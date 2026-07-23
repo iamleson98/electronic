@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import { getPlugin, getAllPlugins } from '@/lib/circuit/registry';
 import { computeWireCurrents, computeComponentCurrents } from '@/lib/circuit/engine';
+import { buildNodeMap } from '@/lib/circuit/engine';
 import type { CircuitComponent, ComponentPlugin, TerminalDef, Vec2, Wire } from '@/lib/circuit/types';
 import { rotateTerminal } from '@/lib/circuit/components/draw';
 
@@ -484,6 +485,51 @@ export function CircuitCanvas() {
       nodeWireCount.set(key2, (nodeWireCount.get(key2) ?? 0) + 1);
     }
 
+    // Build node network: which terminals share the same electrical node.
+    // When a wire is selected or hovered, all terminals and wires on the same
+    // node should highlight, making it easy to see what connects to what.
+    const pluginsMapForNodes = new Map(plugins.map((p) => [p.type, p]));
+    const nodeMap = buildNodeMap(components, wires, pluginsMapForNodes);
+    // Map: terminalKey ("compId:termId") -> nodeId
+    // Map: nodeId -> Set of terminalKeys
+    // Map: nodeId -> Set of wireIds
+    const nodeToTerminals = new Map<number, Set<string>>();
+    const nodeToWires = new Map<number, Set<string>>();
+    for (const [termKey, nodeId] of nodeMap.terminalNode) {
+      if (!nodeToTerminals.has(nodeId)) nodeToTerminals.set(nodeId, new Set());
+      nodeToTerminals.get(nodeId)!.add(termKey);
+    }
+    for (const wire of wires) {
+      const fromKey = `${wire.from.componentId}:${wire.from.terminalId}`;
+      const toKey = `${wire.to.componentId}:${wire.to.terminalId}`;
+      const fromNode = nodeMap.terminalNode.get(fromKey) ?? -1;
+      const toNode = nodeMap.terminalNode.get(toKey) ?? -2;
+      // The wire connects fromNode and toNode (which should be the same after union-find)
+      const nodeId = fromNode; // they're the same node
+      if (!nodeToWires.has(nodeId)) nodeToWires.set(nodeId, new Set());
+      nodeToWires.get(nodeId)!.add(wire.id);
+      void toNode;
+    }
+
+    // Determine which node is "active" (selected or hovered wire's node)
+    let activeNodeId: number | null = null;
+    if (selection.type === 'wire' && selection.id) {
+      const selWire = wires.find((w) => w.id === selection.id);
+      if (selWire) {
+        const fromKey = `${selWire.from.componentId}:${selWire.from.terminalId}`;
+        activeNodeId = nodeMap.terminalNode.get(fromKey) ?? null;
+      }
+    } else if (hover.wireId) {
+      const hovWire = wires.find((w) => w.id === hover.wireId);
+      if (hovWire) {
+        const fromKey = `${hovWire.from.componentId}:${hovWire.from.terminalId}`;
+        activeNodeId = nodeMap.terminalNode.get(fromKey) ?? null;
+      }
+    }
+    // Set of terminal keys and wire IDs that should highlight
+    const activeTerminals = activeNodeId != null ? (nodeToTerminals.get(activeNodeId) ?? new Set<string>()) : new Set<string>();
+    const activeWires = activeNodeId != null ? (nodeToWires.get(activeNodeId) ?? new Set<string>()) : new Set<string>();
+
     // ---- Draw wires FIRST (below components) ----
     for (const wire of wires) {
       const fromComp = components.find((c) => c.id === wire.from.componentId);
@@ -500,10 +546,11 @@ export function CircuitCanvas() {
       const path = getWirePath(wire, fromPos, toPos, gridToScreen);
       const isSelected = selection.type === 'wire' && selection.id === wire.id;
       const isHover = hover.wireId === wire.id;
+      const isOnActiveNode = activeWires.has(wire.id);
 
-      // wire
-      ctx.strokeStyle = isSelected ? '#fbbf24' : (isHover ? '#cbd5e1' : '#94a3b8');
-      ctx.lineWidth = isSelected ? 3.5 : (isHover ? 2.5 : 2);
+      // wire — highlight all wires on the same electrical node
+      ctx.strokeStyle = isSelected ? '#fbbf24' : (isHover ? '#fde047' : (isOnActiveNode ? '#cbd5e1' : '#94a3b8'));
+      ctx.lineWidth = isSelected ? 3.5 : (isHover ? 3 : (isOnActiveNode ? 2.5 : 2));
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
@@ -646,26 +693,30 @@ export function CircuitCanvas() {
       }
       ctx.restore();
 
-      // draw terminals (in screen coords) — color by connected state
+      // draw terminals (in screen coords) — color by connected state and active node
       for (const t of plugin.terminals) {
         const tpos = getTerminalPos(comp, t);
         const sp = gridToScreen(tpos.x, tpos.y);
         const isHot = hover.terminal?.componentId === comp.id && hover.terminal?.terminalId === t.id;
         const connKey = `${comp.id}:${t.id}`;
         const isConnected = (nodeWireCount.get(connKey) ?? 0) > 0;
+        const isOnActiveNode = activeTerminals.has(connKey);
         // Junctions are "live" (green glow) only while running; otherwise show connected state plainly.
         const isLive = isConnected && running && simContext != null;
         let color = '#475569'; // unconnected: dark gray
-        if (isHot) color = '#fbbf24';
-        else if (isLive) color = '#22c55e';
-        else if (isConnected) color = '#cbd5e1';
+        let radius = 3;
+        let glow = 0;
+        if (isHot) { color = '#fbbf24'; radius = 5; }
+        else if (isOnActiveNode) { color = '#fde047'; radius = 5; glow = 6; } // active node: bright yellow
+        else if (isLive) { color = '#22c55e'; radius = 4; glow = 8; }
+        else if (isConnected) { color = '#cbd5e1'; }
         ctx.beginPath();
-        ctx.arc(sp.x, sp.y, isHot ? 5 : (isLive ? 4 : 3), 0, Math.PI * 2);
+        ctx.arc(sp.x, sp.y, radius, 0, Math.PI * 2);
         ctx.fillStyle = color;
         ctx.fill();
-        if (isLive) {
-          ctx.shadowColor = '#22c55e';
-          ctx.shadowBlur = 8;
+        if (glow > 0) {
+          ctx.shadowColor = color;
+          ctx.shadowBlur = glow;
           ctx.fill();
           ctx.shadowBlur = 0;
         }
@@ -866,6 +917,46 @@ export function CircuitCanvas() {
       ctx.moveTo(sp.x, sp.y - 6);
       ctx.lineTo(sp.x, sp.y + 6);
       ctx.stroke();
+    }
+
+    // ---- Wire overlay: redraw wires ON TOP of components so they're always visible ----
+    // This prevents components from hiding wires. We draw a subtle dark background
+    // under each wire for contrast, then the wire color on top.
+    for (const wire of wires) {
+      const fromComp = components.find((c) => c.id === wire.from.componentId);
+      const toComp = components.find((c) => c.id === wire.to.componentId);
+      if (!fromComp || !toComp) continue;
+      const fromPlugin = getPlugin(fromComp.type);
+      const toPlugin = getPlugin(toComp.type);
+      if (!fromPlugin || !toPlugin) continue;
+      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
+      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
+      if (!fromT || !toT) continue;
+      const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
+      const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
+      const path = getWirePath(wire, fromPos, toPos, gridToScreen);
+      const isSelected = selection.type === 'wire' && selection.id === wire.id;
+      const isHover = hover.wireId === wire.id;
+      const isOnActiveNode = activeWires.has(wire.id);
+
+      // Only redraw wires that are selected, hovered, or on the active node
+      // (to avoid overdrawing every wire on top of every component)
+      if (isSelected || isHover || isOnActiveNode) {
+        // Draw with glow for highlighted wires
+        ctx.strokeStyle = isSelected ? '#fbbf24' : (isHover ? '#fde047' : '#cbd5e1');
+        ctx.lineWidth = isSelected ? 3.5 : (isHover ? 3 : 2.5);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        if (isOnActiveNode && !isSelected) {
+          ctx.shadowColor = '#fde047';
+          ctx.shadowBlur = 4;
+        }
+        ctx.beginPath();
+        ctx.moveTo(path[0].x, path[0].y);
+        for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
     }
 
     ctx.restore();
