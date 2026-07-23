@@ -287,13 +287,10 @@ export function CircuitCanvas() {
   }, [running, step]);
 
   // continuous animation loop for current flow dots — ONLY while simulation is running.
-  // When paused or editing, no animation runs at all.
+  // When paused, the phase is preserved (not reset) so dots resume smoothly.
   const [flowTick, setFlowTick] = useState(0);
   useEffect(() => {
-    if (!running) {
-      flowPhaseRef.current = 0;
-      return;
-    }
+    if (!running) return; // don't animate when paused; phase is preserved
     let raf = 0;
     const loop = () => {
       flowPhaseRef.current = (flowPhaseRef.current + 0.012) % 1;
@@ -618,7 +615,13 @@ export function CircuitCanvas() {
       ctx.save();
       ctx.translate(origin.x, origin.y);
       ctx.scale(zoom, zoom);
+      // Rotate around the component's CENTER (not top-left corner).
+      // Translate to center, rotate, translate back.
+      const bbCx = plugin.boundingBox.width / 2;
+      const bbCy = plugin.boundingBox.height / 2;
+      ctx.translate(bbCx * CELL_SIZE, bbCy * CELL_SIZE);
       ctx.rotate((comp.rotation * Math.PI) / 2);
+      ctx.translate(-bbCx * CELL_SIZE, -bbCy * CELL_SIZE);
       // selection halo
       if (isSelected || isHover) {
         ctx.save();
@@ -634,8 +637,13 @@ export function CircuitCanvas() {
       ctx.strokeStyle = '#e2e8f0';
       ctx.fillStyle = '#e2e8f0';
       ctx.lineWidth = 1.5;
+      // Create a temporary instance with __current attached so render() can
+      // use it for brightness/volume effects. We don't mutate the store state.
+      const renderInstance = isAnimating
+        ? { ...comp, simState: { ...(comp.simState ?? {}), __current: componentCurrents.get(comp.id) ?? 0 } }
+        : comp;
       try {
-        plugin.render(ctx, comp.parameters, CELL_SIZE, simContext ?? undefined, comp);
+        plugin.render(ctx, comp.parameters, CELL_SIZE, simContext ?? undefined, renderInstance);
       } catch (e) {
         console.error(`render error in ${comp.type}:`, e);
       }
@@ -880,7 +888,9 @@ export function CircuitCanvas() {
     }
 
     // If simulation is running, check for toggleable components FIRST
-    if (running) {
+    // Use getState() for the latest running state
+    const isRunningNow = useEditor.getState().running;
+    if (isRunningNow) {
       const term = findTerminalAt(g.x, g.y);
       if (term) return; // no wire drawing during simulation
       const comp = findComponentAt(g.x, g.y);
@@ -897,23 +907,33 @@ export function CircuitCanvas() {
     }
 
     // check rotation handle on selected component — start a rotate drag
-    if (selection.type === 'component' && hover.rotateHandle === selection.id) {
-      const comp = components.find((c) => c.id === selection.id);
+    // Use getState() for the latest selection (the `selection` from the hook may be stale)
+    const currentSelection = useEditor.getState().selection;
+    if (!isRunningNow && currentSelection.type === 'component') {
+      const comp = components.find((c) => c.id === currentSelection.id);
       if (comp) {
         const plugin = getPlugin(comp.type);
         if (plugin) {
-          const bb = plugin.boundingBox;
-          const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
-          const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
-          const newDrag: RotateDragState = {
-            componentId: comp.id,
-            center: centerScreen,
-            startAngle: angleFromCenter(centerScreen.x, centerScreen.y, sx, sy),
-            startRotation: comp.rotation,
-          };
-          rotateDragRef.current = newDrag;
-          setRotateDrag(newDrag);
-          return;
+          const handlePos = getRotateHandlePos(comp);
+          if (handlePos) {
+            const dx = sx - handlePos.x;
+            const dy = sy - handlePos.y;
+            const distSq = dx * dx + dy * dy;
+            if (distSq < 400) { // 20px radius hit zone
+              const bb = plugin.boundingBox;
+              const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
+              const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
+              const newDrag: RotateDragState = {
+                componentId: comp.id,
+                center: centerScreen,
+                startAngle: angleFromCenter(centerScreen.x, centerScreen.y, sx, sy),
+                startRotation: comp.rotation,
+              };
+              rotateDragRef.current = newDrag;
+              setRotateDrag(newDrag);
+              return;
+            }
+          }
         }
       }
     }
@@ -1135,9 +1155,21 @@ export function CircuitCanvas() {
   };
 
   const onWheel = (e: React.WheelEvent) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
     const newZoom = Math.max(0.4, Math.min(4, zoom * factor));
+    // Keep the grid point under the cursor stationary during zoom.
+    // Grid point under cursor before zoom: (sx - pan.x) / (CELL_SIZE * zoom)
+    // After zoom, we want: sx = gridX * CELL_SIZE * newZoom + newPan.x
+    // => newPan.x = sx - gridX * CELL_SIZE * newZoom
+    const gridX = (sx - pan.x) / (CELL_SIZE * zoom);
+    const gridY = (sy - pan.y) / (CELL_SIZE * zoom);
+    const newPanX = sx - gridX * CELL_SIZE * newZoom;
+    const newPanY = sy - gridY * CELL_SIZE * newZoom;
     setZoom(newZoom);
+    setPan({ x: newPanX, y: newPanY });
   };
 
   const onDrop = (e: React.DragEvent) => {

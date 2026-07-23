@@ -346,50 +346,56 @@ const led: ComponentPlugin = {
       red: '#ef4444', green: '#22c55e', blue: '#3b82f6', yellow: '#eab308', white: '#f8fafc',
     };
     const color = colorMap[params.color as string] ?? '#ef4444';
-    // Check if LED is on (forward-biased) from sim state
-    const st = sim?.state?.__global ?? {};
-    let isOn = false;
-    if (instance) {
-      // We need the node ids to check state, but we don't have them in render.
-      // Instead, check if there's any `led_*` key matching this instance.
-      // Simpler: the canvas passes simContext which has the state. We look for
-      // any key starting with 'led_' that's true. This is a heuristic.
-      for (const key of Object.keys(st)) {
-        if (key.startsWith('led_') && st[key] === true) {
-          isOn = true;
-          break;
-        }
-      }
-    }
+    // Get the actual current through this LED from the instance's simState.
+    // The canvas attaches __current before calling render (only when sim is running).
+    // Physics: LED brightness ∝ forward current I_F. Typical LEDs are rated for
+    // 20mA at full brightness. We map current to a 0..1 brightness factor:
+    //   brightness = clamp(I_F / 20mA, 0, 1)
+    // When simulation is not running (or no current), brightness = 0 (LED off).
+    const current = (instance?.simState?.__current as number) ?? 0;
+    const absCurrent = Math.abs(current);
+    const isSimRunning = sim != null && instance != null;
+    // Only show glow if simulation is active AND current exceeds the LED's
+    // threshold (forwardV / seriesR gives the minimum conduction current).
+    const vf = (params.forwardV as number) ?? 2.0;
+    const seriesR = Math.max(0.01, (params.seriesR as number) ?? 220);
+    const minConductionCurrent = 0.0001; // 0.1 mA minimum to visible glow
+    const brightness = isSimRunning && absCurrent > minConductionCurrent
+      ? Math.min(1, absCurrent / 0.02) // full brightness at 20mA
+      : 0;
     ctx.beginPath();
     ctx.moveTo(0, cellSize);
     ctx.lineTo(2 * cellSize - 8, cellSize);
     ctx.moveTo(2 * cellSize + 8, cellSize);
     ctx.lineTo(4 * cellSize, cellSize);
     ctx.stroke();
-    // Glow effect when LED is on
-    if (isOn && sim) {
+    // Glow effect — intensity proportional to current (physics: brightness ∝ I_F)
+    if (brightness > 0.01) {
       ctx.save();
-      const glowRadius = cellSize * 1.5;
+      const glowRadius = cellSize * (1.0 + brightness * 1.5); // grows with brightness
       const gradient = ctx.createRadialGradient(
         2 * cellSize, cellSize, 2,
         2 * cellSize, cellSize, glowRadius,
       );
-      gradient.addColorStop(0, color + 'cc');
-      gradient.addColorStop(0.5, color + '44');
+      // Opacity scales with brightness
+      const alphaInner = Math.round(brightness * 0xcc).toString(16).padStart(2, '0');
+      const alphaMid = Math.round(brightness * 0x44).toString(16).padStart(2, '0');
+      gradient.addColorStop(0, color + alphaInner);
+      gradient.addColorStop(0.5, color + alphaMid);
       gradient.addColorStop(1, color + '00');
       ctx.fillStyle = gradient;
       ctx.fillRect(2 * cellSize - glowRadius, cellSize - glowRadius, glowRadius * 2, glowRadius * 2);
       ctx.restore();
     }
     ctx.translate(2 * cellSize, cellSize);
-    // triangle (anode side)
+    // triangle (anode side) — opacity scales with brightness
     ctx.beginPath();
     ctx.moveTo(-8, -8);
     ctx.lineTo(-8, 8);
     ctx.lineTo(0, 0);
     ctx.closePath();
-    ctx.fillStyle = isOn ? color : color + '88';
+    const triAlpha = Math.round(0x88 + brightness * 0x77).toString(16).padStart(2, '0');
+    ctx.fillStyle = color + triAlpha;
     ctx.fill();
     ctx.stroke();
     // bar (cathode)
@@ -398,9 +404,9 @@ const led: ComponentPlugin = {
     ctx.lineTo(0, 8);
     ctx.lineWidth = 2;
     ctx.stroke();
-    // arrows (light emission) — brighter when on
-    ctx.strokeStyle = isOn ? color : '#94a3b8';
-    ctx.lineWidth = isOn ? 2 : 1.5;
+    // arrows (light emission) — brighter and thicker with more current
+    ctx.strokeStyle = brightness > 0.01 ? color : '#94a3b8';
+    ctx.lineWidth = 1.5 + brightness * 1.5;
     ctx.beginPath();
     ctx.moveTo(2, -10);
     ctx.lineTo(8, -16);
@@ -417,6 +423,7 @@ const led: ComponentPlugin = {
     ctx.moveTo(11, -16);
     ctx.lineTo(10, -13);
     ctx.stroke();
+    void vf; void seriesR;
   },
   stamp(params, terminals, sys, sim) {
     const vf = params.forwardV as number;

@@ -824,23 +824,32 @@ const speaker: ComponentPlugin = {
     ctx.fillStyle = '#1e293b';
     ctx.fill();
     ctx.stroke();
-    // Check if current is flowing (voltage difference across speaker)
-    // We use sim.time to animate the sound waves when active
-    const isActive = sim != null && instance != null;
-    // sound waves — animated when active
-    const waveOffset = isActive ? (sim!.time * 8) % 1 : 0;
-    ctx.strokeStyle = isActive ? '#22d3ee' : '#475569';
-    ctx.lineWidth = isActive ? 2 : 1.5;
+    // Get actual current through speaker from simState (set by canvas before render).
+    // Physics: sound intensity ∝ electrical power = I²·R. We map current to a
+    // 0..1 activity factor: activity = clamp(|I| / 100mA, 0, 1).
+    // Only animate when simulation is running AND current is non-zero.
+    const current = (instance?.simState?.__current as number) ?? 0;
+    const absCurrent = Math.abs(current);
+    const isSimRunning = sim != null && instance != null;
+    const minCurrent = 0.0001; // 0.1 mA minimum
+    const activity = isSimRunning && absCurrent > minCurrent
+      ? Math.min(1, absCurrent / 0.1) // full activity at 100mA
+      : 0;
+    // sound waves — animated when active, amplitude scales with current
+    const waveOffset = activity > 0.01 ? (sim!.time * 8) % 1 : 0;
+    const waveAmp = activity; // 0..1
+    ctx.strokeStyle = activity > 0.01 ? '#22d3ee' : '#475569';
+    ctx.lineWidth = 1.5 + activity * 1.5;
     ctx.beginPath();
-    const r1 = 5 + (isActive ? Math.sin(waveOffset * Math.PI * 2) * 1.5 : 0);
-    const r2 = 9 + (isActive ? Math.sin(waveOffset * Math.PI * 2 + 1) * 2 : 0);
+    const r1 = 5 + waveAmp * Math.sin(waveOffset * Math.PI * 2) * 2;
+    const r2 = 9 + waveAmp * Math.sin(waveOffset * Math.PI * 2 + 1) * 2.5;
     ctx.arc(2 * cellSize, cellSize, r1, -Math.PI / 3, Math.PI / 3);
     ctx.moveTo(2 * cellSize + r2 * Math.cos(Math.PI / 3), cellSize - r2 * Math.sin(Math.PI / 3));
     ctx.arc(2 * cellSize, cellSize, r2, -Math.PI / 3, Math.PI / 3);
     ctx.stroke();
-    if (isActive) {
+    if (activity > 0.01) {
       ctx.shadowColor = '#22d3ee';
-      ctx.shadowBlur = 6;
+      ctx.shadowBlur = 4 + activity * 6;
       ctx.stroke();
       ctx.shadowBlur = 0;
     }
