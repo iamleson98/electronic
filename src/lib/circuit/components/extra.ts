@@ -42,17 +42,32 @@ const pnp: ComponentPlugin = {
     ctx.lineTo(cellSize * 1.2, cellSize * 2.8);
     ctx.lineWidth = 2;
     ctx.stroke();
-    // base -> emitter (with arrow INWARD for PNP, at top)
+    // base -> emitter line (emitter is at top for PNP)
     ctx.beginPath();
     ctx.moveTo(cellSize * 1.2, cellSize * 1.5);
     ctx.lineTo(3 * cellSize, cellSize * 1.2);
     ctx.stroke();
-    // arrow on emitter (inward for PNP) - points from emitter lead toward body
+    // arrow on emitter — PNP: arrow points INWARD (toward body)
+    // Place arrow at the midpoint of the emitter line, pointing toward body.
+    // Emitter line: from (3, 1.2) to (1.2, 1.5). Midpoint ≈ (2.1, 1.35).
+    // Direction toward body: (1.2-3, 1.5-1.2) = (-1.8, 0.3), normalized.
+    const emDirP = { x: -1.8, y: 0.3 };
+    const emLenP = Math.hypot(emDirP.x, emDirP.y);
+    const emNP = { x: emDirP.x / emLenP, y: emDirP.y / emLenP };
+    // Arrow tip at midpoint of emitter line
+    const tipXP = 2.1 * cellSize;
+    const tipYP = 1.35 * cellSize;
+    const arrowLenP = 7;
+    const arrowWidP = 4;
+    const baseXP = tipXP - emNP.x * arrowLenP;
+    const baseYP = tipYP - emNP.y * arrowLenP;
+    const perpP = { x: -emNP.y, y: emNP.x };
     ctx.beginPath();
-    ctx.moveTo(2.5 * cellSize, cellSize * 1.3);
-    ctx.lineTo(2 * cellSize * 1.2 / 1 + cellSize * 0.6, cellSize * 1.6);
-    ctx.lineTo(2.7 * cellSize, cellSize * 1.5);
-    ctx.fillStyle = '#1e293b';
+    ctx.moveTo(tipXP, tipYP);
+    ctx.lineTo(baseXP + perpP.x * arrowWidP, baseYP + perpP.y * arrowWidP);
+    ctx.lineTo(baseXP - perpP.x * arrowWidP, baseYP - perpP.y * arrowWidP);
+    ctx.closePath();
+    ctx.fillStyle = '#e2e8f0';
     ctx.fill();
     ctx.stroke();
     // base -> collector
@@ -794,7 +809,7 @@ const speaker: ComponentPlugin = {
   parameters: [
     { key: 'impedance', label: 'Impedance', type: 'number', default: 8, unit: 'Ω', min: 1, max: 1000, step: 1 },
   ],
-  render(ctx, params, cellSize, sim) {
+  render(ctx, params, cellSize, sim, instance) {
     ctx.beginPath();
     ctx.moveTo(0, cellSize);
     ctx.lineTo(cellSize, cellSize);
@@ -809,14 +824,26 @@ const speaker: ComponentPlugin = {
     ctx.fillStyle = '#1e293b';
     ctx.fill();
     ctx.stroke();
-    // sound waves
-    const v = sim?.nodeVoltage;
-    void v;
-    ctx.strokeStyle = '#94a3b8';
+    // Check if current is flowing (voltage difference across speaker)
+    // We use sim.time to animate the sound waves when active
+    const isActive = sim != null && instance != null;
+    // sound waves — animated when active
+    const waveOffset = isActive ? (sim!.time * 8) % 1 : 0;
+    ctx.strokeStyle = isActive ? '#22d3ee' : '#475569';
+    ctx.lineWidth = isActive ? 2 : 1.5;
     ctx.beginPath();
-    ctx.arc(2 * cellSize, cellSize, 5, -Math.PI / 3, Math.PI / 3);
-    ctx.arc(2 * cellSize, cellSize, 9, -Math.PI / 3, Math.PI / 3);
+    const r1 = 5 + (isActive ? Math.sin(waveOffset * Math.PI * 2) * 1.5 : 0);
+    const r2 = 9 + (isActive ? Math.sin(waveOffset * Math.PI * 2 + 1) * 2 : 0);
+    ctx.arc(2 * cellSize, cellSize, r1, -Math.PI / 3, Math.PI / 3);
+    ctx.moveTo(2 * cellSize + r2 * Math.cos(Math.PI / 3), cellSize - r2 * Math.sin(Math.PI / 3));
+    ctx.arc(2 * cellSize, cellSize, r2, -Math.PI / 3, Math.PI / 3);
     ctx.stroke();
+    if (isActive) {
+      ctx.shadowColor = '#22d3ee';
+      ctx.shadowBlur = 6;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
     // wire to right
     ctx.beginPath();
     ctx.moveTo(2 * cellSize, cellSize);

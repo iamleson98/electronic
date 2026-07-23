@@ -153,249 +153,118 @@ export function computeWireCurrents(
   plugins: Map<string, ComponentPlugin>,
   sim: SimContext,
 ): Map<string, number> {
+  // First compute per-component currents
+  const compCurrents = computeComponentCurrents(components, wires, plugins, sim);
   const result = new Map<string, number>();
   const nodeMap = buildNodeMap(components, wires, plugins);
 
-  // Build a map: for each node, sum of currents LEAVING that node through all
-  // passive components (resistors, LEDs, diodes). This helps us compute wire
-  // currents at junctions where multiple components meet.
-  const nodeCurrentOut = new Map<number, number>(); // nodeId -> net current leaving
-
-  // First pass: compute current through each passive component and accumulate
-  // at its terminals.
+  // Build nodeCurrentOut for KCL-based voltage source current
+  const nodeCurrentOut = new Map<number, number>();
   for (const comp of components) {
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
     const terms = getTerminalsForComponent(comp, plugin, nodeMap);
-
-    if (comp.type === 'resistor') {
-      const r = Math.max(1e-9, comp.parameters.resistance as number);
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
-      const i = v / r; // current from a to b through resistor
-      // At node 'a': current i is LEAVING (going into resistor)
-      // At node 'b': current i is ENTERING (coming from resistor), so -i leaving
-      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
-      nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
-    } else if (comp.type === 'capacitor') {
-      const C = Math.max(1e-15, comp.parameters.capacitance as number);
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-      const st = sim.state.__global ?? {};
-      const vPrev = st[`cap_${a}_${b}`] ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
-      const i = (C / Math.max(sim.dt, 1e-12)) * (v - vPrev); // current from a to b
-      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
-      nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
-    } else if (comp.type === 'inductor') {
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-      const st = sim.state.__global ?? {};
-      const i = st[`ind_${a}_${b}`] ?? 0; // current from a to b
-      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
-      nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
-    } else if (comp.type === 'led' || comp.type === 'diode') {
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-      const vf = (comp.parameters.forwardV as number) || 0.7;
-      const r = comp.type === 'led'
-        ? Math.max(0.01, comp.parameters.seriesR as number)
-        : Math.max(0.001, comp.parameters.onR as number);
-      const st = sim.state.__global ?? {};
-      const on = st[`${comp.type}_${a}_${k}`] ?? false;
-      const i = on ? Math.max(0, (v - vf) / r) : 0; // current from a to k (forward only)
-      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
-      nodeCurrentOut.set(k, (nodeCurrentOut.get(k) ?? 0) - i);
-    } else if (comp.type === 'switch' || comp.type === 'pushButton') {
-      const closed = comp.type === 'switch'
-        ? comp.parameters.closed
-        : comp.parameters.pressed;
-      if (closed) {
-        const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-        const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-        const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
-        const i = v / 0.01; // current from a to b
-        nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
-        nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
-      }
-    } else if (comp.type === 'dcVoltage' || comp.type === 'acVoltage' || comp.type === 'pulseSource') {
-      // Voltage source: conventional current flows OUT of + terminal, INTO - terminal.
-      // The current magnitude = current through the external circuit.
-      // We can compute this from KCL: the current leaving the + node through the
-      // source = -(sum of currents leaving + node through passive components).
-      // But that's done in the second pass. Here we just note that the source
-      // delivers current at + and absorbs at -.
-      // We'll handle this in the wire loop below by using nodeCurrentOut.
+    const i = compCurrents.get(comp.id) ?? 0;
+    if (comp.type === 'resistor' || comp.type === 'capacitor' || comp.type === 'inductor' ||
+        comp.type === 'led' || comp.type === 'diode' || comp.type === 'switch' || comp.type === 'pushButton') {
+      const t1Id = comp.type === 'led' || comp.type === 'diode' ? 'a' : 'a';
+      const t2Id = comp.type === 'led' || comp.type === 'diode' ? 'k' : 'b';
+      const n1 = terms.find((t) => t.terminalId === t1Id)?.nodeId ?? 0;
+      const n2 = terms.find((t) => t.terminalId === t2Id)?.nodeId ?? 0;
+      nodeCurrentOut.set(n1, (nodeCurrentOut.get(n1) ?? 0) + i);
+      nodeCurrentOut.set(n2, (nodeCurrentOut.get(n2) ?? 0) - i);
     } else if (comp.type === 'currentSource') {
       const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
       const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
-      const i = comp.parameters.current as number; // current from p to n externally
-      // Current source pushes current OUT of p, INTO n (externally)
-      // So at node p: current i is ENTERING from the source (source delivers to p)
-      // Wait — stampCurrentSource pushes from p to n externally, meaning current
-      // leaves the source at p and enters the external circuit at p.
-      // So at node p: +i leaving (into external circuit)
-      // At node n: -i leaving (returning from external circuit)
       nodeCurrentOut.set(p, (nodeCurrentOut.get(p) ?? 0) + i);
       nodeCurrentOut.set(n, (nodeCurrentOut.get(n) ?? 0) - i);
     }
   }
 
-  // Second pass: for each wire, compute the current flowing from `from` to `to`.
-  // The current through a wire = the current that the `from` component is pushing
-  // into the wire (i.e., current leaving the `from` terminal).
-  //
-  // For a wire connected to a passive component at `from`:
-  //   The current leaving the `from` terminal = the component's current at that terminal.
-  //   We computed nodeCurrentOut[node] = net current leaving that node through ALL
-  //   passive components. But a wire connects two terminals that share the same node,
-  //   so the wire current isn't simply nodeCurrentOut — we need the component-specific current.
-  //
-  // Simplified approach: for each wire, compute the current through the component
-  // at the `from` end, and determine the sign based on which terminal the wire is on.
-  // Positive = current flowing from wire.from to wire.to (conventional current direction).
-
   for (const wire of wires) {
+    // For each wire, compute current from BOTH the from and to components.
+    // In a series circuit, both should give the same magnitude. Use the one
+    // with the larger absolute value (more reliable for components with
+    // threshold models like LEDs where the current might compute to 0
+    // from one end but not the other).
     const fromComp = components.find((c) => c.id === wire.from.componentId);
-    if (!fromComp) continue;
-    const plugin = plugins.get(fromComp.type);
-    if (!plugin) continue;
-    const fromTerm = plugin.terminals.find((t) => t.id === wire.from.terminalId);
-    if (!fromTerm) continue;
-    const fromNode = nodeMap.terminalNode.get(`${fromComp.id}:${fromTerm.id}`) ?? 0;
-    const terms = getTerminalsForComponent(fromComp, plugin, nodeMap);
+    const toComp = components.find((c) => c.id === wire.to.componentId);
+    if (!fromComp || !toComp) continue;
+    const fromPlugin = plugins.get(fromComp.type);
+    const toPlugin = plugins.get(toComp.type);
+    if (!fromPlugin || !toPlugin) continue;
 
-    let current = 0; // positive = from wire.from to wire.to
+    const fromCurrent = computeTerminalCurrent(fromComp, fromPlugin, wire.from.terminalId, nodeMap, sim, compCurrents, nodeCurrentOut);
+    const toCurrent = computeTerminalCurrent(toComp, toPlugin, wire.to.terminalId, nodeMap, sim, compCurrents, nodeCurrentOut);
 
-    if (fromComp.type === 'resistor') {
-      const r = Math.max(1e-9, fromComp.parameters.resistance as number);
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
-      const i = v / r; // current from a to b THROUGH resistor
-      // If wire is at 'a': current i enters the resistor at 'a', meaning the wire
-      //   is delivering i to 'a'. So current flows from wire to component.
-      //   The wire's from→to direction: if from='a', current leaving 'a' toward
-      //   the wire = -i (the resistor is sinking current at 'a').
-      //   But we want current flowing from from to to. The wire connects 'a' to
-      //   some other terminal. Current flows from high V to low V.
-      //   If V(a) > V(b), current flows a→b through resistor. The wire at 'a'
-      //   is the SOURCE of this current (current comes FROM the wire INTO 'a').
-      //   So from the wire's perspective, current flows from the other end TO 'a',
-      //   i.e., from wire.to to wire.from. That's negative (from→to is opposite).
-      //   Wait, that's wrong. Let me think again.
-      //
-      // Conventional current: flows from + to - through external circuit.
-      // Resistor: current enters at the higher-voltage terminal, leaves at lower.
-      // If V(a) > V(b): current flows a→b through resistor.
-      //   The wire at 'a' brings current TO 'a' (from the rest of the circuit).
-      //   So current in the wire flows TOWARD 'a', i.e., from wire.to to wire.from
-      //   (if from='a'). That means from→to current = -i.
-      //   If from='b': current leaves 'b' toward the wire, flowing from 'b' away.
-      //   So from→to current = +i (current flows from 'b' to the other end).
-      //
-      // Summary: if from='a', wire current (from→to) = -i
-      //          if from='b', wire current (from→to) = +i
-      // But this seems backwards. Let me verify with a simple example:
-      //   Battery(+) → wire1 → resistor(a→b) → wire2 → Battery(-)
-      //   V(a) > V(b), so i > 0 (a→b through resistor)
-      //   wire1: from=Battery(+), to=Resistor(a). Current should flow +→a, i.e., from→to = +i
-      //     But from is Battery(+), not resistor. So this case is handled by the voltage source logic.
-      //   wire2: from=Resistor(b), to=Battery(-). Current should flow b→-, i.e., from→to = +i
-      //     from='b', so wire current = +i. ✓
-      //   If wire1 were from=Resistor(a), to=Battery(+): current flows +→a, so from→to = a→+ = -i
-      //     from='a', so wire current = -i. ✓
-      //
-      // So: if from='a', current = -i; if from='b', current = +i
-      current = (fromNode === a) ? -i : i;
-    } else if (fromComp.type === 'capacitor') {
-      const C = Math.max(1e-15, fromComp.parameters.capacitance as number);
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-      const st = sim.state.__global ?? {};
-      const vPrev = st[`cap_${a}_${b}`] ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
-      const i = (C / Math.max(sim.dt, 1e-12)) * (v - vPrev);
-      current = (fromNode === a) ? -i : i;
-    } else if (fromComp.type === 'inductor') {
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-      const st = sim.state.__global ?? {};
-      const i = st[`ind_${a}_${b}`] ?? 0;
-      current = (fromNode === a) ? -i : i;
-    } else if (fromComp.type === 'led' || fromComp.type === 'diode') {
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-      const vf = (fromComp.parameters.forwardV as number) || 0.7;
-      const r = fromComp.type === 'led'
-        ? Math.max(0.01, fromComp.parameters.seriesR as number)
-        : Math.max(0.001, fromComp.parameters.onR as number);
-      const st = sim.state.__global ?? {};
-      const on = st[`${fromComp.type}_${a}_${k}`] ?? false;
-      const i = on ? Math.max(0, (v - vf) / r) : 0;
-      // Same as resistor: current flows a→k (anode→cathode) when forward biased
-      current = (fromNode === a) ? -i : i;
-    } else if (fromComp.type === 'dcVoltage' || fromComp.type === 'acVoltage' || fromComp.type === 'pulseSource') {
-      // Voltage source: conventional current flows OUT of + terminal.
-      // The current magnitude = current through the external circuit.
-      // We can get this from KCL: current leaving + node through source =
-      //   -(sum of currents leaving + node through all other components)
-      // But simpler: the current through the voltage source = current flowing
-      // from + to - externally. We can compute this as the net current leaving
-      // the + node through all passive components (which must return through the source).
-      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
-      const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
-      // Current leaving + node through passive components = nodeCurrentOut[p]
-      // This current must come FROM the voltage source (source pushes it out at +).
-      // So the source current (out of +) = nodeCurrentOut[p].
-      const sourceCurrentOut = nodeCurrentOut.get(p) ?? 0;
-      // If wire is at '+': current flows OUT of + into the wire. from→to = +sourceCurrentOut
-      // If wire is at '-': current flows INTO - from the wire. from→to = -sourceCurrentOut
-      //   (because current enters the source at '-', so from the wire's perspective
-      //    it flows from wire.to to wire.from if from='-')
-      // Wait: if from='-', the wire delivers current TO '-'. So current flows from
-      //   wire.to toward wire.from (the '-' terminal). from→to = -sourceCurrentOut.
-      //   But sourceCurrentOut is the current leaving '+'. The current entering '-' = sourceCurrentOut.
-      //   So if from='-', the wire brings sourceCurrentOut INTO '-'. from→to = -sourceCurrentOut.
-      //   Hmm, but from='-' means the wire starts at '-' and goes to some other terminal.
-      //   Current flows from the other terminal TO '-'. So from→to = -(current into '-') = -sourceCurrentOut.
-      //   Actually no. If current flows INTO '-', and the wire is connected to '-', then
-      //   current flows FROM wire.to TO wire.from ('-'). So from→to = -sourceCurrentOut.
-      // Let me verify: Battery(+) → wire1 → R → wire2 → Battery(-)
-      //   wire1: from=Battery(+), to=R. Current flows +→R. sourceCurrentOut > 0.
-      //     from='p', so current = +sourceCurrentOut. from→to = positive. ✓ (dots flow from + to R)
-      //   wire2: from=R, to=Battery(-). But this is handled by resistor logic, not source.
-      //   If wire2 were from=Battery(-), to=R: current flows R→- (into battery).
-      //     from='n', current = -sourceCurrentOut. from→to = -sourceCurrentOut < 0.
-      //     Negative means dots flow from to→from = from R to '-'. ✓ (current enters battery at -)
-      current = (fromNode === p) ? sourceCurrentOut : -sourceCurrentOut;
-    } else if (fromComp.type === 'currentSource') {
-      // Current source: pushes current from + to - externally.
-      // Current leaves + , enters -.
-      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
-      const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
-      const i = fromComp.parameters.current as number;
-      current = (fromNode === p) ? i : -i;
-    } else if (fromComp.type === 'switch' || fromComp.type === 'pushButton') {
-      const closed = fromComp.type === 'switch'
-        ? fromComp.parameters.closed
-        : fromComp.parameters.pressed;
-      if (closed) {
-        const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-        const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-        const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
-        const i = v / 0.01;
-        current = (fromNode === a) ? -i : i;
-      }
+    // The from current is "current leaving from terminal toward wire"
+    // The to current is "current leaving to terminal toward wire"
+    // They should be opposite: fromCurrent = -toCurrent (what leaves from, enters to)
+    // Use the one with larger magnitude, and set direction from→to.
+    // If fromCurrent > 0, current flows from→to. If fromCurrent < 0, current flows to→from.
+    // For consistency, take the average of fromCurrent and -toCurrent.
+    const fromMag = Math.abs(fromCurrent);
+    const toMag = Math.abs(toCurrent);
+    let current: number;
+    if (fromMag > toMag && fromMag > 1e-12) {
+      current = fromCurrent;
+    } else if (toMag > 1e-12) {
+      current = -toCurrent; // toCurrent is "leaving to terminal", so entering to = -toCurrent = from→to
+    } else {
+      current = 0;
     }
 
     result.set(wire.id, current);
   }
 
   return result;
+}
+
+/**
+ * Compute the current leaving a specific terminal of a component, in amperes.
+ * Positive = current flowing OUT of the terminal (into the wire).
+ */
+function computeTerminalCurrent(
+  comp: CircuitComponent,
+  plugin: ComponentPlugin,
+  terminalId: string,
+  nodeMap: any,
+  sim: SimContext,
+  compCurrents: Map<string, number>,
+  nodeCurrentOut: Map<number, number>,
+): number {
+  const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+  const compCurrent = compCurrents.get(comp.id) ?? 0;
+
+  if (comp.type === 'resistor' || comp.type === 'capacitor' || comp.type === 'inductor') {
+    // 2-terminal: current flows a→b. At 'a': +i leaving. At 'b': -i leaving.
+    const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+    return (termNode === a) ? -compCurrent : compCurrent;
+  } else if (comp.type === 'led' || comp.type === 'diode') {
+    const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+    return (termNode === a) ? -compCurrent : compCurrent;
+  } else if (comp.type === 'dcVoltage' || comp.type === 'acVoltage' || comp.type === 'pulseSource') {
+    // Voltage source: current flows OUT of +, INTO -
+    const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+    const sourceCurrentOut = nodeCurrentOut.get(p) ?? 0;
+    return (termNode === p) ? sourceCurrentOut : -sourceCurrentOut;
+  } else if (comp.type === 'currentSource') {
+    const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+    return (termNode === p) ? compCurrent : -compCurrent;
+  } else if (comp.type === 'switch' || comp.type === 'pushButton') {
+    const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+    return (termNode === a) ? -compCurrent : compCurrent;
+  } else if (comp.type === 'npn' || comp.type === 'pnp' || comp.type === 'nmos' || comp.type === 'pmos') {
+    // 3-terminal: use the collector/emitter or drain/source current
+    // For flow visualization, return the component current
+    return compCurrent;
+  }
+  return 0;
 }
 
 /**

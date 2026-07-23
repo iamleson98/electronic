@@ -118,22 +118,39 @@ const npn: ComponentPlugin = {
     ctx.lineTo(cellSize * 1.2, cellSize * 2.8);
     ctx.lineWidth = 2;
     ctx.stroke();
-    // base -> collector (with arrowless line)
+    // base -> collector line
     ctx.beginPath();
     ctx.moveTo(cellSize * 1.2, cellSize * 1.5);
     ctx.lineTo(3 * cellSize, cellSize * 1.2);
     ctx.stroke();
-    // base -> emitter (with arrow)
+    // base -> emitter line
     ctx.beginPath();
     ctx.moveTo(cellSize * 1.2, cellSize * 2.5);
     ctx.lineTo(3 * cellSize, cellSize * 2.8);
     ctx.stroke();
-    // arrow on emitter (outward for NPN)
+    // arrow on emitter — NPN: arrow points OUTWARD (toward emitter terminal)
+    // The emitter line goes from (1.2, 2.5) to (3, 2.8). The arrow is at the
+    // emitter end (3, 2.8), pointing outward (away from body).
+    // Direction vector: (3-1.2, 2.8-2.5) = (1.8, 0.3), normalized.
+    const emDir = { x: 1.8, y: 0.3 };
+    const emLen = Math.hypot(emDir.x, emDir.y);
+    const emN = { x: emDir.x / emLen, y: emDir.y / emLen };
+    // Arrow tip at emitter terminal
+    const tipX = 3 * cellSize;
+    const tipY = cellSize * 2.8;
+    // Arrow base (perpendicular to direction, 8px back from tip)
+    const arrowLen = 8;
+    const arrowWid = 4;
+    const baseX = tipX - emN.x * arrowLen;
+    const baseY = tipY - emN.y * arrowLen;
+    // Perpendicular vector
+    const perp = { x: -emN.y, y: emN.x };
     ctx.beginPath();
-    ctx.moveTo(2.5 * cellSize, cellSize * 2.7);
-    ctx.lineTo(3 * cellSize, cellSize * 2.8);
-    ctx.lineTo(2.7 * cellSize, cellSize * 2.5);
-    ctx.fillStyle = '#1e293b';
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(baseX + perp.x * arrowWid, baseY + perp.y * arrowWid);
+    ctx.lineTo(baseX - perp.x * arrowWid, baseY - perp.y * arrowWid);
+    ctx.closePath();
+    ctx.fillStyle = '#e2e8f0';
     ctx.fill();
     ctx.stroke();
     drawLabel(ctx, `β=${params.hfe}`, 1.8 * cellSize, 3.5 * cellSize);

@@ -52,14 +52,7 @@ const dcVoltage: ComponentPlugin = {
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     sys.stampVoltageSource(p, n, v);
   },
-  getFlowPath() {
-    // Through the battery body: + (1,0) -> center (1,2) -> - (1,4)
-    return [
-      { x: 1, y: 0 },
-      { x: 1, y: 2 },
-      { x: 1, y: 4 },
-    ];
-  },
+  // No getFlowPath — current flow dots should NOT animate through power sources
   measure(params, terminals, sim) {
     const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
@@ -118,13 +111,7 @@ const acVoltage: ComponentPlugin = {
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     sys.stampVoltageSource(p, n, v);
   },
-  getFlowPath() {
-    return [
-      { x: 1, y: 0 },
-      { x: 1, y: 2 },
-      { x: 1, y: 4 },
-    ];
-  },
+  // No getFlowPath — no dots through power sources
 };
 
 // ----- Pulse Source -----
@@ -177,13 +164,7 @@ const pulseSource: ComponentPlugin = {
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     sys.stampVoltageSource(p, n, v as number);
   },
-  getFlowPath() {
-    return [
-      { x: 1, y: 0 },
-      { x: 1, y: 2 },
-      { x: 1, y: 4 },
-    ];
-  },
+  // No getFlowPath — no dots through power sources
 };
 
 // ----- Current Source -----
@@ -229,13 +210,7 @@ const currentSource: ComponentPlugin = {
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     sys.stampCurrentSource(p, n, i);
   },
-  getFlowPath() {
-    return [
-      { x: 1, y: 0 },
-      { x: 1, y: 2 },
-      { x: 1, y: 4 },
-    ];
-  },
+  // No getFlowPath — no dots through power sources
 };
 
 // ----- Push Button -----
@@ -366,21 +341,47 @@ const led: ComponentPlugin = {
     { key: 'forwardV', label: 'Forward Voltage', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 10, step: 0.1 },
     { key: 'seriesR', label: 'Series Resistance', type: 'number', default: 220, unit: 'Ω', min: 0.1, max: 1e6, step: 1 },
   ],
-  render(ctx, params, cellSize) {
+  render(ctx, params, cellSize, sim, instance) {
     const colorMap: Record<string, string> = {
       red: '#ef4444', green: '#22c55e', blue: '#3b82f6', yellow: '#eab308', white: '#f8fafc',
     };
     const color = colorMap[params.color as string] ?? '#ef4444';
-    // current (approximated) for glow intensity
-    const a = (this as any).__lastA ?? 0;
-    const k = (this as any).__lastK ?? 0;
-    void a; void k;
+    // Check if LED is on (forward-biased) from sim state
+    const st = sim?.state?.__global ?? {};
+    let isOn = false;
+    if (instance) {
+      // We need the node ids to check state, but we don't have them in render.
+      // Instead, check if there's any `led_*` key matching this instance.
+      // Simpler: the canvas passes simContext which has the state. We look for
+      // any key starting with 'led_' that's true. This is a heuristic.
+      for (const key of Object.keys(st)) {
+        if (key.startsWith('led_') && st[key] === true) {
+          isOn = true;
+          break;
+        }
+      }
+    }
     ctx.beginPath();
     ctx.moveTo(0, cellSize);
     ctx.lineTo(2 * cellSize - 8, cellSize);
     ctx.moveTo(2 * cellSize + 8, cellSize);
     ctx.lineTo(4 * cellSize, cellSize);
     ctx.stroke();
+    // Glow effect when LED is on
+    if (isOn && sim) {
+      ctx.save();
+      const glowRadius = cellSize * 1.5;
+      const gradient = ctx.createRadialGradient(
+        2 * cellSize, cellSize, 2,
+        2 * cellSize, cellSize, glowRadius,
+      );
+      gradient.addColorStop(0, color + 'cc');
+      gradient.addColorStop(0.5, color + '44');
+      gradient.addColorStop(1, color + '00');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(2 * cellSize - glowRadius, cellSize - glowRadius, glowRadius * 2, glowRadius * 2);
+      ctx.restore();
+    }
     ctx.translate(2 * cellSize, cellSize);
     // triangle (anode side)
     ctx.beginPath();
@@ -388,7 +389,7 @@ const led: ComponentPlugin = {
     ctx.lineTo(-8, 8);
     ctx.lineTo(0, 0);
     ctx.closePath();
-    ctx.fillStyle = color;
+    ctx.fillStyle = isOn ? color : color + '88';
     ctx.fill();
     ctx.stroke();
     // bar (cathode)
@@ -397,7 +398,9 @@ const led: ComponentPlugin = {
     ctx.lineTo(0, 8);
     ctx.lineWidth = 2;
     ctx.stroke();
-    // arrows
+    // arrows (light emission) — brighter when on
+    ctx.strokeStyle = isOn ? color : '#94a3b8';
+    ctx.lineWidth = isOn ? 2 : 1.5;
     ctx.beginPath();
     ctx.moveTo(2, -10);
     ctx.lineTo(8, -16);
