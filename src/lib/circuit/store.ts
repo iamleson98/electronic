@@ -70,6 +70,8 @@ interface EditorState {
   updateWireCursor: (cursor: { x: number; y: number }) => void;
   cancelWire: () => void;
   completeWire: (to: { componentId: string; terminalId: string }) => void;
+  setWireWaypoints: (id: string, waypoints: { x: number; y: number }[]) => void;
+  toggleSwitch: (id: string) => void;
 
   undo: () => void;
   redo: () => void;
@@ -203,6 +205,23 @@ export const useEditor = create<EditorState>((set, get) => ({
     const id = genId('wire');
     const wire: Wire = { id, from: draft.from, to };
     set((s) => ({ wires: [...s.wires, wire], wireDraft: null }));
+  },
+
+  setWireWaypoints: (id, waypoints) => {
+    set((s) => ({
+      wires: s.wires.map((w) => (w.id === id ? { ...w, waypoints: waypoints.length > 0 ? waypoints : undefined } : w)),
+    }));
+  },
+
+  toggleSwitch: (id) => {
+    set((s) => ({
+      components: s.components.map((c) => {
+        if (c.id !== id) return c;
+        if (c.type === 'switch') return { ...c, parameters: { ...c.parameters, closed: !c.parameters.closed } };
+        if (c.type === 'pushButton') return { ...c, parameters: { ...c.parameters, pressed: !c.parameters.pressed } };
+        return c;
+      }),
+    }));
   },
 
   pushHistory: () => {

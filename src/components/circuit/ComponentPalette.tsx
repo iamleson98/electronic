@@ -5,7 +5,7 @@ import { getPluginsByCategory } from '@/lib/circuit/registry';
 import { useEditor } from '@/lib/circuit/store';
 import { Search, Cpu, Zap, Radio, Lightbulb, CircuitBoard, Gauge, Microchip, Layers } from 'lucide-react';
 import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
+import { ComponentIcon } from './ComponentIcon';
 
 const categoryLabels: Record<string, string> = {
   io: 'Inputs / Outputs',
@@ -32,6 +32,7 @@ const categoryIcons: Record<string, React.ComponentType<{ size?: number; classNa
 export function ComponentPalette() {
   const [query, setQuery] = useState('');
   const addComponent = useEditor((s) => s.addComponent);
+  const running = useEditor((s) => s.running);
   const groups = useMemo(() => getPluginsByCategory(), []);
 
   const filtered = useMemo(() => {
@@ -52,9 +53,9 @@ export function ComponentPalette() {
   }, [groups, query]);
 
   return (
-    <div className="flex h-full flex-col bg-slate-900">
+    <div className="flex h-full min-h-0 flex-col bg-slate-900">
       {/* Header */}
-      <div className="border-b border-slate-800 p-3">
+      <div className="shrink-0 border-b border-slate-800 p-3">
         <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">Components</h2>
         <div className="relative">
           <Search size={14} className="absolute left-2.5 top-2.5 text-slate-500" />
@@ -67,8 +68,8 @@ export function ComponentPalette() {
         </div>
       </div>
 
-      {/* List */}
-      <ScrollArea className="flex-1">
+      {/* List - scrollable */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="p-2">
           {filtered.length === 0 && (
             <div className="p-4 text-center text-xs text-slate-500">No components found</div>
@@ -77,7 +78,7 @@ export function ComponentPalette() {
             const Icon = categoryIcons[group.category] ?? CircuitBoard;
             return (
               <div key={group.category} className="mb-3">
-                <div className="mb-1 flex items-center gap-1.5 px-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                <div className="mb-1.5 flex items-center gap-1.5 px-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
                   <Icon size={11} />
                   {categoryLabels[group.category] ?? group.category}
                 </div>
@@ -85,21 +86,22 @@ export function ComponentPalette() {
                   {group.plugins.map((plugin) => (
                     <button
                       key={plugin.type}
-                      draggable
+                      draggable={!running}
                       onDragStart={(e) => {
+                        if (running) return;
                         e.dataTransfer.setData('application/x-circuit-type', plugin.type);
                         e.dataTransfer.effectAllowed = 'copy';
                       }}
                       onClick={() => {
-                        // click-to-add: drop at center of canvas (will be added at a default spot)
-                        // The canvas will handle drop. For click, add at (5, 5) as a fallback.
+                        if (running) return;
                         addComponent(plugin.type, { x: 8, y: 8 });
                       }}
-                      title={`${plugin.name} — ${plugin.description}`}
-                      className="group flex flex-col items-center justify-start gap-1 rounded-md border border-slate-800 bg-slate-800/50 p-2 text-center transition-all hover:border-cyan-500/50 hover:bg-slate-800"
+                      disabled={running}
+                      title={running ? 'Pause simulation to add components' : `${plugin.name} — ${plugin.description}`}
+                      className="group flex flex-col items-center justify-start gap-1 rounded-md border border-slate-800 bg-slate-800/50 p-2 text-center transition-all hover:border-cyan-500/50 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      <div className="flex h-8 w-full items-center justify-center rounded bg-slate-950 text-sm font-bold text-cyan-300">
-                        {plugin.symbol}
+                      <div className="flex h-10 w-full items-center justify-center rounded bg-slate-950">
+                        <ComponentIcon type={plugin.type} size={40} />
                       </div>
                       <div className="text-[10px] leading-tight text-slate-300">{plugin.name}</div>
                     </button>
@@ -109,11 +111,11 @@ export function ComponentPalette() {
             );
           })}
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Footer hint */}
-      <div className="border-t border-slate-800 p-2 text-center text-[10px] text-slate-500">
-        Drag onto canvas or click to add
+      <div className="shrink-0 border-t border-slate-800 p-2 text-center text-[10px] text-slate-500">
+        {running ? '⏸ Pause to edit' : 'Drag onto canvas or click to add'}
       </div>
     </div>
   );

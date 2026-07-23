@@ -182,19 +182,19 @@ export function Toolbar() {
         {/* Undo / Redo */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button size="sm" variant="ghost" onClick={() => undo()} disabled={past === 0}>
+            <Button size="sm" variant="ghost" onClick={() => undo()} disabled={past === 0 || running}>
               <Undo2 size={14} />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Undo (Ctrl+Z)</TooltipContent>
+          <TooltipContent>{running ? 'Pause to undo' : 'Undo (Ctrl+Z)'}</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button size="sm" variant="ghost" onClick={() => redo()} disabled={future === 0}>
+            <Button size="sm" variant="ghost" onClick={() => redo()} disabled={future === 0 || running}>
               <Redo2 size={14} />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Redo (Ctrl+Y)</TooltipContent>
+          <TooltipContent>{running ? 'Pause to redo' : 'Redo (Ctrl+Y)'}</TooltipContent>
         </Tooltip>
 
         <div className="mx-1 h-5 w-px bg-slate-700" />
@@ -202,7 +202,7 @@ export function Toolbar() {
         {/* Examples */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button size="sm" variant="ghost">
+            <Button size="sm" variant="ghost" disabled={running}>
               <FileText size={14} />
               <span className="ml-1 hidden md:inline">Examples</span>
               <ChevronDown size={12} className="ml-1" />
@@ -227,34 +227,34 @@ export function Toolbar() {
         {/* Database (My Circuits) */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button size="sm" variant="ghost" onClick={() => setShowMyCircuits(true)}>
+            <Button size="sm" variant="ghost" onClick={() => setShowMyCircuits(true)} disabled={running}>
               <Database size={14} />
               <span className="ml-1 hidden lg:inline">My Circuits</span>
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Open the saved circuits library (database)</TooltipContent>
+          <TooltipContent>{running ? 'Pause simulation to manage saved circuits' : 'Open the saved circuits library (database)'}</TooltipContent>
         </Tooltip>
 
         {/* SPICE Import */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button size="sm" variant="ghost" onClick={() => setShowSpiceImport(true)}>
+            <Button size="sm" variant="ghost" onClick={() => setShowSpiceImport(true)} disabled={running}>
               <FileCode size={14} />
               <span className="ml-1 hidden lg:inline">SPICE</span>
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Import a SPICE netlist (.cir / .net)</TooltipContent>
+          <TooltipContent>{running ? 'Pause simulation to import SPICE' : 'Import a SPICE netlist (.cir / .net)'}</TooltipContent>
         </Tooltip>
 
         {/* Sub-Circuit builder */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button size="sm" variant="ghost" onClick={() => setShowSubCircuit(true)}>
+            <Button size="sm" variant="ghost" onClick={() => setShowSubCircuit(true)} disabled={running}>
               <Boxes size={14} />
               <span className="ml-1 hidden lg:inline">Sub-Circuit</span>
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Convert current circuit into a reusable component</TooltipContent>
+          <TooltipContent>{running ? 'Pause simulation to create sub-circuits' : 'Convert current circuit into a reusable component'}</TooltipContent>
         </Tooltip>
 
         {/* Settings */}
@@ -282,21 +282,21 @@ export function Toolbar() {
           {/* Save / Load / Clear */}
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button size="sm" variant="ghost" onClick={handleSave}>
+              <Button size="sm" variant="ghost" onClick={handleSave} disabled={running}>
                 <Save size={14} />
                 <span className="ml-1 hidden md:inline">Save</span>
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Download circuit as JSON</TooltipContent>
+            <TooltipContent>{running ? 'Pause simulation to save' : 'Download circuit as JSON'}</TooltipContent>
           </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button size="sm" variant="ghost" onClick={() => fileInputRef.current?.click()}>
+              <Button size="sm" variant="ghost" onClick={() => fileInputRef.current?.click()} disabled={running}>
                 <Upload size={14} />
                 <span className="ml-1 hidden md:inline">Load</span>
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Load circuit from JSON</TooltipContent>
+            <TooltipContent>{running ? 'Pause simulation to load' : 'Load circuit from JSON'}</TooltipContent>
           </Tooltip>
           <input
             ref={fileInputRef}
@@ -313,12 +313,13 @@ export function Toolbar() {
                 onClick={() => {
                   if (confirm('Clear the entire circuit?')) clear();
                 }}
+                disabled={running}
                 className="text-rose-400 hover:text-rose-300"
               >
                 <Trash2 size={14} />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>Clear all</TooltipContent>
+            <TooltipContent>{running ? 'Pause simulation to clear' : 'Clear all'}</TooltipContent>
           </Tooltip>
         </div>
       </div>

@@ -3,19 +3,61 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import { getPlugin, getAllPlugins } from '@/lib/circuit/registry';
-import type { CircuitComponent, ComponentPlugin, TerminalDef, Vec2 } from '@/lib/circuit/types';
+import { computeWireCurrents } from '@/lib/circuit/engine';
+import type { CircuitComponent, ComponentPlugin, TerminalDef, Vec2, Wire } from '@/lib/circuit/types';
 import { rotateTerminal } from '@/lib/circuit/components/draw';
 
 const CELL_SIZE = 24;
 
 interface DragState {
   componentId: string;
-  offset: Vec2; // offset from component origin to cursor in grid units
+  offset: Vec2;
+}
+
+interface WireDragState {
+  wireId: string;
+  /** index of the segment being dragged (0 = from->wp1, etc.) */
+  segIndex: number;
+  /** 'h' or 'v' — which axis the dragged segment runs along */
+  axis: 'h' | 'v';
 }
 
 interface HoverState {
   componentId: string | null;
   terminal: { componentId: string; terminalId: string; pos: Vec2 } | null;
+  wireId: string | null;
+  /** midpoint handle on a wire segment that can be dragged */
+  wireHandle: { wireId: string; segIndex: number; pos: Vec2; axis: 'h' | 'v' } | null;
+  rotateHandle: string | null; // componentId
+}
+
+/** types of components that can be toggled by clicking during simulation */
+const TOGGLEABLE_TYPES = new Set(['switch', 'pushButton']);
+
+/** Get the orthogonal path points (in screen coords) for a wire */
+function getWirePath(
+  wire: Wire,
+  fromPos: Vec2,
+  toPos: Vec2,
+): Vec2[] {
+  const points: Vec2[] = [fromPos];
+  if (wire.waypoints && wire.waypoints.length > 0) {
+    for (const wp of wire.waypoints) {
+      points.push({ ...wp });
+    }
+  } else {
+    // default orthogonal routing: go to midpoint X, then to target
+    const midX = (fromPos.x + toPos.x) / 2;
+    points.push({ x: midX, y: fromPos.y });
+    points.push({ x: midX, y: toPos.y });
+  }
+  points.push(toPos);
+  return points;
+}
+
+/** Compute the midpoint of a segment for drag handle detection */
+function segmentMidpoint(a: Vec2, b: Vec2): Vec2 {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
 export function CircuitCanvas() {
@@ -26,8 +68,17 @@ export function CircuitCanvas() {
   const [zoom, setZoom] = useState(1);
   const [cursor, setCursor] = useState<Vec2>({ x: 0, y: 0 });
   const dragRef = useRef<DragState | null>(null);
+  const wireDragRef = useRef<WireDragState | null>(null);
   const panRef = useRef<{ start: Vec2; origin: Vec2 } | null>(null);
-  const [hover, setHover] = useState<HoverState>({ componentId: null, terminal: null });
+  const [hover, setHover] = useState<HoverState>({
+    componentId: null,
+    terminal: null,
+    wireId: null,
+    wireHandle: null,
+    rotateHandle: null,
+  });
+  // animation phase for current flow dots (0..1)
+  const flowPhaseRef = useRef(0);
   const plugins = getAllPlugins();
 
   const components = useEditor((s) => s.components);
@@ -48,6 +99,8 @@ export function CircuitCanvas() {
   const updateWireCursor = useEditor((s) => s.updateWireCursor);
   const completeWire = useEditor((s) => s.completeWire);
   const cancelWire = useEditor((s) => s.cancelWire);
+  const setWireWaypoints = useEditor((s) => s.setWireWaypoints);
+  const toggleSwitch = useEditor((s) => s.toggleSwitch);
   const step = useEditor((s) => s.step);
 
   // resize observer
@@ -79,6 +132,21 @@ export function CircuitCanvas() {
     return () => cancelAnimationFrame(raf);
   }, [running, step]);
 
+  // continuous animation loop for current flow dots (independent of simulation)
+  const [flowTick, setFlowTick] = useState(0);
+  useEffect(() => {
+    let raf = 0;
+    const loop = () => {
+      flowPhaseRef.current = (flowPhaseRef.current + 0.012) % 1;
+      // Trigger re-draw by updating a state counter.
+      setFlowTick((t) => (t + 1) % 1000000);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  void flowTick; // referenced in deps below
+
   // helpers
   const screenToGrid = useCallback((sx: number, sy: number): Vec2 => {
     const x = (sx - pan.x) / (CELL_SIZE * zoom);
@@ -90,7 +158,6 @@ export function CircuitCanvas() {
     return { x: gx * CELL_SIZE * zoom + pan.x, y: gy * CELL_SIZE * zoom + pan.y };
   }, [pan, zoom]);
 
-  // get absolute position of a terminal (in grid coords)
   const getTerminalPos = useCallback((comp: CircuitComponent, terminal: TerminalDef): Vec2 => {
     const plugin = getPlugin(comp.type);
     if (!plugin) return { x: 0, y: 0 };
@@ -101,7 +168,6 @@ export function CircuitCanvas() {
     };
   }, []);
 
-  // find terminal under cursor (in grid coords)
   const findTerminalAt = useCallback((gx: number, gy: number) => {
     for (const comp of components) {
       const plugin = getPlugin(comp.type);
@@ -118,14 +184,11 @@ export function CircuitCanvas() {
     return null;
   }, [components, getTerminalPos]);
 
-  // find component under cursor (in grid coords)
   const findComponentAt = useCallback((gx: number, gy: number): CircuitComponent | null => {
-    // iterate in reverse so top-drawn components are picked first
     for (let i = components.length - 1; i >= 0; i--) {
       const comp = components[i];
       const plugin = getPlugin(comp.type);
       if (!plugin) continue;
-      // compute rotated bounding box
       const bb = plugin.boundingBox;
       const cx = bb.width / 2;
       const cy = bb.height / 2;
@@ -144,6 +207,62 @@ export function CircuitCanvas() {
     }
     return null;
   }, [components]);
+
+  // find wire under cursor (hit-test against wire path)
+  const findWireAt = useCallback((sx: number, sy: number): string | null => {
+    for (const wire of wires) {
+      const fromComp = components.find((c) => c.id === wire.from.componentId);
+      const toComp = components.find((c) => c.id === wire.to.componentId);
+      if (!fromComp || !toComp) continue;
+      const fromPlugin = getPlugin(fromComp.type);
+      const toPlugin = getPlugin(toComp.type);
+      if (!fromPlugin || !toPlugin) continue;
+      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
+      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
+      if (!fromT || !toT) continue;
+      const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
+      const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
+      const path = getWirePath(wire, fromPos, toPos);
+      // check each segment
+      for (let i = 0; i < path.length - 1; i++) {
+        const a = path[i];
+        const b = path[i + 1];
+        const dist = pointToSegmentDist(sx, sy, a.x, a.y, b.x, b.y);
+        if (dist < 5) return wire.id;
+      }
+    }
+    return null;
+  }, [wires, components, gridToScreen, getTerminalPos]);
+
+  // find a draggable wire segment midpoint handle
+  const findWireHandle = useCallback((sx: number, sy: number): HoverState['wireHandle'] => {
+    for (const wire of wires) {
+      const fromComp = components.find((c) => c.id === wire.from.componentId);
+      const toComp = components.find((c) => c.id === wire.to.componentId);
+      if (!fromComp || !toComp) continue;
+      const fromPlugin = getPlugin(fromComp.type);
+      const toPlugin = getPlugin(toComp.type);
+      if (!fromPlugin || !toPlugin) continue;
+      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
+      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
+      if (!fromT || !toT) continue;
+      const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
+      const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
+      const path = getWirePath(wire, fromPos, toPos);
+      for (let i = 0; i < path.length - 1; i++) {
+        const a = path[i];
+        const b = path[i + 1];
+        const mid = segmentMidpoint(a, b);
+        const dx = sx - mid.x;
+        const dy = sy - mid.y;
+        if (dx * dx + dy * dy < 36) { // 6px radius
+          const axis = (Math.abs(b.x - a.x) > Math.abs(b.y - a.y)) ? 'h' : 'v';
+          return { wireId: wire.id, segIndex: i, pos: mid, axis };
+        }
+      }
+    }
+    return null;
+  }, [wires, components, gridToScreen, getTerminalPos]);
 
   // ----- Rendering -----
   useEffect(() => {
@@ -179,12 +298,27 @@ export function CircuitCanvas() {
         ctx.lineTo(size.width, y);
       }
       ctx.stroke();
-      // origin mark
       ctx.fillStyle = '#475569';
       ctx.fillRect(pan.x - 1, pan.y - 1, 3, 3);
     }
 
-    // draw wires
+    // compute wire currents for flow animation (only when sim is active)
+    const wireCurrents = simContext ? computeWireCurrents(
+      components, wires,
+      new Map(plugins.map((p) => [p.type, p])),
+      simContext,
+    ) : new Map<string, number>();
+
+    // Build a map of node -> number of attached wires (for junction coloring)
+    const nodeWireCount = new Map<string, number>();
+    for (const wire of wires) {
+      const key1 = `${wire.from.componentId}:${wire.from.terminalId}`;
+      const key2 = `${wire.to.componentId}:${wire.to.terminalId}`;
+      nodeWireCount.set(key1, (nodeWireCount.get(key1) ?? 0) + 1);
+      nodeWireCount.set(key2, (nodeWireCount.get(key2) ?? 0) + 1);
+    }
+
+    // ---- Draw wires FIRST (below components) ----
     for (const wire of wires) {
       const fromComp = components.find((c) => c.id === wire.from.componentId);
       const toComp = components.find((c) => c.id === wire.to.componentId);
@@ -195,27 +329,86 @@ export function CircuitCanvas() {
       const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
       const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
       if (!fromT || !toT) continue;
-      const fromPos = gridToScreen(...Object.values(getTerminalPos(fromComp, fromT)) as [number, number]);
-      const toPos = gridToScreen(...Object.values(getTerminalPos(toComp, toT)) as [number, number]);
+      const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
+      const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
+      const path = getWirePath(wire, fromPos, toPos);
       const isSelected = selection.type === 'wire' && selection.id === wire.id;
-      ctx.strokeStyle = isSelected ? '#fbbf24' : '#94a3b8';
-      ctx.lineWidth = isSelected ? 3 : 2;
+      const isHover = hover.wireId === wire.id;
+
+      // wire shadow/glow for visibility
+      ctx.strokeStyle = isSelected ? '#fbbf24' : (isHover ? '#cbd5e1' : '#94a3b8');
+      ctx.lineWidth = isSelected ? 3.5 : (isHover ? 2.5 : 2);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
       ctx.beginPath();
-      // orthogonal routing
-      const midX = (fromPos.x + toPos.x) / 2;
-      ctx.moveTo(fromPos.x, fromPos.y);
-      ctx.lineTo(midX, fromPos.y);
-      ctx.lineTo(midX, toPos.y);
-      ctx.lineTo(toPos.x, toPos.y);
+      ctx.moveTo(path[0].x, path[0].y);
+      for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
       ctx.stroke();
-      // junction dots at endpoints
-      ctx.fillStyle = '#94a3b8';
-      ctx.beginPath();
-      ctx.arc(fromPos.x, fromPos.y, 3, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(toPos.x, toPos.y, 3, 0, Math.PI * 2);
-      ctx.fill();
+
+      // draw wire segment midpoint handles (only when not running, for editing)
+      if (!running) {
+        for (let i = 0; i < path.length - 1; i++) {
+          const a = path[i];
+          const b = path[i + 1];
+          const mid = segmentMidpoint(a, b);
+          const isHandleHot = hover.wireHandle?.wireId === wire.id && hover.wireHandle?.segIndex === i;
+          ctx.beginPath();
+          ctx.arc(mid.x, mid.y, isHandleHot ? 5 : 3, 0, Math.PI * 2);
+          ctx.fillStyle = isHandleHot ? '#fbbf24' : '#475569';
+          ctx.fill();
+          ctx.strokeStyle = '#0f172a';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+      }
+
+      // draw animated current flow dots
+      const current = wireCurrents.get(wire.id) ?? 0;
+      const absCurrent = Math.abs(current);
+      if (simContext && absCurrent > 1e-9) {
+        // direction: positive = from -> to
+        const dir = current >= 0 ? 1 : -1;
+        // speed: log-scaled with current magnitude
+        const speed = Math.min(1, Math.max(0.1, Math.log10(absCurrent * 1000 + 1) / 3));
+        // dot spacing along the path (in pixels)
+        const dotSpacing = 24;
+        // total path length
+        let totalLen = 0;
+        const segLens: number[] = [];
+        for (let i = 0; i < path.length - 1; i++) {
+          const a = path[i];
+          const b = path[i + 1];
+          const len = Math.hypot(b.x - a.x, b.y - a.y);
+          segLens.push(len);
+          totalLen += len;
+        }
+        if (totalLen > 0) {
+          const numDots = Math.max(2, Math.floor(totalLen / dotSpacing));
+          const phase = flowPhaseRef.current * speed;
+          ctx.fillStyle = dir > 0 ? '#fbbf24' : '#22d3ee';
+          for (let n = 0; n < numDots; n++) {
+            let distAlong = (n / numDots + phase * dir) * totalLen;
+            while (distAlong < 0) distAlong += totalLen;
+            while (distAlong >= totalLen) distAlong -= totalLen;
+            // find which segment
+            let acc = 0;
+            for (let i = 0; i < segLens.length; i++) {
+              if (acc + segLens[i] >= distAlong) {
+                const t = (distAlong - acc) / segLens[i];
+                const a = path[i];
+                const b = path[i + 1];
+                const x = a.x + (b.x - a.x) * t;
+                const y = a.y + (b.y - a.y) * t;
+                ctx.beginPath();
+                ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+                break;
+              }
+              acc += segLens[i];
+            }
+          }
+        }
+      }
     }
 
     // draw wire draft
@@ -226,7 +419,7 @@ export function CircuitCanvas() {
         if (plugin) {
           const t = plugin.terminals.find((tt) => tt.id === wireDraft.from.terminalId);
           if (t) {
-            const fromPos = gridToScreen(...Object.values(getTerminalPos(fromComp, t)) as [number, number]);
+            const fromPos = gridToScreen(getTerminalPos(fromComp, t).x, getTerminalPos(fromComp, t).y);
             const toPos = gridToScreen(wireDraft.cursor.x, wireDraft.cursor.y);
             ctx.strokeStyle = '#fbbf24';
             ctx.lineWidth = 2;
@@ -241,7 +434,7 @@ export function CircuitCanvas() {
       }
     }
 
-    // draw components
+    // ---- Draw components ON TOP of wires ----
     for (const comp of components) {
       const plugin = getPlugin(comp.type);
       if (!plugin) continue;
@@ -264,7 +457,6 @@ export function CircuitCanvas() {
         ctx.stroke();
         ctx.restore();
       }
-      // default stroke
       ctx.strokeStyle = '#e2e8f0';
       ctx.fillStyle = '#e2e8f0';
       ctx.lineWidth = 1.5;
@@ -274,23 +466,106 @@ export function CircuitCanvas() {
         console.error(`render error in ${comp.type}:`, e);
       }
       ctx.restore();
-      // draw terminals (in screen coords)
+
+      // draw terminals (in screen coords) — color by connected state
       for (const t of plugin.terminals) {
         const tpos = getTerminalPos(comp, t);
         const sp = gridToScreen(tpos.x, tpos.y);
         const isHot = hover.terminal?.componentId === comp.id && hover.terminal?.terminalId === t.id;
+        const connKey = `${comp.id}:${t.id}`;
+        const isConnected = (nodeWireCount.get(connKey) ?? 0) > 0;
+        const isLive = isConnected && simContext != null;
+        let color = '#475569'; // unconnected: dark gray
+        if (isHot) color = '#fbbf24'; // hover: amber
+        else if (isLive) color = '#22c55e'; // connected + simulating: green
+        else if (isConnected) color = '#cbd5e1'; // connected, not simulating: light gray
         ctx.beginPath();
-        ctx.arc(sp.x, sp.y, isHot ? 5 : 3, 0, Math.PI * 2);
-        ctx.fillStyle = isHot ? '#fbbf24' : '#64748b';
+        ctx.arc(sp.x, sp.y, isHot ? 5 : (isLive ? 4 : 3), 0, Math.PI * 2);
+        ctx.fillStyle = color;
         ctx.fill();
+        if (isLive) {
+          // glow
+          ctx.shadowColor = '#22c55e';
+          ctx.shadowBlur = 8;
+          ctx.fill();
+          ctx.shadowBlur = 0;
+        }
         ctx.strokeStyle = '#0f172a';
         ctx.lineWidth = 1;
         ctx.stroke();
       }
+
+      // draw rotation handle on selected component
+      if (isSelected && !running) {
+        const bb = plugin.boundingBox;
+        // handle position: top-right corner of the bounding box (in screen coords)
+        // compute center in screen coords
+        const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
+        const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
+        // handle offset: above the top edge, centered horizontally
+        const handleOffsetX = 0;
+        const handleOffsetY = -(bb.height / 2 * CELL_SIZE * zoom) - 16;
+        const hx = centerScreen.x + handleOffsetX;
+        const hy = centerScreen.y + handleOffsetY;
+        const isHandleHot = hover.rotateHandle === comp.id;
+        // line from box to handle
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 2]);
+        ctx.beginPath();
+        ctx.moveTo(centerScreen.x, centerScreen.y - (bb.height / 2 * CELL_SIZE * zoom) - 2);
+        ctx.lineTo(hx, hy + 8);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // handle circle with rotate icon
+        ctx.beginPath();
+        ctx.arc(hx, hy, isHandleHot ? 9 : 8, 0, Math.PI * 2);
+        ctx.fillStyle = isHandleHot ? '#fbbf24' : '#1e293b';
+        ctx.fill();
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // draw a small rotate arrow inside
+        ctx.strokeStyle = isHandleHot ? '#0f172a' : '#fbbf24';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(hx, hy, 3.5, -Math.PI * 0.2, Math.PI * 1.1);
+        ctx.stroke();
+        // arrowhead
+        ctx.beginPath();
+        ctx.moveTo(hx + 4, hy - 1);
+        ctx.lineTo(hx + 2.5, hy - 4);
+        ctx.lineTo(hx + 5, hy - 4);
+        ctx.closePath();
+        ctx.fillStyle = isHandleHot ? '#0f172a' : '#fbbf24';
+        ctx.fill();
+      }
+
+      // "click to toggle" hint for switches during simulation
+      if (running && TOGGLEABLE_TYPES.has(comp.type) && (isHover || isSelected)) {
+        const bb = plugin.boundingBox;
+        const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
+        const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
+        const label = comp.type === 'switch'
+          ? (comp.parameters.closed ? 'OPEN' : 'CLOSE')
+          : (comp.parameters.pressed ? 'RELEASE' : 'PRESS');
+        ctx.fillStyle = '#fbbf24';
+        ctx.font = 'bold 10px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const tw = ctx.measureText(label).width + 10;
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+        ctx.fillRect(centerScreen.x - tw / 2, centerScreen.y + (bb.height / 2 * CELL_SIZE * zoom) + 4, tw, 16);
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(centerScreen.x - tw / 2, centerScreen.y + (bb.height / 2 * CELL_SIZE * zoom) + 4, tw, 16);
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillText(label, centerScreen.x, centerScreen.y + (bb.height / 2 * CELL_SIZE * zoom) + 12);
+      }
     }
 
     // draw cursor crosshair (when no drag)
-    if (!dragRef.current && !panRef.current) {
+    if (!dragRef.current && !panRef.current && !wireDragRef.current) {
       const sp = gridToScreen(cursor.x, cursor.y);
       ctx.strokeStyle = 'rgba(251, 191, 36, 0.4)';
       ctx.lineWidth = 1;
@@ -303,7 +578,7 @@ export function CircuitCanvas() {
     }
 
     ctx.restore();
-  }, [size, pan, zoom, components, wires, selection, hover, cursor, simContext, showGrid, wireDraft, gridToScreen, getTerminalPos]);
+  }, [size, pan, zoom, components, wires, selection, hover, cursor, simContext, showGrid, wireDraft, running, gridToScreen, getTerminalPos, plugins, flowTick]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
@@ -315,6 +590,43 @@ export function CircuitCanvas() {
     // middle or right button: pan
     if (e.button === 1 || e.button === 2) {
       panRef.current = { start: { x: sx, y: sy }, origin: { ...pan } };
+      return;
+    }
+
+    // If simulation is running, check for toggleable components FIRST
+    if (running) {
+      const term = findTerminalAt(g.x, g.y);
+      if (term) {
+        // clicking a terminal during simulation: do nothing (no wire drawing)
+        return;
+      }
+      const comp = findComponentAt(g.x, g.y);
+      if (comp && TOGGLEABLE_TYPES.has(comp.type)) {
+        toggleSwitch(comp.id);
+        return;
+      }
+      // select component but don't drag during simulation
+      if (comp) {
+        setSelection({ type: 'component', id: comp.id });
+        return;
+      }
+      setSelection({ type: null, id: null });
+      return;
+    }
+
+    // check rotation handle on selected component
+    if (selection.type === 'component' && hover.rotateHandle === selection.id) {
+      rotateComponent(selection.id);
+      return;
+    }
+
+    // check wire segment handle (for dragging)
+    if (hover.wireHandle) {
+      wireDragRef.current = {
+        wireId: hover.wireHandle.wireId,
+        segIndex: hover.wireHandle.segIndex,
+        axis: hover.wireHandle.axis,
+      };
       return;
     }
 
@@ -340,6 +652,13 @@ export function CircuitCanvas() {
       return;
     }
 
+    // check wire (for selection)
+    const wireId = findWireAt(sx, sy);
+    if (wireId) {
+      setSelection({ type: 'wire', id: wireId });
+      return;
+    }
+
     // empty space: clear selection, cancel wire
     setSelection({ type: null, id: null });
     if (wireDraft) cancelWire();
@@ -360,7 +679,60 @@ export function CircuitCanvas() {
       return;
     }
 
+    // wire segment dragging
+    if (wireDragRef.current) {
+      const wd = wireDragRef.current;
+      const wire = wires.find((w) => w.id === wd.wireId);
+      if (!wire) return;
+      const fromComp = components.find((c) => c.id === wire.from.componentId);
+      const toComp = components.find((c) => c.id === wire.to.componentId);
+      if (!fromComp || !toComp) return;
+      const fromPlugin = getPlugin(fromComp.type);
+      const toPlugin = getPlugin(toComp.type);
+      if (!fromPlugin || !toPlugin) return;
+      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
+      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
+      if (!fromT || !toT) return;
+      const fromPos = getTerminalPos(fromComp, fromT);
+      const toPos = getTerminalPos(toComp, toT);
+      // Reconstruct current waypoints
+      let wps: Vec2[] = wire.waypoints && wire.waypoints.length > 0
+        ? wire.waypoints.map((w) => ({ ...w }))
+        : [{ x: (fromPos.x + toPos.x) / 2, y: fromPos.y }, { x: (fromPos.x + toPos.x) / 2, y: toPos.y }];
+
+      // The segment being dragged is between path[segIndex] and path[segIndex+1]
+      // path = [fromPos, ...wps, toPos], so segIndex in terms of wps:
+      // segIndex 0 => from->wp0 (or toPos if no wps), segIndex 1 => wp0->wp1, etc.
+      // For the default 2-waypoint case, segIndex 1 is the vertical middle segment.
+      // When dragging a horizontal segment, we move the Y of both endpoints;
+      // when dragging a vertical segment, we move the X of both endpoints.
+
+      // Build full path indices
+      const pathPoints: Vec2[] = [fromPos, ...wps, toPos];
+      const segStart = pathPoints[wd.segIndex];
+      const segEnd = pathPoints[wd.segIndex + 1];
+      if (wd.axis === 'h') {
+        // horizontal segment: drag changes Y of both endpoints
+        const newY = g.y;
+        if (wd.segIndex === 0) fromPos.y = newY; // can't actually move fromPos (it's a terminal)
+        // We only move waypoint positions
+        if (wd.segIndex > 0 && wd.segIndex <= wps.length) wps[wd.segIndex - 1].y = newY;
+        if (wd.segIndex < wps.length) wps[wd.segIndex].y = newY;
+        else toPos.y = newY; // can't move toPos either
+        void segStart; void segEnd; void newY;
+      } else {
+        // vertical segment: drag changes X
+        const newX = g.x;
+        if (wd.segIndex > 0 && wd.segIndex <= wps.length) wps[wd.segIndex - 1].x = newX;
+        if (wd.segIndex < wps.length) wps[wd.segIndex].x = newX;
+        void newX;
+      }
+      setWireWaypoints(wd.wireId, wps);
+      return;
+    }
+
     if (dragRef.current) {
+      if (running) return; // no dragging during simulation
       const newPos = { x: g.x - dragRef.current.offset.x, y: g.y - dragRef.current.offset.y };
       moveComponent(dragRef.current.componentId, newPos);
       return;
@@ -370,14 +742,49 @@ export function CircuitCanvas() {
       updateWireCursor(g);
     }
 
-    // hover detection
+    // hover detection: priority: terminal > rotate handle > wire handle > wire > component
     const term = findTerminalAt(g.x, g.y);
     if (term) {
-      setHover({ componentId: term.componentId, terminal: term });
-    } else {
-      const comp = findComponentAt(g.x, g.y);
-      setHover({ componentId: comp?.id ?? null, terminal: null });
+      setHover({ componentId: term.componentId, terminal: term, wireId: null, wireHandle: null, rotateHandle: null });
+      return;
     }
+    // rotate handle
+    if (!running && selection.type === 'component') {
+      const comp = components.find((c) => c.id === selection.id);
+      if (comp) {
+        const plugin = getPlugin(comp.type);
+        if (plugin) {
+          const bb = plugin.boundingBox;
+          const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
+          const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
+          const hx = centerScreen.x;
+          const hy = centerScreen.y - (bb.height / 2 * CELL_SIZE * zoom) - 16;
+          const dx = sx - hx;
+          const dy = sy - hy;
+          if (dx * dx + dy * dy < 100) {
+            setHover({ componentId: comp.id, terminal: null, wireId: null, wireHandle: null, rotateHandle: comp.id });
+            return;
+          }
+        }
+      }
+    }
+    // wire handle
+    if (!running) {
+      const wh = findWireHandle(sx, sy);
+      if (wh) {
+        setHover({ componentId: null, terminal: null, wireId: wh.wireId, wireHandle: wh, rotateHandle: null });
+        return;
+      }
+    }
+    // wire
+    const wireId = findWireAt(sx, sy);
+    if (wireId) {
+      setHover({ componentId: null, terminal: null, wireId, wireHandle: null, rotateHandle: null });
+      return;
+    }
+    // component
+    const comp = findComponentAt(g.x, g.y);
+    setHover({ componentId: comp?.id ?? null, terminal: null, wireId: null, wireHandle: null, rotateHandle: null });
   };
 
   const onMouseUp = (e: React.MouseEvent) => {
@@ -385,9 +792,13 @@ export function CircuitCanvas() {
       panRef.current = null;
       return;
     }
-    if (dragRef.current) {
-      // commit move to history
+    if (wireDragRef.current) {
       useEditor.getState().pushHistory();
+      wireDragRef.current = null;
+      return;
+    }
+    if (dragRef.current) {
+      if (!running) useEditor.getState().pushHistory();
       dragRef.current = null;
     }
   };
@@ -399,6 +810,7 @@ export function CircuitCanvas() {
   };
 
   const onDrop = (e: React.DragEvent) => {
+    if (running) return;
     e.preventDefault();
     const type = e.dataTransfer.getData('application/x-circuit-type');
     if (!type) return;
@@ -410,11 +822,13 @@ export function CircuitCanvas() {
   };
 
   const onDragOver = (e: React.DragEvent) => {
+    if (running) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
   };
 
   const onDoubleClick = (e: React.MouseEvent) => {
+    if (running) return; // no rotation during simulation
     const rect = canvasRef.current!.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
@@ -423,25 +837,46 @@ export function CircuitCanvas() {
     if (comp) rotateComponent(comp.id);
   };
 
+  // cursor style based on hover state
+  const getCursorStyle = (): string => {
+    if (running) {
+      if (hover.componentId) {
+        const comp = components.find((c) => c.id === hover.componentId);
+        if (comp && TOGGLEABLE_TYPES.has(comp.type)) return 'pointer';
+      }
+      return 'default';
+    }
+    if (hover.terminal) return 'crosshair';
+    if (hover.rotateHandle) return 'pointer';
+    if (hover.wireHandle) return 'ns-resize';
+    if (hover.wireId) return 'pointer';
+    if (hover.componentId) return 'move';
+    return 'crosshair';
+  };
+
   // keyboard
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (running) return;
         const s = useEditor.getState().selection;
         if (s.type === 'component') deleteComponent(s.id!);
         else if (s.type === 'wire') useEditor.getState().deleteWire(s.id!);
       } else if (e.key === 'r' || e.key === 'R') {
+        if (running) return;
         const s = useEditor.getState().selection;
         if (s.type === 'component') rotateComponent(s.id!);
       } else if (e.key === 'Escape') {
         cancelWire();
         setSelection({ type: null, id: null });
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        if (running) return;
         e.preventDefault();
         useEditor.getState().undo();
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+        if (running) return;
         e.preventDefault();
         useEditor.getState().redo();
       } else if (e.key === ' ') {
@@ -452,7 +887,7 @@ export function CircuitCanvas() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [deleteComponent, rotateComponent, cancelWire, setSelection]);
+  }, [deleteComponent, rotateComponent, cancelWire, setSelection, running]);
 
   return (
     <div
@@ -462,11 +897,12 @@ export function CircuitCanvas() {
     >
       <canvas
         ref={canvasRef}
-        className="absolute inset-0 cursor-crosshair"
+        className="absolute inset-0"
+        style={{ cursor: getCursorStyle() }}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
-        onMouseLeave={() => { dragRef.current = null; panRef.current = null; }}
+        onMouseLeave={() => { dragRef.current = null; panRef.current = null; wireDragRef.current = null; }}
         onWheel={onWheel}
         onDrop={onDrop}
         onDragOver={onDragOver}
@@ -475,9 +911,10 @@ export function CircuitCanvas() {
       {/* status overlay */}
       <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-slate-900/80 px-2 py-1 text-xs font-mono text-slate-400">
         ({cursor.x.toFixed(1)}, {cursor.y.toFixed(1)})  zoom: {zoom.toFixed(2)}x  {running ? '▶ running' : '⏸ paused'}
+        {running && <span className="ml-2 text-amber-300">· click switches to toggle</span>}
       </div>
       <div className="pointer-events-none absolute bottom-2 right-2 rounded-md bg-slate-900/80 px-2 py-1 text-xs font-mono text-slate-400">
-        Drag from left • Double-click to rotate • R rotate • Del delete • Space play/pause
+        {running ? 'Click switches to toggle • Space to pause' : 'Drag from left • Double-click/R to rotate • Del delete • Space play/pause'}
       </div>
       {/* zoom controls */}
       <div className="absolute right-2 top-2 flex flex-col gap-1">
@@ -496,4 +933,17 @@ export function CircuitCanvas() {
       </div>
     </div>
   );
+}
+
+/** Distance from point (px, py) to segment (ax,ay)-(bx,by) */
+function pointToSegmentDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.hypot(px - ax, py - ay);
+  let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + t * dx;
+  const cy = ay + t * dy;
+  return Math.hypot(px - cx, py - cy);
 }

@@ -123,6 +123,123 @@ export function getTerminalsForComponent(
 }
 
 /**
+ * Compute the current flowing through each wire, in amperes.
+ * Returns a map of wireId -> current (positive = from `from` to `to`).
+ *
+ * We approximate wire current by looking at the components attached at each end:
+ * - For a 2-terminal component, the current through it = (V(a) - V(b)) / R or its
+ *   stamped current. We sum the currents leaving the source node of each wire.
+ * - A simpler proxy: for each wire, find any resistor/capacitor/inductor/LED/diode
+ *   attached to the `from` terminal and read its current. If none, use 0.
+ *
+ * For visual flow animation, the exact value isn't critical — we just need the
+ * sign (direction) and a rough magnitude.
+ */
+export function computeWireCurrents(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  sim: SimContext,
+): Map<string, number> {
+  const result = new Map<string, number>();
+  const nodeMap = buildNodeMap(components, wires, plugins);
+
+  for (const wire of wires) {
+    // For each wire, try to estimate current by looking at the component at `from` end.
+    // Sum currents leaving the `from` node through all 2-terminal components attached there.
+    const fromComp = components.find((c) => c.id === wire.from.componentId);
+    if (!fromComp) continue;
+    const plugin = plugins.get(fromComp.type);
+    if (!plugin) continue;
+    const fromTerm = plugin.terminals.find((t) => t.id === wire.from.terminalId);
+    if (!fromTerm) continue;
+    const fromNode = nodeMap.terminalNode.get(`${fromComp.id}:${fromTerm.id}`) ?? 0;
+
+    // Try to compute current from this component
+    let current = 0;
+    if (fromComp.type === 'resistor') {
+      const r = Math.max(1e-9, fromComp.parameters.resistance as number);
+      const terms = getTerminalsForComponent(fromComp, plugin, nodeMap);
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
+      // current from a to b
+      const i = v / r;
+      // if this wire is attached to 'a', current leaving a through this wire = i
+      // if attached to 'b', current leaving b through this wire = -i
+      current = (fromNode === a) ? i : -i;
+    } else if (fromComp.type === 'capacitor') {
+      // current = C * dV/dt ≈ companion: i = (C/dt) * (V - vPrev)
+      // For visualization, use the companion current
+      const C = Math.max(1e-15, fromComp.parameters.capacitance as number);
+      const terms = getTerminalsForComponent(fromComp, plugin, nodeMap);
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      const st = sim.state.__global ?? {};
+      const key = `cap_${a}_${b}`;
+      const vPrev = st[key] ?? 0;
+      const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
+      const i = (C / Math.max(sim.dt, 1e-12)) * (v - vPrev);
+      current = (fromNode === a) ? i : -i;
+    } else if (fromComp.type === 'inductor') {
+      const L = Math.max(1e-12, fromComp.parameters.inductance as number);
+      const terms = getTerminalsForComponent(fromComp, plugin, nodeMap);
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      const st = sim.state.__global ?? {};
+      const key = `ind_${a}_${b}`;
+      const i = st[key] ?? 0;
+      current = (fromNode === a) ? i : -i;
+      void L;
+    } else if (fromComp.type === 'led' || fromComp.type === 'diode') {
+      const terms = getTerminalsForComponent(fromComp, plugin, nodeMap);
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
+      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+      const vf = (fromComp.parameters.forwardV as number) || 0.7;
+      const r = fromComp.type === 'led'
+        ? Math.max(0.01, fromComp.parameters.seriesR as number)
+        : Math.max(0.001, fromComp.parameters.onR as number);
+      const st = sim.state.__global ?? {};
+      const key = `${fromComp.type}_${a}_${k}`;
+      const on = st[key] ?? false;
+      const i = on ? (v - vf) / r : 0;
+      current = (fromNode === a) ? i : -i;
+    } else if (fromComp.type === 'dcVoltage' || fromComp.type === 'acVoltage' || fromComp.type === 'pulseSource') {
+      // Voltage source: current flows OUT of the + terminal (into the external circuit)
+      const terms = getTerminalsForComponent(fromComp, plugin, nodeMap);
+      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+      const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+      // We don't easily have the branch current here; approximate by looking at all
+      // other components attached to the same node and summing their currents.
+      // For visualization, just use a small positive value if V(p) > V(n)
+      const v = sim.nodeVoltage[p] - sim.nodeVoltage[n];
+      current = (fromNode === p) ? (v > 0 ? 0.001 : -0.001) : (v > 0 ? -0.001 : 0.001);
+    } else if (fromComp.type === 'switch' || fromComp.type === 'pushButton') {
+      // Approximate: if closed, current = V_drop / 0.01
+      const closed = fromComp.type === 'switch'
+        ? fromComp.parameters.closed
+        : fromComp.parameters.pressed;
+      if (closed) {
+        const terms = getTerminalsForComponent(fromComp, plugin, nodeMap);
+        const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+        const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+        const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
+        const i = v / 0.01;
+        current = (fromNode === a) ? i : -i;
+      } else {
+        current = 0;
+      }
+    }
+    // For other component types, current stays 0 (no visualization)
+
+    result.set(wire.id, current);
+  }
+
+  return result;
+}
+
+/**
  * Run one simulation step.
  * - Stamps all components (with Newton iteration for non-linear ones; for simplicity we do fixed iterations).
  * - Solves the linear system.

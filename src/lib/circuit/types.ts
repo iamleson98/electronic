@@ -80,6 +80,8 @@ export interface Wire {
   from: { componentId: string; terminalId: string };
   /** target component id + terminal id */
   to: { componentId: string; terminalId: string };
+  /** user-defined waypoints (in grid coords) for custom routing */
+  waypoints?: Vec2[];
 }
 
 export interface CircuitDocument {

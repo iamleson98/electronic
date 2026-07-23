@@ -17,7 +17,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 
 export function PropertyPanel() {
@@ -28,6 +27,7 @@ export function PropertyPanel() {
   const deleteComponent = useEditor((s) => s.deleteComponent);
   const setSelection = useEditor((s) => s.setSelection);
   const simContext = useEditor((s) => s.simContext);
+  const running = useEditor((s) => s.running);
 
   const comp = useMemo(
     () => components.find((c) => c.id === selection.id) ?? null,
@@ -99,8 +99,10 @@ export function PropertyPanel() {
         <Button
           size="sm"
           variant="outline"
-          className="flex-1 border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700"
+          className="flex-1 border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-40"
           onClick={() => rotateComponent(comp.id)}
+          disabled={running}
+          title={running ? 'Pause simulation to rotate' : 'Rotate component'}
         >
           <RotateCw size={12} className="mr-1" />
           Rotate (R)
@@ -108,8 +110,10 @@ export function PropertyPanel() {
         <Button
           size="sm"
           variant="outline"
-          className="border-rose-900 bg-rose-950/50 text-rose-300 hover:bg-rose-900/50"
+          className="border-rose-900 bg-rose-950/50 text-rose-300 hover:bg-rose-900/50 disabled:opacity-40"
           onClick={() => deleteComponent(comp.id)}
+          disabled={running}
+          title={running ? 'Pause simulation to delete' : 'Delete component'}
         >
           <Trash2 size={12} className="mr-1" />
           Delete
@@ -117,8 +121,13 @@ export function PropertyPanel() {
       </div>
 
       {/* Parameters */}
-      <ScrollArea className="flex-1">
-        <div className="p-3">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className={`p-3 ${running ? 'pointer-events-none opacity-50' : ''}`}>
+          {running && (
+            <div className="mb-3 rounded-md border border-amber-700/50 bg-amber-950/30 p-2 text-center text-[11px] text-amber-300">
+              ⏸ Pause simulation to edit parameters
+            </div>
+          )}
           {plugin.parameters.length === 0 ? (
             <p className="py-4 text-center text-xs text-slate-500">No editable parameters.</p>
           ) : (
@@ -143,7 +152,7 @@ export function PropertyPanel() {
             </div>
           </div>
         </div>
-      </ScrollArea>
+      </div>
     </div>
   );
 }
