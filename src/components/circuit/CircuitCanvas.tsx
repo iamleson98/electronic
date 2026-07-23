@@ -269,38 +269,35 @@ export function CircuitCanvas() {
     return () => ro.disconnect();
   }, []);
 
-  // simulation loop
+  // SINGLE unified animation+simulation loop.
+  // Both the simulation step and the flow-dot phase advance happen in the same
+  // requestAnimationFrame callback, so there's only ONE re-render per frame.
+  // This eliminates the blinking/lag caused by two competing RAF loops.
+  // The flow dot speed is linked to the simulation speed setting so they match.
+  const [animTick, setAnimTick] = useState(0);
   useEffect(() => {
     if (!running) return;
     let raf = 0;
-    let last = performance.now();
-    const loop = (t: number) => {
-      const dt = t - last;
-      if (dt > 16) {
+    let lastSimTime = performance.now();
+    const SIM_INTERVAL = 16; // ms between simulation steps (~60Hz)
+    const loop = (now: number) => {
+      // Advance flow phase every frame. The base speed (0.012) is scaled by
+      // the simulation speed setting so dots move faster at higher speeds.
+      const simSpeed = useEditor.getState().speed;
+      flowPhaseRef.current = (flowPhaseRef.current + 0.012 * Math.max(0.5, Math.min(4, simSpeed))) % 1;
+      // Run simulation step at fixed interval
+      if (now - lastSimTime >= SIM_INTERVAL) {
         step();
-        last = t;
+        lastSimTime = now;
       }
+      // Single re-render per frame — covers both sim state and animation
+      setAnimTick((t) => (t + 1) % 1000000);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
   }, [running, step]);
-
-  // continuous animation loop for current flow dots — ONLY while simulation is running.
-  // When paused, the phase is preserved (not reset) so dots resume smoothly.
-  const [flowTick, setFlowTick] = useState(0);
-  useEffect(() => {
-    if (!running) return; // don't animate when paused; phase is preserved
-    let raf = 0;
-    const loop = () => {
-      flowPhaseRef.current = (flowPhaseRef.current + 0.012) % 1;
-      setFlowTick((t) => (t + 1) % 1000000);
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [running]);
-  void flowTick; // referenced in deps below
+  void animTick; // referenced in render effect deps
 
   // helpers
   const screenToGrid = useCallback((sx: number, sy: number): Vec2 => {
@@ -872,7 +869,7 @@ export function CircuitCanvas() {
     }
 
     ctx.restore();
-  }, [size, pan, zoom, components, wires, selection, hover, cursor, simContext, showGrid, wireDraft, running, gridToScreen, getTerminalPos, plugins, flowTick, getRotateHandlePos]);
+  }, [size, pan, zoom, components, wires, selection, hover, cursor, simContext, showGrid, wireDraft, running, gridToScreen, getTerminalPos, plugins, animTick, getRotateHandlePos]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
