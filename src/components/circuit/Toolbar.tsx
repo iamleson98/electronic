@@ -18,6 +18,9 @@ import {
   FileText,
   ChevronDown,
   Settings2,
+  Database,
+  FileCode,
+  Boxes,
 } from 'lucide-react';
 import {
   DropdownMenu,
@@ -37,6 +40,9 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { MyCircuitsDialog } from './MyCircuitsDialog';
+import { SpiceImportDialog } from './SpiceImportDialog';
+import { SubCircuitDialog } from './SubCircuitDialog';
 
 export function Toolbar() {
   const running = useEditor((s) => s.running);
@@ -60,6 +66,9 @@ export function Toolbar() {
   const future = useEditor((s) => s.future.length);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [showMyCircuits, setShowMyCircuits] = useState(false);
+  const [showSpiceImport, setShowSpiceImport] = useState(false);
+  const [showSubCircuit, setShowSubCircuit] = useState(false);
 
   const handleSave = useCallback(() => {
     const doc = serialize();
@@ -215,6 +224,39 @@ export function Toolbar() {
           </DropdownMenuContent>
         </DropdownMenu>
 
+        {/* Database (My Circuits) */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => setShowMyCircuits(true)}>
+              <Database size={14} />
+              <span className="ml-1 hidden lg:inline">My Circuits</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Open the saved circuits library (database)</TooltipContent>
+        </Tooltip>
+
+        {/* SPICE Import */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => setShowSpiceImport(true)}>
+              <FileCode size={14} />
+              <span className="ml-1 hidden lg:inline">SPICE</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Import a SPICE netlist (.cir / .net)</TooltipContent>
+        </Tooltip>
+
+        {/* Sub-Circuit builder */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => setShowSubCircuit(true)}>
+              <Boxes size={14} />
+              <span className="ml-1 hidden lg:inline">Sub-Circuit</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Convert current circuit into a reusable component</TooltipContent>
+        </Tooltip>
+
         {/* Settings */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -280,6 +322,11 @@ export function Toolbar() {
           </Tooltip>
         </div>
       </div>
+
+      {/* Dialogs */}
+      <MyCircuitsDialog open={showMyCircuits} onClose={() => setShowMyCircuits(false)} />
+      <SpiceImportDialog open={showSpiceImport} onClose={() => setShowSpiceImport(false)} />
+      <SubCircuitDialog open={showSubCircuit} onClose={() => setShowSubCircuit(false)} />
     </TooltipProvider>
   );
 }

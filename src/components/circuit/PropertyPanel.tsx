@@ -205,6 +205,76 @@ function ParameterEditor({
     );
   }
   if (def.type === 'string') {
+    // Special case: long sketch source code (multi-line) -> use textarea + sample picker
+    if (def.key === 'sketch' || (typeof value === 'string' && value.includes('\n'))) {
+      const sampleSketches: Record<string, string> = {
+        blink: `// Classic blink
+loop:
+D2 = HIGH
+wait 500ms
+D2 = LOW
+wait 500ms
+goto loop`,
+        button: `// Read A0, mirror to D3
+loop:
+if A0 > 2.5 goto on
+D3 = LOW
+wait 10ms
+goto loop
+on:
+D3 = HIGH
+wait 10ms
+goto loop`,
+        pwm_50: `// Software PWM 50% on D3 at ~1kHz
+loop:
+D3 = HIGH
+wait 0.5ms
+D3 = LOW
+wait 0.5ms
+goto loop`,
+        counter: `// 4-bit binary counter on D2-D5
+loop:
+D2 = HIGH
+wait 100ms
+D2 = LOW
+D3 = HIGH
+wait 100ms
+D3 = LOW
+D4 = HIGH
+wait 100ms
+D4 = LOW
+D5 = HIGH
+wait 100ms
+D5 = LOW
+goto loop`,
+      };
+      return (
+        <div className="space-y-1">
+          <div className="flex items-center justify-between">
+            <Label className="text-xs text-slate-300">{def.label}</Label>
+            <Select onValueChange={(v) => onChange(sampleSketches[v] || '')}>
+              <SelectTrigger className="h-6 w-32 border-slate-700 bg-slate-800 text-[10px] text-slate-300">
+                <SelectValue placeholder="Load sample..." />
+              </SelectTrigger>
+              <SelectContent className="bg-slate-800 border-slate-700">
+                {Object.keys(sampleSketches).map((k) => (
+                  <SelectItem key={k} value={k} className="text-xs text-slate-200">{k}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <textarea
+            value={String(value ?? '')}
+            onChange={(e) => onChange(e.target.value)}
+            spellCheck={false}
+            className="min-h-[200px] w-full resize-y rounded border border-slate-700 bg-slate-950 p-2 font-mono text-[11px] leading-snug text-slate-200 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+          />
+          <p className="text-[10px] text-slate-500">
+            Commands: pin D2 output · D2 = HIGH/LOW · wait 500ms · if A0 &gt; 2.5 goto label · loop: · goto loop
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="space-y-1">
         <Label className="text-xs text-slate-300">{def.label}</Label>

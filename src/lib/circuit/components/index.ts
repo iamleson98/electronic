@@ -5,6 +5,12 @@ import './passive';
 import './sources';
 import './semiconductors';
 import './advanced';
+import './extra';
+import './arduino-real';
+import { registerBuiltinSubCircuits } from '../subcircuit';
+
+// Register built-in sub-circuits (voltage divider, diode-DL AND gate, etc.)
+registerBuiltinSubCircuits();
 
 export { registerPlugin, getPlugin, getAllPlugins, getPluginsByCategory, hasPlugin } from '../registry';
 export type { ComponentPlugin } from '../types';

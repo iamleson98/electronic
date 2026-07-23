@@ -30,3 +30,17 @@ model Post {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+model SavedCircuit {
+  id          String   @id @default(cuid())
+  name        String
+  description String   @default("")
+  document    String   // JSON-serialized CircuitDocument
+  tags        String   @default("") // comma-separated
+  isExample   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([name])
+  @@index([updatedAt])
+}

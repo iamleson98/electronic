@@ -132,7 +132,11 @@ export function ProbePanel() {
 
   const hasCircuit = components.length > 0;
   const hasGround = components.some((c) => c.type === 'ground');
-  const hasSource = components.some((c) => ['dcVoltage', 'acVoltage', 'pulseSource', 'currentSource', 'arduino', 'raspberryPi'].includes(c.type));
+  const hasSource = components.some((c) => [
+    'dcVoltage', 'acVoltage', 'pulseSource', 'currentSource',
+    'arduino', 'arduinoReal', 'raspberryPi',
+    'vco', 'crystal', 'timer555',  // these can drive outputs
+  ].includes(c.type));
 
   return (
     <div className="flex h-full flex-col bg-slate-900">

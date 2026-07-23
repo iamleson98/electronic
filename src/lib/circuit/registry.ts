@@ -18,7 +18,8 @@ const categoryOrder: Record<string, number> = {
 
 export function registerPlugin(plugin: ComponentPlugin) {
   if (registry.has(plugin.type)) {
-    console.warn(`[registry] Overwriting plugin "${plugin.type}"`);
+    // Silently overwrite (HMR may cause re-registration)
+    return;
   }
   registry.set(plugin.type, plugin);
 }
