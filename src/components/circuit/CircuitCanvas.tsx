@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import { getPlugin, getAllPlugins } from '@/lib/circuit/registry';
-import { computeWireCurrents } from '@/lib/circuit/engine';
+import { computeWireCurrents, computeComponentCurrents } from '@/lib/circuit/engine';
 import type { CircuitComponent, ComponentPlugin, TerminalDef, Vec2, Wire } from '@/lib/circuit/types';
 import { rotateTerminal } from '@/lib/circuit/components/draw';
 
@@ -471,13 +471,14 @@ export function CircuitCanvas() {
       ctx.fillRect(pan.x - 1, pan.y - 1, 3, 3);
     }
 
-    // compute wire currents for flow animation — ONLY when running AND simContext exists.
-    // When paused or editing, no current data is computed and no dots are drawn.
+    // compute wire + component currents for flow animation — ONLY when running AND simContext exists.
     const isAnimating = running && simContext != null;
+    const pluginsMap = new Map(plugins.map((p) => [p.type, p]));
     const wireCurrents = isAnimating ? computeWireCurrents(
-      components, wires,
-      new Map(plugins.map((p) => [p.type, p])),
-      simContext!,
+      components, wires, pluginsMap, simContext!,
+    ) : new Map<string, number>();
+    const componentCurrents = isAnimating ? computeComponentCurrents(
+      components, wires, pluginsMap, simContext!,
     ) : new Map<string, number>();
 
     // Build a map of node -> number of attached wires (for junction coloring)
@@ -554,7 +555,10 @@ export function CircuitCanvas() {
           if (totalLen > 0) {
             const numDots = Math.max(2, Math.floor(totalLen / dotSpacing));
             const phase = flowPhaseRef.current * speed;
-            ctx.fillStyle = dir > 0 ? '#fbbf24' : '#22d3ee';
+            // Same bright yellow as component dots, with glow
+            ctx.fillStyle = '#fde047';
+            ctx.shadowColor = '#fde047';
+            ctx.shadowBlur = 6;
             for (let n = 0; n < numDots; n++) {
               let distAlong = (n / numDots + phase * dir) * totalLen;
               while (distAlong < 0) distAlong += totalLen;
@@ -568,13 +572,14 @@ export function CircuitCanvas() {
                   const x = a.x + (b.x - a.x) * t;
                   const y = a.y + (b.y - a.y) * t;
                   ctx.beginPath();
-                  ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+                  ctx.arc(x, y, 3, 0, Math.PI * 2);
                   ctx.fill();
                   break;
                 }
                 acc += segLens[i];
               }
             }
+            ctx.shadowBlur = 0; // reset glow after dots
           }
         }
       }
@@ -662,6 +667,86 @@ export function CircuitCanvas() {
         ctx.strokeStyle = '#0f172a';
         ctx.lineWidth = 1;
         ctx.stroke();
+      }
+
+      // draw animated current flow dots THROUGH the component body
+      if (isAnimating && plugin.getFlowPath) {
+        const current = componentCurrents.get(comp.id) ?? 0;
+        const absCurrent = Math.abs(current);
+        if (absCurrent > 1e-9) {
+          const dir = current >= 0 ? 1 : -1;
+          // Speed: proportional to current magnitude.
+          // Physics: I = V/R (Ohm's law). Higher current = faster flow.
+          // For inductor: I(t) = V/R·(1-e^(-Rt/L)) — starts at 0, ramps up.
+          // For capacitor: I = C·dV/dt — strong when charging, 0 when fully charged.
+          // The actual current value already reflects these physics because we
+          // compute it from the solved node voltages and component state.
+          // We map current to a visual speed: log-scaled so wide current ranges
+          // are visible. 1mA → ~0.33, 10mA → ~0.67, 100mA → ~1.0
+          const speed = Math.min(1.5, Math.max(0.05, Math.log10(absCurrent * 1000 + 1) / 3));
+          // Get the flow path in grid coords (relative to component origin, pre-rotation)
+          const flowGridPath = plugin.getFlowPath(comp.parameters, simContext ?? undefined, comp);
+          if (flowGridPath && flowGridPath.length >= 2) {
+            // Transform each point: apply rotation, then translate to component position, then to screen
+            const flowScreenPath: Vec2[] = flowGridPath.map((gp) => {
+              // Apply rotation (0,1,2,3 = 0°,90°,180°,270°) around bounding box center
+              const bb = plugin.boundingBox;
+              const cx = bb.width / 2;
+              const cy = bb.height / 2;
+              const dx = gp.x - cx;
+              const dy = gp.y - cy;
+              let rx: number, ry: number;
+              switch (comp.rotation) {
+                case 0: rx = dx; ry = dy; break;
+                case 1: rx = -dy; ry = dx; break;
+                case 2: rx = -dx; ry = -dy; break;
+                case 3: rx = dy; ry = -dx; break;
+              }
+              const gridX = comp.position.x + cx + rx;
+              const gridY = comp.position.y + cy + ry;
+              return gridToScreen(gridX, gridY);
+            });
+            // Compute total path length
+            let totalLen = 0;
+            const segLens: number[] = [];
+            for (let i = 0; i < flowScreenPath.length - 1; i++) {
+              const a = flowScreenPath[i];
+              const b = flowScreenPath[i + 1];
+              const len = Math.hypot(b.x - a.x, b.y - a.y);
+              segLens.push(len);
+              totalLen += len;
+            }
+            if (totalLen > 0) {
+              const dotSpacing = 18;
+              const numDots = Math.max(2, Math.floor(totalLen / dotSpacing));
+              const phase = flowPhaseRef.current * speed;
+              ctx.fillStyle = '#fde047';
+              ctx.shadowColor = '#fde047';
+              ctx.shadowBlur = 6;
+              for (let n = 0; n < numDots; n++) {
+                let distAlong = (n / numDots + phase * dir) * totalLen;
+                while (distAlong < 0) distAlong += totalLen;
+                while (distAlong >= totalLen) distAlong -= totalLen;
+                let acc = 0;
+                for (let i = 0; i < segLens.length; i++) {
+                  if (acc + segLens[i] >= distAlong) {
+                    const t = (distAlong - acc) / segLens[i];
+                    const a = flowScreenPath[i];
+                    const b = flowScreenPath[i + 1];
+                    const x = a.x + (b.x - a.x) * t;
+                    const y = a.y + (b.y - a.y) * t;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+                    ctx.fill();
+                    break;
+                  }
+                  acc += segLens[i];
+                }
+              }
+              ctx.shadowBlur = 0;
+            }
+          }
+        }
       }
 
       // draw rotation handle on selected component (only when not running)

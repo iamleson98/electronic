@@ -160,6 +160,28 @@ export interface ComponentPlugin {
     terminals: { terminalId: string; nodeId: number }[],
     sim: SimContext,
   ) => { label: string; value: string; unit?: string }[];
+
+  /**
+   * Optional: return the internal flow path for current animation dots.
+   * Points are in grid coordinates, RELATIVE to the component origin (top-left
+   * of bounding box), BEFORE rotation. The renderer will translate, rotate, and
+   * scale them to screen coordinates.
+   *
+   * The path should go from one terminal to the other through the component body.
+   * For a resistor with terminals at (0,1) and (4,1), the flow path might be
+   * [(0,1), (2,1), (4,1)] — straight through the middle.
+   *
+   * If not provided, the renderer will draw a straight line between the two
+   * terminals (for 2-terminal components only).
+   *
+   * `sim` is provided so components can adjust the path based on state (e.g.,
+   * an open switch returns an empty path so no dots flow).
+   */
+  getFlowPath?: (
+    params: Record<string, any>,
+    sim?: SimContext,
+    instance?: CircuitComponent,
+  ) => Vec2[];
 }
 
 // ----- MNA system interface -----

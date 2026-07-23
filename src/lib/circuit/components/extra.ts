@@ -62,6 +62,14 @@ const pnp: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, `β=${params.hfe}`, 1.8 * cellSize, 3.5 * cellSize);
   },
+  getFlowPath() {
+    // PNP: current flows Emitter→Collector. E(3,0) -> body (1.5,2) -> C(3,4)
+    return [
+      { x: 3, y: 0 },
+      { x: 1.5, y: 2 },
+      { x: 3, y: 4 },
+    ];
+  },
   stamp(params, terminals, sys, sim) {
     const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
@@ -163,6 +171,14 @@ const nmos: ComponentPlugin = {
     ctx.fill();
     ctx.stroke();
     drawLabel(ctx, `Vth=${params.vth}`, 1.8 * cellSize, 3.5 * cellSize);
+  },
+  getFlowPath() {
+    // Drain (3,0) -> channel center (1.5,2) -> Source (3,4)
+    return [
+      { x: 3, y: 0 },
+      { x: 1.5, y: 2 },
+      { x: 3, y: 4 },
+    ];
   },
   stamp(params, terminals, sys, sim) {
     const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
@@ -272,6 +288,14 @@ const pmos: ComponentPlugin = {
     ctx.arc(cellSize * 1.15, 2 * cellSize, 2, 0, Math.PI * 2);
     ctx.stroke();
     drawLabel(ctx, `Vth=${params.vth}`, 1.8 * cellSize, 3.5 * cellSize);
+  },
+  getFlowPath() {
+    // Source (3,0) -> channel (1.5,2) -> Drain (3,4) (PMOS: current flows S→D)
+    return [
+      { x: 3, y: 0 },
+      { x: 1.5, y: 2 },
+      { x: 3, y: 4 },
+    ];
   },
   stamp(params, terminals, sys, sim) {
     const s = terminals.find((t) => t.terminalId === 's')!.nodeId;

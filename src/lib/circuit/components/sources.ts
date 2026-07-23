@@ -52,6 +52,14 @@ const dcVoltage: ComponentPlugin = {
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     sys.stampVoltageSource(p, n, v);
   },
+  getFlowPath() {
+    // Through the battery body: + (1,0) -> center (1,2) -> - (1,4)
+    return [
+      { x: 1, y: 0 },
+      { x: 1, y: 2 },
+      { x: 1, y: 4 },
+    ];
+  },
   measure(params, terminals, sim) {
     const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
@@ -110,6 +118,13 @@ const acVoltage: ComponentPlugin = {
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     sys.stampVoltageSource(p, n, v);
   },
+  getFlowPath() {
+    return [
+      { x: 1, y: 0 },
+      { x: 1, y: 2 },
+      { x: 1, y: 4 },
+    ];
+  },
 };
 
 // ----- Pulse Source -----
@@ -162,6 +177,13 @@ const pulseSource: ComponentPlugin = {
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     sys.stampVoltageSource(p, n, v as number);
   },
+  getFlowPath() {
+    return [
+      { x: 1, y: 0 },
+      { x: 1, y: 2 },
+      { x: 1, y: 4 },
+    ];
+  },
 };
 
 // ----- Current Source -----
@@ -206,6 +228,13 @@ const currentSource: ComponentPlugin = {
     const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     sys.stampCurrentSource(p, n, i);
+  },
+  getFlowPath() {
+    return [
+      { x: 1, y: 0 },
+      { x: 1, y: 2 },
+      { x: 1, y: 4 },
+    ];
   },
 };
 
@@ -260,6 +289,10 @@ const pushButton: ComponentPlugin = {
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     sys.stampConductance(a, b, 1 / Math.max(1e-12, r));
   },
+  getFlowPath(params) {
+    // Only show flow when pressed (closed)
+    return params.pressed ? [{ x: 0, y: 1 }, { x: 4, y: 1 }] : [];
+  },
 };
 
 // ----- SPST Switch -----
@@ -303,6 +336,10 @@ const spstSwitch: ComponentPlugin = {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     sys.stampConductance(a, b, 1 / Math.max(1e-12, r));
+  },
+  getFlowPath(params) {
+    // Only show flow when closed
+    return params.closed ? [{ x: 0, y: 1 }, { x: 4, y: 1 }] : [];
   },
 };
 
@@ -401,6 +438,19 @@ const led: ComponentPlugin = {
       // reverse biased: leak (1e-9 S wins against open switches in voltage divider)
       sys.stampConductance(a, k, 1e-9);
     }
+  },
+  getFlowPath(params, sim) {
+    // Only show flow when LED is forward-biased (on).
+    // We need to check the on state from sim.state, but we don't have node ids here.
+    // Use the sim context's global state if available.
+    // For simplicity, always return the path; the renderer will use current magnitude
+    // to decide whether to draw dots (0 current = no dots).
+    void sim;
+    void params;
+    return [
+      { x: 0, y: 1 },
+      { x: 4, y: 1 },
+    ];
   },
   measure(params, terminals, sim) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;

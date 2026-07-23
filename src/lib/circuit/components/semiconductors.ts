@@ -69,6 +69,10 @@ const diode: ComponentPlugin = {
       sys.stampConductance(a, k, 1e-9);
     }
   },
+  getFlowPath() {
+    // anode (0,1) through body to cathode (4,1)
+    return [{ x: 0, y: 1 }, { x: 4, y: 1 }];
+  },
   measure(params, terminals, sim) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
@@ -133,6 +137,15 @@ const npn: ComponentPlugin = {
     ctx.fill();
     ctx.stroke();
     drawLabel(ctx, `β=${params.hfe}`, 1.8 * cellSize, 3.5 * cellSize);
+  },
+  getFlowPath() {
+    // Collector (3,0) -> body center (1.5,2) -> Emitter (3,4)
+    // Current flows C→E when on. Base is separate (small current).
+    return [
+      { x: 3, y: 0 },
+      { x: 1.5, y: 2 },
+      { x: 3, y: 4 },
+    ];
   },
   stamp(params, terminals, sys, sim) {
     const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;

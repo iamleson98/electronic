@@ -40,6 +40,13 @@ const resistor: ComponentPlugin = {
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     sys.stampConductance(a, b, g);
   },
+  getFlowPath() {
+    // Straight line from terminal a (0,1) through the body to terminal b (4,1)
+    return [
+      { x: 0, y: 1 },
+      { x: 4, y: 1 },
+    ];
+  },
   measure(params, terminals, sim) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
@@ -102,6 +109,13 @@ const capacitor: ComponentPlugin = {
     const iEq = (C / dt) * vPrev;
     sys.stampConductance(a, b, g);
     sys.stampCurrentSource(a, b, iEq);
+  },
+  getFlowPath() {
+    // Straight through the capacitor plates
+    return [
+      { x: 0, y: 1 },
+      { x: 4, y: 1 },
+    ];
   },
   step(params, terminals, sim) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
@@ -169,6 +183,13 @@ const inductor: ComponentPlugin = {
     const g = dt / L;
     sys.stampConductance(a, b, g);
     sys.stampCurrentSource(a, b, iPrev);
+  },
+  getFlowPath() {
+    // Straight through the inductor coils
+    return [
+      { x: 0, y: 1 },
+      { x: 4, y: 1 },
+    ];
   },
   step(params, terminals, sim) {
     const L = Math.max(1e-12, params.inductance as number);
