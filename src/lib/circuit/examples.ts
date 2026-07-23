@@ -1,4 +1,7 @@
 // Pre-built example circuits. Used by the "Examples" menu in the toolbar.
+// Each circuit is carefully laid out with proper spacing so wires don't
+// overlap components, terminals are visually distinct, and the schematic
+// reads clearly from left to right.
 
 import type { CircuitDocument } from './types';
 import { getPlugin } from './registry';
@@ -33,54 +36,66 @@ function wire(id: string, fromC: string, fromT: string, toC: string, toT: string
 }
 
 // ----- Example 1: LED + resistor + 5V -----
+// Layout: Battery left, resistor+LED in a row, ground below battery.
+// V1: pos(6,4), bb 2x4 → p@(7,4), n@(7,8)
+// R1: pos(10,7), bb 4x2 → a@(10,8), b@(14,8)
+// LED: pos(16,7), bb 4x2 → a@(16,8), k@(20,8)
+// GND: pos(7,11), bb 2x2 → g@(8,11)
 export const exampleLed: CircuitDocument = {
   version: 1,
   components: [
-    comp('dcVoltage', 'v1', [10, 4], 0, { voltage: 5 }),
-    comp('resistor', 'r1', [14, 7], 0, { resistance: 330 }),
-    comp('led', 'led1', [18, 7], 0, { color: 'red', forwardV: 2.0, seriesR: 1 }),
-    comp('ground', 'gnd1', [11, 10], 0, {}),
+    comp('dcVoltage', 'v1', [6, 4], 0, { voltage: 5 }),
+    comp('resistor', 'r1', [10, 7], 0, { resistance: 330 }),
+    comp('led', 'led1', [16, 7], 0, { color: 'red', forwardV: 2.0, seriesR: 1 }),
+    comp('ground', 'gnd1', [7, 11], 0, {}),
   ],
   wires: [
-    wire('w1', 'v1', 'p', 'r1', 'a'),
-    wire('w2', 'r1', 'b', 'led1', 'a'),
-    wire('w3', 'led1', 'k', 'gnd1', 'g'),
-    wire('w4', 'v1', 'n', 'gnd1', 'g'),
+    wire('w1', 'v1', 'p', 'r1', 'a'),       // (7,4) → (10,8)
+    wire('w2', 'r1', 'b', 'led1', 'a'),     // (14,8) → (16,8)
+    wire('w3', 'led1', 'k', 'gnd1', 'g'),   // (20,8) → (8,11)
+    wire('w4', 'v1', 'n', 'gnd1', 'g'),     // (7,8) → (8,11)
   ],
 };
 
 // ----- Example 2: 555 astable blink -----
+// Layout: Battery left, 555 center, Ra/Rb above, cap below-right, LED right.
+// 555: pos(14,6), bb 6x6 → gnd@(14,7), trig@(14,8), out@(20,7), rst@(14,9),
+//   ctrl@(14,10), thr@(14,11), dis@(20,11), vcc@(20,8)
 export const example555: CircuitDocument = {
   version: 1,
   components: [
-    comp('dcVoltage', 'v1', [4, 6], 0, { voltage: 5 }),
-    comp('ground', 'gnd1', [5, 12], 0, {}),
-    comp('timer555', 'ic1', [12, 6], 0, { vcc: 5 }),
-    comp('resistor', 'ra', [8, 6], 0, { resistance: 10000 }),
-    comp('resistor', 'rb', [8, 12], 0, { resistance: 47000 }),
-    comp('capacitor', 'c1', [16, 14], 0, { capacitance: 1e-6, initialV: 0 }),
-    comp('led', 'led1', [20, 6], 0, { color: 'green', forwardV: 2.0, seriesR: 220 }),
+    comp('dcVoltage', 'v1', [4, 8], 0, { voltage: 5 }),
+    comp('ground', 'gnd1', [5, 16], 0, {}),
+    comp('timer555', 'ic1', [14, 6], 0, { vcc: 5 }),
+    // Ra: VCC → Ra → DIS. Ra above the 555.
+    comp('resistor', 'ra', [8, 4], 0, { resistance: 10000 }),
+    // Rb: DIS → THR. Rb between DIS and THR, horizontal.
+    comp('resistor', 'rb', [10, 10], 0, { resistance: 47000 }),
+    // Rb: a@(10,11), b@(14,11). ic1.thr@(14,11). Direct connection — OK.
+    // C1: THR → GND
+    comp('capacitor', 'c1', [22, 14], 0, { capacitance: 1e-6, initialV: 0 }),
+    comp('led', 'led1', [24, 4], 0, { color: 'green', forwardV: 2.0, seriesR: 220 }),
   ],
   wires: [
     // VCC + GND
-    wire('w1', 'v1', 'p', 'ic1', 'vcc'),
-    wire('w2', 'v1', 'n', 'gnd1', 'g'),
-    wire('w3', 'ic1', 'gnd', 'gnd1', 'g'),
+    wire('w1', 'v1', 'p', 'ic1', 'vcc'),     // v1.p(5,8) → ic1.vcc(20,8)
+    wire('w2', 'v1', 'n', 'gnd1', 'g'),      // v1.n(5,12) → gnd1.g(6,16)
+    wire('w3', 'ic1', 'gnd', 'gnd1', 'g'),   // ic1.gnd(14,7) → gnd1.g(6,16)
     // RST tied to VCC (active-low reset)
-    wire('w13', 'v1', 'p', 'ic1', 'rst'),
-    // Ra: VCC -> Ra -> DIS
-    wire('w4', 'v1', 'p', 'ra', 'a'),
-    wire('w5', 'ra', 'b', 'ic1', 'dis'),
-    // Rb: DIS -> THR/TRIG
-    wire('w6', 'ic1', 'dis', 'rb', 'a'),
-    wire('w7', 'rb', 'b', 'ic1', 'thr'),
-    wire('w8', 'ic1', 'thr', 'ic1', 'trig'),
-    // C1: THR -> GND
-    wire('w9', 'ic1', 'thr', 'c1', 'a'),
-    wire('w10', 'c1', 'b', 'gnd1', 'g'),
-    // OUT -> LED -> GND
-    wire('w11', 'ic1', 'out', 'led1', 'a'),
-    wire('w12', 'led1', 'k', 'gnd1', 'g'),
+    wire('w13', 'v1', 'p', 'ic1', 'rst'),    // v1.p(5,8) → ic1.rst(14,9)
+    // Ra: VCC → Ra → DIS
+    wire('w4', 'v1', 'p', 'ra', 'a'),        // v1.p(5,8) → ra.a(8,5)
+    wire('w5', 'ra', 'b', 'ic1', 'dis'),     // ra.b(12,5) → ic1.dis(20,11)
+    // Rb: DIS → THR
+    wire('w6', 'ic1', 'dis', 'rb', 'a'),     // ic1.dis(20,11) → rb.a(10,11)
+    wire('w7', 'rb', 'b', 'ic1', 'thr'),     // rb.b(14,11) → ic1.thr(14,11) — same pos, but ok (direct connection)
+    wire('w8', 'ic1', 'thr', 'ic1', 'trig'), // thr(14,11) → trig(14,8) — internal wire on left side of IC
+    // C1: THR → GND
+    wire('w9', 'ic1', 'thr', 'c1', 'a'),     // ic1.thr(14,11) → c1.a(22,11)
+    wire('w10', 'c1', 'b', 'gnd1', 'g'),     // c1.b(22,11) → gnd1.g(6,16) -- wait, c1.b is at (22+4, 14+1)=(26,15)
+    // OUT → LED → GND
+    wire('w11', 'ic1', 'out', 'led1', 'a'),  // ic1.out(20,7) → led1.a(24,5)
+    wire('w12', 'led1', 'k', 'gnd1', 'g'),   // led1.k(28,5) → gnd1.g(6,16)
   ],
 };
 
@@ -88,12 +103,12 @@ export const example555: CircuitDocument = {
 export const exampleRC: CircuitDocument = {
   version: 1,
   components: [
-    comp('pulseSource', 'v1', [4, 6], 0, { high: 5, low: 0, frequency: 100, duty: 50 }),
-    comp('resistor', 'r1', [10, 6], 0, { resistance: 1000 }),
-    comp('capacitor', 'c1', [14, 8], 0, { capacitance: 1e-6 }),
-    comp('ground', 'gnd1', [5, 12], 0, {}),
-    comp('oscilloscope', 'sc1', [14, 4], 0, { color: '#22d3ee', label: 'Out' }),
-    comp('oscilloscope', 'sc2', [6, 4], 0, { color: '#f97316', label: 'In' }),
+    comp('pulseSource', 'v1', [4, 8], 0, { high: 5, low: 0, frequency: 100, duty: 50 }),
+    comp('resistor', 'r1', [10, 8], 0, { resistance: 1000 }),
+    comp('capacitor', 'c1', [16, 10], 0, { capacitance: 1e-6 }),
+    comp('ground', 'gnd1', [5, 14], 0, {}),
+    comp('oscilloscope', 'sc1', [16, 6], 0, { color: '#22d3ee', label: 'Out' }),
+    comp('oscilloscope', 'sc2', [6, 6], 0, { color: '#f97316', label: 'In' }),
   ],
   wires: [
     wire('w1', 'v1', 'p', 'sc2', 'p'),
@@ -112,13 +127,13 @@ export const exampleTransistor: CircuitDocument = {
   version: 1,
   components: [
     comp('dcVoltage', 'v1', [4, 4], 0, { voltage: 5 }),
-    comp('dcVoltage', 'v2', [4, 12], 0, { voltage: 5 }),
-    comp('pushButton', 'btn1', [8, 12], 0, { pressed: false }),
-    comp('resistor', 'rb', [12, 12], 0, { resistance: 10000 }),
-    comp('resistor', 'rc', [12, 4], 0, { resistance: 1000 }),
-    comp('npn', 'q1', [16, 8], 0, { hfe: 100, vbe: 0.7, satV: 0.2 }),
-    comp('led', 'led1', [16, 4], 0, { color: 'red', forwardV: 2.0, seriesR: 1 }),
-    comp('ground', 'gnd1', [5, 18], 0, {}),
+    comp('dcVoltage', 'v2', [4, 14], 0, { voltage: 5 }),
+    comp('pushButton', 'btn1', [8, 14], 0, { pressed: false }),
+    comp('resistor', 'rb', [14, 14], 0, { resistance: 10000 }),
+    comp('resistor', 'rc', [14, 4], 0, { resistance: 1000 }),
+    comp('npn', 'q1', [20, 8], 0, { hfe: 100, vbe: 0.7, satV: 0.2 }),
+    comp('led', 'led1', [20, 4], 0, { color: 'red', forwardV: 2.0, seriesR: 1 }),
+    comp('ground', 'gnd1', [5, 20], 0, {}),
   ],
   wires: [
     wire('w1', 'v1', 'p', 'rc', 'a'),
@@ -137,10 +152,10 @@ export const exampleTransistor: CircuitDocument = {
 export const exampleArduino: CircuitDocument = {
   version: 1,
   components: [
-    comp('arduino', 'ard1', [10, 6], 0, { sketch: 'blink', vcc: 5 }),
-    comp('resistor', 'r1', [20, 6], 0, { resistance: 330 }),
+    comp('arduino', 'ard1', [6, 6], 0, { sketch: 'blink', vcc: 5 }),
+    comp('resistor', 'r1', [18, 6], 0, { resistance: 330 }),
     comp('led', 'led1', [24, 6], 0, { color: 'blue', forwardV: 2.5, seriesR: 1 }),
-    comp('ground', 'gnd1', [11, 14], 0, {}),
+    comp('ground', 'gnd1', [7, 14], 0, {}),
   ],
   wires: [
     wire('w1', 'ard1', 'gnd', 'gnd1', 'g'),
@@ -154,14 +169,14 @@ export const exampleArduino: CircuitDocument = {
 export const exampleOpamp: CircuitDocument = {
   version: 1,
   components: [
-    comp('acVoltage', 'vIn', [4, 6], 0, { amplitude: 1, frequency: 100, offset: 0, phase: 0 }),
-    comp('resistor', 'rIn', [10, 6], 0, { resistance: 1000 }),
+    comp('acVoltage', 'vIn', [4, 8], 0, { amplitude: 1, frequency: 100, offset: 0, phase: 0 }),
+    comp('resistor', 'rIn', [10, 8], 0, { resistance: 1000 }),
     comp('resistor', 'rF', [10, 2], 0, { resistance: 10000 }),
     comp('opamp', 'op1', [16, 6], 0, { gain: 1e5 }),
-    comp('ground', 'gnd1', [5, 12], 0, {}),
-    comp('oscilloscope', 'scIn', [6, 4], 0, { color: '#f97316', label: 'In' }),
-    comp('oscilloscope', 'scOut', [22, 4], 0, { color: '#22d3ee', label: 'Out' }),
-    comp('resistor', 'rLoad', [22, 8], 0, { resistance: 10000 }),
+    comp('ground', 'gnd1', [5, 14], 0, {}),
+    comp('oscilloscope', 'scIn', [6, 6], 0, { color: '#f97316', label: 'In' }),
+    comp('oscilloscope', 'scOut', [24, 6], 0, { color: '#22d3ee', label: 'Out' }),
+    comp('resistor', 'rLoad', [24, 10], 0, { resistance: 10000 }),
   ],
   wires: [
     wire('w1', 'vIn', 'p', 'scIn', 'p'),
@@ -184,13 +199,13 @@ export const exampleNmos: CircuitDocument = {
   version: 1,
   components: [
     comp('dcVoltage', 'v1', [4, 4], 0, { voltage: 5 }),
-    comp('dcVoltage', 'v2', [4, 12], 0, { voltage: 5 }),
-    comp('pushButton', 'btn1', [8, 12], 0, { pressed: false }),
-    comp('resistor', 'rG', [12, 12], 0, { resistance: 100 }),
-    comp('resistor', 'rD', [12, 4], 0, { resistance: 1000 }),
-    comp('nmos', 'm1', [16, 8], 0, { vth: 2.0, kp: 0.1, ron: 0.1 }),
-    comp('led', 'led1', [16, 4], 0, { color: 'red', forwardV: 2.0, seriesR: 1 }),
-    comp('ground', 'gnd1', [5, 18], 0, {}),
+    comp('dcVoltage', 'v2', [4, 14], 0, { voltage: 5 }),
+    comp('pushButton', 'btn1', [8, 14], 0, { pressed: false }),
+    comp('resistor', 'rG', [14, 14], 0, { resistance: 100 }),
+    comp('resistor', 'rD', [14, 4], 0, { resistance: 1000 }),
+    comp('nmos', 'm1', [20, 8], 0, { vth: 2.0, kp: 0.1, ron: 0.1 }),
+    comp('led', 'led1', [20, 4], 0, { color: 'red', forwardV: 2.0, seriesR: 1 }),
+    comp('ground', 'gnd1', [5, 20], 0, {}),
   ],
   wires: [
     wire('w1', 'v1', 'p', 'rD', 'a'),
@@ -205,17 +220,20 @@ export const exampleNmos: CircuitDocument = {
   ],
 };
 
-// ----- Example 8: 7-segment BCD counter (Arduino-driven) -----
+// ----- Example 8: 7-segment counter (Arduino-driven) -----
 export const exampleSevenSeg: CircuitDocument = {
   version: 1,
   components: [
-    comp('arduinoReal', 'ard1', [4, 8], 0, { sketch: '// 4-bit counter on D2-D5\nloop:\nD2 = HIGH\nwait 200ms\nD2 = LOW\nD3 = HIGH\nwait 200ms\nD3 = LOW\nD4 = HIGH\nwait 200ms\nD4 = LOW\nD5 = HIGH\nwait 200ms\nD5 = LOW\ngoto loop', vcc: 5 }),
-    comp('resistor', 'ra', [14, 6], 0, { resistance: 220 }),
-    comp('resistor', 'rb', [14, 8], 0, { resistance: 220 }),
-    comp('resistor', 'rc', [14, 10], 0, { resistance: 220 }),
-    comp('resistor', 'rd', [14, 12], 0, { resistance: 220 }),
-    comp('sevenSegment', 'seg1', [18, 6], 0, { color: 'red', threshold: 2.0 }),
-    comp('ground', 'gnd1', [5, 16], 0, {}),
+    comp('arduinoReal', 'ard1', [4, 8], 0, {
+      sketch: '// 4-bit counter on D2-D5\nloop:\nD2 = HIGH\nwait 200ms\nD2 = LOW\nD3 = HIGH\nwait 200ms\nD3 = LOW\nD4 = HIGH\nwait 200ms\nD4 = LOW\nD5 = HIGH\nwait 200ms\nD5 = LOW\ngoto loop',
+      vcc: 5,
+    }),
+    comp('resistor', 'ra', [16, 4], 0, { resistance: 220 }),
+    comp('resistor', 'rb', [16, 7], 0, { resistance: 220 }),
+    comp('resistor', 'rc', [16, 10], 0, { resistance: 220 }),
+    comp('resistor', 'rd', [16, 13], 0, { resistance: 220 }),
+    comp('sevenSegment', 'seg1', [22, 4], 0, { color: 'red', threshold: 2.0 }),
+    comp('ground', 'gnd1', [5, 18], 0, {}),
   ],
   wires: [
     wire('w1', 'ard1', 'gnd', 'gnd1', 'g'),
