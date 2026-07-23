@@ -1,0 +1,426 @@
+// Sources, switches, and I/O: DC voltage source, AC source, current source,
+// push button, SPST switch, SPDT switch, LED, lamp, potentiometer.
+
+import type { ComponentPlugin } from '../types';
+import { drawLabel } from './draw';
+import { registerPlugin } from '../registry';
+
+// ----- DC Voltage Source -----
+const dcVoltage: ComponentPlugin = {
+  type: 'dcVoltage',
+  name: 'DC Voltage',
+  category: 'source',
+  description: 'Ideal DC voltage source. Maintains a fixed voltage between + and - terminals.',
+  symbol: 'V',
+  boundingBox: { width: 2, height: 4 },
+  terminals: [
+    { id: 'p', label: '+', position: { x: 1, y: 0 } },
+    { id: 'n', label: '-', position: { x: 1, y: 4 } },
+  ],
+  parameters: [
+    { key: 'voltage', label: 'Voltage', type: 'number', default: 5, unit: 'V', min: -1000, max: 1000, step: 0.1 },
+  ],
+  render(ctx, params, cellSize) {
+    const cx = cellSize;
+    // leads
+    ctx.beginPath();
+    ctx.moveTo(cx, 0);
+    ctx.lineTo(cx, cellSize * 1.4);
+    ctx.moveTo(cx, cellSize * 2.6);
+    ctx.lineTo(cx, 4 * cellSize);
+    ctx.stroke();
+    // body circle
+    ctx.beginPath();
+    ctx.arc(cx, 2 * cellSize, 0.7 * cellSize, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // + and - marks
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx - 5, 2 * cellSize - 8);
+    ctx.lineTo(cx + 5, 2 * cellSize - 8);
+    ctx.moveTo(cx, 2 * cellSize - 13);
+    ctx.lineTo(cx, 2 * cellSize - 3);
+    ctx.moveTo(cx - 5, 2 * cellSize + 8);
+    ctx.lineTo(cx + 5, 2 * cellSize + 8);
+    ctx.stroke();
+    drawLabel(ctx, `${(params.voltage as number).toFixed(1)}V`, cx + 20, 2 * cellSize);
+  },
+  stamp(params, terminals, sys) {
+    const v = params.voltage as number;
+    const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
+    const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
+    sys.stampVoltageSource(p, n, v);
+  },
+  measure(params, terminals, sim) {
+    const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
+    const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
+    return [{ label: 'V', value: (sim.nodeVoltage[p] - sim.nodeVoltage[n]).toFixed(3), unit: 'V' }];
+  },
+};
+
+// ----- AC Voltage Source -----
+const acVoltage: ComponentPlugin = {
+  type: 'acVoltage',
+  name: 'AC Voltage',
+  category: 'source',
+  description: 'Sinusoidal voltage source. V(t) = offset + amplitude·sin(2π·f·t).',
+  symbol: '~',
+  boundingBox: { width: 2, height: 4 },
+  terminals: [
+    { id: 'p', label: '+', position: { x: 1, y: 0 } },
+    { id: 'n', label: '-', position: { x: 1, y: 4 } },
+  ],
+  parameters: [
+    { key: 'amplitude', label: 'Amplitude', type: 'number', default: 5, unit: 'V', min: 0, max: 1000, step: 0.1 },
+    { key: 'frequency', label: 'Frequency', type: 'number', default: 50, unit: 'Hz', min: 0.001, max: 1e9, step: 1 },
+    { key: 'offset', label: 'DC Offset', type: 'number', default: 0, unit: 'V', min: -1000, max: 1000, step: 0.1 },
+    { key: 'phase', label: 'Phase', type: 'number', default: 0, unit: '°', min: -360, max: 360, step: 1 },
+  ],
+  render(ctx, params, cellSize) {
+    const cx = cellSize;
+    ctx.beginPath();
+    ctx.moveTo(cx, 0);
+    ctx.lineTo(cx, cellSize * 1.4);
+    ctx.moveTo(cx, cellSize * 2.6);
+    ctx.lineTo(cx, 4 * cellSize);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, 2 * cellSize, 0.7 * cellSize, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // sine wave inside
+    ctx.beginPath();
+    for (let i = 0; i <= 20; i++) {
+      const t = i / 20;
+      const x = cx - 0.5 * cellSize + t * cellSize;
+      const y = 2 * cellSize - Math.sin(t * Math.PI * 2) * 6;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    drawLabel(ctx, `${(params.amplitude as number).toFixed(1)}V ${(params.frequency as number).toFixed(0)}Hz`, cx + 20, 2 * cellSize);
+  },
+  stamp(params, terminals, sys, sim) {
+    const amp = params.amplitude as number;
+    const f = params.frequency as number;
+    const offset = params.offset as number;
+    const phase = (params.phase as number) * Math.PI / 180;
+    const v = offset + amp * Math.sin(2 * Math.PI * f * sim.time + phase);
+    const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
+    const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
+    sys.stampVoltageSource(p, n, v);
+  },
+};
+
+// ----- Pulse Source -----
+const pulseSource: ComponentPlugin = {
+  type: 'pulseSource',
+  name: 'Pulse',
+  category: 'source',
+  description: 'Square wave generator with configurable period and duty cycle.',
+  symbol: '⊓',
+  boundingBox: { width: 2, height: 4 },
+  terminals: [
+    { id: 'p', label: '+', position: { x: 1, y: 0 } },
+    { id: 'n', label: '-', position: { x: 1, y: 4 } },
+  ],
+  parameters: [
+    { key: 'high', label: 'High Voltage', type: 'number', default: 5, unit: 'V', min: -1000, max: 1000, step: 0.1 },
+    { key: 'low', label: 'Low Voltage', type: 'number', default: 0, unit: 'V', min: -1000, max: 1000, step: 0.1 },
+    { key: 'frequency', label: 'Frequency', type: 'number', default: 1, unit: 'Hz', min: 0.001, max: 1e9, step: 1 },
+    { key: 'duty', label: 'Duty Cycle', type: 'number', default: 50, unit: '%', min: 0.1, max: 99.9, step: 1 },
+  ],
+  render(ctx, params, cellSize) {
+    const cx = cellSize;
+    ctx.beginPath();
+    ctx.moveTo(cx, 0);
+    ctx.lineTo(cx, cellSize * 1.4);
+    ctx.moveTo(cx, cellSize * 2.6);
+    ctx.lineTo(cx, 4 * cellSize);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, 2 * cellSize, 0.7 * cellSize, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // square wave inside
+    ctx.beginPath();
+    const r = 0.5 * cellSize;
+    ctx.moveTo(cx - r, 2 * cellSize + 5);
+    ctx.lineTo(cx - r, 2 * cellSize - 5);
+    ctx.lineTo(cx, 2 * cellSize - 5);
+    ctx.lineTo(cx, 2 * cellSize + 5);
+    ctx.lineTo(cx + r, 2 * cellSize + 5);
+    ctx.stroke();
+    drawLabel(ctx, `${(params.frequency as number).toFixed(0)}Hz`, cx + 20, 2 * cellSize);
+  },
+  stamp(params, terminals, sys, sim) {
+    const f = params.frequency as number;
+    const duty = (params.duty as number) / 100;
+    const t = (sim.time * f) % 1;
+    const v = t < duty ? params.high : params.low;
+    const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
+    const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
+    sys.stampVoltageSource(p, n, v as number);
+  },
+};
+
+// ----- Current Source -----
+const currentSource: ComponentPlugin = {
+  type: 'currentSource',
+  name: 'DC Current',
+  category: 'source',
+  description: 'Ideal current source. Pushes a fixed current from + to - externally.',
+  symbol: 'I',
+  boundingBox: { width: 2, height: 4 },
+  terminals: [
+    { id: 'p', label: '+', position: { x: 1, y: 0 } },
+    { id: 'n', label: '-', position: { x: 1, y: 4 } },
+  ],
+  parameters: [
+    { key: 'current', label: 'Current', type: 'number', default: 0.01, unit: 'A', min: -100, max: 100, step: 0.001 },
+  ],
+  render(ctx, params, cellSize) {
+    const cx = cellSize;
+    ctx.beginPath();
+    ctx.moveTo(cx, 0);
+    ctx.lineTo(cx, cellSize * 1.4);
+    ctx.moveTo(cx, cellSize * 2.6);
+    ctx.lineTo(cx, 4 * cellSize);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, 2 * cellSize, 0.7 * cellSize, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // arrow pointing down (from p to n)
+    ctx.beginPath();
+    ctx.moveTo(cx, 2 * cellSize - 8);
+    ctx.lineTo(cx, 2 * cellSize + 8);
+    ctx.moveTo(cx - 4, 2 * cellSize + 3);
+    ctx.lineTo(cx, 2 * cellSize + 8);
+    ctx.lineTo(cx + 4, 2 * cellSize + 3);
+    ctx.stroke();
+    drawLabel(ctx, `${((params.current as number) * 1000).toFixed(1)}mA`, cx + 20, 2 * cellSize);
+  },
+  stamp(params, terminals, sys) {
+    const i = params.current as number;
+    const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
+    const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
+    sys.stampCurrentSource(p, n, i);
+  },
+};
+
+// ----- Push Button -----
+const pushButton: ComponentPlugin = {
+  type: 'pushButton',
+  name: 'Push Button',
+  category: 'io',
+  description: 'Momentary switch. Closes when the "Pressed" parameter is true.',
+  symbol: '⎚',
+  boundingBox: { width: 4, height: 2 },
+  terminals: [
+    { id: 'a', label: 'A', position: { x: 0, y: 1 } },
+    { id: 'b', label: 'B', position: { x: 4, y: 1 } },
+  ],
+  parameters: [
+    { key: 'pressed', label: 'Pressed', type: 'boolean', default: false },
+    { key: 'resistance_on', label: 'On Resistance', type: 'number', default: 0.01, unit: 'Ω', min: 0.001, max: 100, step: 0.01 },
+    { key: 'resistance_off', label: 'Off Resistance', type: 'number', default: 1e15, unit: 'Ω', min: 1e9, max: 1e18, step: 1e6 },
+  ],
+  render(ctx, params, cellSize) {
+    const pressed = params.pressed as boolean;
+    ctx.beginPath();
+    ctx.moveTo(0, cellSize);
+    ctx.lineTo(cellSize, cellSize);
+    ctx.moveTo(3 * cellSize, cellSize);
+    ctx.lineTo(4 * cellSize, cellSize);
+    ctx.stroke();
+    ctx.translate(2 * cellSize, cellSize);
+    // switch contact
+    if (pressed) {
+      ctx.beginPath();
+      ctx.moveTo(-cellSize, 0);
+      ctx.lineTo(cellSize, 0);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(-cellSize, 0);
+      ctx.lineTo(cellSize * 0.7, -cellSize * 0.5);
+      ctx.stroke();
+    }
+    // button cap
+    ctx.beginPath();
+    ctx.arc(0, -cellSize * 0.8, 5, 0, Math.PI * 2);
+    ctx.fillStyle = pressed ? '#22c55e' : '#94a3b8';
+    ctx.fill();
+    ctx.stroke();
+  },
+  stamp(params, terminals, sys) {
+    const r = params.pressed ? (params.resistance_on as number) : (params.resistance_off as number);
+    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
+    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    sys.stampConductance(a, b, 1 / Math.max(1e-12, r));
+  },
+};
+
+// ----- SPST Switch -----
+const spstSwitch: ComponentPlugin = {
+  type: 'switch',
+  name: 'Switch (SPST)',
+  category: 'io',
+  description: 'Single-pole single-throw switch. Toggle the "Closed" parameter.',
+  symbol: '⇋',
+  boundingBox: { width: 4, height: 2 },
+  terminals: [
+    { id: 'a', label: 'A', position: { x: 0, y: 1 } },
+    { id: 'b', label: 'B', position: { x: 4, y: 1 } },
+  ],
+  parameters: [
+    { key: 'closed', label: 'Closed', type: 'boolean', default: true },
+  ],
+  render(ctx, params, cellSize) {
+    const closed = params.closed as boolean;
+    ctx.beginPath();
+    ctx.moveTo(0, cellSize);
+    ctx.lineTo(cellSize, cellSize);
+    ctx.moveTo(3 * cellSize, cellSize);
+    ctx.lineTo(4 * cellSize, cellSize);
+    ctx.stroke();
+    ctx.translate(2 * cellSize, cellSize);
+    if (closed) {
+      ctx.beginPath();
+      ctx.moveTo(-cellSize, 0);
+      ctx.lineTo(cellSize, 0);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(-cellSize, 0);
+      ctx.lineTo(cellSize * 0.7, -cellSize * 0.5);
+      ctx.stroke();
+    }
+  },
+  stamp(params, terminals, sys) {
+    const r = params.closed ? 0.01 : 1e15;
+    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
+    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    sys.stampConductance(a, b, 1 / Math.max(1e-12, r));
+  },
+};
+
+// ----- LED -----
+const led: ComponentPlugin = {
+  type: 'led',
+  name: 'LED',
+  category: 'io',
+  description: 'Light-emitting diode with series resistance. Color parameter controls glow color.',
+  symbol: 'LED',
+  boundingBox: { width: 4, height: 2 },
+  terminals: [
+    { id: 'a', label: 'A', position: { x: 0, y: 1 } },
+    { id: 'k', label: 'K', position: { x: 4, y: 1 } },
+  ],
+  parameters: [
+    { key: 'color', label: 'Color', type: 'select', default: 'red', options: [
+      { label: 'Red', value: 'red' },
+      { label: 'Green', value: 'green' },
+      { label: 'Blue', value: 'blue' },
+      { label: 'Yellow', value: 'yellow' },
+      { label: 'White', value: 'white' },
+    ] },
+    { key: 'forwardV', label: 'Forward Voltage', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 10, step: 0.1 },
+    { key: 'seriesR', label: 'Series Resistance', type: 'number', default: 220, unit: 'Ω', min: 0.1, max: 1e6, step: 1 },
+  ],
+  render(ctx, params, cellSize) {
+    const colorMap: Record<string, string> = {
+      red: '#ef4444', green: '#22c55e', blue: '#3b82f6', yellow: '#eab308', white: '#f8fafc',
+    };
+    const color = colorMap[params.color as string] ?? '#ef4444';
+    // current (approximated) for glow intensity
+    const a = (this as any).__lastA ?? 0;
+    const k = (this as any).__lastK ?? 0;
+    void a; void k;
+    ctx.beginPath();
+    ctx.moveTo(0, cellSize);
+    ctx.lineTo(2 * cellSize - 8, cellSize);
+    ctx.moveTo(2 * cellSize + 8, cellSize);
+    ctx.lineTo(4 * cellSize, cellSize);
+    ctx.stroke();
+    ctx.translate(2 * cellSize, cellSize);
+    // triangle (anode side)
+    ctx.beginPath();
+    ctx.moveTo(-8, -8);
+    ctx.lineTo(-8, 8);
+    ctx.lineTo(0, 0);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.stroke();
+    // bar (cathode)
+    ctx.beginPath();
+    ctx.moveTo(0, -8);
+    ctx.lineTo(0, 8);
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // arrows
+    ctx.beginPath();
+    ctx.moveTo(2, -10);
+    ctx.lineTo(8, -16);
+    ctx.moveTo(8, -16);
+    ctx.lineTo(5, -15);
+    ctx.moveTo(8, -16);
+    ctx.lineTo(7, -13);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(5, -10);
+    ctx.lineTo(11, -16);
+    ctx.moveTo(11, -16);
+    ctx.lineTo(8, -15);
+    ctx.moveTo(11, -16);
+    ctx.lineTo(10, -13);
+    ctx.stroke();
+  },
+  stamp(params, terminals, sys, sim) {
+    const vf = params.forwardV as number;
+    const r = Math.max(0.01, params.seriesR as number);
+    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
+    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = `led_${a}_${k}`;
+    const prevOn = st[key] ?? false;
+    // threshold model with hysteresis (matches diode behavior)
+    const on = prevOn ? v > vf - 0.1 : v > vf;
+    st[key] = on;
+    if (on) {
+      // Forward biased: model as V_th = Vf at 'a' in series with R.
+      // Thevenin -> Norton: G = 1/R in parallel with current source I_N = Vf/R.
+      // Direction: I_N flows externally from k to a (the LED absorbs power, current
+      // enters at 'a' externally and leaves at 'k'). So stamp current source from k to a.
+      sys.stampConductance(a, k, 1 / r);
+      sys.stampCurrentSource(k, a, vf / r);
+    } else {
+      // reverse biased: leak (1e-9 S wins against open switches in voltage divider)
+      sys.stampConductance(a, k, 1e-9);
+    }
+  },
+  measure(params, terminals, sim) {
+    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
+    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+    const r = Math.max(0.01, params.seriesR as number);
+    const i = v >= (params.forwardV as number) ? (v - (params.forwardV as number)) / r : 0;
+    return [
+      { label: 'V', value: v.toFixed(3), unit: 'V' },
+      { label: 'I', value: (i * 1000).toFixed(2), unit: 'mA' },
+    ];
+  },
+};
+
+registerPlugin(dcVoltage);
+registerPlugin(acVoltage);
+registerPlugin(pulseSource);
+registerPlugin(currentSource);
+registerPlugin(pushButton);
+registerPlugin(spstSwitch);
+registerPlugin(led);
+
+export { dcVoltage, acVoltage, pulseSource, currentSource, pushButton, spstSwitch, led };
