@@ -16,10 +16,22 @@ interface DragState {
 
 interface WireDragState {
   wireId: string;
-  /** index of the segment being dragged (0 = from->wp1, etc.) */
+  /** the segment being dragged (index into path) */
   segIndex: number;
-  /** 'h' or 'v' — which axis the dragged segment runs along */
-  axis: 'h' | 'v';
+  /** starting cursor position (grid) for delta calc */
+  startGrid: Vec2;
+  /** original waypoints snapshot */
+  originalWaypoints: Vec2[];
+}
+
+interface RotateDragState {
+  componentId: string;
+  /** center of the component in screen coords */
+  center: Vec2;
+  /** initial angle from center to cursor at drag start (radians) */
+  startAngle: number;
+  /** initial rotation (0-3) */
+  startRotation: 0 | 1 | 2 | 3;
 }
 
 interface HoverState {
@@ -27,23 +39,26 @@ interface HoverState {
   terminal: { componentId: string; terminalId: string; pos: Vec2 } | null;
   wireId: string | null;
   /** midpoint handle on a wire segment that can be dragged */
-  wireHandle: { wireId: string; segIndex: number; pos: Vec2; axis: 'h' | 'v' } | null;
+  wireHandle: { wireId: string; segIndex: number; pos: Vec2 } | null;
   rotateHandle: string | null; // componentId
 }
 
 /** types of components that can be toggled by clicking during simulation */
 const TOGGLEABLE_TYPES = new Set(['switch', 'pushButton']);
 
-/** Get the orthogonal path points (in screen coords) for a wire */
+/** Get the orthogonal path points for a wire.
+ *  fromPos and toPos are in SCREEN coords. Waypoints are in GRID coords and
+ *  are converted to screen coords using the provided converter. */
 function getWirePath(
   wire: Wire,
   fromPos: Vec2,
   toPos: Vec2,
+  gridToScreenFn: (gx: number, gy: number) => Vec2,
 ): Vec2[] {
   const points: Vec2[] = [fromPos];
   if (wire.waypoints && wire.waypoints.length > 0) {
     for (const wp of wire.waypoints) {
-      points.push({ ...wp });
+      points.push(gridToScreenFn(wp.x, wp.y));
     }
   } else {
     // default orthogonal routing: go to midpoint X, then to target
@@ -60,6 +75,140 @@ function segmentMidpoint(a: Vec2, b: Vec2): Vec2 {
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
+/** Angle (in degrees, 0-360) from a center point to a target point */
+function angleFromCenter(cx: number, cy: number, x: number, y: number): number {
+  const angle = Math.atan2(y - cy, x - cx) * 180 / Math.PI;
+  return (angle + 360) % 360;
+}
+
+/**
+ * Re-route a wire so a dragged segment follows the cursor freely in 2D.
+ *
+ * The wire is ALWAYS kept orthogonal (only horizontal/vertical segments).
+ * Terminal positions (fromPos, toPos) are NEVER moved — they're fixed to
+ * component terminals. Only waypoints change.
+ *
+ * Path layout: [fromPos, wp1, wp2, ..., toPos]
+ *   segIndex 0 = fromPos→wp1, segIndex 1 = wp1→wp2, ..., last = wpN→toPos
+ *
+ * When the user drags a segment handle, we move that segment to the cursor
+ * position. The dragged segment stays horizontal or vertical (whichever it
+ * was), and its perpendicular axis snaps to the cursor. The parallel axis
+ * also follows the cursor when possible (for interior segments with waypoints
+ * on both ends). Adjacent segments naturally stretch/shrink to stay connected.
+ */
+function rerouteWireForDrag(
+  fromPos: Vec2,
+  toPos: Vec2,
+  segIndex: number,
+  cursorGrid: Vec2,
+  existingWaypoints: Vec2[],
+): Vec2[] {
+  // Build waypoint copy (never touch fromPos/toPos)
+  const wps: Vec2[] = existingWaypoints.length > 0
+    ? existingWaypoints.map((w) => ({ ...w }))
+    : [
+        { x: (fromPos.x + toPos.x) / 2, y: fromPos.y },
+        { x: (fromPos.x + toPos.x) / 2, y: toPos.y },
+      ];
+
+  // Helper: get path point by index (0=fromPos, 1..n=waypoints, n+1=toPos)
+  const getPt = (i: number): Vec2 => {
+    if (i === 0) return fromPos;
+    if (i === wps.length + 1) return toPos;
+    return wps[i - 1];
+  };
+  // Helper: set a waypoint by path index (only waypoints are settable)
+  const setPt = (i: number, val: Vec2) => {
+    if (i > 0 && i <= wps.length) wps[i - 1] = val;
+  };
+
+  const a = getPt(segIndex);
+  const b = getPt(segIndex + 1);
+  const isHorizontal = Math.abs(b.y - a.y) < Math.abs(b.x - a.x);
+
+  if (isHorizontal) {
+    // Horizontal segment: perpendicular axis = Y. Cursor Y becomes the new Y.
+    // Parallel axis = X: shift segment along X toward cursor (only waypoints move).
+    const newY = cursorGrid.y;
+    const midX = (a.x + b.x) / 2;
+    const deltaX = cursorGrid.x - midX;
+    const aIdx = segIndex;
+    const bIdx = segIndex + 1;
+    const aIsFixed = (aIdx === 0);           // fromPos can't move
+    const bIsFixed = (bIdx === wps.length + 1); // toPos can't move
+    // Set Y on both endpoints (waypoints only; fixed terminals keep their Y)
+    const newA = { ...getPt(aIdx) };
+    const newB = { ...getPt(bIdx) };
+    if (!aIsFixed) newA.y = newY;
+    if (!bIsFixed) newB.y = newY;
+    // Shift X: both endpoints if both are waypoints; only one if the other is fixed
+    if (!aIsFixed && !bIsFixed) {
+      newA.x += deltaX;
+      newB.x += deltaX;
+    } else if (aIsFixed && !bIsFixed) {
+      newB.x += deltaX;
+    } else if (!aIsFixed && bIsFixed) {
+      newA.x += deltaX;
+    }
+    setPt(aIdx, newA);
+    setPt(bIdx, newB);
+  } else {
+    // Vertical segment: perpendicular axis = X. Cursor X becomes the new X.
+    // Parallel axis = Y: shift segment along Y toward cursor.
+    const newX = cursorGrid.x;
+    const midY = (a.y + b.y) / 2;
+    const deltaY = cursorGrid.y - midY;
+    const aIdx = segIndex;
+    const bIdx = segIndex + 1;
+    const aIsFixed = (aIdx === 0);
+    const bIsFixed = (bIdx === wps.length + 1);
+    const newA = { ...getPt(aIdx) };
+    const newB = { ...getPt(bIdx) };
+    if (!aIsFixed) newA.x = newX;
+    if (!bIsFixed) newB.x = newX;
+    if (!aIsFixed && !bIsFixed) {
+      newA.y += deltaY;
+      newB.y += deltaY;
+    } else if (aIsFixed && !bIsFixed) {
+      newB.y += deltaY;
+    } else if (!aIsFixed && bIsFixed) {
+      newA.y += deltaY;
+    }
+    setPt(aIdx, newA);
+    setPt(bIdx, newB);
+  }
+
+  // After moving waypoints, the path may have diagonal segments adjacent to
+  // fixed terminals. Re-orthogonalize by inserting elbow waypoints.
+  return orthogonalizePath(fromPos, toPos, wps);
+}
+
+/**
+ * Ensure a wire path is fully orthogonal (no diagonal segments).
+ * If moving a waypoint created a diagonal segment adjacent to a fixed terminal,
+ * insert an extra elbow waypoint to break it into two orthogonal segments.
+ *
+ * This is called after rerouteWireForDrag to clean up any diagonals.
+ */
+function orthogonalizePath(fromPos: Vec2, toPos: Vec2, wps: Vec2[]): Vec2[] {
+  const result: Vec2[] = [];
+  const full: Vec2[] = [fromPos, ...wps, toPos];
+  for (let i = 0; i < full.length - 1; i++) {
+    const a = full[i];
+    const b = full[i + 1];
+    result.push({ ...a });
+    // If segment is diagonal, insert an elbow (go horizontal first, then vertical)
+    if (Math.abs(a.x - b.x) > 0.01 && Math.abs(a.y - b.y) > 0.01) {
+      // Insert elbow at (b.x, a.y) — horizontal first, then vertical
+      result.push({ x: b.x, y: a.y });
+    }
+  }
+  result.push({ ...toPos });
+  // Convert back to waypoints (exclude fromPos and toPos)
+  return result.slice(1, -1);
+}
+
 export function CircuitCanvas() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -70,6 +219,11 @@ export function CircuitCanvas() {
   const dragRef = useRef<DragState | null>(null);
   const wireDragRef = useRef<WireDragState | null>(null);
   const panRef = useRef<{ start: Vec2; origin: Vec2 } | null>(null);
+  // rotateDrag needs to trigger re-renders (for the snap-angle indicator), so it's state.
+  // We keep a ref in sync for use inside event handlers.
+  const [rotateDrag, setRotateDrag] = useState<RotateDragState | null>(null);
+  const rotateDragRef = useRef<RotateDragState | null>(null);
+  useEffect(() => { rotateDragRef.current = rotateDrag; }, [rotateDrag]);
   const [hover, setHover] = useState<HoverState>({
     componentId: null,
     terminal: null,
@@ -132,19 +286,23 @@ export function CircuitCanvas() {
     return () => cancelAnimationFrame(raf);
   }, [running, step]);
 
-  // continuous animation loop for current flow dots (independent of simulation)
+  // continuous animation loop for current flow dots — ONLY while simulation is running.
+  // When paused or editing, no animation runs at all.
   const [flowTick, setFlowTick] = useState(0);
   useEffect(() => {
+    if (!running) {
+      flowPhaseRef.current = 0;
+      return;
+    }
     let raf = 0;
     const loop = () => {
       flowPhaseRef.current = (flowPhaseRef.current + 0.012) % 1;
-      // Trigger re-draw by updating a state counter.
       setFlowTick((t) => (t + 1) % 1000000);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [running]);
   void flowTick; // referenced in deps below
 
   // helpers
@@ -222,8 +380,7 @@ export function CircuitCanvas() {
       if (!fromT || !toT) continue;
       const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
       const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
-      const path = getWirePath(wire, fromPos, toPos);
-      // check each segment
+      const path = getWirePath(wire, fromPos, toPos, gridToScreen);
       for (let i = 0; i < path.length - 1; i++) {
         const a = path[i];
         const b = path[i + 1];
@@ -248,21 +405,33 @@ export function CircuitCanvas() {
       if (!fromT || !toT) continue;
       const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
       const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
-      const path = getWirePath(wire, fromPos, toPos);
+      const path = getWirePath(wire, fromPos, toPos, gridToScreen);
       for (let i = 0; i < path.length - 1; i++) {
         const a = path[i];
         const b = path[i + 1];
         const mid = segmentMidpoint(a, b);
         const dx = sx - mid.x;
         const dy = sy - mid.y;
-        if (dx * dx + dy * dy < 36) { // 6px radius
-          const axis = (Math.abs(b.x - a.x) > Math.abs(b.y - a.y)) ? 'h' : 'v';
-          return { wireId: wire.id, segIndex: i, pos: mid, axis };
+        if (dx * dx + dy * dy < 36) {
+          return { wireId: wire.id, segIndex: i, pos: mid };
         }
       }
     }
     return null;
   }, [wires, components, gridToScreen, getTerminalPos]);
+
+  // compute rotation handle position for a component (in screen coords)
+  const getRotateHandlePos = useCallback((comp: CircuitComponent): Vec2 | null => {
+    const plugin = getPlugin(comp.type);
+    if (!plugin) return null;
+    const bb = plugin.boundingBox;
+    const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
+    const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
+    return {
+      x: centerScreen.x,
+      y: centerScreen.y - (bb.height / 2 * CELL_SIZE * zoom) - 18,
+    };
+  }, [gridToScreen, zoom]);
 
   // ----- Rendering -----
   useEffect(() => {
@@ -302,11 +471,13 @@ export function CircuitCanvas() {
       ctx.fillRect(pan.x - 1, pan.y - 1, 3, 3);
     }
 
-    // compute wire currents for flow animation (only when sim is active)
-    const wireCurrents = simContext ? computeWireCurrents(
+    // compute wire currents for flow animation — ONLY when running AND simContext exists.
+    // When paused or editing, no current data is computed and no dots are drawn.
+    const isAnimating = running && simContext != null;
+    const wireCurrents = isAnimating ? computeWireCurrents(
       components, wires,
       new Map(plugins.map((p) => [p.type, p])),
-      simContext,
+      simContext!,
     ) : new Map<string, number>();
 
     // Build a map of node -> number of attached wires (for junction coloring)
@@ -331,11 +502,11 @@ export function CircuitCanvas() {
       if (!fromT || !toT) continue;
       const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
       const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
-      const path = getWirePath(wire, fromPos, toPos);
+      const path = getWirePath(wire, fromPos, toPos, gridToScreen);
       const isSelected = selection.type === 'wire' && selection.id === wire.id;
       const isHover = hover.wireId === wire.id;
 
-      // wire shadow/glow for visibility
+      // wire
       ctx.strokeStyle = isSelected ? '#fbbf24' : (isHover ? '#cbd5e1' : '#94a3b8');
       ctx.lineWidth = isSelected ? 3.5 : (isHover ? 2.5 : 2);
       ctx.lineCap = 'round';
@@ -362,49 +533,47 @@ export function CircuitCanvas() {
         }
       }
 
-      // draw animated current flow dots
-      const current = wireCurrents.get(wire.id) ?? 0;
-      const absCurrent = Math.abs(current);
-      if (simContext && absCurrent > 1e-9) {
-        // direction: positive = from -> to
-        const dir = current >= 0 ? 1 : -1;
-        // speed: log-scaled with current magnitude
-        const speed = Math.min(1, Math.max(0.1, Math.log10(absCurrent * 1000 + 1) / 3));
-        // dot spacing along the path (in pixels)
-        const dotSpacing = 24;
-        // total path length
-        let totalLen = 0;
-        const segLens: number[] = [];
-        for (let i = 0; i < path.length - 1; i++) {
-          const a = path[i];
-          const b = path[i + 1];
-          const len = Math.hypot(b.x - a.x, b.y - a.y);
-          segLens.push(len);
-          totalLen += len;
-        }
-        if (totalLen > 0) {
-          const numDots = Math.max(2, Math.floor(totalLen / dotSpacing));
-          const phase = flowPhaseRef.current * speed;
-          ctx.fillStyle = dir > 0 ? '#fbbf24' : '#22d3ee';
-          for (let n = 0; n < numDots; n++) {
-            let distAlong = (n / numDots + phase * dir) * totalLen;
-            while (distAlong < 0) distAlong += totalLen;
-            while (distAlong >= totalLen) distAlong -= totalLen;
-            // find which segment
-            let acc = 0;
-            for (let i = 0; i < segLens.length; i++) {
-              if (acc + segLens[i] >= distAlong) {
-                const t = (distAlong - acc) / segLens[i];
-                const a = path[i];
-                const b = path[i + 1];
-                const x = a.x + (b.x - a.x) * t;
-                const y = a.y + (b.y - a.y) * t;
-                ctx.beginPath();
-                ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-                ctx.fill();
-                break;
+      // draw animated current flow dots — ONLY when running AND simContext is active.
+      // When paused or editing, absolutely no dots are drawn.
+      if (isAnimating) {
+        const current = wireCurrents.get(wire.id) ?? 0;
+        const absCurrent = Math.abs(current);
+        if (absCurrent > 1e-9) {
+          const dir = current >= 0 ? 1 : -1;
+          const speed = Math.min(1, Math.max(0.1, Math.log10(absCurrent * 1000 + 1) / 3));
+          const dotSpacing = 24;
+          let totalLen = 0;
+          const segLens: number[] = [];
+          for (let i = 0; i < path.length - 1; i++) {
+            const a = path[i];
+            const b = path[i + 1];
+            const len = Math.hypot(b.x - a.x, b.y - a.y);
+            segLens.push(len);
+            totalLen += len;
+          }
+          if (totalLen > 0) {
+            const numDots = Math.max(2, Math.floor(totalLen / dotSpacing));
+            const phase = flowPhaseRef.current * speed;
+            ctx.fillStyle = dir > 0 ? '#fbbf24' : '#22d3ee';
+            for (let n = 0; n < numDots; n++) {
+              let distAlong = (n / numDots + phase * dir) * totalLen;
+              while (distAlong < 0) distAlong += totalLen;
+              while (distAlong >= totalLen) distAlong -= totalLen;
+              let acc = 0;
+              for (let i = 0; i < segLens.length; i++) {
+                if (acc + segLens[i] >= distAlong) {
+                  const t = (distAlong - acc) / segLens[i];
+                  const a = path[i];
+                  const b = path[i + 1];
+                  const x = a.x + (b.x - a.x) * t;
+                  const y = a.y + (b.y - a.y) * t;
+                  ctx.beginPath();
+                  ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+                  ctx.fill();
+                  break;
+                }
+                acc += segLens[i];
               }
-              acc += segLens[i];
             }
           }
         }
@@ -474,17 +643,17 @@ export function CircuitCanvas() {
         const isHot = hover.terminal?.componentId === comp.id && hover.terminal?.terminalId === t.id;
         const connKey = `${comp.id}:${t.id}`;
         const isConnected = (nodeWireCount.get(connKey) ?? 0) > 0;
-        const isLive = isConnected && simContext != null;
+        // Junctions are "live" (green glow) only while running; otherwise show connected state plainly.
+        const isLive = isConnected && running && simContext != null;
         let color = '#475569'; // unconnected: dark gray
-        if (isHot) color = '#fbbf24'; // hover: amber
-        else if (isLive) color = '#22c55e'; // connected + simulating: green
-        else if (isConnected) color = '#cbd5e1'; // connected, not simulating: light gray
+        if (isHot) color = '#fbbf24';
+        else if (isLive) color = '#22c55e';
+        else if (isConnected) color = '#cbd5e1';
         ctx.beginPath();
         ctx.arc(sp.x, sp.y, isHot ? 5 : (isLive ? 4 : 3), 0, Math.PI * 2);
         ctx.fillStyle = color;
         ctx.fill();
         if (isLive) {
-          // glow
           ctx.shadowColor = '#22c55e';
           ctx.shadowBlur = 8;
           ctx.fill();
@@ -495,50 +664,82 @@ export function CircuitCanvas() {
         ctx.stroke();
       }
 
-      // draw rotation handle on selected component
+      // draw rotation handle on selected component (only when not running)
       if (isSelected && !running) {
         const bb = plugin.boundingBox;
-        // handle position: top-right corner of the bounding box (in screen coords)
-        // compute center in screen coords
         const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
         const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
-        // handle offset: above the top edge, centered horizontally
-        const handleOffsetX = 0;
-        const handleOffsetY = -(bb.height / 2 * CELL_SIZE * zoom) - 16;
-        const hx = centerScreen.x + handleOffsetX;
-        const hy = centerScreen.y + handleOffsetY;
-        const isHandleHot = hover.rotateHandle === comp.id;
-        // line from box to handle
-        ctx.strokeStyle = '#fbbf24';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([2, 2]);
-        ctx.beginPath();
-        ctx.moveTo(centerScreen.x, centerScreen.y - (bb.height / 2 * CELL_SIZE * zoom) - 2);
-        ctx.lineTo(hx, hy + 8);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        // handle circle with rotate icon
-        ctx.beginPath();
-        ctx.arc(hx, hy, isHandleHot ? 9 : 8, 0, Math.PI * 2);
-        ctx.fillStyle = isHandleHot ? '#fbbf24' : '#1e293b';
-        ctx.fill();
-        ctx.strokeStyle = '#fbbf24';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        // draw a small rotate arrow inside
-        ctx.strokeStyle = isHandleHot ? '#0f172a' : '#fbbf24';
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        ctx.arc(hx, hy, 3.5, -Math.PI * 0.2, Math.PI * 1.1);
-        ctx.stroke();
-        // arrowhead
-        ctx.beginPath();
-        ctx.moveTo(hx + 4, hy - 1);
-        ctx.lineTo(hx + 2.5, hy - 4);
-        ctx.lineTo(hx + 5, hy - 4);
-        ctx.closePath();
-        ctx.fillStyle = isHandleHot ? '#0f172a' : '#fbbf24';
-        ctx.fill();
+        const handlePos = getRotateHandlePos(comp);
+        if (handlePos) {
+          const isHandleHot = hover.rotateHandle === comp.id || rotateDragRef.current?.componentId === comp.id;
+          // line from box to handle
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([2, 2]);
+          ctx.beginPath();
+          ctx.moveTo(centerScreen.x, centerScreen.y - (bb.height / 2 * CELL_SIZE * zoom) - 2);
+          ctx.lineTo(handlePos.x, handlePos.y + 9);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          // handle circle with rotate icon
+          ctx.beginPath();
+          ctx.arc(handlePos.x, handlePos.y, isHandleHot ? 10 : 9, 0, Math.PI * 2);
+          ctx.fillStyle = isHandleHot ? '#fbbf24' : '#1e293b';
+          ctx.fill();
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          // draw a small rotate arrow inside
+          ctx.strokeStyle = isHandleHot ? '#0f172a' : '#fbbf24';
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.arc(handlePos.x, handlePos.y, 4, -Math.PI * 0.2, Math.PI * 1.1);
+          ctx.stroke();
+          // arrowhead
+          ctx.beginPath();
+          ctx.moveTo(handlePos.x + 4.5, handlePos.y - 1);
+          ctx.lineTo(handlePos.x + 2.8, handlePos.y - 4.5);
+          ctx.lineTo(handlePos.x + 5.5, handlePos.y - 4.5);
+          ctx.closePath();
+          ctx.fillStyle = isHandleHot ? '#0f172a' : '#fbbf24';
+          ctx.fill();
+
+          // While dragging rotation, show a visual indicator of the target snap angle
+          if (rotateDragRef.current?.componentId === comp.id) {
+            const cursorScreen = gridToScreen(cursor.x, cursor.y);
+            const curAngle = angleFromCenter(centerScreen.x, centerScreen.y, cursorScreen.x, cursorScreen.y);
+            // Snap to nearest 90°: 0/90/180/270. We map cursor angle to rotation increment.
+            // Up = 270°, Right = 0°, Down = 90°, Left = 180° (screen y is down)
+            // We snap based on which quadrant the cursor is in relative to center.
+            // Show the snap direction as a thick arrow from center.
+            let snapRot: 0 | 1 | 2 | 3 = 0;
+            // Convert cursor angle to a rotation increment (0=right, 1=down, 2=left, 3=up)
+            // We want: cursor up (angle ~270) => rotation 3 (or whichever makes component point up)
+            // Use the angle to determine nearest of 4 directions
+            const normalized = (curAngle + 45) % 360;
+            if (normalized < 90) snapRot = 0;
+            else if (normalized < 180) snapRot = 1;
+            else if (normalized < 270) snapRot = 2;
+            else snapRot = 3;
+            void snapRot;
+            // Draw a dashed line from center to cursor
+            ctx.strokeStyle = 'rgba(251, 191, 36, 0.5)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(centerScreen.x, centerScreen.y);
+            ctx.lineTo(cursorScreen.x, cursorScreen.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            // Draw the snap angle text
+            ctx.fillStyle = '#fbbf24';
+            ctx.font = 'bold 11px ui-monospace, monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const snapDeg = (snapRot * 90) % 360;
+            ctx.fillText(`${snapDeg}°`, cursorScreen.x, cursorScreen.y - 14);
+          }
+        }
       }
 
       // "click to toggle" hint for switches during simulation
@@ -565,7 +766,7 @@ export function CircuitCanvas() {
     }
 
     // draw cursor crosshair (when no drag)
-    if (!dragRef.current && !panRef.current && !wireDragRef.current) {
+    if (!dragRef.current && !panRef.current && !wireDragRef.current && !rotateDragRef.current) {
       const sp = gridToScreen(cursor.x, cursor.y);
       ctx.strokeStyle = 'rgba(251, 191, 36, 0.4)';
       ctx.lineWidth = 1;
@@ -578,7 +779,7 @@ export function CircuitCanvas() {
     }
 
     ctx.restore();
-  }, [size, pan, zoom, components, wires, selection, hover, cursor, simContext, showGrid, wireDraft, running, gridToScreen, getTerminalPos, plugins, flowTick]);
+  }, [size, pan, zoom, components, wires, selection, hover, cursor, simContext, showGrid, wireDraft, running, gridToScreen, getTerminalPos, plugins, flowTick, getRotateHandlePos]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
@@ -596,16 +797,12 @@ export function CircuitCanvas() {
     // If simulation is running, check for toggleable components FIRST
     if (running) {
       const term = findTerminalAt(g.x, g.y);
-      if (term) {
-        // clicking a terminal during simulation: do nothing (no wire drawing)
-        return;
-      }
+      if (term) return; // no wire drawing during simulation
       const comp = findComponentAt(g.x, g.y);
       if (comp && TOGGLEABLE_TYPES.has(comp.type)) {
         toggleSwitch(comp.id);
         return;
       }
-      // select component but don't drag during simulation
       if (comp) {
         setSelection({ type: 'component', id: comp.id });
         return;
@@ -614,20 +811,60 @@ export function CircuitCanvas() {
       return;
     }
 
-    // check rotation handle on selected component
+    // check rotation handle on selected component — start a rotate drag
     if (selection.type === 'component' && hover.rotateHandle === selection.id) {
-      rotateComponent(selection.id);
-      return;
+      const comp = components.find((c) => c.id === selection.id);
+      if (comp) {
+        const plugin = getPlugin(comp.type);
+        if (plugin) {
+          const bb = plugin.boundingBox;
+          const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
+          const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
+          const newDrag: RotateDragState = {
+            componentId: comp.id,
+            center: centerScreen,
+            startAngle: angleFromCenter(centerScreen.x, centerScreen.y, sx, sy),
+            startRotation: comp.rotation,
+          };
+          rotateDragRef.current = newDrag;
+          setRotateDrag(newDrag);
+          return;
+        }
+      }
     }
 
     // check wire segment handle (for dragging)
     if (hover.wireHandle) {
-      wireDragRef.current = {
-        wireId: hover.wireHandle.wireId,
-        segIndex: hover.wireHandle.segIndex,
-        axis: hover.wireHandle.axis,
-      };
-      return;
+      const wire = wires.find((w) => w.id === hover.wireHandle.wireId);
+      if (wire) {
+        const fromComp = components.find((c) => c.id === wire.from.componentId);
+        const toComp = components.find((c) => c.id === wire.to.componentId);
+        if (fromComp && toComp) {
+          const fromPlugin = getPlugin(fromComp.type);
+          const toPlugin = getPlugin(toComp.type);
+          if (fromPlugin && toPlugin) {
+            const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
+            const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
+            if (fromT && toT) {
+              const fromPos = getTerminalPos(fromComp, fromT);
+              const toPos = getTerminalPos(toComp, toT);
+              const originalWaypoints = wire.waypoints && wire.waypoints.length > 0
+                ? wire.waypoints.map((w) => ({ ...w }))
+                : [
+                    { x: (fromPos.x + toPos.x) / 2, y: fromPos.y },
+                    { x: (fromPos.x + toPos.x) / 2, y: toPos.y },
+                  ];
+              wireDragRef.current = {
+                wireId: hover.wireHandle.wireId,
+                segIndex: hover.wireHandle.segIndex,
+                startGrid: g,
+                originalWaypoints,
+              };
+              return;
+            }
+          }
+        }
+      }
     }
 
     // check terminal first
@@ -679,7 +916,37 @@ export function CircuitCanvas() {
       return;
     }
 
-    // wire segment dragging
+    // rotation drag — compute snap rotation from cursor angle around component center
+    if (rotateDragRef.current) {
+      const rd = rotateDragRef.current;
+      const curAngle = angleFromCenter(rd.center.x, rd.center.y, sx, sy);
+      // Determine target rotation by snapping cursor angle to nearest 90°.
+      // Screen angle: 0=right, 90=down, 180=left, 270=up.
+      // We map: cursor right (0°) => rotation 0; down (90°) => rotation 1; left (180°) => rotation 2; up (270°) => rotation 3.
+      // But this mapping is relative to the component's "forward" direction. A simpler
+      // approach: compute how many 90° steps the cursor has moved from the start angle,
+      // and add to startRotation.
+      let deltaDeg = curAngle - rd.startAngle;
+      // normalize to -180..180
+      while (deltaDeg > 180) deltaDeg -= 360;
+      while (deltaDeg < -180) deltaDeg += 360;
+      // Snap to nearest 90° step
+      const steps = Math.round(deltaDeg / 90);
+      let targetRotation = (rd.startRotation + steps) % 4;
+      if (targetRotation < 0) targetRotation += 4;
+      const comp = components.find((c) => c.id === rd.componentId);
+      if (comp && comp.rotation !== targetRotation) {
+        // Use rotateComponent repeatedly until we reach the target. Since rotateComponent
+        // only increments by 1, we call it the right number of times.
+        let diff = (targetRotation - comp.rotation + 4) % 4;
+        for (let i = 0; i < diff; i++) {
+          rotateComponent(comp.id);
+        }
+      }
+      return;
+    }
+
+    // wire segment dragging — free 2D drag in any direction
     if (wireDragRef.current) {
       const wd = wireDragRef.current;
       const wire = wires.find((w) => w.id === wd.wireId);
@@ -695,44 +962,22 @@ export function CircuitCanvas() {
       if (!fromT || !toT) return;
       const fromPos = getTerminalPos(fromComp, fromT);
       const toPos = getTerminalPos(toComp, toT);
-      // Reconstruct current waypoints
-      let wps: Vec2[] = wire.waypoints && wire.waypoints.length > 0
-        ? wire.waypoints.map((w) => ({ ...w }))
-        : [{ x: (fromPos.x + toPos.x) / 2, y: fromPos.y }, { x: (fromPos.x + toPos.x) / 2, y: toPos.y }];
-
-      // The segment being dragged is between path[segIndex] and path[segIndex+1]
-      // path = [fromPos, ...wps, toPos], so segIndex in terms of wps:
-      // segIndex 0 => from->wp0 (or toPos if no wps), segIndex 1 => wp0->wp1, etc.
-      // For the default 2-waypoint case, segIndex 1 is the vertical middle segment.
-      // When dragging a horizontal segment, we move the Y of both endpoints;
-      // when dragging a vertical segment, we move the X of both endpoints.
-
-      // Build full path indices
-      const pathPoints: Vec2[] = [fromPos, ...wps, toPos];
-      const segStart = pathPoints[wd.segIndex];
-      const segEnd = pathPoints[wd.segIndex + 1];
-      if (wd.axis === 'h') {
-        // horizontal segment: drag changes Y of both endpoints
-        const newY = g.y;
-        if (wd.segIndex === 0) fromPos.y = newY; // can't actually move fromPos (it's a terminal)
-        // We only move waypoint positions
-        if (wd.segIndex > 0 && wd.segIndex <= wps.length) wps[wd.segIndex - 1].y = newY;
-        if (wd.segIndex < wps.length) wps[wd.segIndex].y = newY;
-        else toPos.y = newY; // can't move toPos either
-        void segStart; void segEnd; void newY;
-      } else {
-        // vertical segment: drag changes X
-        const newX = g.x;
-        if (wd.segIndex > 0 && wd.segIndex <= wps.length) wps[wd.segIndex - 1].x = newX;
-        if (wd.segIndex < wps.length) wps[wd.segIndex].x = newX;
-        void newX;
-      }
-      setWireWaypoints(wd.wireId, wps);
+      // Always start from the ORIGINAL waypoints captured at drag start.
+      // This gives smooth, predictable behavior: the segment follows the cursor
+      // absolutely, and the path is rebuilt fresh each frame from the original.
+      const newWaypoints = rerouteWireForDrag(
+        { ...fromPos },
+        { ...toPos },
+        wd.segIndex,
+        g,
+        wd.originalWaypoints,
+      );
+      setWireWaypoints(wd.wireId, newWaypoints);
       return;
     }
 
     if (dragRef.current) {
-      if (running) return; // no dragging during simulation
+      if (running) return;
       const newPos = { x: g.x - dragRef.current.offset.x, y: g.y - dragRef.current.offset.y };
       moveComponent(dragRef.current.componentId, newPos);
       return;
@@ -752,16 +997,11 @@ export function CircuitCanvas() {
     if (!running && selection.type === 'component') {
       const comp = components.find((c) => c.id === selection.id);
       if (comp) {
-        const plugin = getPlugin(comp.type);
-        if (plugin) {
-          const bb = plugin.boundingBox;
-          const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
-          const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
-          const hx = centerScreen.x;
-          const hy = centerScreen.y - (bb.height / 2 * CELL_SIZE * zoom) - 16;
-          const dx = sx - hx;
-          const dy = sy - hy;
-          if (dx * dx + dy * dy < 100) {
+        const handlePos = getRotateHandlePos(comp);
+        if (handlePos) {
+          const dx = sx - handlePos.x;
+          const dy = sy - handlePos.y;
+          if (dx * dx + dy * dy < 144) { // 12px radius hit zone
             setHover({ componentId: comp.id, terminal: null, wireId: null, wireHandle: null, rotateHandle: comp.id });
             return;
           }
@@ -790,6 +1030,12 @@ export function CircuitCanvas() {
   const onMouseUp = (e: React.MouseEvent) => {
     if (e.button === 1 || e.button === 2) {
       panRef.current = null;
+      return;
+    }
+    if (rotateDragRef.current) {
+      useEditor.getState().pushHistory();
+      rotateDragRef.current = null;
+      setRotateDrag(null);
       return;
     }
     if (wireDragRef.current) {
@@ -828,7 +1074,7 @@ export function CircuitCanvas() {
   };
 
   const onDoubleClick = (e: React.MouseEvent) => {
-    if (running) return; // no rotation during simulation
+    if (running) return;
     const rect = canvasRef.current!.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
@@ -839,6 +1085,7 @@ export function CircuitCanvas() {
 
   // cursor style based on hover state
   const getCursorStyle = (): string => {
+    if (rotateDrag) return 'grabbing';
     if (running) {
       if (hover.componentId) {
         const comp = components.find((c) => c.id === hover.componentId);
@@ -847,8 +1094,8 @@ export function CircuitCanvas() {
       return 'default';
     }
     if (hover.terminal) return 'crosshair';
-    if (hover.rotateHandle) return 'pointer';
-    if (hover.wireHandle) return 'ns-resize';
+    if (hover.rotateHandle) return 'grab';
+    if (hover.wireHandle) return 'move';
     if (hover.wireId) return 'pointer';
     if (hover.componentId) return 'move';
     return 'crosshair';
@@ -902,7 +1149,7 @@ export function CircuitCanvas() {
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
-        onMouseLeave={() => { dragRef.current = null; panRef.current = null; wireDragRef.current = null; }}
+        onMouseLeave={() => { dragRef.current = null; panRef.current = null; wireDragRef.current = null; rotateDragRef.current = null; setRotateDrag(null); }}
         onWheel={onWheel}
         onDrop={onDrop}
         onDragOver={onDragOver}

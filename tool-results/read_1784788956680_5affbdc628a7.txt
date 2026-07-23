@@ -1,0 +1,950 @@
+     1→'use client';
+     2→
+     3→import { useCallback, useEffect, useRef, useState } from 'react';
+     4→import { useEditor } from '@/lib/circuit/store';
+     5→import { getPlugin, getAllPlugins } from '@/lib/circuit/registry';
+     6→import { computeWireCurrents } from '@/lib/circuit/engine';
+     7→import type { CircuitComponent, ComponentPlugin, TerminalDef, Vec2, Wire } from '@/lib/circuit/types';
+     8→import { rotateTerminal } from '@/lib/circuit/components/draw';
+     9→
+    10→const CELL_SIZE = 24;
+    11→
+    12→interface DragState {
+    13→  componentId: string;
+    14→  offset: Vec2;
+    15→}
+    16→
+    17→interface WireDragState {
+    18→  wireId: string;
+    19→  /** index of the segment being dragged (0 = from->wp1, etc.) */
+    20→  segIndex: number;
+    21→  /** 'h' or 'v' — which axis the dragged segment runs along */
+    22→  axis: 'h' | 'v';
+    23→}
+    24→
+    25→interface HoverState {
+    26→  componentId: string | null;
+    27→  terminal: { componentId: string; terminalId: string; pos: Vec2 } | null;
+    28→  wireId: string | null;
+    29→  /** midpoint handle on a wire segment that can be dragged */
+    30→  wireHandle: { wireId: string; segIndex: number; pos: Vec2; axis: 'h' | 'v' } | null;
+    31→  rotateHandle: string | null; // componentId
+    32→}
+    33→
+    34→/** types of components that can be toggled by clicking during simulation */
+    35→const TOGGLEABLE_TYPES = new Set(['switch', 'pushButton']);
+    36→
+    37→/** Get the orthogonal path points (in screen coords) for a wire */
+    38→function getWirePath(
+    39→  wire: Wire,
+    40→  fromPos: Vec2,
+    41→  toPos: Vec2,
+    42→): Vec2[] {
+    43→  const points: Vec2[] = [fromPos];
+    44→  if (wire.waypoints && wire.waypoints.length > 0) {
+    45→    for (const wp of wire.waypoints) {
+    46→      points.push({ ...wp });
+    47→    }
+    48→  } else {
+    49→    // default orthogonal routing: go to midpoint X, then to target
+    50→    const midX = (fromPos.x + toPos.x) / 2;
+    51→    points.push({ x: midX, y: fromPos.y });
+    52→    points.push({ x: midX, y: toPos.y });
+    53→  }
+    54→  points.push(toPos);
+    55→  return points;
+    56→}
+    57→
+    58→/** Compute the midpoint of a segment for drag handle detection */
+    59→function segmentMidpoint(a: Vec2, b: Vec2): Vec2 {
+    60→  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    61→}
+    62→
+    63→export function CircuitCanvas() {
+    64→  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    65→  const containerRef = useRef<HTMLDivElement | null>(null);
+    66→  const [size, setSize] = useState({ width: 800, height: 600 });
+    67→  const [pan, setPan] = useState<Vec2>({ x: 0, y: 0 });
+    68→  const [zoom, setZoom] = useState(1);
+    69→  const [cursor, setCursor] = useState<Vec2>({ x: 0, y: 0 });
+    70→  const dragRef = useRef<DragState | null>(null);
+    71→  const wireDragRef = useRef<WireDragState | null>(null);
+    72→  const panRef = useRef<{ start: Vec2; origin: Vec2 } | null>(null);
+    73→  const [hover, setHover] = useState<HoverState>({
+    74→    componentId: null,
+    75→    terminal: null,
+    76→    wireId: null,
+    77→    wireHandle: null,
+    78→    rotateHandle: null,
+    79→  });
+    80→  // animation phase for current flow dots (0..1)
+    81→  const flowPhaseRef = useRef(0);
+    82→  const plugins = getAllPlugins();
+    83→
+    84→  const components = useEditor((s) => s.components);
+    85→  const wires = useEditor((s) => s.wires);
+    86→  const selection = useEditor((s) => s.selection);
+    87→  const simContext = useEditor((s) => s.simContext);
+    88→  const running = useEditor((s) => s.running);
+    89→  const showGrid = useEditor((s) => s.showGrid);
+    90→  const snapToGrid = useEditor((s) => s.snapToGrid);
+    91→  const wireDraft = useEditor((s) => s.wireDraft);
+    92→
+    93→  const addComponent = useEditor((s) => s.addComponent);
+    94→  const moveComponent = useEditor((s) => s.moveComponent);
+    95→  const rotateComponent = useEditor((s) => s.rotateComponent);
+    96→  const deleteComponent = useEditor((s) => s.deleteComponent);
+    97→  const setSelection = useEditor((s) => s.setSelection);
+    98→  const startWire = useEditor((s) => s.startWire);
+    99→  const updateWireCursor = useEditor((s) => s.updateWireCursor);
+   100→  const completeWire = useEditor((s) => s.completeWire);
+   101→  const cancelWire = useEditor((s) => s.cancelWire);
+   102→  const setWireWaypoints = useEditor((s) => s.setWireWaypoints);
+   103→  const toggleSwitch = useEditor((s) => s.toggleSwitch);
+   104→  const step = useEditor((s) => s.step);
+   105→
+   106→  // resize observer
+   107→  useEffect(() => {
+   108→    if (!containerRef.current) return;
+   109→    const ro = new ResizeObserver((entries) => {
+   110→      for (const e of entries) {
+   111→        setSize({ width: e.contentRect.width, height: e.contentRect.height });
+   112→      }
+   113→    });
+   114→    ro.observe(containerRef.current);
+   115→    return () => ro.disconnect();
+   116→  }, []);
+   117→
+   118→  // simulation loop
+   119→  useEffect(() => {
+   120→    if (!running) return;
+   121→    let raf = 0;
+   122→    let last = performance.now();
+   123→    const loop = (t: number) => {
+   124→      const dt = t - last;
+   125→      if (dt > 16) {
+   126→        step();
+   127→        last = t;
+   128→      }
+   129→      raf = requestAnimationFrame(loop);
+   130→    };
+   131→    raf = requestAnimationFrame(loop);
+   132→    return () => cancelAnimationFrame(raf);
+   133→  }, [running, step]);
+   134→
+   135→  // continuous animation loop for current flow dots (independent of simulation)
+   136→  const [flowTick, setFlowTick] = useState(0);
+   137→  useEffect(() => {
+   138→    let raf = 0;
+   139→    const loop = () => {
+   140→      flowPhaseRef.current = (flowPhaseRef.current + 0.012) % 1;
+   141→      // Trigger re-draw by updating a state counter.
+   142→      setFlowTick((t) => (t + 1) % 1000000);
+   143→      raf = requestAnimationFrame(loop);
+   144→    };
+   145→    raf = requestAnimationFrame(loop);
+   146→    return () => cancelAnimationFrame(raf);
+   147→  }, []);
+   148→  void flowTick; // referenced in deps below
+   149→
+   150→  // helpers
+   151→  const screenToGrid = useCallback((sx: number, sy: number): Vec2 => {
+   152→    const x = (sx - pan.x) / (CELL_SIZE * zoom);
+   153→    const y = (sy - pan.y) / (CELL_SIZE * zoom);
+   154→    return snapToGrid ? { x: Math.round(x), y: Math.round(y) } : { x, y };
+   155→  }, [pan, zoom, snapToGrid]);
+   156→
+   157→  const gridToScreen = useCallback((gx: number, gy: number): Vec2 => {
+   158→    return { x: gx * CELL_SIZE * zoom + pan.x, y: gy * CELL_SIZE * zoom + pan.y };
+   159→  }, [pan, zoom]);
+   160→
+   161→  const getTerminalPos = useCallback((comp: CircuitComponent, terminal: TerminalDef): Vec2 => {
+   162→    const plugin = getPlugin(comp.type);
+   163→    if (!plugin) return { x: 0, y: 0 };
+   164→    const rotated = rotateTerminal(terminal, comp.rotation, plugin.boundingBox);
+   165→    return {
+   166→      x: comp.position.x + rotated.position.x,
+   167→      y: comp.position.y + rotated.position.y,
+   168→    };
+   169→  }, []);
+   170→
+   171→  const findTerminalAt = useCallback((gx: number, gy: number) => {
+   172→    for (const comp of components) {
+   173→      const plugin = getPlugin(comp.type);
+   174→      if (!plugin) continue;
+   175→      for (const t of plugin.terminals) {
+   176→        const pos = getTerminalPos(comp, t);
+   177→        const dx = pos.x - gx;
+   178→        const dy = pos.y - gy;
+   179→        if (dx * dx + dy * dy < 0.5 * 0.5) {
+   180→          return { componentId: comp.id, terminalId: t.id, pos };
+   181→        }
+   182→      }
+   183→    }
+   184→    return null;
+   185→  }, [components, getTerminalPos]);
+   186→
+   187→  const findComponentAt = useCallback((gx: number, gy: number): CircuitComponent | null => {
+   188→    for (let i = components.length - 1; i >= 0; i--) {
+   189→      const comp = components[i];
+   190→      const plugin = getPlugin(comp.type);
+   191→      if (!plugin) continue;
+   192→      const bb = plugin.boundingBox;
+   193→      const cx = bb.width / 2;
+   194→      const cy = bb.height / 2;
+   195→      const dx = gx - (comp.position.x + cx);
+   196→      const dy = gy - (comp.position.y + cy);
+   197→      let rx: number, ry: number;
+   198→      switch (comp.rotation) {
+   199→        case 0: rx = dx; ry = dy; break;
+   200→        case 1: rx = -dy; ry = dx; break;
+   201→        case 2: rx = -dx; ry = -dy; break;
+   202→        case 3: rx = dy; ry = -dx; break;
+   203→      }
+   204→      if (Math.abs(rx) <= bb.width / 2 && Math.abs(ry) <= bb.height / 2) {
+   205→        return comp;
+   206→      }
+   207→    }
+   208→    return null;
+   209→  }, [components]);
+   210→
+   211→  // find wire under cursor (hit-test against wire path)
+   212→  const findWireAt = useCallback((sx: number, sy: number): string | null => {
+   213→    for (const wire of wires) {
+   214→      const fromComp = components.find((c) => c.id === wire.from.componentId);
+   215→      const toComp = components.find((c) => c.id === wire.to.componentId);
+   216→      if (!fromComp || !toComp) continue;
+   217→      const fromPlugin = getPlugin(fromComp.type);
+   218→      const toPlugin = getPlugin(toComp.type);
+   219→      if (!fromPlugin || !toPlugin) continue;
+   220→      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
+   221→      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
+   222→      if (!fromT || !toT) continue;
+   223→      const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
+   224→      const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
+   225→      const path = getWirePath(wire, fromPos, toPos);
+   226→      // check each segment
+   227→      for (let i = 0; i < path.length - 1; i++) {
+   228→        const a = path[i];
+   229→        const b = path[i + 1];
+   230→        const dist = pointToSegmentDist(sx, sy, a.x, a.y, b.x, b.y);
+   231→        if (dist < 5) return wire.id;
+   232→      }
+   233→    }
+   234→    return null;
+   235→  }, [wires, components, gridToScreen, getTerminalPos]);
+   236→
+   237→  // find a draggable wire segment midpoint handle
+   238→  const findWireHandle = useCallback((sx: number, sy: number): HoverState['wireHandle'] => {
+   239→    for (const wire of wires) {
+   240→      const fromComp = components.find((c) => c.id === wire.from.componentId);
+   241→      const toComp = components.find((c) => c.id === wire.to.componentId);
+   242→      if (!fromComp || !toComp) continue;
+   243→      const fromPlugin = getPlugin(fromComp.type);
+   244→      const toPlugin = getPlugin(toComp.type);
+   245→      if (!fromPlugin || !toPlugin) continue;
+   246→      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
+   247→      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
+   248→      if (!fromT || !toT) continue;
+   249→      const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
+   250→      const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
+   251→      const path = getWirePath(wire, fromPos, toPos);
+   252→      for (let i = 0; i < path.length - 1; i++) {
+   253→        const a = path[i];
+   254→        const b = path[i + 1];
+   255→        const mid = segmentMidpoint(a, b);
+   256→        const dx = sx - mid.x;
+   257→        const dy = sy - mid.y;
+   258→        if (dx * dx + dy * dy < 36) { // 6px radius
+   259→          const axis = (Math.abs(b.x - a.x) > Math.abs(b.y - a.y)) ? 'h' : 'v';
+   260→          return { wireId: wire.id, segIndex: i, pos: mid, axis };
+   261→        }
+   262→      }
+   263→    }
+   264→    return null;
+   265→  }, [wires, components, gridToScreen, getTerminalPos]);
+   266→
+   267→  // ----- Rendering -----
+   268→  useEffect(() => {
+   269→    const canvas = canvasRef.current;
+   270→    if (!canvas) return;
+   271→    const dpr = window.devicePixelRatio || 1;
+   272→    canvas.width = size.width * dpr;
+   273→    canvas.height = size.height * dpr;
+   274→    canvas.style.width = `${size.width}px`;
+   275→    canvas.style.height = `${size.height}px`;
+   276→    const ctx = canvas.getContext('2d');
+   277→    if (!ctx) return;
+   278→    ctx.save();
+   279→    ctx.scale(dpr, dpr);
+   280→    // bg
+   281→    ctx.fillStyle = '#0f172a';
+   282→    ctx.fillRect(0, 0, size.width, size.height);
+   283→
+   284→    // grid
+   285→    if (showGrid) {
+   286→      ctx.strokeStyle = '#1e293b';
+   287→      ctx.lineWidth = 1;
+   288→      const stepPx = CELL_SIZE * zoom;
+   289→      const startX = pan.x % stepPx;
+   290→      const startY = pan.y % stepPx;
+   291→      ctx.beginPath();
+   292→      for (let x = startX; x < size.width; x += stepPx) {
+   293→        ctx.moveTo(x, 0);
+   294→        ctx.lineTo(x, size.height);
+   295→      }
+   296→      for (let y = startY; y < size.height; y += stepPx) {
+   297→        ctx.moveTo(0, y);
+   298→        ctx.lineTo(size.width, y);
+   299→      }
+   300→      ctx.stroke();
+   301→      ctx.fillStyle = '#475569';
+   302→      ctx.fillRect(pan.x - 1, pan.y - 1, 3, 3);
+   303→    }
+   304→
+   305→    // compute wire currents for flow animation (only when sim is active)
+   306→    const wireCurrents = simContext ? computeWireCurrents(
+   307→      components, wires,
+   308→      new Map(plugins.map((p) => [p.type, p])),
+   309→      simContext,
+   310→    ) : new Map<string, number>();
+   311→
+   312→    // Build a map of node -> number of attached wires (for junction coloring)
+   313→    const nodeWireCount = new Map<string, number>();
+   314→    for (const wire of wires) {
+   315→      const key1 = `${wire.from.componentId}:${wire.from.terminalId}`;
+   316→      const key2 = `${wire.to.componentId}:${wire.to.terminalId}`;
+   317→      nodeWireCount.set(key1, (nodeWireCount.get(key1) ?? 0) + 1);
+   318→      nodeWireCount.set(key2, (nodeWireCount.get(key2) ?? 0) + 1);
+   319→    }
+   320→
+   321→    // ---- Draw wires FIRST (below components) ----
+   322→    for (const wire of wires) {
+   323→      const fromComp = components.find((c) => c.id === wire.from.componentId);
+   324→      const toComp = components.find((c) => c.id === wire.to.componentId);
+   325→      if (!fromComp || !toComp) continue;
+   326→      const fromPlugin = getPlugin(fromComp.type);
+   327→      const toPlugin = getPlugin(toComp.type);
+   328→      if (!fromPlugin || !toPlugin) continue;
+   329→      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
+   330→      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
+   331→      if (!fromT || !toT) continue;
+   332→      const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
+   333→      const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
+   334→      const path = getWirePath(wire, fromPos, toPos);
+   335→      const isSelected = selection.type === 'wire' && selection.id === wire.id;
+   336→      const isHover = hover.wireId === wire.id;
+   337→
+   338→      // wire shadow/glow for visibility
+   339→      ctx.strokeStyle = isSelected ? '#fbbf24' : (isHover ? '#cbd5e1' : '#94a3b8');
+   340→      ctx.lineWidth = isSelected ? 3.5 : (isHover ? 2.5 : 2);
+   341→      ctx.lineCap = 'round';
+   342→      ctx.lineJoin = 'round';
+   343→      ctx.beginPath();
+   344→      ctx.moveTo(path[0].x, path[0].y);
+   345→      for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
+   346→      ctx.stroke();
+   347→
+   348→      // draw wire segment midpoint handles (only when not running, for editing)
+   349→      if (!running) {
+   350→        for (let i = 0; i < path.length - 1; i++) {
+   351→          const a = path[i];
+   352→          const b = path[i + 1];
+   353→          const mid = segmentMidpoint(a, b);
+   354→          const isHandleHot = hover.wireHandle?.wireId === wire.id && hover.wireHandle?.segIndex === i;
+   355→          ctx.beginPath();
+   356→          ctx.arc(mid.x, mid.y, isHandleHot ? 5 : 3, 0, Math.PI * 2);
+   357→          ctx.fillStyle = isHandleHot ? '#fbbf24' : '#475569';
+   358→          ctx.fill();
+   359→          ctx.strokeStyle = '#0f172a';
+   360→          ctx.lineWidth = 1;
+   361→          ctx.stroke();
+   362→        }
+   363→      }
+   364→
+   365→      // draw animated current flow dots
+   366→      const current = wireCurrents.get(wire.id) ?? 0;
+   367→      const absCurrent = Math.abs(current);
+   368→      if (simContext && absCurrent > 1e-9) {
+   369→        // direction: positive = from -> to
+   370→        const dir = current >= 0 ? 1 : -1;
+   371→        // speed: log-scaled with current magnitude
+   372→        const speed = Math.min(1, Math.max(0.1, Math.log10(absCurrent * 1000 + 1) / 3));
+   373→        // dot spacing along the path (in pixels)
+   374→        const dotSpacing = 24;
+   375→        // total path length
+   376→        let totalLen = 0;
+   377→        const segLens: number[] = [];
+   378→        for (let i = 0; i < path.length - 1; i++) {
+   379→          const a = path[i];
+   380→          const b = path[i + 1];
+   381→          const len = Math.hypot(b.x - a.x, b.y - a.y);
+   382→          segLens.push(len);
+   383→          totalLen += len;
+   384→        }
+   385→        if (totalLen > 0) {
+   386→          const numDots = Math.max(2, Math.floor(totalLen / dotSpacing));
+   387→          const phase = flowPhaseRef.current * speed;
+   388→          ctx.fillStyle = dir > 0 ? '#fbbf24' : '#22d3ee';
+   389→          for (let n = 0; n < numDots; n++) {
+   390→            let distAlong = (n / numDots + phase * dir) * totalLen;
+   391→            while (distAlong < 0) distAlong += totalLen;
+   392→            while (distAlong >= totalLen) distAlong -= totalLen;
+   393→            // find which segment
+   394→            let acc = 0;
+   395→            for (let i = 0; i < segLens.length; i++) {
+   396→              if (acc + segLens[i] >= distAlong) {
+   397→                const t = (distAlong - acc) / segLens[i];
+   398→                const a = path[i];
+   399→                const b = path[i + 1];
+   400→                const x = a.x + (b.x - a.x) * t;
+   401→                const y = a.y + (b.y - a.y) * t;
+   402→                ctx.beginPath();
+   403→                ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+   404→                ctx.fill();
+   405→                break;
+   406→              }
+   407→              acc += segLens[i];
+   408→            }
+   409→          }
+   410→        }
+   411→      }
+   412→    }
+   413→
+   414→    // draw wire draft
+   415→    if (wireDraft) {
+   416→      const fromComp = components.find((c) => c.id === wireDraft.from.componentId);
+   417→      if (fromComp) {
+   418→        const plugin = getPlugin(fromComp.type);
+   419→        if (plugin) {
+   420→          const t = plugin.terminals.find((tt) => tt.id === wireDraft.from.terminalId);
+   421→          if (t) {
+   422→            const fromPos = gridToScreen(getTerminalPos(fromComp, t).x, getTerminalPos(fromComp, t).y);
+   423→            const toPos = gridToScreen(wireDraft.cursor.x, wireDraft.cursor.y);
+   424→            ctx.strokeStyle = '#fbbf24';
+   425→            ctx.lineWidth = 2;
+   426→            ctx.setLineDash([4, 4]);
+   427→            ctx.beginPath();
+   428→            ctx.moveTo(fromPos.x, fromPos.y);
+   429→            ctx.lineTo(toPos.x, toPos.y);
+   430→            ctx.stroke();
+   431→            ctx.setLineDash([]);
+   432→          }
+   433→        }
+   434→      }
+   435→    }
+   436→
+   437→    // ---- Draw components ON TOP of wires ----
+   438→    for (const comp of components) {
+   439→      const plugin = getPlugin(comp.type);
+   440→      if (!plugin) continue;
+   441→      const isSelected = selection.type === 'component' && selection.id === comp.id;
+   442→      const isHover = hover.componentId === comp.id;
+   443→      const origin = gridToScreen(comp.position.x, comp.position.y);
+   444→      ctx.save();
+   445→      ctx.translate(origin.x, origin.y);
+   446→      ctx.scale(zoom, zoom);
+   447→      ctx.rotate((comp.rotation * Math.PI) / 2);
+   448→      // selection halo
+   449→      if (isSelected || isHover) {
+   450→        ctx.save();
+   451→        ctx.fillStyle = isSelected ? 'rgba(251, 191, 36, 0.18)' : 'rgba(148, 163, 184, 0.12)';
+   452→        ctx.strokeStyle = isSelected ? '#fbbf24' : '#64748b';
+   453→        ctx.lineWidth = 1.5;
+   454→        ctx.beginPath();
+   455→        ctx.rect(-2, -2, plugin.boundingBox.width * CELL_SIZE + 4, plugin.boundingBox.height * CELL_SIZE + 4);
+   456→        ctx.fill();
+   457→        ctx.stroke();
+   458→        ctx.restore();
+   459→      }
+   460→      ctx.strokeStyle = '#e2e8f0';
+   461→      ctx.fillStyle = '#e2e8f0';
+   462→      ctx.lineWidth = 1.5;
+   463→      try {
+   464→        plugin.render(ctx, comp.parameters, CELL_SIZE, simContext ?? undefined, comp);
+   465→      } catch (e) {
+   466→        console.error(`render error in ${comp.type}:`, e);
+   467→      }
+   468→      ctx.restore();
+   469→
+   470→      // draw terminals (in screen coords) — color by connected state
+   471→      for (const t of plugin.terminals) {
+   472→        const tpos = getTerminalPos(comp, t);
+   473→        const sp = gridToScreen(tpos.x, tpos.y);
+   474→        const isHot = hover.terminal?.componentId === comp.id && hover.terminal?.terminalId === t.id;
+   475→        const connKey = `${comp.id}:${t.id}`;
+   476→        const isConnected = (nodeWireCount.get(connKey) ?? 0) > 0;
+   477→        const isLive = isConnected && simContext != null;
+   478→        let color = '#475569'; // unconnected: dark gray
+   479→        if (isHot) color = '#fbbf24'; // hover: amber
+   480→        else if (isLive) color = '#22c55e'; // connected + simulating: green
+   481→        else if (isConnected) color = '#cbd5e1'; // connected, not simulating: light gray
+   482→        ctx.beginPath();
+   483→        ctx.arc(sp.x, sp.y, isHot ? 5 : (isLive ? 4 : 3), 0, Math.PI * 2);
+   484→        ctx.fillStyle = color;
+   485→        ctx.fill();
+   486→        if (isLive) {
+   487→          // glow
+   488→          ctx.shadowColor = '#22c55e';
+   489→          ctx.shadowBlur = 8;
+   490→          ctx.fill();
+   491→          ctx.shadowBlur = 0;
+   492→        }
+   493→        ctx.strokeStyle = '#0f172a';
+   494→        ctx.lineWidth = 1;
+   495→        ctx.stroke();
+   496→      }
+   497→
+   498→      // draw rotation handle on selected component
+   499→      if (isSelected && !running) {
+   500→        const bb = plugin.boundingBox;
+   501→        // handle position: top-right corner of the bounding box (in screen coords)
+   502→        // compute center in screen coords
+   503→        const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
+   504→        const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
+   505→        // handle offset: above the top edge, centered horizontally
+   506→        const handleOffsetX = 0;
+   507→        const handleOffsetY = -(bb.height / 2 * CELL_SIZE * zoom) - 16;
+   508→        const hx = centerScreen.x + handleOffsetX;
+   509→        const hy = centerScreen.y + handleOffsetY;
+   510→        const isHandleHot = hover.rotateHandle === comp.id;
+   511→        // line from box to handle
+   512→        ctx.strokeStyle = '#fbbf24';
+   513→        ctx.lineWidth = 1;
+   514→        ctx.setLineDash([2, 2]);
+   515→        ctx.beginPath();
+   516→        ctx.moveTo(centerScreen.x, centerScreen.y - (bb.height / 2 * CELL_SIZE * zoom) - 2);
+   517→        ctx.lineTo(hx, hy + 8);
+   518→        ctx.stroke();
+   519→        ctx.setLineDash([]);
+   520→        // handle circle with rotate icon
+   521→        ctx.beginPath();
+   522→        ctx.arc(hx, hy, isHandleHot ? 9 : 8, 0, Math.PI * 2);
+   523→        ctx.fillStyle = isHandleHot ? '#fbbf24' : '#1e293b';
+   524→        ctx.fill();
+   525→        ctx.strokeStyle = '#fbbf24';
+   526→        ctx.lineWidth = 1.5;
+   527→        ctx.stroke();
+   528→        // draw a small rotate arrow inside
+   529→        ctx.strokeStyle = isHandleHot ? '#0f172a' : '#fbbf24';
+   530→        ctx.lineWidth = 1.2;
+   531→        ctx.beginPath();
+   532→        ctx.arc(hx, hy, 3.5, -Math.PI * 0.2, Math.PI * 1.1);
+   533→        ctx.stroke();
+   534→        // arrowhead
+   535→        ctx.beginPath();
+   536→        ctx.moveTo(hx + 4, hy - 1);
+   537→        ctx.lineTo(hx + 2.5, hy - 4);
+   538→        ctx.lineTo(hx + 5, hy - 4);
+   539→        ctx.closePath();
+   540→        ctx.fillStyle = isHandleHot ? '#0f172a' : '#fbbf24';
+   541→        ctx.fill();
+   542→      }
+   543→
+   544→      // "click to toggle" hint for switches during simulation
+   545→      if (running && TOGGLEABLE_TYPES.has(comp.type) && (isHover || isSelected)) {
+   546→        const bb = plugin.boundingBox;
+   547→        const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
+   548→        const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
+   549→        const label = comp.type === 'switch'
+   550→          ? (comp.parameters.closed ? 'OPEN' : 'CLOSE')
+   551→          : (comp.parameters.pressed ? 'RELEASE' : 'PRESS');
+   552→        ctx.fillStyle = '#fbbf24';
+   553→        ctx.font = 'bold 10px ui-monospace, monospace';
+   554→        ctx.textAlign = 'center';
+   555→        ctx.textBaseline = 'middle';
+   556→        const tw = ctx.measureText(label).width + 10;
+   557→        ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+   558→        ctx.fillRect(centerScreen.x - tw / 2, centerScreen.y + (bb.height / 2 * CELL_SIZE * zoom) + 4, tw, 16);
+   559→        ctx.strokeStyle = '#fbbf24';
+   560→        ctx.lineWidth = 1;
+   561→        ctx.strokeRect(centerScreen.x - tw / 2, centerScreen.y + (bb.height / 2 * CELL_SIZE * zoom) + 4, tw, 16);
+   562→        ctx.fillStyle = '#fbbf24';
+   563→        ctx.fillText(label, centerScreen.x, centerScreen.y + (bb.height / 2 * CELL_SIZE * zoom) + 12);
+   564→      }
+   565→    }
+   566→
+   567→    // draw cursor crosshair (when no drag)
+   568→    if (!dragRef.current && !panRef.current && !wireDragRef.current) {
+   569→      const sp = gridToScreen(cursor.x, cursor.y);
+   570→      ctx.strokeStyle = 'rgba(251, 191, 36, 0.4)';
+   571→      ctx.lineWidth = 1;
+   572→      ctx.beginPath();
+   573→      ctx.moveTo(sp.x - 6, sp.y);
+   574→      ctx.lineTo(sp.x + 6, sp.y);
+   575→      ctx.moveTo(sp.x, sp.y - 6);
+   576→      ctx.lineTo(sp.x, sp.y + 6);
+   577→      ctx.stroke();
+   578→    }
+   579→
+   580→    ctx.restore();
+   581→  }, [size, pan, zoom, components, wires, selection, hover, cursor, simContext, showGrid, wireDraft, running, gridToScreen, getTerminalPos, plugins, flowTick]);
+   582→
+   583→  // ----- Mouse handlers -----
+   584→  const onMouseDown = (e: React.MouseEvent) => {
+   585→    const rect = canvasRef.current!.getBoundingClientRect();
+   586→    const sx = e.clientX - rect.left;
+   587→    const sy = e.clientY - rect.top;
+   588→    const g = screenToGrid(sx, sy);
+   589→
+   590→    // middle or right button: pan
+   591→    if (e.button === 1 || e.button === 2) {
+   592→      panRef.current = { start: { x: sx, y: sy }, origin: { ...pan } };
+   593→      return;
+   594→    }
+   595→
+   596→    // If simulation is running, check for toggleable components FIRST
+   597→    if (running) {
+   598→      const term = findTerminalAt(g.x, g.y);
+   599→      if (term) {
+   600→        // clicking a terminal during simulation: do nothing (no wire drawing)
+   601→        return;
+   602→      }
+   603→      const comp = findComponentAt(g.x, g.y);
+   604→      if (comp && TOGGLEABLE_TYPES.has(comp.type)) {
+   605→        toggleSwitch(comp.id);
+   606→        return;
+   607→      }
+   608→      // select component but don't drag during simulation
+   609→      if (comp) {
+   610→        setSelection({ type: 'component', id: comp.id });
+   611→        return;
+   612→      }
+   613→      setSelection({ type: null, id: null });
+   614→      return;
+   615→    }
+   616→
+   617→    // check rotation handle on selected component
+   618→    if (selection.type === 'component' && hover.rotateHandle === selection.id) {
+   619→      rotateComponent(selection.id);
+   620→      return;
+   621→    }
+   622→
+   623→    // check wire segment handle (for dragging)
+   624→    if (hover.wireHandle) {
+   625→      wireDragRef.current = {
+   626→        wireId: hover.wireHandle.wireId,
+   627→        segIndex: hover.wireHandle.segIndex,
+   628→        axis: hover.wireHandle.axis,
+   629→      };
+   630→      return;
+   631→    }
+   632→
+   633→    // check terminal first
+   634→    const term = findTerminalAt(g.x, g.y);
+   635→    if (term) {
+   636→      if (wireDraft) {
+   637→        completeWire({ componentId: term.componentId, terminalId: term.terminalId });
+   638→      } else {
+   639→        startWire({ componentId: term.componentId, terminalId: term.terminalId }, g);
+   640→      }
+   641→      return;
+   642→    }
+   643→
+   644→    // check component
+   645→    const comp = findComponentAt(g.x, g.y);
+   646→    if (comp) {
+   647→      setSelection({ type: 'component', id: comp.id });
+   648→      dragRef.current = {
+   649→        componentId: comp.id,
+   650→        offset: { x: g.x - comp.position.x, y: g.y - comp.position.y },
+   651→      };
+   652→      return;
+   653→    }
+   654→
+   655→    // check wire (for selection)
+   656→    const wireId = findWireAt(sx, sy);
+   657→    if (wireId) {
+   658→      setSelection({ type: 'wire', id: wireId });
+   659→      return;
+   660→    }
+   661→
+   662→    // empty space: clear selection, cancel wire
+   663→    setSelection({ type: null, id: null });
+   664→    if (wireDraft) cancelWire();
+   665→  };
+   666→
+   667→  const onMouseMove = (e: React.MouseEvent) => {
+   668→    const rect = canvasRef.current!.getBoundingClientRect();
+   669→    const sx = e.clientX - rect.left;
+   670→    const sy = e.clientY - rect.top;
+   671→    const g = screenToGrid(sx, sy);
+   672→    setCursor(g);
+   673→
+   674→    if (panRef.current) {
+   675→      setPan({
+   676→        x: panRef.current.origin.x + (sx - panRef.current.start.x),
+   677→        y: panRef.current.origin.y + (sy - panRef.current.start.y),
+   678→      });
+   679→      return;
+   680→    }
+   681→
+   682→    // wire segment dragging
+   683→    if (wireDragRef.current) {
+   684→      const wd = wireDragRef.current;
+   685→      const wire = wires.find((w) => w.id === wd.wireId);
+   686→      if (!wire) return;
+   687→      const fromComp = components.find((c) => c.id === wire.from.componentId);
+   688→      const toComp = components.find((c) => c.id === wire.to.componentId);
+   689→      if (!fromComp || !toComp) return;
+   690→      const fromPlugin = getPlugin(fromComp.type);
+   691→      const toPlugin = getPlugin(toComp.type);
+   692→      if (!fromPlugin || !toPlugin) return;
+   693→      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
+   694→      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
+   695→      if (!fromT || !toT) return;
+   696→      const fromPos = getTerminalPos(fromComp, fromT);
+   697→      const toPos = getTerminalPos(toComp, toT);
+   698→      // Reconstruct current waypoints
+   699→      let wps: Vec2[] = wire.waypoints && wire.waypoints.length > 0
+   700→        ? wire.waypoints.map((w) => ({ ...w }))
+   701→        : [{ x: (fromPos.x + toPos.x) / 2, y: fromPos.y }, { x: (fromPos.x + toPos.x) / 2, y: toPos.y }];
+   702→
+   703→      // The segment being dragged is between path[segIndex] and path[segIndex+1]
+   704→      // path = [fromPos, ...wps, toPos], so segIndex in terms of wps:
+   705→      // segIndex 0 => from->wp0 (or toPos if no wps), segIndex 1 => wp0->wp1, etc.
+   706→      // For the default 2-waypoint case, segIndex 1 is the vertical middle segment.
+   707→      // When dragging a horizontal segment, we move the Y of both endpoints;
+   708→      // when dragging a vertical segment, we move the X of both endpoints.
+   709→
+   710→      // Build full path indices
+   711→      const pathPoints: Vec2[] = [fromPos, ...wps, toPos];
+   712→      const segStart = pathPoints[wd.segIndex];
+   713→      const segEnd = pathPoints[wd.segIndex + 1];
+   714→      if (wd.axis === 'h') {
+   715→        // horizontal segment: drag changes Y of both endpoints
+   716→        const newY = g.y;
+   717→        if (wd.segIndex === 0) fromPos.y = newY; // can't actually move fromPos (it's a terminal)
+   718→        // We only move waypoint positions
+   719→        if (wd.segIndex > 0 && wd.segIndex <= wps.length) wps[wd.segIndex - 1].y = newY;
+   720→        if (wd.segIndex < wps.length) wps[wd.segIndex].y = newY;
+   721→        else toPos.y = newY; // can't move toPos either
+   722→        void segStart; void segEnd; void newY;
+   723→      } else {
+   724→        // vertical segment: drag changes X
+   725→        const newX = g.x;
+   726→        if (wd.segIndex > 0 && wd.segIndex <= wps.length) wps[wd.segIndex - 1].x = newX;
+   727→        if (wd.segIndex < wps.length) wps[wd.segIndex].x = newX;
+   728→        void newX;
+   729→      }
+   730→      setWireWaypoints(wd.wireId, wps);
+   731→      return;
+   732→    }
+   733→
+   734→    if (dragRef.current) {
+   735→      if (running) return; // no dragging during simulation
+   736→      const newPos = { x: g.x - dragRef.current.offset.x, y: g.y - dragRef.current.offset.y };
+   737→      moveComponent(dragRef.current.componentId, newPos);
+   738→      return;
+   739→    }
+   740→
+   741→    if (wireDraft) {
+   742→      updateWireCursor(g);
+   743→    }
+   744→
+   745→    // hover detection: priority: terminal > rotate handle > wire handle > wire > component
+   746→    const term = findTerminalAt(g.x, g.y);
+   747→    if (term) {
+   748→      setHover({ componentId: term.componentId, terminal: term, wireId: null, wireHandle: null, rotateHandle: null });
+   749→      return;
+   750→    }
+   751→    // rotate handle
+   752→    if (!running && selection.type === 'component') {
+   753→      const comp = components.find((c) => c.id === selection.id);
+   754→      if (comp) {
+   755→        const plugin = getPlugin(comp.type);
+   756→        if (plugin) {
+   757→          const bb = plugin.boundingBox;
+   758→          const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
+   759→          const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
+   760→          const hx = centerScreen.x;
+   761→          const hy = centerScreen.y - (bb.height / 2 * CELL_SIZE * zoom) - 16;
+   762→          const dx = sx - hx;
+   763→          const dy = sy - hy;
+   764→          if (dx * dx + dy * dy < 100) {
+   765→            setHover({ componentId: comp.id, terminal: null, wireId: null, wireHandle: null, rotateHandle: comp.id });
+   766→            return;
+   767→          }
+   768→        }
+   769→      }
+   770→    }
+   771→    // wire handle
+   772→    if (!running) {
+   773→      const wh = findWireHandle(sx, sy);
+   774→      if (wh) {
+   775→        setHover({ componentId: null, terminal: null, wireId: wh.wireId, wireHandle: wh, rotateHandle: null });
+   776→        return;
+   777→      }
+   778→    }
+   779→    // wire
+   780→    const wireId = findWireAt(sx, sy);
+   781→    if (wireId) {
+   782→      setHover({ componentId: null, terminal: null, wireId, wireHandle: null, rotateHandle: null });
+   783→      return;
+   784→    }
+   785→    // component
+   786→    const comp = findComponentAt(g.x, g.y);
+   787→    setHover({ componentId: comp?.id ?? null, terminal: null, wireId: null, wireHandle: null, rotateHandle: null });
+   788→  };
+   789→
+   790→  const onMouseUp = (e: React.MouseEvent) => {
+   791→    if (e.button === 1 || e.button === 2) {
+   792→      panRef.current = null;
+   793→      return;
+   794→    }
+   795→    if (wireDragRef.current) {
+   796→      useEditor.getState().pushHistory();
+   797→      wireDragRef.current = null;
+   798→      return;
+   799→    }
+   800→    if (dragRef.current) {
+   801→      if (!running) useEditor.getState().pushHistory();
+   802→      dragRef.current = null;
+   803→    }
+   804→  };
+   805→
+   806→  const onWheel = (e: React.WheelEvent) => {
+   807→    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+   808→    const newZoom = Math.max(0.4, Math.min(4, zoom * factor));
+   809→    setZoom(newZoom);
+   810→  };
+   811→
+   812→  const onDrop = (e: React.DragEvent) => {
+   813→    if (running) return;
+   814→    e.preventDefault();
+   815→    const type = e.dataTransfer.getData('application/x-circuit-type');
+   816→    if (!type) return;
+   817→    const rect = canvasRef.current!.getBoundingClientRect();
+   818→    const sx = e.clientX - rect.left;
+   819→    const sy = e.clientY - rect.top;
+   820→    const g = screenToGrid(sx, sy);
+   821→    addComponent(type, g);
+   822→  };
+   823→
+   824→  const onDragOver = (e: React.DragEvent) => {
+   825→    if (running) return;
+   826→    e.preventDefault();
+   827→    e.dataTransfer.dropEffect = 'copy';
+   828→  };
+   829→
+   830→  const onDoubleClick = (e: React.MouseEvent) => {
+   831→    if (running) return; // no rotation during simulation
+   832→    const rect = canvasRef.current!.getBoundingClientRect();
+   833→    const sx = e.clientX - rect.left;
+   834→    const sy = e.clientY - rect.top;
+   835→    const g = screenToGrid(sx, sy);
+   836→    const comp = findComponentAt(g.x, g.y);
+   837→    if (comp) rotateComponent(comp.id);
+   838→  };
+   839→
+   840→  // cursor style based on hover state
+   841→  const getCursorStyle = (): string => {
+   842→    if (running) {
+   843→      if (hover.componentId) {
+   844→        const comp = components.find((c) => c.id === hover.componentId);
+   845→        if (comp && TOGGLEABLE_TYPES.has(comp.type)) return 'pointer';
+   846→      }
+   847→      return 'default';
+   848→    }
+   849→    if (hover.terminal) return 'crosshair';
+   850→    if (hover.rotateHandle) return 'pointer';
+   851→    if (hover.wireHandle) return 'ns-resize';
+   852→    if (hover.wireId) return 'pointer';
+   853→    if (hover.componentId) return 'move';
+   854→    return 'crosshair';
+   855→  };
+   856→
+   857→  // keyboard
+   858→  useEffect(() => {
+   859→    const onKey = (e: KeyboardEvent) => {
+   860→      const target = e.target as HTMLElement;
+   861→      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+   862→      if (e.key === 'Delete' || e.key === 'Backspace') {
+   863→        if (running) return;
+   864→        const s = useEditor.getState().selection;
+   865→        if (s.type === 'component') deleteComponent(s.id!);
+   866→        else if (s.type === 'wire') useEditor.getState().deleteWire(s.id!);
+   867→      } else if (e.key === 'r' || e.key === 'R') {
+   868→        if (running) return;
+   869→        const s = useEditor.getState().selection;
+   870→        if (s.type === 'component') rotateComponent(s.id!);
+   871→      } else if (e.key === 'Escape') {
+   872→        cancelWire();
+   873→        setSelection({ type: null, id: null });
+   874→      } else if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+   875→        if (running) return;
+   876→        e.preventDefault();
+   877→        useEditor.getState().undo();
+   878→      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+   879→        if (running) return;
+   880→        e.preventDefault();
+   881→        useEditor.getState().redo();
+   882→      } else if (e.key === ' ') {
+   883→        e.preventDefault();
+   884→        const s = useEditor.getState();
+   885→        s.setRunning(!s.running);
+   886→      }
+   887→    };
+   888→    window.addEventListener('keydown', onKey);
+   889→    return () => window.removeEventListener('keydown', onKey);
+   890→  }, [deleteComponent, rotateComponent, cancelWire, setSelection, running]);
+   891→
+   892→  return (
+   893→    <div
+   894→      ref={containerRef}
+   895→      className="relative h-full w-full overflow-hidden bg-slate-950"
+   896→      onContextMenu={(e) => e.preventDefault()}
+   897→    >
+   898→      <canvas
+   899→        ref={canvasRef}
+   900→        className="absolute inset-0"
+   901→        style={{ cursor: getCursorStyle() }}
+   902→        onMouseDown={onMouseDown}
+   903→        onMouseMove={onMouseMove}
+   904→        onMouseUp={onMouseUp}
+   905→        onMouseLeave={() => { dragRef.current = null; panRef.current = null; wireDragRef.current = null; }}
+   906→        onWheel={onWheel}
+   907→        onDrop={onDrop}
+   908→        onDragOver={onDragOver}
+   909→        onDoubleClick={onDoubleClick}
+   910→      />
+   911→      {/* status overlay */}
+   912→      <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-slate-900/80 px-2 py-1 text-xs font-mono text-slate-400">
+   913→        ({cursor.x.toFixed(1)}, {cursor.y.toFixed(1)})  zoom: {zoom.toFixed(2)}x  {running ? '▶ running' : '⏸ paused'}
+   914→        {running && <span className="ml-2 text-amber-300">· click switches to toggle</span>}
+   915→      </div>
+   916→      <div className="pointer-events-none absolute bottom-2 right-2 rounded-md bg-slate-900/80 px-2 py-1 text-xs font-mono text-slate-400">
+   917→        {running ? 'Click switches to toggle • Space to pause' : 'Drag from left • Double-click/R to rotate • Del delete • Space play/pause'}
+   918→      </div>
+   919→      {/* zoom controls */}
+   920→      <div className="absolute right-2 top-2 flex flex-col gap-1">
+   921→        <button
+   922→          onClick={() => setZoom((z) => Math.min(4, z * 1.2))}
+   923→          className="h-7 w-7 rounded bg-slate-800 text-slate-200 hover:bg-slate-700"
+   924→        >+</button>
+   925→        <button
+   926→          onClick={() => setZoom((z) => Math.max(0.4, z / 1.2))}
+   927→          className="h-7 w-7 rounded bg-slate-800 text-slate-200 hover:bg-slate-700"
+   928→        >−</button>
+   929→        <button
+   930→          onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
+   931→          className="h-7 w-7 rounded bg-slate-800 text-slate-200 hover:bg-slate-700 text-xs"
+   932→        >⌂</button>
+   933→      </div>
+   934→    </div>
+   935→  );
+   936→}
+   937→
+   938→/** Distance from point (px, py) to segment (ax,ay)-(bx,by) */
+   939→function pointToSegmentDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+   940→  const dx = bx - ax;
+   941→  const dy = by - ay;
+   942→  const lenSq = dx * dx + dy * dy;
+   943→  if (lenSq === 0) return Math.hypot(px - ax, py - ay);
+   944→  let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+   945→  t = Math.max(0, Math.min(1, t));
+   946→  const cx = ax + t * dx;
+   947→  const cy = ay + t * dy;
+   948→  return Math.hypot(px - cx, py - cy);
+   949→}
+   950→
