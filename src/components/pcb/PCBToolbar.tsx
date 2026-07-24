@@ -7,7 +7,7 @@ import { Slider } from '@/components/ui/slider';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   Download, MousePointer2, Route, Plus, RotateCw, Trash2, Grid3x3, Eye, Zap,
-  ShieldCheck, Layers, FileDown,
+  ShieldCheck, Layers, FileDown, Wand2, GitCompare,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -37,6 +37,8 @@ export function PCBToolbar() {
   const removeCopperPour = usePCB((s) => s.removeCopperPour);
   const copperPours = usePCB((s) => s.copperPours);
   const exportGerbers = usePCB((s) => s.exportGerbers);
+  const runAutoRoute = usePCB((s) => s.runAutoRoute);
+  const runNetlistVerify = usePCB((s) => s.runNetlistVerify);
 
   const components = useEditor((s) => s.components);
   const wires = useEditor((s) => s.wires);
@@ -77,6 +79,32 @@ export function PCBToolbar() {
   const handleGerberExport = () => {
     exportGerbers();
     toast.success('Gerber + drill + PnP files exported');
+  };
+
+  const handleAutoRoute = () => {
+    if (usePCB.getState().footprints.length === 0) {
+      toast.error('No footprints to route');
+      return;
+    }
+    runAutoRoute();
+    const state = usePCB.getState();
+    const routedNets = new Set(state.traces.map((t) => t.id.startsWith('auto_')));
+    toast.success(`Auto-route complete: ${state.traces.filter(t => t.id.startsWith('auto_')).length} traces added`);
+  };
+
+  const handleNetlistVerify = () => {
+    const result = runNetlistVerify();
+    if (!result) {
+      toast.error('Could not verify netlist — no schematic loaded');
+      return;
+    }
+    if (result.ok && result.errors.length === 0) {
+      toast.success(`Netlist verified: ${result.stats.matchedNets}/${result.stats.schematicNets} nets match`);
+    } else {
+      const errors = result.errors.filter((e) => e.severity === 'error').length;
+      const warnings = result.errors.filter((e) => e.severity === 'warning').length;
+      toast.warning(`Netlist: ${errors} error(s), ${warnings} warning(s)`);
+    }
   };
 
   const handleCopperPour = () => {
@@ -204,6 +232,26 @@ export function PCBToolbar() {
             </Button>
           </TooltipTrigger>
           <TooltipContent>Toggle GND copper pour on {activeLayer} layer</TooltipContent>
+        </Tooltip>
+
+        {/* Auto-route */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={handleAutoRoute} className="text-purple-400 hover:text-purple-300">
+              <Wand2 size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Auto-route all unrouted nets (Lee's algorithm)</TooltipContent>
+        </Tooltip>
+
+        {/* Netlist verify */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={handleNetlistVerify} className="text-cyan-400 hover:text-cyan-300">
+              <GitCompare size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Verify PCB netlist matches schematic</TooltipContent>
         </Tooltip>
 
         <div className="mx-1 h-5 w-px bg-slate-700" />

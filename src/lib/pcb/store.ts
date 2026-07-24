@@ -13,7 +13,7 @@ import type {
   PCBDocument,
   Pad,
 } from './types';
-import type { CircuitComponent, Wire } from '../circuit/types';
+import { useEditor } from '../circuit/store';
 import { getFootprintDef } from './footprints';
 import { createPCBFromSchematic } from './netlist-sync';
 import { runDRC as runDRCCheck, DEFAULT_DRC_CONFIG } from './drc';
@@ -21,6 +21,9 @@ import type { DRCError } from './drc';
 import { generateCopperPour } from './copper-pour';
 import type { CopperPour } from './copper-pour';
 import { exportAllGerbers } from './gerber-export';
+import { autoRoute } from './auto-router';
+import { verifyNetlist } from './netlist-verify';
+import type { NetlistVerifyResult } from './netlist-verify';
 
 export type PCBTool = 'select' | 'route' | 'via' | 'move' | 'pour';
 
@@ -77,6 +80,8 @@ interface PCBState {
   addCopperPour: (layer: 'top' | 'bottom', net: string) => void;
   removeCopperPour: (layer: 'top' | 'bottom') => void;
   exportGerbers: () => void;
+  runAutoRoute: () => void;
+  runNetlistVerify: () => NetlistVerifyResult | null;
 }
 
 let idCounter = 0;
@@ -310,6 +315,25 @@ export const usePCB = create<PCBState>((set, get) => ({
       a.click();
       URL.revokeObjectURL(url);
     }
+  },
+
+  runAutoRoute: () => {
+    const s = get();
+    const result = autoRoute(
+      s.footprints, s.traces, s.vias, s.ratsnest, s.board,
+      s.activeLayer, s.defaultTraceWidth,
+    );
+    set({ traces: result.traces, vias: result.vias });
+  },
+
+  runNetlistVerify: () => {
+    const s = get();
+    const editorState = useEditor.getState();
+    const result = verifyNetlist(
+      editorState.components, editorState.wires,
+      s.footprints, s.traces,
+    );
+    return result;
   },
 }));
 
