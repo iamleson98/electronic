@@ -221,11 +221,13 @@ export const exampleNmos: CircuitDocument = {
 };
 
 // ----- Example 8: 7-segment counter (Arduino-driven) -----
+// The Arduino sketch cycles D2→D3→D4→D5, lighting segments a→b→c→d in sequence.
+// Using 20ms wait instead of 200ms so the cycling is visible at default simulation speed.
 export const exampleSevenSeg: CircuitDocument = {
   version: 1,
   components: [
     comp('arduinoReal', 'ard1', [4, 8], 0, {
-      sketch: '// 4-bit counter on D2-D5\nloop:\nD2 = HIGH\nwait 200ms\nD2 = LOW\nD3 = HIGH\nwait 200ms\nD3 = LOW\nD4 = HIGH\nwait 200ms\nD4 = LOW\nD5 = HIGH\nwait 200ms\nD5 = LOW\ngoto loop',
+      sketch: '// 4-bit counter on D2-D5\nloop:\nD2 = HIGH\nwait 20ms\nD2 = LOW\nD3 = HIGH\nwait 20ms\nD3 = LOW\nD4 = HIGH\nwait 20ms\nD4 = LOW\nD5 = HIGH\nwait 20ms\nD5 = LOW\ngoto loop',
       vcc: 5,
     }),
     comp('resistor', 'ra', [16, 4], 0, { resistance: 220 }),
