@@ -4,9 +4,11 @@ import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
-import { Label } from '@/components/ui/label';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Download, MousePointer2, Route, Plus, RotateCw, Trash2, Grid3x3, Eye, Zap } from 'lucide-react';
+import {
+  Download, MousePointer2, Route, Plus, RotateCw, Trash2, Grid3x3, Eye, Zap,
+  ShieldCheck, Layers, FileDown,
+} from 'lucide-react';
 import { toast } from 'sonner';
 
 export function PCBToolbar() {
@@ -28,7 +30,13 @@ export function PCBToolbar() {
   const importFromSchematic = usePCB((s) => s.importFromSchematic);
   const serialize = usePCB((s) => s.serialize);
   const clearPCB = usePCB((s) => s.clearPCB);
-  const cancelRouting = usePCB((s) => s.cancelRouting);
+  const runDRC = usePCB((s) => s.runDRC);
+  const clearDRC = usePCB((s) => s.clearDRC);
+  const drcErrors = usePCB((s) => s.drcErrors);
+  const addCopperPour = usePCB((s) => s.addCopperPour);
+  const removeCopperPour = usePCB((s) => s.removeCopperPour);
+  const copperPours = usePCB((s) => s.copperPours);
+  const exportGerbers = usePCB((s) => s.exportGerbers);
 
   const components = useEditor((s) => s.components);
   const wires = useEditor((s) => s.wires);
@@ -42,7 +50,7 @@ export function PCBToolbar() {
     toast.success(`Imported ${components.length} components from schematic`);
   };
 
-  const handleExport = () => {
+  const handleExportJSON = () => {
     const doc = serialize();
     const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -51,12 +59,40 @@ export function PCBToolbar() {
     a.download = `pcb_${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    toast.success('PCB layout exported');
+    toast.success('PCB layout exported as JSON');
+  };
+
+  const handleDRC = () => {
+    runDRC();
+    const errors = usePCB.getState().drcErrors;
+    const errorCount = errors.filter((e) => e.severity === 'error').length;
+    const warnCount = errors.filter((e) => e.severity === 'warning').length;
+    if (errorCount === 0 && warnCount === 0) {
+      toast.success('DRC passed — no errors found');
+    } else {
+      toast.warning(`DRC: ${errorCount} error(s), ${warnCount} warning(s)`);
+    }
+  };
+
+  const handleGerberExport = () => {
+    exportGerbers();
+    toast.success('Gerber + drill + PnP files exported');
+  };
+
+  const handleCopperPour = () => {
+    const hasPour = copperPours.some((p) => p.layer === activeLayer);
+    if (hasPour) {
+      removeCopperPour(activeLayer);
+      toast.info(`Copper pour removed from ${activeLayer} layer`);
+    } else {
+      addCopperPour(activeLayer, 'GND');
+      toast.success(`GND copper pour added to ${activeLayer} layer`);
+    }
   };
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="flex items-center gap-1 border-b border-slate-800 bg-slate-900 px-3 py-2">
+      <div className="flex items-center gap-1 border-b border-slate-800 bg-slate-900 px-3 py-2 flex-wrap">
         {/* Brand */}
         <div className="mr-2 flex items-center gap-2 pr-3">
           <div className="flex h-7 w-7 items-center justify-center rounded bg-gradient-to-br from-emerald-500 to-cyan-600 text-white">
@@ -70,7 +106,7 @@ export function PCBToolbar() {
           <TooltipTrigger asChild>
             <Button size="sm" className="bg-emerald-500 text-slate-900 hover:bg-emerald-400" onClick={handleImport}>
               <Zap size={14} className="mr-1" />
-              <span className="hidden md:inline">Import Schematic</span>
+              <span className="hidden md:inline">Import</span>
             </Button>
           </TooltipTrigger>
           <TooltipContent>Import components & netlist from the schematic</TooltipContent>
@@ -108,22 +144,12 @@ export function PCBToolbar() {
 
         {/* Layer selector */}
         <div className="flex items-center gap-1">
-          <Button
-            size="sm"
-            variant={activeLayer === 'top' ? 'default' : 'ghost'}
+          <Button size="sm" variant={activeLayer === 'top' ? 'default' : 'ghost'}
             className={activeLayer === 'top' ? 'bg-red-600 text-white hover:bg-red-500' : ''}
-            onClick={() => setActiveLayer('top')}
-          >
-            Top
-          </Button>
-          <Button
-            size="sm"
-            variant={activeLayer === 'bottom' ? 'default' : 'ghost'}
+            onClick={() => setActiveLayer('top')}>Top</Button>
+          <Button size="sm" variant={activeLayer === 'bottom' ? 'default' : 'ghost'}
             className={activeLayer === 'bottom' ? 'bg-blue-600 text-white hover:bg-blue-500' : ''}
-            onClick={() => setActiveLayer('bottom')}
-          >
-            Bottom
-          </Button>
+            onClick={() => setActiveLayer('bottom')}>Bot</Button>
         </div>
 
         <div className="mx-1 h-5 w-px bg-slate-700" />
@@ -131,14 +157,8 @@ export function PCBToolbar() {
         {/* Trace width */}
         <div className="flex items-center gap-2 px-1">
           <span className="hidden text-xs text-slate-400 lg:inline">Width</span>
-          <Slider
-            value={[defaultTraceWidth * 10]}
-            min={2}
-            max={30}
-            step={1}
-            onValueChange={(v) => setDefaultTraceWidth(v[0] / 10)}
-            className="w-20"
-          />
+          <Slider value={[defaultTraceWidth * 10]} min={2} max={30} step={1}
+            onValueChange={(v) => setDefaultTraceWidth(v[0] / 10)} className="w-20" />
           <span className="w-10 text-right font-mono text-xs text-slate-300">{defaultTraceWidth.toFixed(1)}mm</span>
         </div>
 
@@ -155,19 +175,35 @@ export function PCBToolbar() {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="text-rose-400 hover:text-rose-300"
-              onClick={() => {
-                if (selectedTraceId) usePCB.getState().deleteTrace(selectedTraceId);
-                else if (confirm('Clear entire PCB?')) clearPCB();
-              }}
-            >
+            <Button size="sm" variant="ghost" className="text-rose-400 hover:text-rose-300"
+              onClick={() => { if (selectedTraceId) usePCB.getState().deleteTrace(selectedTraceId); }}>
               <Trash2 size={14} />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Delete trace / Clear PCB</TooltipContent>
+          <TooltipContent>Delete selected trace</TooltipContent>
+        </Tooltip>
+
+        <div className="mx-1 h-5 w-px bg-slate-700" />
+
+        {/* DRC */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={handleDRC} className={drcErrors.length > 0 ? 'text-amber-400' : ''}>
+              <ShieldCheck size={14} />
+              {drcErrors.length > 0 && <span className="ml-1 text-xs">{drcErrors.length}</span>}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Run DRC (Design Rule Check)</TooltipContent>
+        </Tooltip>
+
+        {/* Copper pour */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant={copperPours.some((p) => p.layer === activeLayer) ? 'default' : 'ghost'} onClick={handleCopperPour}>
+              <Layers size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Toggle GND copper pour on {activeLayer} layer</TooltipContent>
         </Tooltip>
 
         <div className="mx-1 h-5 w-px bg-slate-700" />
@@ -189,25 +225,27 @@ export function PCBToolbar() {
           </TooltipTrigger>
           <TooltipContent>Toggle Grid</TooltipContent>
         </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button size="sm" variant={showPadNets ? 'default' : 'ghost'} onClick={togglePadNets}>
-              <Label size={14} />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Toggle Net Names on Pads</TooltipContent>
-        </Tooltip>
 
         <div className="ml-auto flex items-center gap-1">
-          {/* Export */}
+          {/* Export JSON */}
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button size="sm" variant="ghost" onClick={handleExport}>
+              <Button size="sm" variant="ghost" onClick={handleExportJSON}>
                 <Download size={14} />
-                <span className="ml-1 hidden md:inline">Export</span>
+                <span className="ml-1 hidden md:inline">JSON</span>
               </Button>
             </TooltipTrigger>
             <TooltipContent>Export PCB as JSON</TooltipContent>
+          </Tooltip>
+          {/* Export Gerbers */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button size="sm" className="bg-amber-500 text-slate-900 hover:bg-amber-400" onClick={handleGerberExport}>
+                <FileDown size={14} />
+                <span className="ml-1 hidden md:inline">Gerbers</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Export Gerber + Drill + PnP files</TooltipContent>
           </Tooltip>
         </div>
       </div>

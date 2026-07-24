@@ -35,6 +35,8 @@ export function PCBCanvas() {
   const showRatsnest = usePCB((s) => s.showRatsnest);
   const showGrid = usePCB((s) => s.showGrid);
   const showPadNets = usePCB((s) => s.showPadNets);
+  const drcErrors = usePCB((s) => s.drcErrors);
+  const copperPours = usePCB((s) => s.copperPours);
 
   const moveFootprint = usePCB((s) => s.moveFootprint);
   const rotateFootprint = usePCB((s) => s.rotateFootprint);
@@ -141,6 +143,36 @@ export function PCBCanvas() {
     ctx.strokeStyle = '#4ade80';
     ctx.lineWidth = 2;
     ctx.strokeRect(boardTL.x, boardTL.y, boardBR.x - boardTL.x, boardBR.y - boardTL.y);
+
+    // copper pours (ground planes)
+    for (const pour of copperPours) {
+      const color = pour.layer === 'top' ? 'rgba(220, 38, 38, 0.15)' : 'rgba(37, 99, 235, 0.15)';
+      ctx.fillStyle = color;
+      const cellPx = pour.cellSize * PX_PER_MM * zoom;
+      for (const cell of pour.cells) {
+        const sp = mmToScreen(cell.x - pour.cellSize / 2, cell.y - pour.cellSize / 2);
+        ctx.fillRect(sp.x, sp.y, cellPx, cellPx);
+      }
+    }
+
+    // DRC error markers
+    for (const err of drcErrors) {
+      const sp = mmToScreen(err.position.x, err.position.y);
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 6, 0, Math.PI * 2);
+      ctx.fillStyle = err.severity === 'error' ? 'rgba(239, 68, 68, 0.3)' : 'rgba(251, 191, 36, 0.3)';
+      ctx.fill();
+      ctx.strokeStyle = err.severity === 'error' ? '#ef4444' : '#fbbf24';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      // X mark
+      ctx.beginPath();
+      ctx.moveTo(sp.x - 3, sp.y - 3);
+      ctx.lineTo(sp.x + 3, sp.y + 3);
+      ctx.moveTo(sp.x + 3, sp.y - 3);
+      ctx.lineTo(sp.x - 3, sp.y + 3);
+      ctx.stroke();
+    }
 
     // ratsnest (airwires)
     if (showRatsnest) {
@@ -291,7 +323,7 @@ export function PCBCanvas() {
     ctx.restore();
   }, [size, pan, zoom, board, footprints, traces, vias, ratsnest, padNets, activeLayer, tool,
       defaultTraceWidth, selectedFootprintId, selectedTraceId, routingFrom, routingPath,
-      showRatsnest, showGrid, showPadNets, cursor, mmToScreen]);
+      showRatsnest, showGrid, showPadNets, cursor, mmToScreen, drcErrors, copperPours]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {

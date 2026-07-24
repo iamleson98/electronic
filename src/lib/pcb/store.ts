@@ -16,8 +16,13 @@ import type {
 import type { CircuitComponent, Wire } from '../circuit/types';
 import { getFootprintDef } from './footprints';
 import { createPCBFromSchematic } from './netlist-sync';
+import { runDRC as runDRCCheck, DEFAULT_DRC_CONFIG } from './drc';
+import type { DRCError } from './drc';
+import { generateCopperPour } from './copper-pour';
+import type { CopperPour } from './copper-pour';
+import { exportAllGerbers } from './gerber-export';
 
-export type PCBTool = 'select' | 'route' | 'via' | 'move';
+export type PCBTool = 'select' | 'route' | 'via' | 'move' | 'pour';
 
 interface PCBState {
   // document
@@ -41,6 +46,10 @@ interface PCBState {
   showGrid: boolean;
   showPadNets: boolean;
 
+  // DRC + copper pour
+  drcErrors: DRCError[];
+  copperPours: CopperPour[];
+
   // actions
   importFromSchematic: (components: CircuitComponent[], wires: Wire[]) => void;
   setTool: (tool: PCBTool) => void;
@@ -63,6 +72,11 @@ interface PCBState {
   clearPCB: () => void;
   serialize: () => PCBDocument;
   loadDocument: (doc: PCBDocument) => void;
+  runDRC: () => void;
+  clearDRC: () => void;
+  addCopperPour: (layer: 'top' | 'bottom', net: string) => void;
+  removeCopperPour: (layer: 'top' | 'bottom') => void;
+  exportGerbers: () => void;
 }
 
 let idCounter = 0;
@@ -88,6 +102,8 @@ export const usePCB = create<PCBState>((set, get) => ({
   showRatsnest: true,
   showGrid: true,
   showPadNets: false,
+  drcErrors: [],
+  copperPours: [],
 
   importFromSchematic: (components, wires) => {
     const { footprints, ratsnest, padNets } = createPCBFromSchematic(components, wires);
@@ -258,7 +274,43 @@ export const usePCB = create<PCBState>((set, get) => ({
     defaultTraceWidth: doc.defaultTraceWidth,
     ratsnest: [],
     padNets: new Map(),
+    drcErrors: [],
+    copperPours: [],
   }),
+
+  runDRC: () => {
+    const s = get();
+    const errors = runDRCCheck(s.footprints, s.traces, s.vias, s.ratsnest, s.board, DEFAULT_DRC_CONFIG);
+    set({ drcErrors: errors });
+  },
+
+  clearDRC: () => set({ drcErrors: [] }),
+
+  addCopperPour: (layer, net) => {
+    const s = get();
+    const pour = generateCopperPour(layer, net, s.footprints, s.traces, s.vias, s.board);
+    set((st) => ({
+      copperPours: [...st.copperPours.filter((p) => !(p.layer === layer && p.net === net)), pour],
+    }));
+  },
+
+  removeCopperPour: (layer) => {
+    set((st) => ({ copperPours: st.copperPours.filter((p) => p.layer !== layer) }));
+  },
+
+  exportGerbers: () => {
+    const s = get();
+    const files = exportAllGerbers(s.footprints, s.traces, s.vias, s.board);
+    for (const file of files) {
+      const blob = new Blob([file.content], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = file.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  },
 }));
 
 // Helper: compute ratsnest from current state
