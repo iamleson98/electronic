@@ -183,10 +183,10 @@ export function createPCBFromSchematic(
   components: CircuitComponent[],
   wires: Wire[],
 ): { footprints: Footprint[]; ratsnest: Ratsnest[]; padNets: Map<string, string> } {
-  // Default board size: auto-calculated based on component count
-  const area = components.length * 200; // 200 mm² per component
-  const boardWidth = Math.max(50, Math.ceil(Math.sqrt(area) * 1.5));
-  const boardHeight = Math.max(50, Math.ceil(Math.sqrt(area) * 1.0));
+  // Board size: give each component at least 400mm² of space
+  const area = components.length * 400;
+  const boardWidth = Math.max(80, Math.ceil(Math.sqrt(area) * 1.8));
+  const boardHeight = Math.max(60, Math.ceil(Math.sqrt(area) * 1.2));
 
   const footprints = generateFootprints(components, boardWidth, boardHeight);
   const { ratsnest, padNets } = computeRatsnest(components, wires, footprints);

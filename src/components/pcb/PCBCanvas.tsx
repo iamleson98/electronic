@@ -98,6 +98,25 @@ export function PCBCanvas() {
     return null;
   }, [footprints, screenToMm]);
 
+  // Auto-fit board to viewport when footprints change (import)
+  useEffect(() => {
+    if (footprints.length === 0 || size.width < 10) return;
+    const margin = 40;
+    const zoomX = (size.width - margin * 2) / (board.width * PX_PER_MM);
+    const zoomY = (size.height - margin * 2) / (board.height * PX_PER_MM);
+    const fitZoom = Math.min(zoomX, zoomY, 5);
+    const boardScreenW = board.width * PX_PER_MM * fitZoom;
+    const boardScreenH = board.height * PX_PER_MM * fitZoom;
+    // Use requestAnimationFrame to avoid synchronous setState in effect
+    requestAnimationFrame(() => {
+      setZoom(fitZoom);
+      setPan({
+        x: (size.width - boardScreenW) / 2,
+        y: (size.height - boardScreenH) / 2,
+      });
+    });
+  }, [footprints.length, board.width, board.height, size.width, size.height]);
+
   // ----- Rendering -----
   useEffect(() => {
     const canvas = canvasRef.current;
