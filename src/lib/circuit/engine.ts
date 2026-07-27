@@ -302,9 +302,26 @@ function computeTerminalCurrent(
     const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
     return (termNode === a) ? -compCurrent : compCurrent;
   } else if (comp.type === 'npn' || comp.type === 'pnp' || comp.type === 'nmos' || comp.type === 'pmos') {
-    // 3-terminal: use the collector/emitter or drain/source current
-    // For flow visualization, return the component current
-    return compCurrent;
+    // 3-terminal transistor/MOSFET
+    // Physics (NPN/NMOS): current flows C→E (or D→S) THROUGH the device.
+    //   At collector/drain: current ENTERS (leaves terminal = negative)
+    //   At emitter/source: current EXITS (leaves terminal = positive)
+    // Physics (PNP/PMOS): current flows E→C (or S→D) — reversed.
+    //   At emitter/source: current ENTERS (leaves terminal = negative)
+    //   At collector/drain: current EXITS (leaves terminal = positive)
+    const isNpn = comp.type === 'npn' || comp.type === 'nmos';
+    const cOrD = isNpn ? (comp.type === 'npn' ? 'c' : 'd') : (comp.type === 'pnp' ? 'c' : 'd');
+    const eOrS = isNpn ? (comp.type === 'npn' ? 'e' : 's') : (comp.type === 'pnp' ? 'e' : 's');
+    if (terminalId === eOrS) {
+      // Emitter/Source: for NPN/NMOS current EXITS here; for PNP/PMOS current ENTERS here
+      return isNpn ? compCurrent : -compCurrent;
+    } else if (terminalId === cOrD) {
+      // Collector/Drain: for NPN/NMOS current ENTERS here; for PNP/PMOS current EXITS here
+      return isNpn ? -compCurrent : compCurrent;
+    } else {
+      // Base/Gate: small current, return 0 for flow visualization
+      return 0;
+    }
   }
   return 0;
 }
@@ -451,19 +468,33 @@ export function computeComponentCurrents(
         current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / 0.01;
       }
     } else if (comp.type === 'npn' || comp.type === 'pnp') {
-      // BJT: collector/emitter current
-      const cOrE = comp.type === 'npn' ? 'c' : 'e';
-      const eOrC = comp.type === 'npn' ? 'e' : 'c';
-      const cNode = terms.find((t) => t.terminalId === cOrE)?.nodeId ?? 0;
-      const eNode = terms.find((t) => t.terminalId === eOrC)?.nodeId ?? 0;
-      // For NPN: current flows C→E. For PNP: current flows E→C.
-      // Use the nodeCurrentOut at the "input" terminal.
-      current = nodeCurrentOut.get(cNode) ?? 0;
+      // BJT: collector→emitter current (NPN) or emitter→collector (PNP)
+      // nodeCurrentOut at collector = current LEAVING collector node
+      // For NPN: current ENTERS collector (leaves node = negative), so negate
+      // For PNP: current ENTERS emitter, EXITS collector
+      const isNpn = comp.type === 'npn';
+      const cNode = terms.find((t) => t.terminalId === 'c')?.nodeId ?? 0;
+      const eNode = terms.find((t) => t.terminalId === 'e')?.nodeId ?? 0;
+      if (isNpn) {
+        // NPN: current flows C→E. At collector node, current leaves toward transistor (negative out).
+        // So component current = -nodeCurrentOut(cNode) = current entering collector
+        current = -(nodeCurrentOut.get(cNode) ?? 0);
+      } else {
+        // PNP: current flows E→C. At emitter node, current leaves toward transistor (negative out).
+        current = -(nodeCurrentOut.get(eNode) ?? 0);
+      }
     } else if (comp.type === 'nmos' || comp.type === 'pmos') {
-      // MOSFET: drain/source current
-      const dOrS = comp.type === 'nmos' ? 'd' : 's';
-      const dNode = terms.find((t) => t.terminalId === dOrS)?.nodeId ?? 0;
-      current = nodeCurrentOut.get(dNode) ?? 0;
+      // MOSFET: drain→source (NMOS) or source→drain (PMOS)
+      const isNmos = comp.type === 'nmos';
+      const dNode = terms.find((t) => t.terminalId === 'd')?.nodeId ?? 0;
+      const sNode = terms.find((t) => t.terminalId === 's')?.nodeId ?? 0;
+      if (isNmos) {
+        // NMOS: current flows D→S. At drain, current enters (leaves node = negative).
+        current = -(nodeCurrentOut.get(dNode) ?? 0);
+      } else {
+        // PMOS: current flows S→D. At source, current enters (leaves node = negative).
+        current = -(nodeCurrentOut.get(sNode) ?? 0);
+      }
     } else if (comp.type === 'timer555') {
       // 555: current flows from VCC through OUT pin
       const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
