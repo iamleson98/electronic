@@ -311,10 +311,15 @@ export function computeComponentCurrents(
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
     } else if (comp.type === 'inductor') {
+      // Compute fresh inductor current (no one-step lag)
+      const L = Math.max(1e-12, comp.parameters.inductance as number);
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
       const st = sim.state.__global ?? {};
-      const i = st[`ind_${a}_${b}`] ?? 0;
+      const iPrev = st[`ind_${a}_${b}`] ?? 0;
+      const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
+      const dt = Math.max(sim.dt, 1e-12);
+      const i = iPrev + (v / L) * dt;
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
     } else if (comp.type === 'led' || comp.type === 'diode') {
@@ -368,10 +373,17 @@ export function computeComponentCurrents(
       const vPrev = st[`cap_${a}_${b}`] ?? 0;
       current = (C / Math.max(sim.dt, 1e-12)) * ((sim.nodeVoltage[a] - sim.nodeVoltage[b]) - vPrev);
     } else if (comp.type === 'inductor') {
+      // Compute fresh inductor current from V = L·dI/dt using current voltage
+      // This avoids the one-step-behind bug from reading stored state
+      const L = Math.max(1e-12, comp.parameters.inductance as number);
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
       const st = sim.state.__global ?? {};
-      current = st[`ind_${a}_${b}`] ?? 0; // a→b
+      const iPrev = st[`ind_${a}_${b}`] ?? 0;
+      const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
+      const dt = Math.max(sim.dt, 1e-12);
+      // I_now = I_prev + (V/L)*dt — uses current voltage (no lag)
+      current = iPrev + (v / L) * dt;
     } else if (comp.type === 'led' || comp.type === 'diode') {
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
@@ -410,6 +422,38 @@ export function computeComponentCurrents(
       const dOrS = comp.type === 'nmos' ? 'd' : 's';
       const dNode = terms.find((t) => t.terminalId === dOrS)?.nodeId ?? 0;
       current = nodeCurrentOut.get(dNode) ?? 0;
+    } else if (comp.type === 'timer555') {
+      // 555: current flows from VCC through OUT pin
+      const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+      current = nodeCurrentOut.get(outNode) ?? 0;
+    } else if (comp.type === 'opamp') {
+      // Op-amp: output current
+      const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+      current = nodeCurrentOut.get(outNode) ?? 0;
+    } else if (comp.type === 'arduino' || comp.type === 'arduinoReal' || comp.type === 'raspberryPi') {
+      // MCU: sum of currents on all digital pins
+      let totalCurrent = 0;
+      for (const t of terms) {
+        totalCurrent += Math.abs(nodeCurrentOut.get(t.nodeId) ?? 0);
+      }
+      current = totalCurrent;
+    } else if (comp.type === 'voltmeter' || comp.type === 'ammeter' || comp.type === 'oscilloscope') {
+      // Meters: very high impedance, negligible current
+      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+      const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+      current = (sim.nodeVoltage[p] - sim.nodeVoltage[n]) / 1e7; // 10MΩ input impedance
+    } else if (comp.type === 'vco' || comp.type === 'crystal') {
+      // Oscillators: output current
+      const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+      current = nodeCurrentOut.get(outNode) ?? 0;
+    } else if (comp.type === 'speaker' || comp.type === 'lamp' || comp.type === 'dcMotor') {
+      // Load components: same as resistor
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      const r = (comp.type === 'speaker') ? Math.max(1, comp.parameters.resistance as number) :
+                (comp.type === 'lamp') ? Math.max(1, comp.parameters.resistance as number) :
+                Math.max(1, comp.parameters.resistance as number);
+      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
     }
 
     result.set(comp.id, current);

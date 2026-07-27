@@ -77,18 +77,25 @@ const ammeter: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, 'A', cellSize, 1.5 * cellSize);
   },
-  stamp(params, terminals, sys) {
+  stamp(params, terminals, sys, sim) {
     const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     // 0V voltage source acts as short circuit with measurable current
-    sys.stampVoltageSource(p, n, 0);
+    const branchIdx = sys.stampVoltageSource(p, n, 0);
+    // Store branch index on sim.state for later retrieval in measure()
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    st[`ammeter_${p}_${n}`] = branchIdx;
   },
   measure(params, terminals, sim) {
-    // we need the branch current; this requires bookkeeping per ammeter.
-    // The simulator stores branch currents in sim.branchCurrent indexed by extra var index.
-    // We don't have the index here easily; approximate by reading the voltage at the same nodes
-    // (which will be ~equal) -- but we can't measure current directly. For now, return 0 placeholder.
-    return [{ label: 'I', value: '?', unit: 'A' }];
+    const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
+    const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
+    const st = sim.state.__global ?? {};
+    const branchIdx = st[`ammeter_${p}_${n}`];
+    if (branchIdx !== undefined && sim.branchCurrent[branchIdx] !== undefined) {
+      const i = sim.branchCurrent[branchIdx];
+      return [{ label: 'I', value: (i * 1000).toFixed(3), unit: 'mA' }];
+    }
+    return [{ label: 'I', value: '0.000', unit: 'mA' }];
   },
 };
 

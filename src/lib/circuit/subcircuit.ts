@@ -402,7 +402,7 @@ export function registerBuiltinSubCircuits() {
 
 // Helper: build internal node map for sub-circuit step()
 function buildInternalNodeMap(
-  doc: { components: CircuitComponent[]; wires: Wire[] },
+  doc: { components: CircuitComponent[]; wires: import('./types').Wire[] },
   plugins: Map<string, ComponentPlugin>,
   pinToNode: Map<string, number>,
 ): Map<string, number> {

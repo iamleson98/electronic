@@ -63,7 +63,7 @@ export function parseSpiceValue(s: string): number {
     't': 1e12, 'g': 1e9, 'meg': 1e6, 'k': 1e3,
     'm': 1e-3, 'mil': 25.4e-6,
     'u': 1e-6, 'µ': 1e-6,
-    'n': 1e-9, 'p': 1e-12, 'f': 1e-15,
+    'n': 1e-9, 'p': 1e-12,
     'hz': 1, 's': 1, 'v': 1, 'a': 1, 'ohm': 1, 'ohms': 1, 'f': 1e-15, 'h': 1,
   };
   // meg first (3-letter) to avoid falling into 'm'

@@ -1,5 +1,6 @@
 'use client';
 
+import { useRef } from 'react';
 import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
 import { Button } from '@/components/ui/button';
@@ -7,7 +8,7 @@ import { Slider } from '@/components/ui/slider';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   Download, MousePointer2, Route, Plus, RotateCw, Trash2, Grid3x3, Eye, Zap,
-  ShieldCheck, Layers, FileDown, Wand2, GitCompare,
+  ShieldCheck, Layers, FileDown, Wand2, GitCompare, Upload,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -76,6 +77,41 @@ export function PCBToolbar() {
     }
   };
 
+  const kicadFileInputRef = useRef<HTMLInputElement | null>(null);
+  const handleKiCadImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const content = reader.result as string;
+        const { importKiCadFootprint, importKiCadFootprintsFromFile } = require('@/lib/pcb/kicad-import');
+        const { footprintDefs } = require('@/lib/pcb/footprints');
+        if (file.name.endsWith('.kicad_mod')) {
+          const def = importKiCadFootprint(content);
+          if (def) {
+            footprintDefs[`kicad_${file.name.replace('.kicad_mod', '')}`] = def;
+            toast.success(`Imported KiCad footprint: ${file.name}`);
+          } else {
+            toast.error('Failed to parse KiCad footprint');
+          }
+        } else if (file.name.endsWith('.kicad_pcb')) {
+          const footprints = importKiCadFootprintsFromFile(content);
+          for (const fp of footprints) {
+            footprintDefs[`kicad_${fp.name}`] = fp.def;
+          }
+          toast.success(`Imported ${footprints.length} footprints from KiCad PCB`);
+        } else {
+          toast.error('Please select a .kicad_mod or .kicad_pcb file');
+        }
+      } catch (err) {
+        toast.error('Import failed: ' + (err as Error).message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
   const handleGerberExport = () => {
     exportGerbers();
     toast.success('Gerber + drill + PnP files exported');
@@ -138,6 +174,24 @@ export function PCBToolbar() {
             </Button>
           </TooltipTrigger>
           <TooltipContent>Import components & netlist from the schematic</TooltipContent>
+        </Tooltip>
+
+        {/* KiCad footprint/PCB import */}
+        <input
+          ref={kicadFileInputRef}
+          type="file"
+          accept=".kicad_mod,.kicad_pcb"
+          onChange={handleKiCadImport}
+          className="hidden"
+        />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => kicadFileInputRef.current?.click()}>
+              <Upload size={14} />
+              <span className="ml-1 hidden md:inline">KiCad</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Import KiCad .kicad_mod or .kicad_pcb file</TooltipContent>
         </Tooltip>
 
         <div className="mx-1 h-5 w-px bg-slate-700" />

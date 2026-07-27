@@ -276,7 +276,7 @@ export const usePCB = create<PCBState>((set, get) => ({
     footprints: doc.footprints,
     traces: doc.traces,
     vias: doc.vias ?? [],
-    activeLayer: doc.activeLayer,
+    activeLayer: (doc.activeLayer as 'top' | 'bottom') ?? 'top',
     defaultTraceWidth: doc.defaultTraceWidth,
     ratsnest: [],
     padNets: new Map(),

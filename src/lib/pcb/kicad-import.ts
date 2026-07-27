@@ -56,8 +56,7 @@ export function parseKiCadFootprint(content: string): ParsedKiCadFootprint | nul
       let shape: 'circle' | 'rect' | 'oval' = 'rect';
       if (padShape === 'circle') shape = 'circle';
       else if (padShape === 'oval') shape = 'oval';
-      else if (padShape === 'roundrect') shape = 'rect'; // treat as rect
-      else shape = 'rect';
+      // roundrect and any other shape → rect
 
       pads.push({
         terminalId: padNum,

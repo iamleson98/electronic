@@ -1028,7 +1028,7 @@ export function CircuitCanvas() {
 
     // check wire segment handle (for dragging)
     if (hover.wireHandle) {
-      const wire = wires.find((w) => w.id === hover.wireHandle.wireId);
+      const wire = wires.find((w) => w.id === hover.wireHandle!.wireId);
       if (wire) {
         const fromComp = components.find((c) => c.id === wire.from.componentId);
         const toComp = components.find((c) => c.id === wire.to.componentId);
