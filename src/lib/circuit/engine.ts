@@ -159,12 +159,15 @@ export function computeWireCurrents(
   const nodeMap = buildNodeMap(components, wires, plugins);
 
   // Build nodeCurrentOut for KCL-based voltage source current
+  // This sums up ALL currents leaving each node from ALL component types,
+  // so the voltage source current = total current drawn from its + node.
   const nodeCurrentOut = new Map<number, number>();
   for (const comp of components) {
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
     const terms = getTerminalsForComponent(comp, plugin, nodeMap);
     const i = compCurrents.get(comp.id) ?? 0;
+
     if (comp.type === 'resistor' || comp.type === 'capacitor' || comp.type === 'inductor' ||
         comp.type === 'led' || comp.type === 'diode' || comp.type === 'switch' || comp.type === 'pushButton') {
       const t1Id = 'a';
@@ -178,7 +181,46 @@ export function computeWireCurrents(
       const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
       nodeCurrentOut.set(p, (nodeCurrentOut.get(p) ?? 0) + i);
       nodeCurrentOut.set(n, (nodeCurrentOut.get(n) ?? 0) - i);
+    } else if (comp.type === 'speaker' || comp.type === 'lamp' || comp.type === 'dcMotor') {
+      // Load components: current flows a→b
+      const n1 = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const n2 = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      nodeCurrentOut.set(n1, (nodeCurrentOut.get(n1) ?? 0) + i);
+      nodeCurrentOut.set(n2, (nodeCurrentOut.get(n2) ?? 0) - i);
+    } else if (comp.type === 'timer555') {
+      // 555: current exits OUT pin, enters VCC pin
+      const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+      const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
+      nodeCurrentOut.set(outNode, (nodeCurrentOut.get(outNode) ?? 0) + i);
+      nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) - i);
+    } else if (comp.type === 'opamp') {
+      // Op-amp: current exits OUT pin
+      const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+      nodeCurrentOut.set(outNode, (nodeCurrentOut.get(outNode) ?? 0) + i);
+    } else if (comp.type === 'npn' || comp.type === 'nmos') {
+      // Transistor: current flows C→E or D→S
+      const cOrD = comp.type === 'npn' ? 'c' : 'd';
+      const eOrS = comp.type === 'npn' ? 'e' : 's';
+      const cNode = terms.find((t) => t.terminalId === cOrD)?.nodeId ?? 0;
+      const eNode = terms.find((t) => t.terminalId === eOrS)?.nodeId ?? 0;
+      nodeCurrentOut.set(cNode, (nodeCurrentOut.get(cNode) ?? 0) + i);
+      nodeCurrentOut.set(eNode, (nodeCurrentOut.get(eNode) ?? 0) - i);
+    } else if (comp.type === 'pnp' || comp.type === 'pmos') {
+      // PNP/PMOS: current flows E→C or S→D (reversed)
+      const eOrS = comp.type === 'pnp' ? 'e' : 's';
+      const cOrD = comp.type === 'pnp' ? 'c' : 'd';
+      const eNode = terms.find((t) => t.terminalId === eOrS)?.nodeId ?? 0;
+      const cNode = terms.find((t) => t.terminalId === cOrD)?.nodeId ?? 0;
+      nodeCurrentOut.set(eNode, (nodeCurrentOut.get(eNode) ?? 0) + i);
+      nodeCurrentOut.set(cNode, (nodeCurrentOut.get(cNode) ?? 0) - i);
+    } else if (comp.type === 'voltmeter' || comp.type === 'ammeter' || comp.type === 'oscilloscope') {
+      // Meters: negligible current (10MΩ input)
+      const pNode = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+      const nNode = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+      nodeCurrentOut.set(pNode, (nodeCurrentOut.get(pNode) ?? 0) + i);
+      nodeCurrentOut.set(nNode, (nodeCurrentOut.get(nNode) ?? 0) - i);
     }
+    // Voltage sources, ground, junction, power symbols: skip (they define the current, not draw it)
   }
 
   for (const wire of wires) {
