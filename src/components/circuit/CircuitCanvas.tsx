@@ -232,7 +232,8 @@ export function CircuitCanvas() {
     wireHandle: null,
     rotateHandle: null,
   });
-  // animation phase for current flow dots (0..1)
+  // animation phase for current flow dots — continuous counter (never wraps)
+  // Using a large float that never resets eliminates the "snap back" visual glitch.
   const flowPhaseRef = useRef(0);
   const plugins = getAllPlugins();
 
@@ -282,10 +283,11 @@ export function CircuitCanvas() {
     let lastSimTime = performance.now();
     const SIM_INTERVAL = 16; // ms between simulation steps (~60Hz)
     const loop = (now: number) => {
-      // Advance flow phase every frame. The base speed (0.012) is scaled by
-      // the simulation speed setting so dots move faster at higher speeds.
+      // Advance flow phase continuously — never wrap with % 1.
+      // Each wire uses frac(phase * speed) internally, so dots cycle smoothly
+      // per-wire without all dots snapping back at the same time.
       const simSpeed = useEditor.getState().speed;
-      flowPhaseRef.current = (flowPhaseRef.current + 0.012 * Math.max(0.5, Math.min(4, simSpeed))) % 1;
+      flowPhaseRef.current += 0.012 * Math.max(0.5, Math.min(4, simSpeed));
       // Run simulation step at fixed interval
       if (now - lastSimTime >= SIM_INTERVAL) {
         step();
@@ -595,15 +597,16 @@ export function CircuitCanvas() {
           }
           if (totalLen > 0) {
             const numDots = Math.max(2, Math.floor(totalLen / dotSpacing));
-            const phase = flowPhaseRef.current * speed;
-            // Same bright yellow as component dots, with glow
+            // Use frac() for smooth per-wire wrapping — no global snap-back
+            const phase = flowPhaseRef.current * speed * dir;
+            const fracPhase = phase - Math.floor(phase); // 0..1, wraps smoothly per wire
             ctx.fillStyle = '#fde047';
             ctx.shadowColor = '#fde047';
             ctx.shadowBlur = 6;
             for (let n = 0; n < numDots; n++) {
-              let distAlong = (n / numDots + phase * dir) * totalLen;
-              while (distAlong < 0) distAlong += totalLen;
-              while (distAlong >= totalLen) distAlong -= totalLen;
+              let distAlong = (n / numDots + fracPhase) * totalLen;
+              // Smooth wrap: mod by totalLen (handles negative and > totalLen)
+              distAlong = ((distAlong % totalLen) + totalLen) % totalLen;
               let acc = 0;
               for (let i = 0; i < segLens.length; i++) {
                 if (acc + segLens[i] >= distAlong) {
@@ -620,7 +623,7 @@ export function CircuitCanvas() {
                 acc += segLens[i];
               }
             }
-            ctx.shadowBlur = 0; // reset glow after dots
+            ctx.shadowBlur = 0;
           }
         }
       }
@@ -775,14 +778,15 @@ export function CircuitCanvas() {
             if (totalLen > 0) {
               const dotSpacing = 18;
               const numDots = Math.max(2, Math.floor(totalLen / dotSpacing));
-              const phase = flowPhaseRef.current * speed;
+              // Use frac() for smooth per-component wrapping — no global snap-back
+              const phase = flowPhaseRef.current * speed * dir;
+              const fracPhase = phase - Math.floor(phase);
               ctx.fillStyle = '#fde047';
               ctx.shadowColor = '#fde047';
               ctx.shadowBlur = 6;
               for (let n = 0; n < numDots; n++) {
-                let distAlong = (n / numDots + phase * dir) * totalLen;
-                while (distAlong < 0) distAlong += totalLen;
-                while (distAlong >= totalLen) distAlong -= totalLen;
+                let distAlong = (n / numDots + fracPhase) * totalLen;
+                distAlong = ((distAlong % totalLen) + totalLen) % totalLen;
                 let acc = 0;
                 for (let i = 0; i < segLens.length; i++) {
                   if (acc + segLens[i] >= distAlong) {
