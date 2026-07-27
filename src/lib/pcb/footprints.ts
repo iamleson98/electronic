@@ -161,7 +161,7 @@ export const footprintDefs: Record<string, FootprintDef> = {
       { terminalId: 'out', position: { x: 4.0, y: -3.0 }, shape: 'circle', size: PAD_THT },
       { terminalId: 'rst', position: { x: -4.0, y: 1.0 }, shape: 'circle', size: PAD_THT },
       { terminalId: 'ctrl', position: { x: -4.0, y: 3.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'thr', position: { x: -4.0, y: 3.0 }, shape: 'circle', size: PAD_THT },
+      { terminalId: 'thr', position: { x: -4.0, y: 5.0 }, shape: 'circle', size: PAD_THT },
       { terminalId: 'dis', position: { x: 4.0, y: 3.0 }, shape: 'circle', size: PAD_THT },
       { terminalId: 'vcc', position: { x: 4.0, y: -1.0 }, shape: 'circle', size: PAD_THT },
     ],

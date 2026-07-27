@@ -167,7 +167,7 @@ export function computeWireCurrents(
     const i = compCurrents.get(comp.id) ?? 0;
     if (comp.type === 'resistor' || comp.type === 'capacitor' || comp.type === 'inductor' ||
         comp.type === 'led' || comp.type === 'diode' || comp.type === 'switch' || comp.type === 'pushButton') {
-      const t1Id = comp.type === 'led' || comp.type === 'diode' ? 'a' : 'a';
+      const t1Id = 'a';
       const t2Id = comp.type === 'led' || comp.type === 'diode' ? 'k' : 'b';
       const n1 = terms.find((t) => t.terminalId === t1Id)?.nodeId ?? 0;
       const n2 = terms.find((t) => t.terminalId === t2Id)?.nodeId ?? 0;

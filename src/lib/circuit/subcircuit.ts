@@ -17,7 +17,6 @@ import type {
   SimContext,
   TerminalDef,
 } from './types';
-import { buildNodeMap, getTerminalsForComponent } from './engine';
 import { getPlugin } from './registry';
 
 export interface SubCircuitDefinition {
@@ -253,24 +252,25 @@ export function createSubCircuitPlugin(def: SubCircuitDefinition): ComponentPlug
       }
     },
     step(params, terminals, sim, instance) {
-      // Re-dispatch step to internal components (they share sim.state via instance.simState)
-      // For simplicity, we just iterate the internal document.
+      // Re-dispatch step to internal components with proper terminal mapping
       const internalPlugins = new Map<string, ComponentPlugin>();
       for (const c of def.document.components) {
         const p = getPlugin(c.type);
         if (p) internalPlugins.set(c.type, p);
       }
-      // Build internal terminal list (similar to stamp, but for step)
-      // For brevity, we just call step on each internal component with an empty
-      // terminal list (most step() functions only need sim.state). This is a
-      // simplification; full correctness would require re-deriving nodes.
-      // TO DO: re-derive node ids here too.
-      void terminals;
+      // Re-derive internal node ids (same logic as in stamp)
+      const pinToNode = new Map<string, number>();
+      for (const pm of def.pinMap) {
+        const extTerm = terminals.find(t => t.terminalId === pm.pinId);
+        if (extTerm) pinToNode.set(`${pm.componentId}:${pm.terminalId}`, extTerm.nodeId);
+      }
+      const internalNodeMap = buildInternalNodeMap(def.document, internalPlugins, pinToNode);
       for (const comp of def.document.components) {
         const plugin = internalPlugins.get(comp.type);
         if (!plugin || !plugin.step) continue;
+        const internalTerms = getInternalTerminals(comp, plugin, internalNodeMap);
         try {
-          plugin.step(comp.parameters, [], sim, comp);
+          plugin.step(comp.parameters, internalTerms, sim, comp);
         } catch (e) {
           console.error(`sub-circuit step error in ${comp.type} (${comp.id}):`, e);
         }
@@ -398,4 +398,50 @@ export function registerBuiltinSubCircuits() {
     ],
   };
   registerSubCircuit(vdivDef);
+}
+
+// Helper: build internal node map for sub-circuit step()
+function buildInternalNodeMap(
+  doc: { components: CircuitComponent[]; wires: Wire[] },
+  plugins: Map<string, ComponentPlugin>,
+  pinToNode: Map<string, number>,
+): Map<string, number> {
+  // Simple union-find for internal nodes
+  const parent: number[] = [0];
+  function find(x: number): number { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+  function union(a: number, b: number) { const ra = find(a), rb = find(b); if (ra === rb) return; if (ra === 0) parent[rb] = 0; else parent[ra] = rb; }
+  function newNode(): number { const id = parent.length; parent.push(id); return id; }
+
+  const termNode = new Map<string, number>();
+  // Apply forced nodes from pin map
+  for (const [k, n] of pinToNode) termNode.set(k, n);
+
+  function nodeFor(cId: string, tId: string): number {
+    const k = `${cId}:${tId}`;
+    if (!termNode.has(k)) termNode.set(k, newNode());
+    return termNode.get(k)!;
+  }
+
+  // Process internal wires
+  for (const wire of doc.wires) {
+    union(nodeFor(wire.from.componentId, wire.from.terminalId), nodeFor(wire.to.componentId, wire.to.terminalId));
+  }
+
+  // Finalize: compress paths
+  for (const [k, n] of termNode) {
+    termNode.set(k, find(n));
+  }
+  return termNode;
+}
+
+// Helper: get terminal list for an internal component
+function getInternalTerminals(
+  comp: CircuitComponent,
+  plugin: ComponentPlugin,
+  nodeMap: Map<string, number>,
+): { terminalId: string; nodeId: number }[] {
+  return plugin.terminals.map(t => ({
+    terminalId: t.id,
+    nodeId: nodeMap.get(`${comp.id}:${t.id}`) ?? 0,
+  }));
 }

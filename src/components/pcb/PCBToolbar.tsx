@@ -88,8 +88,8 @@ export function PCBToolbar() {
     }
     runAutoRoute();
     const state = usePCB.getState();
-    const routedNets = new Set(state.traces.map((t) => t.id.startsWith('auto_')));
-    toast.success(`Auto-route complete: ${state.traces.filter(t => t.id.startsWith('auto_')).length} traces added`);
+    const autoRouteCount = state.traces.filter(t => t.id.startsWith('auto_')).length;
+    toast.success(`Auto-route complete: ${autoRouteCount} traces added`);
   };
 
   const handleNetlistVerify = () => {

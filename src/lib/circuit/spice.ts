@@ -357,10 +357,43 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
         const kind = rest[0].toUpperCase();
         if (kind === 'DC') {
           const v = parseSpiceValue(rest[1] || '0');
-          addComponent('dcVoltage', name, [
-            { terminalId: 'p', node: n1 },
-            { terminalId: 'n', node: n2 },
-          ], { voltage: v });
+          // Check if there's also a SINE/PULSE after the DC value (mixed form: DC 0 SINE(...))
+          const sineIdx = rest.findIndex(t => t.toUpperCase().startsWith('SINE'));
+          const pulseIdx = rest.findIndex(t => t.toUpperCase().startsWith('PULSE'));
+          if (sineIdx >= 0) {
+            // DC 0 SINE(offset amp freq) — create AC source
+            const argsStr = rest[sineIdx].slice(rest[sineIdx].indexOf('(') + 1, -1) ||
+                           (rest[sineIdx + 1] || '').slice(1, -1) || '';
+            const args = argsStr.split(/\s+/).filter(Boolean);
+            addComponent('acVoltage', name, [
+              { terminalId: 'p', node: n1 },
+              { terminalId: 'n', node: n2 },
+            ], {
+              offset: parseSpiceValue(args[0] || '0'),
+              amplitude: parseSpiceValue(args[1] || '1'),
+              frequency: parseSpiceValue(args[2] || '1'),
+              phase: parseSpiceValue(args[3] || '0'),
+            });
+          } else if (pulseIdx >= 0) {
+            // DC 0 PULSE(...) — create pulse source
+            const argsStr = rest[pulseIdx].slice(rest[pulseIdx].indexOf('(') + 1, -1) ||
+                           (rest[pulseIdx + 1] || '').slice(1, -1) || '';
+            const args = argsStr.split(/\s+/).filter(Boolean);
+            addComponent('pulseSource', name, [
+              { terminalId: 'p', node: n1 },
+              { terminalId: 'n', node: n2 },
+            ], {
+              low: parseSpiceValue(args[0] || '0'),
+              high: parseSpiceValue(args[1] || '5'),
+              frequency: parseSpiceValue(args[7] || '100'),
+              duty: 50,
+            });
+          } else {
+            addComponent('dcVoltage', name, [
+              { terminalId: 'p', node: n1 },
+              { terminalId: 'n', node: n2 },
+            ], { voltage: v });
+          }
         } else if (kind.startsWith('SINE') || kind === 'SINE') {
           // (offset amp freq [phase])
           const argsStr = rest.find(t => t.startsWith('('))?.slice(1, -1) || '';

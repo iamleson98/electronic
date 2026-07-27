@@ -1074,6 +1074,8 @@ export function CircuitCanvas() {
     // check component
     const comp = findComponentAt(g.x, g.y);
     if (comp) {
+      // Push history BEFORE drag starts (not after) so undo works correctly
+      useEditor.getState().pushHistory();
       setSelection({ type: 'component', id: comp.id });
       dragRef.current = {
         componentId: comp.id,
@@ -1226,18 +1228,18 @@ export function CircuitCanvas() {
       return;
     }
     if (rotateDragRef.current) {
-      useEditor.getState().pushHistory();
+      // History was already pushed at drag start
       rotateDragRef.current = null;
       setRotateDrag(null);
       return;
     }
     if (wireDragRef.current) {
-      useEditor.getState().pushHistory();
+      // History was already pushed at drag start
       wireDragRef.current = null;
       return;
     }
     if (dragRef.current) {
-      if (!running) useEditor.getState().pushHistory();
+      // History was already pushed at drag start
       dragRef.current = null;
     }
   };

@@ -14,7 +14,7 @@
 // - Isolated copper (unconnected pours/fills)
 // - Starved thermal (pad with insufficient thermal connections)
 
-import type { Footprint, Trace, Via, Ratsnest, Pad, BoardOutline } from './types';
+import type { Footprint, Trace, Via, Ratsnest, Pad, BoardOutline, CopperLayer } from './types';
 
 export interface DRCError {
   type: 'clearance' | 'short' | 'unrouted' | 'outside_board' | 'overlap' |
@@ -23,7 +23,7 @@ export interface DRCError {
   severity: 'error' | 'warning';
   message: string;
   position: { x: number; y: number };
-  layer: 'top' | 'bottom' | 'both';
+  layer: CopperLayer | 'both';
 }
 
 export interface DRCConfig {
@@ -86,7 +86,7 @@ export function runDRC(
     end: { x: number; y: number };
     width: number;
     net: string;
-    layer: 'top' | 'bottom';
+    layer: CopperLayer;
     source: string; // trace id
   }
   const copperSegs: CopperSeg[] = [];
@@ -108,7 +108,7 @@ export function runDRC(
     pos: { x: number; y: number };
     size: { width: number; height: number };
     net: string;
-    layer: 'top' | 'bottom';
+    layer: CopperLayer;
     id: string;
   }
   const copperPads: CopperPad[] = [];

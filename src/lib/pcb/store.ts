@@ -13,6 +13,7 @@ import type {
   PCBDocument,
   Pad,
 } from './types';
+import type { CircuitComponent, Wire } from '../circuit/types';
 import { useEditor } from '../circuit/store';
 import { getFootprintDef } from './footprints';
 import { createPCBFromSchematic } from './netlist-sync';

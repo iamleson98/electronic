@@ -3,6 +3,7 @@
 import { useMemo } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import { getPlugin } from '@/lib/circuit/registry';
+import { buildNodeMap, getTerminalsForComponent } from '@/lib/circuit/engine';
 import type { ParameterDef } from '@/lib/circuit/types';
 import { RotateCw, Trash2, X, Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -22,6 +23,7 @@ import { Badge } from '@/components/ui/badge';
 export function PropertyPanel() {
   const selection = useEditor((s) => s.selection);
   const components = useEditor((s) => s.components);
+  const wires = useEditor((s) => s.wires);
   const setParameter = useEditor((s) => s.setParameter);
   const rotateComponent = useEditor((s) => s.rotateComponent);
   const deleteComponent = useEditor((s) => s.deleteComponent);
@@ -40,15 +42,19 @@ export function PropertyPanel() {
   const measurements = useMemo(() => {
     if (!comp || !plugin || !plugin.measure || !simContext) return [];
     try {
-      // we need the node map to resolve terminal ids, but we don't have it here directly.
-      // For now, pass empty terminals and let the plugin handle gracefully (it can't measure without node ids).
-      // To properly support this, we'd need to expose the node map from the store.
-      // For simplicity, the probe panel uses the same logic and pulls voltages from simContext.
-      return [];
+      // Build node map to resolve terminal node IDs
+      const plugins = new Map<string, any>();
+      for (const c of components) {
+        const p = getPlugin(c.type);
+        if (p) plugins.set(c.type, p);
+      }
+      const nodeMap = buildNodeMap(components, wires, plugins);
+      const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+      return plugin.measure(comp.parameters, terms, simContext);
     } catch {
       return [];
     }
-  }, [comp, plugin, simContext]);
+  }, [comp, plugin, simContext, components, wires]);
 
   if (!comp || !plugin) {
     return (

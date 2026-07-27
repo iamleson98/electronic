@@ -331,129 +331,70 @@ const timer555: ComponentPlugin = {
       ctx.fillText(p.label, w - cellSize * 0.3, p.y * cellSize);
     }
   },
+  // 555 timer: state-aware stamp and step using sim.state keyed by terminal topology.
+  // The state (flip-flop, outHigh) persists across steps via sim.state[key].
   stamp(params, terminals, sys, sim) {
     const vcc = params.vcc as number;
     const vccNode = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
     const gndNode = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
-    // VCC pin: high-impedance input (just a tiny conductance to ground to avoid floating)
-    sys.stampConductance(vccNode, gndNode, 1e-9);
-    // CTRL pin: typically 2/3 VCC; we provide it as a voltage source if nothing is connected
-    // We can't easily detect "connected"; just make it a sense pin (high-Z).
+    if (vccNode !== gndNode) sys.stampConductance(vccNode, gndNode, 1e-9);
+
+    // CTRL pin: if left unconnected, add weak pull to 2/3 VCC
+    const ctrlNode = terminals.find((t) => t.terminalId === 'ctrl')!.nodeId;
+    if (ctrlNode !== gndNode && ctrlNode !== vccNode) {
+      const ctrlG = 1 / 5e6;
+      sys.stampConductance(ctrlNode, gndNode, ctrlG);
+      sys.stampCurrentSource(gndNode, ctrlNode, (2 / 3) * vcc * ctrlG);
+    }
+
+    const key = stateKey555(terminals);
+    const st = sim.state[key] ?? (sim.state[key] = { ff: false, outHigh: false });
+    const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
+    const dis = terminals.find((t) => t.terminalId === 'dis')!.nodeId;
+    if (out !== gndNode) sys.stampVoltageSource(out, gndNode, st.outHigh ? vcc : 0);
+    if (!st.ff) {
+      if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1 / 50);
+    } else {
+      if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1e-9);
+    }
   },
   step(params, terminals, sim, instance) {
     const vcc = params.vcc as number;
-    const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
-    const dis = terminals.find((t) => t.terminalId === 'dis')!.nodeId;
     const thr = terminals.find((t) => t.terminalId === 'thr')!.nodeId;
     const trig = terminals.find((t) => t.terminalId === 'trig')!.nodeId;
     const rst = terminals.find((t) => t.terminalId === 'rst')!.nodeId;
     const ctrl = terminals.find((t) => t.terminalId === 'ctrl')!.nodeId;
-    const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
-
-    const st = instance.simState ?? (instance.simState = {});
-    if (st.outHigh === undefined) {
-      st.outHigh = false;
-      st.ff = false; // internal flip-flop
-    }
+    const key = stateKey555(terminals);
+    const st = sim.state[key] ?? (sim.state[key] = { ff: false, outHigh: false });
     const vThr = sim.nodeVoltage[thr];
     const vTrig = sim.nodeVoltage[trig];
     const vRst = sim.nodeVoltage[rst];
     const vCtrl = sim.nodeVoltage[ctrl];
     const vThresh = vCtrl > 0.1 ? vCtrl : (2 / 3) * vcc;
     const vTrigThresh = vCtrl > 0.1 ? vCtrl / 2 : (1 / 3) * vcc;
-    // reset (active low)
     if (vRst < 0.4) {
       st.ff = false;
     } else {
       if (vThr > vThresh) st.ff = false;
       if (vTrig < vTrigThresh) st.ff = true;
     }
-    // OUT pin: drive to VCC if ff, else 0
     st.outHigh = st.ff;
-    // We can't directly drive the node here (this is post-solve). We need to drive it via stamping
-    // a voltage source next step. We store the state and pick it up in stamp().
-    // Save state.
-    sim.state.__global = sim.state.__global || {};
   },
-  // We need to drive OUT and DIS. Override stamp to do this:
-  // But stamp() above doesn't have access to instance state. Let's restructure.
-  // Actually we can read from sim.state which is keyed by component id - but our state map is keyed by instance.id
-  // Let's rewrite stamp using instance lookup via sim.state map.
+  measure(params, terminals, sim) {
+    const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
+    const key = stateKey555(terminals);
+    const st = sim.state[key];
+    return [
+      { label: 'Vout', value: sim.nodeVoltage[out].toFixed(3), unit: 'V' },
+      { label: 'State', value: st?.outHigh ? 'HIGH' : 'LOW', unit: '' },
+    ];
+  },
 };
 
-// Re-stamp 555 with state-aware OUT and DIS driving
-timer555.stamp = (params, terminals, sys, sim) => {
-  const vcc = params.vcc as number;
-  const vccNode = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
-  const gndNode = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
-  // VCC high-Z
-  sys.stampConductance(vccNode, gndNode, 1e-9);
-  // CTRL: 2/3 VCC reference - we won't drive it, but if floating, give it a weak pull to 2/3 VCC
-  // (we can't easily detect floating; rely on user connecting CTRL or leaving it)
-};
-
-// We need both stamp and step. The state lives in instance.simState, but we don't have the instance
-// in stamp(). However, sim.state[instance.id] is the same object. Let's pass instance id via the
-// sim.state map. To do this, we need the instance id. Easiest: use the `state` map keyed by a hash
-// of the terminal nodes (which is stable for a given circuit topology).
-
-// Override step & stamp using a state object on sim.state keyed by component position hash
+// State key for 555 timer (stable across steps)
 function stateKey555(terminals: { terminalId: string; nodeId: number }[]): string {
   return 't555_' + terminals.map(t => `${t.terminalId}=${t.nodeId}`).join('_');
 }
-
-(timer555 as any).stamp = (params, terminals, sys, sim) => {
-  const vcc = params.vcc as number;
-  const vccNode = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
-  const gndNode = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
-  if (vccNode !== gndNode) sys.stampConductance(vccNode, gndNode, 1e-9);
-
-  const key = stateKey555(terminals);
-  const st = sim.state[key] ?? (sim.state[key] = { ff: false, outHigh: false });
-  const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
-  const dis = terminals.find((t) => t.terminalId === 'dis')!.nodeId;
-  // Drive OUT as a voltage source (only if OUT is wired to a non-ground node)
-  if (out !== gndNode) sys.stampVoltageSource(out, gndNode, st.outHigh ? vcc : 0);
-  // Drive DIS: open collector -- if ff=0 (discharging), pull to ground via small R; else high-Z
-  if (!st.ff) {
-    if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1 / 50); // ~50Ω discharge transistor
-  } else {
-    if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1e-9);
-  }
-};
-
-timer555.step = (params, terminals, sim, instance) => {
-  const vcc = params.vcc as number;
-  const thr = terminals.find((t) => t.terminalId === 'thr')!.nodeId;
-  const trig = terminals.find((t) => t.terminalId === 'trig')!.nodeId;
-  const rst = terminals.find((t) => t.terminalId === 'rst')!.nodeId;
-  const ctrl = terminals.find((t) => t.terminalId === 'ctrl')!.nodeId;
-  const key = stateKey555(terminals);
-  const st = sim.state[key] ?? (sim.state[key] = { ff: false, outHigh: false });
-  const vThr = sim.nodeVoltage[thr];
-  const vTrig = sim.nodeVoltage[trig];
-  const vRst = sim.nodeVoltage[rst];
-  const vCtrl = sim.nodeVoltage[ctrl];
-  const vThresh = vCtrl > 0.1 ? vCtrl : (2 / 3) * vcc;
-  const vTrigThresh = vCtrl > 0.1 ? vCtrl / 2 : (1 / 3) * vcc;
-  if (vRst < 0.4) {
-    st.ff = false;
-  } else {
-    if (vThr > vThresh) st.ff = false;
-    if (vTrig < vTrigThresh) st.ff = true;
-  }
-  st.outHigh = st.ff;
-};
-
-timer555.measure = (params, terminals, sim) => {
-  const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
-  const key = stateKey555(terminals);
-  const st = sim.state[key];
-  return [
-    { label: 'Vout', value: sim.nodeVoltage[out].toFixed(3), unit: 'V' },
-    { label: 'State', value: st?.outHigh ? 'HIGH' : 'LOW', unit: '' },
-  ];
-};
 
 // ----- Logic gates (AND, OR, NOT, NAND, NOR, XOR) -----
 function makeLogicGate(type: string, name: string, symbol: string, op: (a: boolean, b?: boolean) => boolean): ComponentPlugin {
