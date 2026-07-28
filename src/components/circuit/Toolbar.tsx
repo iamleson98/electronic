@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import { examples } from '@/lib/circuit/examples';
+import { toast } from 'sonner';
 import {
   Play,
   Pause,
@@ -21,6 +22,7 @@ import {
   Database,
   FileCode,
   Boxes,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   DropdownMenu,
@@ -255,6 +257,24 @@ export function Toolbar() {
             </Button>
           </TooltipTrigger>
           <TooltipContent>{running ? 'Pause simulation to create sub-circuits' : 'Convert current circuit into a reusable component'}</TooltipContent>
+        </Tooltip>
+
+        {/* ERC (Electrical Rule Check) */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => {
+              const result = useEditor.getState().runERC();
+              if (result.passed) {
+                toast.success(`ERC passed — ${result.stats.warnings} warning(s)`);
+              } else {
+                toast.warning(`ERC: ${result.stats.errors} error(s), ${result.stats.warnings} warning(s)`);
+              }
+            }} disabled={running}>
+              <ShieldCheck size={14} />
+              <span className="ml-1 hidden lg:inline">ERC</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Electrical Rule Check — find unconnected pins, power shorts, conflicting drivers</TooltipContent>
         </Tooltip>
 
         {/* Settings */}

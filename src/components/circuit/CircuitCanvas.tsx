@@ -13,6 +13,8 @@ const CELL_SIZE = 24;
 interface DragState {
   componentId: string;
   offset: Vec2;
+  isGroupDrag?: boolean;
+  lastGrid?: Vec2;
 }
 
 interface WireDragState {
@@ -240,6 +242,7 @@ export function CircuitCanvas() {
   const components = useEditor((s) => s.components);
   const wires = useEditor((s) => s.wires);
   const selection = useEditor((s) => s.selection);
+  const multiSelection = useEditor((s) => s.multiSelection);
   const simContext = useEditor((s) => s.simContext);
   const running = useEditor((s) => s.running);
   const showGrid = useEditor((s) => s.showGrid);
@@ -657,6 +660,7 @@ export function CircuitCanvas() {
       const plugin = getPlugin(comp.type);
       if (!plugin) continue;
       const isSelected = selection.type === 'component' && selection.id === comp.id;
+      const isMultiSelected = multiSelection.components.has(comp.id);
       const isHover = hover.componentId === comp.id;
       const origin = gridToScreen(comp.position.x, comp.position.y);
       ctx.save();
@@ -670,10 +674,12 @@ export function CircuitCanvas() {
       ctx.rotate((comp.rotation * Math.PI) / 2);
       ctx.translate(-bbCx * CELL_SIZE, -bbCy * CELL_SIZE);
       // selection halo
-      if (isSelected || isHover) {
+      if (isSelected || isHover || isMultiSelected) {
         ctx.save();
-        ctx.fillStyle = isSelected ? 'rgba(251, 191, 36, 0.18)' : 'rgba(148, 163, 184, 0.12)';
-        ctx.strokeStyle = isSelected ? '#fbbf24' : '#64748b';
+        const haloColor = isSelected ? '#fbbf24' : isMultiSelected ? '#22d3ee' : '#64748b';
+        const haloFill = isSelected ? 'rgba(251,191,36,0.18)' : isMultiSelected ? 'rgba(34,211,238,0.15)' : 'rgba(148,163,184,0.12)';
+        ctx.fillStyle = haloFill;
+        ctx.strokeStyle = haloColor;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.rect(-2, -2, plugin.boundingBox.width * CELL_SIZE + 4, plugin.boundingBox.height * CELL_SIZE + 4);
@@ -964,7 +970,7 @@ export function CircuitCanvas() {
     }
 
     ctx.restore();
-  }, [size, pan, zoom, components, wires, selection, hover, cursor, simContext, showGrid, wireDraft, running, gridToScreen, getTerminalPos, plugins, animTick, getRotateHandlePos]);
+  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, running, gridToScreen, getTerminalPos, plugins, animTick, getRotateHandlePos]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
@@ -1078,6 +1084,23 @@ export function CircuitCanvas() {
     // check component
     const comp = findComponentAt(g.x, g.y);
     if (comp) {
+      if (e.shiftKey) {
+        // Shift-click: toggle multi-select
+        useEditor.getState().toggleMultiSelect('component', comp.id);
+        return;
+      }
+      // If clicking an already-selected component in multi-selection, start group drag
+      const ms = useEditor.getState().multiSelection;
+      if (ms.components.has(comp.id) && ms.components.size > 1) {
+        useEditor.getState().pushHistory();
+        dragRef.current = {
+          componentId: comp.id,
+          offset: { x: g.x - comp.position.x, y: g.y - comp.position.y },
+          isGroupDrag: true,
+          lastGrid: { ...g },
+        };
+        return;
+      }
       // Push history BEFORE drag starts (not after) so undo works correctly
       useEditor.getState().pushHistory();
       setSelection({ type: 'component', id: comp.id });
@@ -1177,6 +1200,17 @@ export function CircuitCanvas() {
 
     if (dragRef.current) {
       if (running) return;
+      if (dragRef.current.isGroupDrag) {
+        const delta = {
+          x: g.x - (dragRef.current.lastGrid?.x ?? g.x),
+          y: g.y - (dragRef.current.lastGrid?.y ?? g.y),
+        };
+        if (delta.x !== 0 || delta.y !== 0) {
+          useEditor.getState().moveSelectedComponents(delta);
+        }
+        dragRef.current.lastGrid = { ...g };
+        return;
+      }
       const newPos = { x: g.x - dragRef.current.offset.x, y: g.y - dragRef.current.offset.y };
       moveComponent(dragRef.current.componentId, newPos);
       return;
@@ -1319,9 +1353,14 @@ export function CircuitCanvas() {
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (running) return;
-        const s = useEditor.getState().selection;
-        if (s.type === 'component') deleteComponent(s.id!);
-        else if (s.type === 'wire') useEditor.getState().deleteWire(s.id!);
+        const s = useEditor.getState();
+        if (s.multiSelection.components.size > 0 || s.multiSelection.wires.size > 0) {
+          s.deleteSelected();
+        } else if (s.selection.type === 'component') {
+          deleteComponent(s.selection.id!);
+        } else if (s.selection.type === 'wire') {
+          s.deleteWire(s.selection.id!);
+        }
       } else if (e.key === 'r' || e.key === 'R') {
         if (running) return;
         const s = useEditor.getState().selection;
@@ -1329,6 +1368,7 @@ export function CircuitCanvas() {
       } else if (e.key === 'Escape') {
         cancelWire();
         setSelection({ type: null, id: null });
+        useEditor.getState().clearMultiSelection();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
         if (running) return;
         e.preventDefault();
@@ -1337,6 +1377,26 @@ export function CircuitCanvas() {
         if (running) return;
         e.preventDefault();
         useEditor.getState().redo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        if (running) return;
+        e.preventDefault();
+        useEditor.getState().copySelection();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        if (running) return;
+        e.preventDefault();
+        useEditor.getState().paste();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
+        if (running) return;
+        e.preventDefault();
+        useEditor.getState().duplicate();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        if (running) return;
+        e.preventDefault();
+        const s = useEditor.getState();
+        s.setMultiSelection({
+          components: new Set(s.components.map((c) => c.id)),
+          wires: new Set(s.wires.map((w) => w.id)),
+        });
       } else if (e.key === ' ') {
         e.preventDefault();
         const s = useEditor.getState();

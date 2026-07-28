@@ -67,13 +67,34 @@ export function buildNodeMap(components: CircuitComponent[], wires: Wire[], plug
   for (const comp of components) {
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
-    if (comp.type === 'ground') {
-      // any terminal on a ground component is node 0
+    if (comp.type === 'ground' || comp.type === 'powerGND') {
       for (const t of plugin.terminals) {
         const k = termKey(comp.id, t.id);
         terminalNode.set(k, 0);
       }
     }
+  }
+
+  // Power symbols & net labels: unify all terminals with the same `net` parameter
+  const netToNode = new Map<string, number>();
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (!plugin) continue;
+    const isPowerSymbol =
+      comp.type === 'powerGND' || comp.type === 'powerVCC' ||
+      comp.type === 'power5V' || comp.type === 'power3V3' ||
+      comp.type === 'power12V' || comp.type === 'powerMinus12V' ||
+      comp.type === 'netLabel' || comp.type === 'busLabel';
+    if (!isPowerSymbol) continue;
+    const netName = (comp.parameters.net as string) || '';
+    if (!netName) continue;
+    if (netName === 'GND' || netName === 'gnd' || netName === '0') {
+      for (const t of plugin.terminals) terminalNode.set(termKey(comp.id, t.id), 0);
+      continue;
+    }
+    let sharedNode = netToNode.get(netName);
+    if (sharedNode === undefined) { sharedNode = newNode(); netToNode.set(netName, sharedNode); }
+    for (const t of plugin.terminals) terminalNode.set(termKey(comp.id, t.id), sharedNode);
   }
 
   // Process wires - union terminals

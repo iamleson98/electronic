@@ -13,8 +13,133 @@ import type {
   Wire,
 } from './types';
 import { getPlugin } from './registry';
-import { simulateStep, getTerminalsForComponent } from './engine';
+import { simulateStep, getTerminalsForComponent, buildNodeMap } from './engine';
 import './components'; // register all built-in plugins
+
+// ===== ERC (Electrical Rule Check) =====
+export interface ERCError {
+  type: 'unconnected_pin' | 'power_short' | 'conflicting_drivers' | 'missing_ground';
+  severity: 'error' | 'warning';
+  message: string;
+  componentId: string;
+  terminalId: string;
+  position: { x: number; y: number };
+}
+
+export interface ERCResult {
+  errors: ERCError[];
+  passed: boolean;
+  stats: { errors: number; warnings: number };
+}
+
+function getTerminalElecType(compType: string, terminalId: string): string {
+  if (compType === 'dcVoltage' || compType === 'acVoltage' || compType === 'pulseSource') {
+    return terminalId === 'p' ? 'power' : 'ground';
+  }
+  if (compType === 'ground' || compType === 'powerGND') return 'ground';
+  if (compType.startsWith('power') && compType !== 'powerGND') return 'power';
+  if (compType === 'netLabel') return 'passive';
+  if (compType === 'resistor' || compType === 'capacitor' || compType === 'inductor' ||
+      compType === 'diode' || compType === 'led' || compType === 'switch' || compType === 'pushButton') return 'passive';
+  if (compType === 'npn' || compType === 'pnp' || compType === 'nmos' || compType === 'pmos') {
+    if (terminalId === 'b' || terminalId === 'g') return 'input';
+    return 'passive';
+  }
+  if (compType === 'opamp') {
+    if (terminalId === 'in+' || terminalId === 'in-') return 'input';
+    if (terminalId === 'out') return 'output';
+    if (terminalId === 'vcc' || terminalId === 'vee') return 'power';
+  }
+  if (compType === 'timer555') {
+    if (terminalId === 'out') return 'output';
+    if (terminalId === 'vcc') return 'power';
+    if (terminalId === 'gnd') return 'ground';
+    return 'input';
+  }
+  if (compType === 'arduino' || compType === 'arduinoReal' || compType === 'raspberryPi') {
+    if (terminalId === 'gnd') return 'ground';
+    if (terminalId === '5v' || terminalId === '3v3') return 'power';
+    return 'bidirectional';
+  }
+  return 'unspecified';
+}
+
+export function runERC(components: CircuitComponent[], wires: Wire[]): ERCResult {
+  const errors: ERCError[] = [];
+  const plugins = new Map<string, any>();
+  for (const c of components) {
+    const p = getPlugin(c.type);
+    if (p) plugins.set(c.type, p);
+  }
+
+  // Check 1: Unconnected pins
+  const connectedTerminals = new Set<string>();
+  for (const wire of wires) {
+    connectedTerminals.add(`${wire.from.componentId}:${wire.from.terminalId}`);
+    connectedTerminals.add(`${wire.to.componentId}:${wire.to.terminalId}`);
+  }
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (!plugin) continue;
+    for (const term of plugin.terminals) {
+      const key = `${comp.id}:${term.id}`;
+      if (!connectedTerminals.has(key)) {
+        if (comp.type === 'ground' || comp.type === 'powerGND') continue;
+        const elecType = getTerminalElecType(comp.type, term.id);
+        if (elecType === 'input' || elecType === 'output' || elecType === 'power') {
+          errors.push({
+            type: 'unconnected_pin',
+            severity: elecType === 'power' ? 'warning' : 'error',
+            message: `${comp.id}.${term.id} (${elecType}) is unconnected`,
+            componentId: comp.id,
+            terminalId: term.id,
+            position: { x: comp.position.x + term.position.x, y: comp.position.y + term.position.y },
+          });
+        }
+      }
+    }
+  }
+
+  // Check 2: Missing ground
+  const hasGround = components.some(c => c.type === 'ground' || c.type === 'powerGND');
+  if (!hasGround && components.length > 0) {
+    errors.push({
+      type: 'missing_ground', severity: 'error',
+      message: 'Circuit has no ground reference — add a Ground component',
+      componentId: '', terminalId: '', position: { x: 0, y: 0 },
+    });
+  }
+
+  // Check 3: Conflicting drivers (multiple outputs on same net)
+  const nodeMap = buildNodeMap(components, wires, plugins);
+  const netToOutputs = new Map<number, { compId: string; termId: string; refdes: string }[]>();
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (!plugin) continue;
+    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+    for (const t of terms) {
+      const elecType = getTerminalElecType(comp.type, t.terminalId);
+      if (elecType === 'output' || elecType === 'power') {
+        const node = t.nodeId;
+        if (!netToOutputs.has(node)) netToOutputs.set(node, []);
+        netToOutputs.get(node)!.push({ compId: comp.id, termId: t.terminalId, refdes: comp.id });
+      }
+    }
+  }
+  for (const [node, outputs] of netToOutputs) {
+    if (outputs.length > 1 && node !== 0) {
+      errors.push({
+        type: 'conflicting_drivers', severity: 'error',
+        message: `Net has ${outputs.length} conflicting drivers: ${outputs.map(o => o.refdes).join(', ')}`,
+        componentId: outputs[0].compId, terminalId: outputs[0].termId, position: { x: 0, y: 0 },
+      });
+    }
+  }
+
+  const errorCount = errors.filter(e => e.severity === 'error').length;
+  const warningCount = errors.filter(e => e.severity === 'warning').length;
+  return { errors, passed: errorCount === 0, stats: { errors: errorCount, warnings: warningCount } };
+}
 
 export interface Selection {
   type: 'component' | 'wire' | null;
@@ -37,8 +162,14 @@ interface EditorState {
   // document
   components: CircuitComponent[];
   wires: Wire[];
-  // selection
+  // selection (single)
   selection: Selection;
+  // multi-selection
+  multiSelection: { components: Set<string>; wires: Set<string> };
+  // clipboard
+  clipboard: { components: CircuitComponent[]; wires: Wire[] } | null;
+  // ERC results
+  ercErrors: ERCError[];
   // simulation settings
   running: boolean;
   speed: number;          // multiplier (1 = real-time at chosen dt)
@@ -66,6 +197,18 @@ interface EditorState {
   deleteWire: (id: string) => void;
   setParameter: (id: string, key: string, value: number | string | boolean) => void;
   setSelection: (sel: Selection) => void;
+  // multi-selection
+  toggleMultiSelect: (type: 'component' | 'wire', id: string) => void;
+  setMultiSelection: (sel: { components: Set<string>; wires: Set<string> }) => void;
+  clearMultiSelection: () => void;
+  moveSelectedComponents: (delta: { x: number; y: number }) => void;
+  deleteSelected: () => void;
+  // copy/paste
+  copySelection: () => void;
+  paste: () => void;
+  duplicate: () => void;
+  // ERC
+  runERC: () => ERCResult;
   startWire: (from: { componentId: string; terminalId: string }, cursor: { x: number; y: number }) => void;
   updateWireCursor: (cursor: { x: number; y: number }) => void;
   cancelWire: () => void;
@@ -117,6 +260,9 @@ export const useEditor = create<EditorState>((set, get) => ({
   components: [],
   wires: [],
   selection: { type: null, id: null },
+  multiSelection: { components: new Set(), wires: new Set() },
+  clipboard: null,
+  ercErrors: [],
   running: false,
   speed: 1,
   dt: 1e-4,
@@ -189,7 +335,108 @@ export const useEditor = create<EditorState>((set, get) => ({
     }));
   },
 
-  setSelection: (sel) => set({ selection: sel }),
+  setSelection: (sel) => set({ selection: sel, multiSelection: { components: new Set(), wires: new Set() } }),
+
+  // ===== Multi-selection =====
+  toggleMultiSelect: (type, id) => {
+    set((s) => {
+      const ms = {
+        components: new Set(s.multiSelection.components),
+        wires: new Set(s.multiSelection.wires),
+      };
+      if (type === 'component') {
+        if (ms.components.has(id)) ms.components.delete(id);
+        else ms.components.add(id);
+      } else {
+        if (ms.wires.has(id)) ms.wires.delete(id);
+        else ms.wires.add(id);
+      }
+      return { multiSelection: ms };
+    });
+  },
+  setMultiSelection: (sel) => set({ multiSelection: sel, selection: { type: null, id: null } }),
+  clearMultiSelection: () => set({ multiSelection: { components: new Set(), wires: new Set() } }),
+
+  moveSelectedComponents: (delta) => {
+    set((s) => {
+      const ids = new Set(s.multiSelection.components);
+      if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+      if (ids.size === 0) return {};
+      return {
+        components: s.components.map((c) =>
+          ids.has(c.id) ? { ...c, position: { x: c.position.x + delta.x, y: c.position.y + delta.y } } : c,
+        ),
+      };
+    });
+  },
+
+  deleteSelected: () => {
+    get().pushHistory();
+    set((s) => {
+      const idsToDelete = new Set(s.multiSelection.components);
+      if (s.selection.type === 'component' && s.selection.id) idsToDelete.add(s.selection.id);
+      const wiresToDelete = new Set(s.multiSelection.wires);
+      if (s.selection.type === 'wire' && s.selection.id) wiresToDelete.add(s.selection.id);
+      return {
+        components: s.components.filter((c) => !idsToDelete.has(c.id)),
+        wires: s.wires.filter((w) => !wiresToDelete.has(w.id) &&
+          !idsToDelete.has(w.from.componentId) && !idsToDelete.has(w.to.componentId)),
+        selection: { type: null, id: null },
+        multiSelection: { components: new Set(), wires: new Set() },
+      };
+    });
+  },
+
+  // ===== Copy/Paste =====
+  copySelection: () => {
+    const s = get();
+    const idsToCopy = new Set(s.multiSelection.components);
+    if (s.selection.type === 'component' && s.selection.id) idsToCopy.add(s.selection.id);
+    if (idsToCopy.size === 0) return;
+    const copiedComponents = s.components
+      .filter((c) => idsToCopy.has(c.id))
+      .map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined }));
+    const copiedWires = s.wires
+      .filter((w) => idsToCopy.has(w.from.componentId) && idsToCopy.has(w.to.componentId))
+      .map((w) => ({ ...w }));
+    set({ clipboard: { components: copiedComponents, wires: copiedWires } });
+  },
+
+  paste: () => {
+    const s = get();
+    if (!s.clipboard || s.clipboard.components.length === 0) return;
+    get().pushHistory();
+    const idMap = new Map<string, string>();
+    const newComponents = s.clipboard.components.map((c) => {
+      const newId = genId('comp');
+      idMap.set(c.id, newId);
+      return { ...c, id: newId, position: { x: c.position.x + 2, y: c.position.y + 2 }, parameters: { ...c.parameters }, simState: undefined };
+    });
+    const newWires = s.clipboard.wires.map((w) => ({
+      id: genId('wire'),
+      from: { componentId: idMap.get(w.from.componentId) ?? w.from.componentId, terminalId: w.from.terminalId },
+      to: { componentId: idMap.get(w.to.componentId) ?? w.to.componentId, terminalId: w.to.terminalId },
+    }));
+    set((st) => ({
+      components: [...st.components, ...newComponents],
+      wires: [...st.wires, ...newWires],
+      selection: { type: null, id: null },
+      multiSelection: {
+        components: new Set(newComponents.map((c) => c.id)),
+        wires: new Set(newWires.map((w) => w.id)),
+      },
+    }));
+  },
+
+  duplicate: () => { get().copySelection(); get().paste(); },
+
+  // ===== ERC =====
+  runERC: () => {
+    const s = get();
+    const result = runERC(s.components, s.wires);
+    set({ ercErrors: result.errors });
+    return result;
+  },
 
   startWire: (from, cursor) => set({ wireDraft: { from, cursor } }),
   updateWireCursor: (cursor) => set((s) => (s.wireDraft ? { wireDraft: { ...s.wireDraft, cursor } } : {})),

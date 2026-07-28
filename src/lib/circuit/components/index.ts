@@ -7,6 +7,7 @@ import './semiconductors';
 import './advanced';
 import './extra';
 import './arduino-real';
+import './power-symbols';
 import { registerBuiltinSubCircuits } from '../subcircuit';
 
 // Register built-in sub-circuits (voltage divider, diode-DL AND gate, etc.)
