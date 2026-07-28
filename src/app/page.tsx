@@ -7,7 +7,7 @@ import {
   ResizablePanelGroup,
 } from '@/components/ui/resizable';
 import { Button } from '@/components/ui/button';
-import { CircuitBoard, Cpu, Zap } from 'lucide-react';
+import { CircuitBoard, Cpu, Zap, Box } from 'lucide-react';
 import { CircuitCanvas } from '@/components/circuit/CircuitCanvas';
 import { Toolbar } from '@/components/circuit/Toolbar';
 import { ComponentPalette } from '@/components/circuit/ComponentPalette';
@@ -15,10 +15,12 @@ import { PropertyPanel } from '@/components/circuit/PropertyPanel';
 import { ProbePanel } from '@/components/circuit/ProbePanel';
 import { PCBCanvas } from '@/components/pcb/PCBCanvas';
 import { PCBToolbar } from '@/components/pcb/PCBToolbar';
+import { PCB3DViewer } from '@/components/pcb/PCB3DViewer';
+import { usePCB } from '@/lib/pcb/store';
 import '@/lib/circuit/components';
 
 export default function Home() {
-  const [mode, setMode] = useState<'schematic' | 'pcb'>('schematic');
+  const [mode, setMode] = useState<'schematic' | 'pcb' | '3d'>('schematic');
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-950 text-slate-100">
@@ -41,6 +43,15 @@ export default function Home() {
         >
           <CircuitBoard size={14} className="mr-1.5" />
           PCB Layout
+        </Button>
+        <Button
+          size="sm"
+          variant={mode === '3d' ? 'default' : 'ghost'}
+          className={mode === '3d' ? 'bg-purple-500 text-white hover:bg-purple-400' : ''}
+          onClick={() => setMode('3d')}
+        >
+          <Box size={14} className="mr-1.5" />
+          3D View
         </Button>
       </div>
 
@@ -71,11 +82,30 @@ export default function Home() {
             </ResizablePanelGroup>
           </div>
         </>
-      ) : (
+      ) : mode === 'pcb' ? (
         <>
           <PCBToolbar />
           <div className="min-h-0 flex-1">
             <PCBCanvas />
+          </div>
+        </>
+      ) : (
+        /* 3D View mode */
+        <>
+          <div className="flex items-center gap-2 border-b border-slate-800 bg-slate-900 px-3 py-2">
+            <span className="text-sm font-semibold text-slate-100">3D PCB Preview</span>
+            <span className="text-xs text-slate-500">·</span>
+            <span className="text-xs text-slate-400">
+              {usePCB.getState().footprints.length} components ·
+              {' '}{usePCB.getState().traces.length} traces ·
+              {' '}{usePCB.getState().board.width}×{usePCB.getState().board.height}mm
+            </span>
+            <div className="ml-auto flex items-center gap-2">
+              <span className="text-xs text-slate-500">Left-drag: rotate · Right-drag: pan · Scroll: zoom</span>
+            </div>
+          </div>
+          <div className="min-h-0 flex-1">
+            <PCB3DViewer />
           </div>
         </>
       )}

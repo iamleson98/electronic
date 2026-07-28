@@ -12,6 +12,7 @@ import {
   ShieldOff, Droplet, AlignLeft, FlipHorizontal, ChevronDown,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { exportBOM, exportIPC2581 } from '@/lib/pcb/additional-exports';
 
 export function PCBToolbar() {
   const tool = usePCB((s) => s.tool);
@@ -422,6 +423,42 @@ export function PCBToolbar() {
               </Button>
             </TooltipTrigger>
             <TooltipContent>Export Gerber + Drill + PnP files</TooltipContent>
+          </Tooltip>
+          {/* Export BOM */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button size="sm" variant="ghost" onClick={() => {
+                const s = usePCB.getState();
+                const csv = exportBOM(s.footprints);
+                const blob = new Blob([csv], { type: 'text/csv' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url; a.download = 'bom.csv'; a.click();
+                URL.revokeObjectURL(url);
+                toast.success('BOM exported');
+              }}>
+                <FileDown size={14} />
+                <span className="ml-1 hidden md:inline">BOM</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Export Bill of Materials (CSV)</TooltipContent>
+          </Tooltip>
+          {/* Export IPC-2581 */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button size="sm" variant="ghost" onClick={() => {
+                const s = usePCB.getState();
+                const xml = exportIPC2581(s.footprints, s.traces, s.vias, s.board, s.padNets);
+                const blob = new Blob([xml], { type: 'application/xml' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url; a.download = 'pcb.ipc2581.xml'; a.click();
+                URL.revokeObjectURL(url);
+                toast.success('IPC-2581 exported');
+              }}>
+                <FileDown size={14} />
+                <span className="ml-1 hidden md:inline">IPC-2581</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Export IPC-2581 (single XML manufacturing file)</TooltipContent>
           </Tooltip>
         </div>
       </div>
