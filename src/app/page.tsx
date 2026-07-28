@@ -1,13 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
 } from '@/components/ui/resizable';
 import { Button } from '@/components/ui/button';
-import { CircuitBoard, Cpu, Zap, Box } from 'lucide-react';
+import { CircuitBoard, Cpu, Zap, Box, HelpCircle, Share2, Library } from 'lucide-react';
 import { CircuitCanvas } from '@/components/circuit/CircuitCanvas';
 import { Toolbar } from '@/components/circuit/Toolbar';
 import { ComponentPalette } from '@/components/circuit/ComponentPalette';
@@ -16,11 +16,49 @@ import { ProbePanel } from '@/components/circuit/ProbePanel';
 import { PCBCanvas } from '@/components/pcb/PCBCanvas';
 import { PCBToolbar } from '@/components/pcb/PCBToolbar';
 import { PCB3DViewer } from '@/components/pcb/PCB3DViewer';
+import { CommandPalette } from '@/components/CommandPalette';
+import { HelpDialog } from '@/components/circuit/HelpDialog';
+import { LibraryManagerDialog } from '@/components/pcb/LibraryManagerDialog';
 import { usePCB } from '@/lib/pcb/store';
+import { useEditor } from '@/lib/circuit/store';
+import { installScriptingAPI } from '@/lib/scripting-api';
+import { hasSharedCircuit, loadFromShareURL, createShareURL } from '@/lib/circuit/share-url';
 import '@/lib/circuit/components';
+import { toast } from 'sonner';
 
 export default function Home() {
   const [mode, setMode] = useState<'schematic' | 'pcb' | '3d'>('schematic');
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [showLibrary, setShowLibrary] = useState(false);
+
+  useEffect(() => {
+    const initTimer = setTimeout(() => {
+      try {
+        installScriptingAPI();
+        if (hasSharedCircuit()) {
+          const doc = loadFromShareURL(window.location.hash);
+          if (doc && doc.components && doc.wires) useEditor.getState().loadDocument(doc);
+        }
+      } catch (e) { console.warn('Init failed:', e); }
+    }, 500);
+    return () => clearTimeout(initTimer);
+  }, []);
+
+  // Ctrl+K command palette
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); setShowCommandPalette(true); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const handleShare = () => {
+    const doc = useEditor.getState().serialize();
+    const url = createShareURL(doc);
+    navigator.clipboard.writeText(url).then(() => toast.success('Share URL copied!')).catch(() => window.prompt('Copy URL:', url));
+  };
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-950 text-slate-100">
@@ -53,6 +91,11 @@ export default function Home() {
           <Box size={14} className="mr-1.5" />
           3D View
         </Button>
+        <div className="ml-auto flex items-center gap-1">
+          <Button size="sm" variant="ghost" onClick={handleShare}><Share2 size={14} /><span className="ml-1 hidden md:inline">Share</span></Button>
+          <Button size="sm" variant="ghost" onClick={() => setShowLibrary(true)}><Library size={14} /><span className="ml-1 hidden md:inline">Library</span></Button>
+          <Button size="sm" variant="ghost" onClick={() => setShowHelp(true)}><HelpCircle size={14} /></Button>
+        </div>
       </div>
 
       {mode === 'schematic' ? (
@@ -109,6 +152,10 @@ export default function Home() {
           </div>
         </>
       )}
+
+      <CommandPalette open={showCommandPalette} onClose={() => setShowCommandPalette(false)} />
+      <HelpDialog open={showHelp} onClose={() => setShowHelp(false)} />
+      <LibraryManagerDialog open={showLibrary} onClose={() => setShowLibrary(false)} />
     </div>
   );
 }
