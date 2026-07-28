@@ -9,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import {
   Download, MousePointer2, Route, Plus, RotateCw, Trash2, Grid3x3, Eye, Zap,
   ShieldCheck, Layers, FileDown, Wand2, GitCompare, Upload,
+  ShieldOff, Droplet, AlignLeft, FlipHorizontal, ChevronDown,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -211,7 +212,16 @@ export function PCBToolbar() {
               <Route size={14} />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Route Trace (2)</TooltipContent>
+          <TooltipContent>Route Trace — 90° (2)</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant={tool === 'route45' ? 'default' : 'ghost'} onClick={() => setTool('route45')}
+              className={tool === 'route45' ? 'bg-cyan-600 text-white hover:bg-cyan-500' : ''}>
+              <Route size={14} className="rotate-45" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Route Trace — 45° (Shift+2)</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -220,6 +230,23 @@ export function PCBToolbar() {
             </Button>
           </TooltipTrigger>
           <TooltipContent>Add Via (3)</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant={tool === 'keepout' ? 'default' : 'ghost'} onClick={() => setTool('keepout')}
+              className={tool === 'keepout' ? 'bg-rose-600 text-white hover:bg-rose-500' : ''}>
+              <ShieldOff size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Add Keepout Area (4)</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => { usePCB.getState().generateTeardrops(); toast.success('Teardrops generated'); }}>
+              <Droplet size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Generate Teardrops</TooltipContent>
         </Tooltip>
 
         <div className="mx-1 h-5 w-px bg-slate-700" />
@@ -297,6 +324,53 @@ export function PCBToolbar() {
           </TooltipTrigger>
           <TooltipContent>Auto-route all unrouted nets (Lee's algorithm)</TooltipContent>
         </Tooltip>
+
+        {/* Tools dropdown: align, distribute, flip, length-tune */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="ghost">
+              <AlignLeft size={14} />
+              <ChevronDown size={12} className="ml-1" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56 bg-slate-900 border-slate-700">
+            <DropdownMenuLabel className="text-slate-300">Alignment (select 2+)</DropdownMenuLabel>
+            <div className="grid grid-cols-3 gap-1 p-2">
+              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('left')}>Left</DropdownMenuItem>
+              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('hCenter')}>H Center</DropdownMenuItem>
+              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('right')}>Right</DropdownMenuItem>
+              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('top')}>Top</DropdownMenuItem>
+              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('vCenter')}>V Center</DropdownMenuItem>
+              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('bottom')}>Bottom</DropdownMenuItem>
+            </div>
+            <DropdownMenuSeparator className="bg-slate-700" />
+            <DropdownMenuLabel className="text-slate-300">Distribute (3+)</DropdownMenuLabel>
+            <div className="grid grid-cols-2 gap-1 p-2">
+              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().distributeSelected('horizontal')}>Horizontal</DropdownMenuItem>
+              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().distributeSelected('vertical')}>Vertical</DropdownMenuItem>
+            </div>
+            <DropdownMenuSeparator className="bg-slate-700" />
+            <DropdownMenuItem onClick={() => {
+              const id = usePCB.getState().selectedTraceId;
+              if (!id) { toast.error('Select a trace first'); return; }
+              const trace = usePCB.getState().traces.find(t => t.id === id);
+              if (!trace) return;
+              const len = trace.segments.reduce((a, s) => a + Math.hypot(s.end.x - s.start.x, s.end.y - s.start.y), 0);
+              usePCB.getState().lengthTuneTrace(id, len * 1.2);
+              toast.success(`Length-tuned: +20% (serpentine meander)`);
+            }}>
+              <Droplet size={12} className="mr-2" /> Length-Tune Trace (+20%)
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => {
+              const id = usePCB.getState().selectedFootprintId;
+              if (!id) { toast.error('Select a footprint first'); return; }
+              usePCB.getState().flipFootprint(id);
+              toast.success('Flipped to other side');
+            }}>
+              <FlipHorizontal size={12} className="mr-2" /> Flip to Other Side
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
 
         {/* Netlist verify */}
         <Tooltip>

@@ -37,6 +37,10 @@ export function PCBCanvas() {
   const showPadNets = usePCB((s) => s.showPadNets);
   const drcErrors = usePCB((s) => s.drcErrors);
   const copperPours = usePCB((s) => s.copperPours);
+  const keepouts = usePCB((s) => s.keepouts);
+  const teardrops = usePCB((s) => s.teardrops);
+  const showKeepouts = usePCB((s) => s.showKeepouts);
+  const addKeepout = usePCB((s) => s.addKeepout);
 
   const moveFootprint = usePCB((s) => s.moveFootprint);
   const rotateFootprint = usePCB((s) => s.rotateFootprint);
@@ -193,6 +197,45 @@ export function PCBCanvas() {
       ctx.stroke();
     }
 
+    // Keepout areas — hatched red rectangles
+    if (showKeepouts) {
+      for (const kp of keepouts) {
+        const tl = mmToScreen(kp.rect.x, kp.rect.y);
+        const br = mmToScreen(kp.rect.x + kp.rect.width, kp.rect.y + kp.rect.height);
+        const w = br.x - tl.x, h = br.y - tl.y;
+        ctx.save();
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
+        ctx.fillRect(tl.x, tl.y, w, h);
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.6)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([6, 3]);
+        ctx.strokeRect(tl.x, tl.y, w, h);
+        ctx.setLineDash([]);
+        if (kp.reason) {
+          ctx.fillStyle = '#ef4444';
+          ctx.font = '10px ui-monospace, monospace';
+          ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+          ctx.fillText(kp.reason, tl.x + 4, tl.y + 4);
+        }
+        ctx.restore();
+      }
+    }
+
+    // Teardrops — copper polygons at pad/trace junctions
+    for (const td of teardrops) {
+      if (td.points.length < 3) continue;
+      ctx.fillStyle = td.layer === 'top' ? 'rgba(220, 38, 38, 0.6)' : 'rgba(37, 99, 235, 0.6)';
+      ctx.beginPath();
+      const p0 = mmToScreen(td.points[0].x, td.points[0].y);
+      ctx.moveTo(p0.x, p0.y);
+      for (let i = 1; i < td.points.length; i++) {
+        const p = mmToScreen(td.points[i].x, td.points[i].y);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
+
     // ratsnest (airwires)
     if (showRatsnest) {
       ctx.strokeStyle = 'rgba(250, 204, 21, 0.4)';
@@ -342,7 +385,7 @@ export function PCBCanvas() {
     ctx.restore();
   }, [size, pan, zoom, board, footprints, traces, vias, ratsnest, padNets, activeLayer, tool,
       defaultTraceWidth, selectedFootprintId, selectedTraceId, routingFrom, routingPath,
-      showRatsnest, showGrid, showPadNets, cursor, mmToScreen, drcErrors, copperPours]);
+      showRatsnest, showGrid, showPadNets, cursor, mmToScreen, drcErrors, copperPours, keepouts, teardrops, showKeepouts]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
@@ -355,10 +398,33 @@ export function PCBCanvas() {
       return;
     }
 
-    if (tool === 'route') {
+    if (tool === 'route' || tool === 'route45') {
+      const is45 = tool === 'route45';
       const pad = findPadAt(sx, sy);
       const mm = screenToMm(sx, sy);
-      const snapped = { x: Math.round(mm.x * 2) / 2, y: Math.round(mm.y * 2) / 2 };
+      let snapped = { x: Math.round(mm.x * 2) / 2, y: Math.round(mm.y * 2) / 2 };
+      // 45° mode: snap to nearest 0°/45°/90° angle
+      if (is45 && routingFrom) {
+        const last = routingPath[routingPath.length - 1] ?? routingFrom;
+        const dx = snapped.x - last.x;
+        const dy = snapped.y - last.y;
+        const len = Math.hypot(dx, dy);
+        if (len > 0.01) {
+          const angle = Math.atan2(dy, dx);
+          const snappedAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+          const isDiagonal = Math.abs(Math.sin(snappedAngle)) > 0.1 && Math.abs(Math.cos(snappedAngle)) > 0.1;
+          if (isDiagonal) {
+            const halfLen = (Math.abs(dx) + Math.abs(dy)) / 2;
+            snapped = {
+              x: last.x + Math.sign(Math.cos(snappedAngle)) * halfLen,
+              y: last.y + Math.sign(Math.sin(snappedAngle)) * halfLen,
+            };
+          } else {
+            if (Math.abs(dx) > Math.abs(dy)) snapped = { x: snapped.x, y: last.y };
+            else snapped = { x: last.x, y: snapped.y };
+          }
+        }
+      }
       if (pad) {
         const net = padNets.get(`${pad.componentId}:${pad.terminalId}`) ?? 'unrouted';
         if (!routingFrom) {
@@ -368,9 +434,7 @@ export function PCBCanvas() {
           finishRouting({ x: pad.position.x, y: pad.position.y, net });
         }
       } else {
-        if (routingFrom) {
-          addRoutingPoint(snapped);
-        }
+        if (routingFrom) addRoutingPoint(snapped);
       }
       return;
     }
@@ -378,6 +442,12 @@ export function PCBCanvas() {
     if (tool === 'via') {
       const mm = screenToMm(sx, sy);
       addVia({ x: mm.x, y: mm.y }, routingFrom?.net ?? 'unrouted');
+      return;
+    }
+
+    if (tool === 'keepout') {
+      const mm = screenToMm(sx, sy);
+      addKeepout({ x: mm.x - 2.5, y: mm.y - 2.5, width: 5, height: 5 }, 'all', 'Keepout');
       return;
     }
 
