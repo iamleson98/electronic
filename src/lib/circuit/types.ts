@@ -72,6 +72,8 @@ export interface CircuitComponent {
   parameters: Record<string, number | string | boolean>;
   /** runtime simulation state (not serialized in some cases) */
   simState?: Record<string, any>;
+  /** explicit reference designator (e.g., "R1", "C2"). If absent, derived from id. */
+  refdes?: string;
 }
 
 export interface Wire {

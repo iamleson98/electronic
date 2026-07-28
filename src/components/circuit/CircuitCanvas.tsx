@@ -57,11 +57,42 @@ function getWirePath(
   fromPos: Vec2,
   toPos: Vec2,
   gridToScreenFn: (gx: number, gy: number) => Vec2,
+  use45: boolean = false,
 ): Vec2[] {
   const points: Vec2[] = [fromPos];
   if (wire.waypoints && wire.waypoints.length > 0) {
     for (const wp of wire.waypoints) {
       points.push(gridToScreenFn(wp.x, wp.y));
+    }
+  } else if (use45) {
+    // 45-degree routing: L-shape with 45° diagonal in the middle
+    const dx = toPos.x - fromPos.x;
+    const dy = toPos.y - fromPos.y;
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+    if (absDx < 1 || absDy < 1) {
+      // Nearly straight — just go direct
+      points.push({ x: toPos.x, y: fromPos.y });
+    } else if (absDx > absDy) {
+      // More horizontal: go horizontal, then 45° diagonal, then horizontal
+      const diagLen = absDy;
+      const sign = Math.sign(dy);
+      const horizSign = Math.sign(dx);
+      const midX1 = fromPos.x + horizSign * (absDx - diagLen) / 2;
+      const midX2 = midX1 + horizSign * diagLen;
+      points.push({ x: midX1, y: fromPos.y });
+      points.push({ x: midX2, y: fromPos.y + sign * diagLen });
+      points.push({ x: midX2, y: toPos.y });
+    } else {
+      // More vertical: go vertical, then 45° diagonal, then vertical
+      const diagLen = absDx;
+      const sign = Math.sign(dx);
+      const vertSign = Math.sign(dy);
+      const midY1 = fromPos.y + vertSign * (absDy - diagLen) / 2;
+      const midY2 = midY1 + vertSign * diagLen;
+      points.push({ x: fromPos.x, y: midY1 });
+      points.push({ x: fromPos.x + sign * diagLen, y: midY2 });
+      points.push({ x: toPos.x, y: midY2 });
     }
   } else {
     // default orthogonal routing: go to midpoint X, then to target
@@ -237,6 +268,7 @@ export function CircuitCanvas() {
   // animation phase for current flow dots — continuous counter (never wraps)
   // Using a large float that never resets eliminates the "snap back" visual glitch.
   const flowPhaseRef = useRef(0);
+  const [use45Routing, setUse45Routing] = useState(false);
   const plugins = getAllPlugins();
 
   const components = useEditor((s) => s.components);
@@ -380,7 +412,7 @@ export function CircuitCanvas() {
       if (!fromT || !toT) continue;
       const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
       const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
-      const path = getWirePath(wire, fromPos, toPos, gridToScreen);
+      const path = getWirePath(wire, fromPos, toPos, gridToScreen, use45Routing);
       for (let i = 0; i < path.length - 1; i++) {
         const a = path[i];
         const b = path[i + 1];
@@ -405,7 +437,7 @@ export function CircuitCanvas() {
       if (!fromT || !toT) continue;
       const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
       const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
-      const path = getWirePath(wire, fromPos, toPos, gridToScreen);
+      const path = getWirePath(wire, fromPos, toPos, gridToScreen, use45Routing);
       for (let i = 0; i < path.length - 1; i++) {
         const a = path[i];
         const b = path[i + 1];
@@ -548,7 +580,7 @@ export function CircuitCanvas() {
       if (!fromT || !toT) continue;
       const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
       const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
-      const path = getWirePath(wire, fromPos, toPos, gridToScreen);
+      const path = getWirePath(wire, fromPos, toPos, gridToScreen, use45Routing);
       const isSelected = selection.type === 'wire' && selection.id === wire.id;
       const isHover = hover.wireId === wire.id;
       const isOnActiveNode = activeWires.has(wire.id);
@@ -701,6 +733,18 @@ export function CircuitCanvas() {
         console.error(`render error in ${comp.type}:`, e);
       }
       ctx.restore();
+
+      // Draw reference designator label above the component
+      if (comp.refdes) {
+        const labelPos = gridToScreen(comp.position.x + plugin.boundingBox.width / 2, comp.position.y - 0.3);
+        ctx.save();
+        ctx.fillStyle = isSelected ? '#fbbf24' : isMultiSelected ? '#22d3ee' : '#94a3b8';
+        ctx.font = `${Math.max(9, Math.floor(10 * zoom))}px ui-monospace, monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(comp.refdes, labelPos.x, labelPos.y);
+        ctx.restore();
+      }
 
       // draw terminals (in screen coords) — color by connected state and active node
       for (const t of plugin.terminals) {
@@ -944,7 +988,7 @@ export function CircuitCanvas() {
       if (!fromT || !toT) continue;
       const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
       const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
-      const path = getWirePath(wire, fromPos, toPos, gridToScreen);
+      const path = getWirePath(wire, fromPos, toPos, gridToScreen, use45Routing);
       const isSelected = selection.type === 'wire' && selection.id === wire.id;
       const isHover = hover.wireId === wire.id;
       const isOnActiveNode = activeWires.has(wire.id);
@@ -970,7 +1014,7 @@ export function CircuitCanvas() {
     }
 
     ctx.restore();
-  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, running, gridToScreen, getTerminalPos, plugins, animTick, getRotateHandlePos]);
+  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, use45Routing, running, gridToScreen, getTerminalPos, plugins, animTick, getRotateHandlePos]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
@@ -1401,6 +1445,9 @@ export function CircuitCanvas() {
         e.preventDefault();
         const s = useEditor.getState();
         s.setRunning(!s.running);
+      } else if (e.key === '\\' || e.key === '|') {
+        e.preventDefault();
+        setUse45Routing((v) => !v);
       }
     };
     window.addEventListener('keydown', onKey);

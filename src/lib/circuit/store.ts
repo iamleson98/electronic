@@ -209,6 +209,8 @@ interface EditorState {
   duplicate: () => void;
   // ERC
   runERC: () => ERCResult;
+  // annotation
+  reannotate: () => void;
   startWire: (from: { componentId: string; terminalId: string }, cursor: { x: number; y: number }) => void;
   updateWireCursor: (cursor: { x: number; y: number }) => void;
   cancelWire: () => void;
@@ -236,6 +238,77 @@ let idCounter = 0;
 function genId(prefix: string = 'c') {
   idCounter++;
   return `${prefix}_${Date.now().toString(36)}_${idCounter}`;
+}
+
+/** Get the reference designator prefix for a component type */
+function refdesPrefix(type: string): string {
+  switch (type) {
+    case 'resistor': return 'R';
+    case 'capacitor': return 'C';
+    case 'inductor': return 'L';
+    case 'led': return 'LED';
+    case 'diode': return 'D';
+    case 'zener': return 'DZ';
+    case 'schottky': return 'D';
+    case 'dcVoltage':
+    case 'acVoltage':
+    case 'pulseSource': return 'V';
+    case 'currentSource': return 'I';
+    case 'timer555':
+    case 'opamp':
+    case 'opampRails':
+    case 'voltageRegulator':
+    case 'vco': return 'U';
+    case 'npn':
+    case 'pnp':
+    case 'nmos':
+    case 'pmos': return 'Q';
+    case 'switch':
+    case 'pushButton': return 'SW';
+    case 'fuse': return 'F';
+    case 'crystal': return 'Y';
+    case 'transformer': return 'T';
+    case 'speaker':
+    case 'buzzer': return 'LS';
+    case 'dcMotor': return 'M';
+    case 'photoresistor': return 'LDR';
+    case 'sevenSegment': return 'DSP';
+    case 'ground':
+    case 'powerGND': return 'GND';
+    case 'junction': return 'J';
+    case 'oscilloscope':
+    case 'voltmeter':
+    case 'ammeter': return 'TP';
+    case 'arduino':
+    case 'arduinoReal':
+    case 'raspberryPi': return 'U';
+    case 'netLabel':
+    case 'busLabel': return 'NL';
+    case 'bus': return 'BUS';
+    default:
+      if (type.startsWith('7400_') || type.startsWith('7402_') || type.startsWith('7404_') ||
+          type.startsWith('7408_') || type.startsWith('7432_') || type.startsWith('7486_') ||
+          type.startsWith('7474_')) return 'U';
+      if (type.startsWith('custom_')) return 'U';
+      return 'U';
+  }
+}
+
+/** Generate the next refdes for a given type, based on existing components */
+function nextRefdes(type: string, components: CircuitComponent[]): string {
+  const prefix = refdesPrefix(type);
+  let maxNum = 0;
+  for (const c of components) {
+    if (refdesPrefix(c.type) === prefix) {
+      const ref = c.refdes ?? c.id;
+      const match = ref.match(/(\d+)$/);
+      if (match) {
+        const n = parseInt(match[1]);
+        if (n > maxNum) maxNum = n;
+      }
+    }
+  }
+  return `${prefix}${maxNum + 1}`;
 }
 
 function snapshot(s: { components: CircuitComponent[]; wires: Wire[] }) {
@@ -279,12 +352,15 @@ export const useEditor = create<EditorState>((set, get) => ({
   addComponent: (type, position) => {
     get().pushHistory();
     const id = genId('comp');
+    const s = get();
+    const refdes = nextRefdes(type, s.components);
     const comp: CircuitComponent = {
       id,
       type,
       position: { ...position },
       rotation: 0,
       parameters: defaultsFor(type),
+      refdes,
     };
     set((s) => ({ components: [...s.components, comp], selection: { type: 'component', id } }));
     return id;
@@ -436,6 +512,18 @@ export const useEditor = create<EditorState>((set, get) => ({
     const result = runERC(s.components, s.wires);
     set({ ercErrors: result.errors });
     return result;
+  },
+
+  reannotate: () => {
+    get().pushHistory();
+    const s = get();
+    const counters: Record<string, number> = {};
+    const newComponents = s.components.map((c) => {
+      const prefix = refdesPrefix(c.type);
+      counters[prefix] = (counters[prefix] ?? 0) + 1;
+      return { ...c, refdes: `${prefix}${counters[prefix]}` };
+    });
+    set({ components: newComponents });
   },
 
   startWire: (from, cursor) => set({ wireDraft: { from, cursor } }),

@@ -295,6 +295,29 @@ export function Toolbar() {
               <Label htmlFor="snap-switch" className="text-slate-200 text-sm">Snap to Grid</Label>
               <Switch id="snap-switch" checked={snapToGrid} onCheckedChange={setSnapToGrid} />
             </div>
+            <DropdownMenuSeparator className="bg-slate-700" />
+            <DropdownMenuLabel className="text-slate-300">Schematic Tools</DropdownMenuLabel>
+            <DropdownMenuItem
+              className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => {
+                if (running) return;
+                useEditor.getState().reannotate();
+                toast.success('Re-annotated all components (R1, R2, C1, ...)');
+              }}
+              disabled={running}
+            >
+              Re-annotate Components
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => {
+                // Toggle 45° routing — this is a canvas state, so we use a custom event
+                window.dispatchEvent(new KeyboardEvent('keydown', { key: '\\' }));
+                toast.info('Toggled 45° wire routing');
+              }}
+            >
+              Toggle 45° Wire Routing
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
