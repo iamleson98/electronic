@@ -9,6 +9,8 @@ import './extra';
 import './arduino-real';
 import './power-symbols';
 import './kicad-parity';
+import './advanced-semi';
+import './advanced-devices';
 import { registerBuiltinSubCircuits } from '../subcircuit';
 
 // Register built-in sub-circuits (voltage divider, diode-DL AND gate, etc.)

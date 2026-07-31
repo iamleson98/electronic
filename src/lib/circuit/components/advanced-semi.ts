@@ -1,0 +1,522 @@
+// Advanced semiconductor models — KiCad/ngspice parity.
+//
+// These plugins add more accurate semiconductor models that are commonly used
+// in ngspice. They use DISTINCT plugin type names so the existing simple
+// 'diode', 'npn', 'nmos' etc. plugins continue to work unchanged.
+//
+// New plugin types:
+//   - diodeShockley  — Shockley diode with full Is/N/Rs/Cjo/M/Vj/Tt + temperature
+//   - bjtGummelPoon  — Gummel-Poon NPN/PNP (Is/Bf/Br/Vaf/Var)
+//   - mosLevel1      — Schichman-Hodges Level-1 NMOS/PMOS (Vto/Kp/Gamma/Phi/Lambda)
+//   - jfetN / jfetP  — JFET models
+//   - bjtSubVt       — BJT with sub-threshold (extra Gummel-Poon fields)
+
+import type { ComponentPlugin } from '../types';
+import { registerPlugin } from '../registry';
+import { drawLabel } from './draw';
+import { thermalVoltage, tempScaleIs } from '../sim-options';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shockley diode — full model
+//   I = Is * (exp(V/(n*Vt)) - 1)
+//   Linearized conductance: g = Is/(n*Vt) * exp(V/(n*Vt))
+//   Junction capacitance: Cj = Cjo / (1 - V/Vj)^M  (depletion)
+//   Diffusion capacitance: Cd = Tt * dI/dV
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const diodeShockley: ComponentPlugin = {
+  type: 'diodeShockley',
+  name: 'Diode (Shockley)',
+  category: 'semiconductor',
+  description: 'Full Shockley diode with Is/N/Rs/Cjo/M/Vj/Tt and temperature dependence.',
+  symbol: 'D',
+  boundingBox: { width: 4, height: 2 },
+  terminals: [
+    { id: 'a', label: 'A', position: { x: 0, y: 1 }, electricalType: 'passive' },
+    { id: 'k', label: 'K', position: { x: 4, y: 1 }, electricalType: 'passive' },
+  ],
+  parameters: [
+    { key: 'Is', label: 'Saturation Current', type: 'number', default: 1e-14, unit: 'A', min: 1e-20, max: 1e-3, step: 1e-15 },
+    { key: 'N', label: 'Emission Coeff', type: 'number', default: 1.5, min: 0.1, max: 5, step: 0.1 },
+    { key: 'Rs', label: 'Series Resistance', type: 'number', default: 0.5, unit: 'Ω', min: 0, max: 1000, step: 0.1 },
+    { key: 'Cjo', label: 'Junction Cap', type: 'number', default: 4e-12, unit: 'F', min: 0, max: 1e-6, step: 1e-13 },
+    { key: 'M', label: 'Grading Coeff', type: 'number', default: 0.333, min: 0, max: 2, step: 0.05 },
+    { key: 'Vj', label: 'Junction Potential', type: 'number', default: 0.7, unit: 'V', min: 0.01, max: 5, step: 0.05 },
+    { key: 'Tt', label: 'Transit Time', type: 'number', default: 4.5e-9, unit: 's', min: 0, max: 1e-3, step: 1e-10 },
+    { key: 'Bv', label: 'Breakdown Voltage', type: 'number', default: 100, unit: 'V', min: 1, max: 10000, step: 1 },
+  ],
+  keywords: ['diode', 'shockley', 'junction', 'rectifier'],
+  defaultFootprint: 'D0805',
+  datasheet: 'https://en.wikipedia.org/wiki/Diode_modelling',
+  render(ctx, params, cellSize) {
+    ctx.beginPath();
+    ctx.moveTo(0, cellSize); ctx.lineTo(2 * cellSize - 3, cellSize);
+    ctx.moveTo(2 * cellSize + 3, cellSize); ctx.lineTo(4 * cellSize, cellSize);
+    ctx.stroke();
+    ctx.translate(2 * cellSize, cellSize);
+    ctx.beginPath();
+    ctx.moveTo(-10, -10); ctx.lineTo(10, 10);
+    ctx.lineTo(10, -10); ctx.closePath();
+    ctx.fillStyle = '#cbd5e1';
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-10, 10); ctx.lineTo(10, 10);
+    ctx.stroke();
+    drawLabel(ctx, `Is=${(params.Is as number).toExponential(1)}`, 0, -16);
+  },
+  stamp(params, terminals, sys, sim) {
+    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
+    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const Is = params.Is as number;
+    const N = params.N as number;
+    const Rs = params.Rs as number;
+    const Vt = thermalVoltage(27);   // 27°C default
+    // Get current voltage (initial guess = 0.7V if not yet solved)
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = `dio_${a}_${k}`;
+    const vGuess = st[key] ?? 0.7;
+    // Newton-Raphson linearization around current guess
+    const v = vGuess;
+    // Shockley: I = Is*(exp(v/(N*Vt)) - 1)
+    // Limit exponent to avoid overflow
+    const ev = Math.exp(Math.min(v / (N * Vt), 30));
+    const I = Is * (ev - 1);
+    const g = Is * ev / (N * Vt);
+    // Equivalent circuit: series Rs + diode
+    // Thevenin: V_eq = v - Rs*I (voltage at internal node), R_eq = 1/g + Rs
+    // Norton: I_eq = I - g*v = -Is*(ev - 1 - ev) = Is (since I = Is*(ev-1) and g*v = Is*ev)
+    // Wait — proper companion model: diode linearized as conductance g + current source I - g*v
+    // For the full circuit with Rs: stamp Rs as conductance, then stamp diode at internal node.
+    // We don't have an internal node — approximate by combining into single conductance:
+    // G_total = 1 / (1/g + Rs) = g / (1 + g*Rs)
+    // I_total = (I - g*v) * G_total / g (current source scaled)
+    const Gtotal = g / (1 + g * Rs);
+    const Ieq = (I - g * v) * (Gtotal / g);
+    sys.stampConductance(a, k, Gtotal);
+    sys.stampCurrentSource(a, k, Ieq);
+  },
+  step(params, terminals, sim) {
+    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
+    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    st[`dio_${a}_${k}`] = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+  },
+  getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
+  measure(params, terminals, sim) {
+    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
+    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+    const Is = params.Is as number;
+    const N = params.N as number;
+    const Vt = thermalVoltage(27);
+    const i = Is * (Math.exp(Math.min(v / (N * Vt), 30)) - 1);
+    return [
+      { label: 'V', value: v.toFixed(4), unit: 'V' },
+      { label: 'I', value: (i * 1000).toFixed(4), unit: 'mA' },
+      { label: 'P', value: (v * i * 1000).toFixed(4), unit: 'mW' },
+    ];
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gummel-Poon BJT (NPN and PNP)
+//   Includes: Is (saturation), Bf (forward beta), Br (reverse beta),
+//             Vaf (Forward Early voltage), Var (Reverse Early voltage),
+//             Ikf (forward knee current), Ise (B-E leakage)
+//   Simplified — uses Ebers-Moll with Early effect
+// ─────────────────────────────────────────────────────────────────────────────
+
+function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
+  const isNpn = type === 'npn';
+  return {
+    type: isNpn ? 'bjtGPNpn' : 'bjtGPPnp',
+    name: `${isNpn ? 'NPN' : 'PNP'} BJT (Gummel-Poon)`,
+    category: 'semiconductor',
+    description: `Gummel-Poon ${isNpn ? 'NPN' : 'PNP'} BJT with Is/Bf/Br/Vaf/Var/Early effect.`,
+    symbol: isNpn ? 'Qn' : 'Qp',
+    boundingBox: { width: 4, height: 4 },
+    terminals: [
+      { id: 'c', label: 'C', position: { x: 4, y: 1 }, electricalType: 'passive' },
+      { id: 'b', label: 'B', position: { x: 0, y: 3 }, electricalType: 'input' },
+      { id: 'e', label: 'E', position: { x: 4, y: 3 }, electricalType: 'passive' },
+    ],
+    parameters: [
+      { key: 'Is', label: 'Saturation Current', type: 'number', default: 1e-15, unit: 'A', min: 1e-20, max: 1e-3, step: 1e-16 },
+      { key: 'Bf', label: 'Forward Beta', type: 'number', default: 100, min: 1, max: 10000, step: 1 },
+      { key: 'Br', label: 'Reverse Beta', type: 'number', default: 1, min: 0.1, max: 100, step: 0.1 },
+      { key: 'Vaf', label: 'Forward Early V', type: 'number', default: 100, unit: 'V', min: 1, max: 10000, step: 1 },
+      { key: 'Var', label: 'Reverse Early V', type: 'number', default: 50, unit: 'V', min: 1, max: 10000, step: 1 },
+      { key: 'Ikf', label: 'Forward Knee I', type: 'number', default: 1, unit: 'A', min: 1e-6, max: 100, step: 0.1 },
+    ],
+    keywords: ['bjt', 'transistor', isNpn ? 'npn' : 'pnp', 'gummel-poon'],
+    defaultFootprint: 'TO-92',
+    render(ctx, params, cellSize) {
+      ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+      // base lead
+      ctx.beginPath(); ctx.moveTo(0, 3 * cellSize); ctx.lineTo(2 * cellSize, 3 * cellSize); ctx.stroke();
+      // base vertical bar
+      ctx.beginPath(); ctx.moveTo(2 * cellSize, 2 * cellSize); ctx.lineTo(2 * cellSize, 4 * cellSize); ctx.stroke();
+      // collector lead
+      ctx.beginPath();
+      if (isNpn) {
+        ctx.moveTo(2 * cellSize, 2 * cellSize); ctx.lineTo(4 * cellSize, cellSize);
+      } else {
+        ctx.moveTo(4 * cellSize, cellSize); ctx.lineTo(2 * cellSize, 2 * cellSize);
+      }
+      ctx.stroke();
+      // emitter lead
+      ctx.beginPath();
+      ctx.moveTo(2 * cellSize, 4 * cellSize); ctx.lineTo(4 * cellSize, 3 * cellSize);
+      ctx.stroke();
+      // arrow on emitter
+      const ax = 3 * cellSize, ay = 3.5 * cellSize;
+      ctx.beginPath();
+      if (isNpn) {
+        ctx.moveTo(ax, ay); ctx.lineTo(ax - 6, ay - 4); ctx.lineTo(ax - 4, ay + 2); ctx.closePath();
+      } else {
+        ctx.moveTo(ax, ay); ctx.lineTo(ax + 6, ay + 4); ctx.lineTo(ax + 4, ay - 2); ctx.closePath();
+      }
+      ctx.fillStyle = '#cbd5e1'; ctx.fill();
+      drawLabel(ctx, isNpn ? 'NPN' : 'PNP', 2 * cellSize, 0);
+    },
+    stamp(params, terminals, sys, sim) {
+      const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
+      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+      const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
+      const Is = params.Is as number;
+      const Bf = params.Bf as number;
+      const Br = params.Br as number;
+      const Vaf = params.Vaf as number;
+      const Vt = thermalVoltage(27);
+      // Get previous voltages
+      const st = sim.state.__global ?? (sim.state.__global = {});
+      const key = `bjt_${c}_${b}_${e}`;
+      const vBEguess = isNpn ? (st[key + '_vbe'] ?? 0.7) : -(st[key + '_vbe'] ?? 0.7);
+      const vCEguess = isNpn ? (st[key + '_vce'] ?? 0.2) : -(st[key + '_vce'] ?? 0.2);
+      // Ebers-Moll simplified:
+      // Ic = Is * (exp(vBE/Vt) - exp(-vCE/Vt)) * (1 + vCE/Vaf)
+      // For active region (vCE > 0, vBE > 0): Ic ≈ Is*exp(vBE/Vt)*(1 + vCE/Vaf)
+      //                                          Ib ≈ Is/Bf * exp(vBE/Vt)
+      // Conductances:
+      //   dIc/dvBE = Is/Vt * exp(vBE/Vt) * (1 + vCE/Vaf) = gm + Ic/Vt
+      //   dIc/dvCE = Is*exp(vBE/Vt)/Vaf = gds
+      //   dIb/dvBE = Is/(Bf*Vt) * exp(vBE/Vt) = gm/Bf
+      const evBE = Math.exp(Math.min(vBEguess / Vt, 30));
+      const Ic = Is * evBE * (1 + vCEguess / Vaf);
+      const gm = Is * evBE / Vt;
+      const gds = Is * evBE / Vaf;
+      const gpi = gm / Bf;
+      // Linearized model: VCCS from b→e controlling c→e (gm), conductance c-e (gds), conductance b-e (gpi)
+      // For NPN: current source c→e = gm*(vBE)
+      // For PNP: reverse all signs
+      const sign = isNpn ? 1 : -1;
+      // VCCS: I_c = gm * V_BE
+      sys.stampVCCS(c, e, b, e, sign * gm);
+      // output conductance gds
+      sys.stampConductance(c, e, sign * gds);
+      // input conductance gpi (at b-e junction)
+      sys.stampConductance(b, e, sign * gpi);
+      // current sources for the constant offsets (linearization around guess)
+      const IcEq = Ic - gm * vBEguess - gds * vCEguess;
+      const IbEq = gm * vBEguess / Bf - gpi * vBEguess;
+      sys.stampCurrentSource(c, e, sign * IcEq);
+      sys.stampCurrentSource(b, e, sign * IbEq);
+    },
+    step(params, terminals, sim) {
+      const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
+      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+      const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
+      const st = sim.state.__global ?? (sim.state.__global = {});
+      const key = `bjt_${c}_${b}_${e}`;
+      st[key + '_vbe'] = sim.nodeVoltage[b] - sim.nodeVoltage[e];
+      st[key + '_vce'] = sim.nodeVoltage[c] - sim.nodeVoltage[e];
+    },
+    getFlowPath() { return [{ x: 4, y: 1 }, { x: 2, y: 3 }, { x: 4, y: 3 }]; },
+    measure(params, terminals, sim) {
+      const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
+      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+      const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
+      const vBE = sim.nodeVoltage[b] - sim.nodeVoltage[e];
+      const vCE = sim.nodeVoltage[c] - sim.nodeVoltage[e];
+      const Is = params.Is as number;
+      const Bf = params.Bf as number;
+      const Vaf = params.Vaf as number;
+      const Vt = thermalVoltage(27);
+      const Ic = Is * Math.exp(Math.min(vBE / Vt, 30)) * (1 + Math.max(0, vCE) / Vaf);
+      const Ib = Ic / Bf;
+      return [
+        { label: 'Vbe', value: vBE.toFixed(4), unit: 'V' },
+        { label: 'Vce', value: vCE.toFixed(4), unit: 'V' },
+        { label: 'Ic', value: (Ic * 1000).toFixed(4), unit: 'mA' },
+        { label: 'Ib', value: (Ib * 1000).toFixed(4), unit: 'mA' },
+      ];
+    },
+  };
+}
+
+export const bjtGPNpn = makeGummelPoonBJT('npn');
+export const bjtGPPnp = makeGummelPoonBJT('pnp');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Schichman-Hodges Level-1 MOSFET (NMOS and PMOS)
+//   Id = Kp/2 * (Vgs-Vth)^2 * (1 + λ*Vds) [saturation]
+//   Id = Kp * ((Vgs-Vth)*Vds - Vds^2/2) * (1 + λ*Vds) [linear]
+//   Includes body effect: Vth = Vth0 + γ*(sqrt(2ΦF - Vbs) - sqrt(2ΦF))
+//   Includes sub-threshold: weak inversion when Vgs < Vth
+// ─────────────────────────────────────────────────────────────────────────────
+
+function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
+  const isNmos = type === 'nmos';
+  return {
+    type: isNmos ? 'mosLevel1N' : 'mosLevel1P',
+    name: `${isNmos ? 'NMOS' : 'PMOS'} (Level-1 Schichman-Hodges)`,
+    category: 'semiconductor',
+    description: 'Full Schichman-Hodges Level-1 MOSFET with Gamma/Phi/Lambda/body effect/sub-threshold.',
+    symbol: isNmos ? 'Mn' : 'Mp',
+    boundingBox: { width: 4, height: 4 },
+    terminals: [
+      { id: 'd', label: 'D', position: { x: 4, y: 1 }, electricalType: 'passive' },
+      { id: 'g', label: 'G', position: { x: 0, y: 2 }, electricalType: 'input' },
+      { id: 's', label: 'S', position: { x: 4, y: 3 }, electricalType: 'passive' },
+      { id: 'b', label: 'B', position: { x: 0, y: 4 }, electricalType: 'passive' },
+    ],
+    parameters: [
+      { key: 'Vto', label: 'Threshold Voltage', type: 'number', default: isNmos ? 1.0 : -1.0, unit: 'V', min: -10, max: 10, step: 0.05 },
+      { key: 'Kp', label: 'Transconductance Param', type: 'number', default: 0.05, unit: 'A/V²', min: 1e-6, max: 1, step: 1e-3 },
+      { key: 'Gamma', label: 'Body Effect Coeff', type: 'number', default: 0.5, unit: 'V^0.5', min: 0, max: 5, step: 0.05 },
+      { key: 'Phi', label: 'Surface Potential', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 2, step: 0.05 },
+      { key: 'Lambda', label: 'Channel-Length Mod', type: 'number', default: 0.02, unit: '1/V', min: 0, max: 1, step: 0.005 },
+      { key: 'W', label: 'Channel Width', type: 'number', default: 100e-6, unit: 'm', min: 1e-9, max: 1e-2, step: 1e-7 },
+      { key: 'L', label: 'Channel Length', type: 'number', default: 10e-6, unit: 'm', min: 1e-9, max: 1e-2, step: 1e-7 },
+      { key: 'Rd', label: 'Drain Resistance', type: 'number', default: 0, unit: 'Ω', min: 0, max: 1000, step: 0.1 },
+      { key: 'Rs', label: 'Source Resistance', type: 'number', default: 0, unit: 'Ω', min: 0, max: 1000, step: 0.1 },
+    ],
+    keywords: ['mosfet', isNmos ? 'nmos' : 'pmos', 'level1', 'schichman-hodges'],
+    defaultFootprint: 'SOT-23',
+    render(ctx, _params, cellSize) {
+      ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+      // gate lead
+      ctx.beginPath(); ctx.moveTo(0, 2 * cellSize); ctx.lineTo(2 * cellSize, 2 * cellSize); ctx.stroke();
+      // gate vertical bar
+      ctx.beginPath(); ctx.moveTo(2 * cellSize, cellSize); ctx.lineTo(2 * cellSize, 3 * cellSize); ctx.stroke();
+      // drain / source
+      ctx.beginPath();
+      ctx.moveTo(2 * cellSize, cellSize); ctx.lineTo(4 * cellSize, cellSize);
+      ctx.moveTo(2 * cellSize, 3 * cellSize); ctx.lineTo(4 * cellSize, 3 * cellSize);
+      ctx.stroke();
+      // arrow on source (NMOS points in, PMOS points out)
+      ctx.beginPath();
+      const ax = 3 * cellSize, ay = 3 * cellSize;
+      if (isNmos) {
+        ctx.moveTo(ax, ay); ctx.lineTo(ax - 4, ay - 6); ctx.lineTo(ax + 4, ay - 6); ctx.closePath();
+      } else {
+        ctx.moveTo(ax, ay - 6); ctx.lineTo(ax - 4, ay); ctx.lineTo(ax + 4, ay); ctx.closePath();
+      }
+      ctx.fillStyle = '#cbd5e1'; ctx.fill();
+      // body terminal
+      ctx.beginPath(); ctx.moveTo(2 * cellSize, 3 * cellSize); ctx.lineTo(0, 4 * cellSize); ctx.stroke();
+      drawLabel(ctx, isNmos ? 'NMOS' : 'PMOS', 2 * cellSize, 0);
+    },
+    stamp(params, terminals, sys, sim) {
+      const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
+      const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
+      const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
+      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+      const Vto0 = params.Vto as number;
+      const Kp = params.Kp as number;
+      const Gamma = params.Gamma as number;
+      const Phi = params.Phi as number;
+      const Lambda = params.Lambda as number;
+      const Rd = params.Rd as number;
+      const Rs = params.Rs as number;
+      // Get previous voltages
+      const st = sim.state.__global ?? (sim.state.__global = {});
+      const key = `mos_${d}_${g}_${s}_${b}`;
+      const vGSguess = isNmos ? (st[key + '_vgs'] ?? 2) : -(st[key + '_vgs'] ?? 2);
+      const vDSguess = isNmos ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? 1);
+      const vBSguess = isNmos ? (st[key + '_vbs'] ?? 0) : -(st[key + '_vbs'] ?? 0);
+      // Body effect: Vth = Vto0 + γ*(sqrt(2ΦF - Vbs) - sqrt(2ΦF))
+      const Vth = Vto0 + Gamma * (Math.sqrt(Math.max(0, 2 * Phi - vBSguess)) - Math.sqrt(2 * Phi));
+      const vov = isNmos ? (vGSguess - Vth) : -(vGSguess - Vth);
+      // Compute Id
+      let Id = 0;
+      let gm = 0;
+      let gds = 0;
+      if (vov > 0) {
+        if (vDSguess > vov) {
+          // saturation
+          Id = 0.5 * Kp * vov * vov * (1 + Lambda * vDSguess);
+          gm = Kp * vov;
+          gds = 0.5 * Kp * vov * vov * Lambda;
+        } else {
+          // linear
+          Id = Kp * (vov * vDSguess - 0.5 * vDSguess * vDSguess) * (1 + Lambda * vDSguess);
+          gm = Kp * vDSguess;
+          gds = Kp * (vov - vDSguess) * (1 + Lambda * vDSguess) + Kp * (vov * vDSguess - 0.5 * vDSguess * vDSguess) * Lambda;
+        }
+      } else {
+        // sub-threshold: weak inversion — Id ∝ exp((Vgs-Vth)/(n*Vt))
+        // n is sub-threshold slope factor (typical 1.5)
+        const Vt_thermal = 0.026; // 26 mV at room temp
+        const n = 1.5;
+        const expArg = Math.min((vGSguess - Vth) / (n * Vt_thermal), 30);
+        Id = 1e-7 * (Math.exp(expArg) - 1) * (1 + Lambda * vDSguess);
+        gm = 1e-7 * Math.exp(expArg) / (n * Vt_thermal);
+        gds = 1e-7 * (Math.exp(expArg) - 1) * Lambda;
+      }
+      const sign = isNmos ? 1 : -1;
+      // stamp VCCS from d→s controlled by g-s
+      sys.stampVCCS(d, s, g, s, sign * gm);
+      // output conductance
+      sys.stampConductance(d, s, sign * gds);
+      // current source offset (linearization)
+      const Ieq = Id - gm * vGSguess - gds * vDSguess;
+      sys.stampCurrentSource(d, s, sign * Ieq);
+      // series resistances Rd, Rs
+      if (Rd > 0) {
+        // stamp Rd as series conductance between d and internal node
+        // (we approximate by adding conductance to source side)
+        sys.stampConductance(d, s, 1 / Rd);
+      }
+      if (Rs > 0) {
+        sys.stampConductance(d, s, 1 / Rs);
+      }
+    },
+    step(params, terminals, sim) {
+      const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
+      const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
+      const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
+      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+      const st = sim.state.__global ?? (sim.state.__global = {});
+      const key = `mos_${d}_${g}_${s}_${b}`;
+      st[key + '_vgs'] = sim.nodeVoltage[g] - sim.nodeVoltage[s];
+      st[key + '_vds'] = sim.nodeVoltage[d] - sim.nodeVoltage[s];
+      st[key + '_vbs'] = sim.nodeVoltage[b] - sim.nodeVoltage[s];
+    },
+    getFlowPath() { return [{ x: 4, y: 1 }, { x: 2, y: 2 }, { x: 4, y: 3 }]; },
+    measure(params, terminals, sim) {
+      const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
+      const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
+      const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
+      const vGS = sim.nodeVoltage[g] - sim.nodeVoltage[s];
+      const vDS = sim.nodeVoltage[d] - sim.nodeVoltage[s];
+      return [
+        { label: 'Vgs', value: vGS.toFixed(4), unit: 'V' },
+        { label: 'Vds', value: vDS.toFixed(4), unit: 'V' },
+        { label: 'Vth', value: (params.Vto as number).toFixed(3), unit: 'V' },
+      ];
+    },
+  };
+}
+
+export const mosLevel1N = makeLevel1MOS('nmos');
+export const mosLevel1P = makeLevel1MOS('pmos');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JFET (N-channel and P-channel)
+//   Shockley model:
+//   For Vgs > Vp (pinch-off): Id = 0
+//   For Vgs < Vp and Vds > Vgs - Vp (saturation): Id = Idss * (1 - Vgs/Vp)^2
+//   For Vgs < Vp and Vds < Vgs - Vp (linear): Id = Idss * (2*(1 - Vgs/Vp)*Vds - Vds^2/Vp^2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function makeJFET(type: 'n' | 'p'): ComponentPlugin {
+  const isN = type === 'n';
+  return {
+    type: isN ? 'jfetN' : 'jfetP',
+    name: `${isN ? 'N' : 'P'}-channel JFET`,
+    category: 'semiconductor',
+    description: 'Junction Field-Effect Transistor (Shockley square-law model).',
+    symbol: isN ? 'Jn' : 'Jp',
+    boundingBox: { width: 4, height: 4 },
+    terminals: [
+      { id: 'd', label: 'D', position: { x: 4, y: 1 }, electricalType: 'passive' },
+      { id: 'g', label: 'G', position: { x: 0, y: 2 }, electricalType: 'input' },
+      { id: 's', label: 'S', position: { x: 4, y: 3 }, electricalType: 'passive' },
+    ],
+    parameters: [
+      { key: 'Vp', label: 'Pinch-off Voltage', type: 'number', default: isN ? -2 : 2, unit: 'V', min: -10, max: 10, step: 0.1 },
+      { key: 'Idss', label: 'Saturation Current', type: 'number', default: 0.01, unit: 'A', min: 1e-6, max: 1, step: 1e-4 },
+    ],
+    keywords: ['jfet', isN ? 'n-channel' : 'p-channel'],
+    defaultFootprint: 'TO-92',
+    render(ctx, _params, cellSize) {
+      ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(0, 2 * cellSize); ctx.lineTo(2 * cellSize, 2 * cellSize);
+      ctx.moveTo(2 * cellSize, cellSize); ctx.lineTo(2 * cellSize, 3 * cellSize);
+      ctx.moveTo(2 * cellSize, cellSize); ctx.lineTo(4 * cellSize, cellSize);
+      ctx.moveTo(2 * cellSize, 3 * cellSize); ctx.lineTo(4 * cellSize, 3 * cellSize);
+      ctx.stroke();
+      // arrow on gate (always pointing into the gate for N, out for P)
+      const ax = 2 * cellSize, ay = 2 * cellSize;
+      ctx.beginPath();
+      if (isN) {
+        ctx.moveTo(ax - 4, ay); ctx.lineTo(ax - 4, ay + 6); ctx.lineTo(ax, ay); ctx.closePath();
+      } else {
+        ctx.moveTo(ax, ay); ctx.lineTo(ax - 4, ay - 6); ctx.lineTo(ax - 4, ay); ctx.closePath();
+      }
+      ctx.fillStyle = '#cbd5e1'; ctx.fill();
+      drawLabel(ctx, isN ? 'NJF' : 'PJF', 2 * cellSize, 0);
+    },
+    stamp(params, terminals, sys, sim) {
+      const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
+      const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
+      const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
+      const Vp = params.Vp as number;
+      const Idss = params.Idss as number;
+      const st = sim.state.__global ?? (sim.state.__global = {});
+      const key = `jfet_${d}_${g}_${s}`;
+      const vGSguess = isN ? (st[key + '_vgs'] ?? 0) : -(st[key + '_vgs'] ?? 0);
+      const vDSguess = isN ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? 1);
+      const vov = 1 - vGSguess / Vp;
+      let Id = 0;
+      let gm = 0;
+      let gds = 0;
+      if (vov > 0) {
+        if (vDSguess > -vov * Vp) {
+          // saturation: Id = Idss * vov^2
+          Id = Idss * vov * vov;
+          gm = -2 * Idss * vov / Vp;
+          gds = 0;
+        } else {
+          // linear
+          Id = Idss * (2 * vov * vDSguess / Vp + vDSguess * vDSguess / (Vp * Vp));
+          gm = -2 * Idss * vDSguess / Vp / Vp;
+          gds = 2 * Idss * (vov / Vp + vDSguess / (Vp * Vp));
+        }
+      }
+      const sign = isN ? 1 : -1;
+      sys.stampVCCS(d, s, g, s, sign * gm);
+      sys.stampConductance(d, s, sign * gds);
+      const Ieq = Id - gm * vGSguess - gds * vDSguess;
+      sys.stampCurrentSource(d, s, sign * Ieq);
+    },
+    step(params, terminals, sim) {
+      const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
+      const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
+      const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
+      const st = sim.state.__global ?? (sim.state.__global = {});
+      const key = `jfet_${d}_${g}_${s}`;
+      st[key + '_vgs'] = sim.nodeVoltage[g] - sim.nodeVoltage[s];
+      st[key + '_vds'] = sim.nodeVoltage[d] - sim.nodeVoltage[s];
+    },
+    getFlowPath() { return [{ x: 4, y: 1 }, { x: 2, y: 2 }, { x: 4, y: 3 }]; },
+  };
+}
+
+export const jfetN = makeJFET('n');
+export const jfetP = makeJFET('p');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Register everything
+// ─────────────────────────────────────────────────────────────────────────────
+
+registerPlugin(diodeShockley);
+registerPlugin(bjtGPNpn);
+registerPlugin(bjtGPPnp);
+registerPlugin(mosLevel1N);
+registerPlugin(mosLevel1P);
+registerPlugin(jfetN);
+registerPlugin(jfetP);

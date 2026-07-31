@@ -25,6 +25,11 @@ import { DEFAULT_PAGE_SETUP, DEFAULT_TITLE_BLOCK } from './types';
 import { getPlugin } from './registry';
 import { simulateStep, getTerminalsForComponent, buildNodeMap } from './engine';
 import { runFullERC } from './erc';
+import { runAnalysis as runAnalysisEngine, type AnalysisConfig, type AnalysisResult } from './analysis';
+import { runBatch as runBatchEngine, type BatchConfig, type BatchResult } from './batch-runner';
+import { execMeas, type MeasCommand, type RealTrace as MeasRealTrace, type MeasResult } from './measurement';
+import { solveDCRobust as solveDCRobustEngine } from './convergence';
+import { DEFAULT_OPTIONS, type SimOptions, type ConvergenceReport } from './sim-options';
 import './components'; // register all built-in plugins
 
 // ===== ERC (Electrical Rule Check) =====
@@ -215,6 +220,22 @@ interface EditorState {
   reset: () => void;
   setShowGrid: (s: boolean) => void;
   setSnapToGrid: (s: boolean) => void;
+
+  // ── Advanced analysis (KiCad ngspice parity) ──────────────────────────────
+  /** last analysis result (AC/DC sweep/TF/etc.) — null if none yet */
+  lastAnalysisResult: AnalysisResult | null;
+  /** sim options — exposed to UI */
+  simOptions: SimOptions;
+  /** run an analysis (AC/DC/TF/etc.) and store result */
+  runAnalysis: (config: AnalysisConfig) => AnalysisResult;
+  /** run a batch sweep (.step / .mc / .worst) */
+  runBatch: (config: BatchConfig) => BatchResult;
+  /** run a .meas post-process on a trace */
+  runMeasurement: (cmd: MeasCommand, trace: MeasRealTrace) => MeasResult;
+  /** update sim options (reltol, gmin, method, temp, etc.) */
+  setSimOptions: (patch: Partial<SimOptions>) => void;
+  /** robust DC operating point using convergence aids */
+  solveDCRobust: () => { sim: SimContext | null; report: ConvergenceReport };
 }
 
 let idCounter = 0;
@@ -1085,4 +1106,48 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   setShowGrid: (showGrid) => set({ showGrid }),
   setSnapToGrid: (snapToGrid) => set({ snapToGrid }),
+
+  // ── Advanced analysis ──────────────────────────────────────────────────────
+  lastAnalysisResult: null,
+  simOptions: { ...DEFAULT_OPTIONS },
+
+  runAnalysis: (config) => {
+    const s = get();
+    const plugins = new Map<string, any>();
+    for (const c of s.components) {
+      const p = getPlugin(c.type);
+      if (p) plugins.set(c.type, p);
+    }
+    const result = runAnalysisEngine(s.components, s.wires, plugins, config, s.simOptions);
+    set({ lastAnalysisResult: result });
+    return result;
+  },
+
+  runBatch: (config) => {
+    const s = get();
+    const plugins = new Map<string, any>();
+    for (const c of s.components) {
+      const p = getPlugin(c.type);
+      if (p) plugins.set(c.type, p);
+    }
+    return runBatchEngine(s.components, s.wires, plugins, config, s.simOptions);
+  },
+
+  runMeasurement: (cmd, trace) => {
+    return execMeas(cmd, trace);
+  },
+
+  setSimOptions: (patch) => {
+    set((s) => ({ simOptions: { ...s.simOptions, ...patch } }));
+  },
+
+  solveDCRobust: () => {
+    const s = get();
+    const plugins = new Map<string, any>();
+    for (const c of s.components) {
+      const p = getPlugin(c.type);
+      if (p) plugins.set(c.type, p);
+    }
+    return solveDCRobustEngine(s.components, s.wires, plugins, s.simOptions);
+  },
 }));

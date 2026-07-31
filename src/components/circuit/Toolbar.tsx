@@ -8,6 +8,7 @@ import {
   Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Square, Gauge, Zap,
   FileText, ChevronDown, Settings2, Database, FileCode, Boxes, ShieldCheck,
   Search, FileDown, Network, Layers, BookOpen, Wand2, Ruler, Pencil,
+  Activity, Sliders, Sigma, Waves,
 } from 'lucide-react';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
@@ -27,6 +28,9 @@ import {
   FindReplaceDialog, ViolationsBrowserDialog, NetInspectorDialog,
   PageSetupDialog, SavedViewsDialog, HierarchicalSheetsDialog, NetClassesDialog,
 } from './SchematicDialogs';
+import {
+  AnalysisDialog, OptionsDialog, MeasurementDialog, BatchSweepDialog, StimuliEditorDialog,
+} from './AnalysisDialogs';
 import {
   exportSchematicSVG, exportSchematicPNG, exportSchematicPDF,
   downloadBlob, downloadText,
@@ -85,6 +89,12 @@ export function Toolbar() {
   const [showSavedViews, setShowSavedViews] = useState(false);
   const [showSheets, setShowSheets] = useState(false);
   const [showNetClasses, setShowNetClasses] = useState(false);
+  // Simulation analysis dialogs
+  const [showAnalysis, setShowAnalysis] = useState(false);
+  const [showOptions, setShowOptions] = useState(false);
+  const [showMeasurement, setShowMeasurement] = useState(false);
+  const [showBatchSweep, setShowBatchSweep] = useState(false);
+  const [showStimuliEditor, setShowStimuliEditor] = useState(false);
   // Track camera so SaveViewDialog gets current pan/zoom
   const [camera, setCamera] = useState({ x: 0, y: 0, zoom: 1 });
 
@@ -409,6 +419,41 @@ export function Toolbar() {
           <TooltipContent>Find / Replace (Ctrl+F)</TooltipContent>
         </Tooltip>
 
+        {/* Simulate menu — KiCad/ngspice parity */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="ghost">
+              <Activity size={14} />
+              <span className="ml-1 hidden lg:inline">Simulate</span>
+              <ChevronDown size={12} className="ml-1" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-64 bg-slate-900 border-slate-700">
+            <DropdownMenuLabel className="text-slate-300">Analysis</DropdownMenuLabel>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => setShowAnalysis(true)}>
+              <Activity size={14} className="mr-2" /> Run Analysis (AC/DC/TF/Sens/Noise/...)
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => setShowBatchSweep(true)}>
+              <Waves size={14} className="mr-2" /> Batch Sweep / Monte Carlo (.step/.mc/.worst)
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => setShowMeasurement(true)}>
+              <Sigma size={14} className="mr-2" /> Measurements (.meas)
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => setShowStimuliEditor(true)}>
+              <Wand2 size={14} className="mr-2" /> Stimuli Editor (PWL/SINE/PULSE/SFFM/EXP)
+            </DropdownMenuItem>
+            <DropdownMenuSeparator className="bg-slate-700" />
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => setShowOptions(true)}>
+              <Sliders size={14} className="mr-2" /> Simulation Options (reltol/gmin/method/temp)
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
         {/* Inspect: ERC violations + Net inspector + Net classes */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -711,6 +756,12 @@ export function Toolbar() {
       <HierarchicalSheetsDialog open={showSheets} onClose={() => setShowSheets(false)} />
       <PageSetupDialog open={showPageSetup} onClose={() => setShowPageSetup(false)} />
       <SavedViewsDialog open={showSavedViews} onClose={() => setShowSavedViews(false)} camera={camera} />
+      {/* Simulation analysis dialogs */}
+      <AnalysisDialog open={showAnalysis} onClose={() => setShowAnalysis(false)} />
+      <OptionsDialog open={showOptions} onClose={() => setShowOptions(false)} />
+      <MeasurementDialog open={showMeasurement} onClose={() => setShowMeasurement(false)} />
+      <BatchSweepDialog open={showBatchSweep} onClose={() => setShowBatchSweep(false)} />
+      <StimuliEditorDialog open={showStimuliEditor} onClose={() => setShowStimuliEditor(false)} />
     </TooltipProvider>
   );
 }
