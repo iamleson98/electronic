@@ -1,50 +1,41 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import { examples } from '@/lib/circuit/examples';
 import { toast } from 'sonner';
 import {
-  Play,
-  Pause,
-  SkipForward,
-  Save,
-  Upload,
-  Trash2,
-  Undo2,
-  Redo2,
-  Square,
-  Gauge,
-  Zap,
-  FileText,
-  ChevronDown,
-  Settings2,
-  Database,
-  FileCode,
-  Boxes,
-  ShieldCheck,
+  Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Square, Gauge, Zap,
+  FileText, ChevronDown, Settings2, Database, FileCode, Boxes, ShieldCheck,
+  Search, FileDown, Network, Layers, BookOpen, Wand2, Ruler, Pencil,
 } from 'lucide-react';
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
+  DropdownMenuSeparator, DropdownMenuTrigger, DropdownMenuCheckboxItem,
 } from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
+  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { MyCircuitsDialog } from './MyCircuitsDialog';
 import { SpiceImportDialog } from './SpiceImportDialog';
 import { SubCircuitDialog } from './SubCircuitDialog';
+import {
+  FindReplaceDialog, ViolationsBrowserDialog, NetInspectorDialog,
+  PageSetupDialog, SavedViewsDialog, HierarchicalSheetsDialog, NetClassesDialog,
+} from './SchematicDialogs';
+import {
+  exportSchematicSVG, exportSchematicPNG, exportSchematicPDF,
+  downloadBlob, downloadText,
+} from '@/lib/circuit/schematic-plot';
+import {
+  exportSPICENetlist, exportKiCadNetlist,
+  exportBOMCSV, exportBOMHTML, exportBOMXML,
+} from '@/lib/circuit/netlist-export';
+import { parseSchematicFile } from '@/lib/circuit/kicad-sch-import';
 
 export function Toolbar() {
   const running = useEditor((s) => s.running);
@@ -66,11 +57,57 @@ export function Toolbar() {
   const setSnapToGrid = useEditor((s) => s.setSnapToGrid);
   const past = useEditor((s) => s.past.length);
   const future = useEditor((s) => s.future.length);
+  // KiCad-parity new state
+  const units = useEditor((s) => s.units);
+  const setUnits = useEditor((s) => s.setUnits);
+  const showPinNumbers = useEditor((s) => s.showPinNumbers);
+  const setShowPinNumbers = useEditor((s) => s.setShowPinNumbers);
+  const showPinNames = useEditor((s) => s.showPinNames);
+  const setShowPinNames = useEditor((s) => s.setShowPinNames);
+  const showPinElecTypes = useEditor((s) => s.showPinElecTypes);
+  const setShowPinElecTypes = useEditor((s) => s.setShowPinElecTypes);
+  const showRefdes = useEditor((s) => s.showRefdes);
+  const setShowRefdes = useEditor((s) => s.setShowRefdes);
+  const showValues = useEditor((s) => s.showValues);
+  const setShowValues = useEditor((s) => s.setShowValues);
+  const activeTool = useEditor((s) => s.activeTool);
+  const setActiveTool = useEditor((s) => s.setActiveTool);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const schImportInputRef = useRef<HTMLInputElement | null>(null);
   const [showMyCircuits, setShowMyCircuits] = useState(false);
   const [showSpiceImport, setShowSpiceImport] = useState(false);
   const [showSubCircuit, setShowSubCircuit] = useState(false);
+  const [showFindReplace, setShowFindReplace] = useState(false);
+  const [showViolations, setShowViolations] = useState(false);
+  const [showNetInspector, setShowNetInspector] = useState(false);
+  const [showPageSetup, setShowPageSetup] = useState(false);
+  const [showSavedViews, setShowSavedViews] = useState(false);
+  const [showSheets, setShowSheets] = useState(false);
+  const [showNetClasses, setShowNetClasses] = useState(false);
+  // Track camera so SaveViewDialog gets current pan/zoom
+  const [camera, setCamera] = useState({ x: 0, y: 0, zoom: 1 });
+
+  // Listen for "open find/replace" event from canvas hotkey
+  useEffect(() => {
+    const handler = () => setShowFindReplace(true);
+    window.addEventListener('circuitlab:open-find-replace', handler);
+    // poll camera from canvas via custom event
+    const camHandler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail) setCamera(detail);
+    };
+    window.addEventListener('circuitlab:camera', camHandler);
+    // ask canvas for current camera
+    const askCamera = () => window.dispatchEvent(new CustomEvent('circuitlab:request-camera'));
+    askCamera();
+    const interval = setInterval(askCamera, 2000);
+    return () => {
+      window.removeEventListener('circuitlab:open-find-replace', handler);
+      window.removeEventListener('circuitlab:camera', camHandler);
+      clearInterval(interval);
+    };
+  }, []);
 
   const handleSave = useCallback(() => {
     const doc = serialize();
@@ -102,6 +139,90 @@ export function Toolbar() {
     reader.readAsText(file);
     e.target.value = '';
   }, [loadDocument]);
+
+  // KiCad / Eagle schematic import
+  const handleSchImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const text = reader.result as string;
+        const result = parseSchematicFile(text, file.name);
+        loadDocument(result.document);
+        if (result.unknownSymbols.length > 0) {
+          toast.warning(`Imported with ${result.unknownSymbols.length} unknown symbols skipped`, {
+            description: result.unknownSymbols.slice(0, 5).join('\n'),
+          });
+        } else {
+          toast.success(`Imported ${file.name}`);
+        }
+        if (result.warnings.length > 0) {
+          console.log('Import warnings:', result.warnings);
+        }
+      } catch (err) {
+        toast.error('Import failed: ' + (err as Error).message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }, [loadDocument]);
+
+  const handlePlotSVG = useCallback(() => {
+    const doc = serialize();
+    const svg = exportSchematicSVG(doc);
+    downloadText(svg, `schematic_${Date.now()}.svg`, 'image/svg+xml');
+    toast.success('Exported SVG');
+  }, [serialize]);
+
+  const handlePlotPNG = useCallback(async () => {
+    try {
+      const doc = serialize();
+      const blob = await exportSchematicPNG(doc, 2);
+      downloadBlob(blob, `schematic_${Date.now()}.png`);
+      toast.success('Exported PNG');
+    } catch (err) {
+      toast.error('PNG export failed: ' + (err as Error).message);
+    }
+  }, [serialize]);
+
+  const handlePlotPDF = useCallback(async () => {
+    try {
+      const doc = serialize();
+      const blob = await exportSchematicPDF(doc);
+      downloadBlob(blob, `schematic_${Date.now()}.pdf`);
+      toast.success('Exported PDF');
+    } catch (err) {
+      toast.error('PDF export failed: ' + (err as Error).message);
+    }
+  }, [serialize]);
+
+  const handleExportSPICE = useCallback(() => {
+    const doc = serialize();
+    const net = exportSPICENetlist(doc, doc.metadata?.title ?? 'Circuit');
+    downloadText(net, `circuit_${Date.now()}.cir`, 'text/plain');
+    toast.success('Exported SPICE netlist');
+  }, [serialize]);
+
+  const handleExportKiCadNet = useCallback(() => {
+    const doc = serialize();
+    const net = exportKiCadNetlist(doc, doc.metadata?.title ?? 'Circuit');
+    downloadText(net, `circuit_${Date.now()}.net`, 'application/xml');
+    toast.success('Exported KiCad netlist');
+  }, [serialize]);
+
+  const handleExportBOM = useCallback((format: 'csv' | 'html' | 'xml') => {
+    const doc = serialize();
+    const ext = format;
+    if (format === 'csv') {
+      downloadText(exportBOMCSV(doc), `bom_${Date.now()}.csv`, 'text/csv');
+    } else if (format === 'html') {
+      downloadText(exportBOMHTML(doc), `bom_${Date.now()}.html`, 'text/html');
+    } else {
+      downloadText(exportBOMXML(doc), `bom_${Date.now()}.xml`, 'application/xml');
+    }
+    toast.success(`Exported BOM (${format.toUpperCase()})`);
+  }, [serialize]);
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -277,6 +398,179 @@ export function Toolbar() {
           <TooltipContent>Electrical Rule Check — find unconnected pins, power shorts, conflicting drivers</TooltipContent>
         </Tooltip>
 
+        {/* Find */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => setShowFindReplace(true)} disabled={running}>
+              <Search size={14} />
+              <span className="ml-1 hidden lg:inline">Find</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Find / Replace (Ctrl+F)</TooltipContent>
+        </Tooltip>
+
+        {/* Inspect: ERC violations + Net inspector + Net classes */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="ghost" disabled={running}>
+              <Network size={14} />
+              <span className="ml-1 hidden lg:inline">Inspect</span>
+              <ChevronDown size={12} className="ml-1" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56 bg-slate-900 border-slate-700">
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => setShowViolations(true)}>
+              <ShieldCheck size={14} className="mr-2" /> ERC Violations Browser
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => setShowNetInspector(true)}>
+              <Network size={14} className="mr-2" /> Net Inspector
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => setShowNetClasses(true)}>
+              <Layers size={14} className="mr-2" /> Net Classes
+            </DropdownMenuItem>
+            <DropdownMenuSeparator className="bg-slate-700" />
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => setShowSheets(true)}>
+              <BookOpen size={14} className="mr-2" /> Hierarchical Sheets
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => setShowPageSetup(true)}>
+              <Ruler size={14} className="mr-2" /> Page Setup & Title Block
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => setShowSavedViews(true)}>
+              <Layers size={14} className="mr-2" /> Saved Views
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {/* Tools toolbar — left-rail tools (Wire / Bus / Label / etc.) */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="ghost" disabled={running}>
+              <Pencil size={14} />
+              <span className="ml-1 hidden lg:inline">Tools</span>
+              <ChevronDown size={12} className="ml-1" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56 bg-slate-900 border-slate-700">
+            <DropdownMenuLabel className="text-slate-300">Schematic Tools</DropdownMenuLabel>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'wire'} onCheckedChange={() => setActiveTool(activeTool === 'wire' ? 'select' : 'wire')}>
+              Wire
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'bus'} onCheckedChange={() => setActiveTool(activeTool === 'bus' ? 'select' : 'bus')}>
+              Bus
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'label'} onCheckedChange={() => setActiveTool(activeTool === 'label' ? 'select' : 'label')}>
+              Local Label
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'globalLabel'} onCheckedChange={() => setActiveTool(activeTool === 'globalLabel' ? 'select' : 'globalLabel')}>
+              Global Label
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'hierLabel'} onCheckedChange={() => setActiveTool(activeTool === 'hierLabel' ? 'select' : 'hierLabel')}>
+              Hierarchical Label
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'junction'} onCheckedChange={() => setActiveTool(activeTool === 'junction' ? 'select' : 'junction')}>
+              Junction
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'noConnect'} onCheckedChange={() => setActiveTool(activeTool === 'noConnect' ? 'select' : 'noConnect')}>
+              No-Connect (N)
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'powerPort'} onCheckedChange={() => setActiveTool(activeTool === 'powerPort' ? 'select' : 'powerPort')}>
+              Power Port
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuSeparator className="bg-slate-700" />
+            <DropdownMenuLabel className="text-slate-300">Drawing Primitives</DropdownMenuLabel>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'text'} onCheckedChange={() => setActiveTool(activeTool === 'text' ? 'select' : 'text')}>
+              Text
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'line'} onCheckedChange={() => setActiveTool(activeTool === 'line' ? 'select' : 'line')}>
+              Line
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'poly'} onCheckedChange={() => setActiveTool(activeTool === 'poly' ? 'select' : 'poly')}>
+              Polygon
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem
+              checked={activeTool === 'image'} onCheckedChange={() => setActiveTool(activeTool === 'image' ? 'select' : 'image')}>
+              Image
+            </DropdownMenuCheckboxItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {/* Plot menu — PDF/SVG/PNG */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="ghost" disabled={running}>
+              <FileDown size={14} />
+              <span className="ml-1 hidden lg:inline">Plot</span>
+              <ChevronDown size={12} className="ml-1" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56 bg-slate-900 border-slate-700">
+            <DropdownMenuLabel className="text-slate-300">Plot Schematic</DropdownMenuLabel>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handlePlotPDF}>
+              PDF
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handlePlotSVG}>
+              SVG
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handlePlotPNG}>
+              PNG (rasterized)
+            </DropdownMenuItem>
+            <DropdownMenuSeparator className="bg-slate-700" />
+            <DropdownMenuLabel className="text-slate-300">Export Netlist</DropdownMenuLabel>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handleExportSPICE}>
+              SPICE Netlist (.cir)
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handleExportKiCadNet}>
+              KiCad PCB Netlist (.net)
+            </DropdownMenuItem>
+            <DropdownMenuSeparator className="bg-slate-700" />
+            <DropdownMenuLabel className="text-slate-300">Export BOM</DropdownMenuLabel>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={() => handleExportBOM('csv')}>
+              BOM CSV
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={() => handleExportBOM('html')}>
+              BOM HTML
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={() => handleExportBOM('xml')}>
+              BOM XML
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {/* Import KiCad / Eagle schematic */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => schImportInputRef.current?.click()} disabled={running}>
+              <Upload size={14} />
+              <span className="ml-1 hidden lg:inline">Import .sch</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Import KiCad .kicad_sch or Eagle .sch</TooltipContent>
+        </Tooltip>
+        <input
+          ref={schImportInputRef}
+          type="file"
+          accept=".kicad_sch,.sch,application/json"
+          onChange={handleSchImport}
+          className="hidden"
+        />
+
         {/* Settings */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -284,7 +578,7 @@ export function Toolbar() {
               <Settings2 size={14} />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-56 bg-slate-900 border-slate-700">
+          <DropdownMenuContent align="end" className="w-64 bg-slate-900 border-slate-700">
             <DropdownMenuLabel className="text-slate-300">View Settings</DropdownMenuLabel>
             <DropdownMenuSeparator className="bg-slate-700" />
             <div className="flex items-center justify-between gap-2 px-2 py-1.5">
@@ -296,22 +590,61 @@ export function Toolbar() {
               <Switch id="snap-switch" checked={snapToGrid} onCheckedChange={setSnapToGrid} />
             </div>
             <DropdownMenuSeparator className="bg-slate-700" />
+            <DropdownMenuLabel className="text-slate-300">Display</DropdownMenuLabel>
+            <DropdownMenuCheckboxItem checked={showRefdes} onCheckedChange={setShowRefdes}>
+              Show Reference Designators
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem checked={showValues} onCheckedChange={setShowValues}>
+              Show Values
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem checked={showPinNumbers} onCheckedChange={setShowPinNumbers}>
+              Show Pin Numbers
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem checked={showPinNames} onCheckedChange={setShowPinNames}>
+              Show Pin Names
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem checked={showPinElecTypes} onCheckedChange={setShowPinElecTypes}>
+              Show Pin Electrical Types
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuSeparator className="bg-slate-700" />
+            <DropdownMenuLabel className="text-slate-300">Units</DropdownMenuLabel>
+            <div className="flex gap-1 px-2 py-1">
+              {(['grid', 'mm', 'mil', 'in'] as const).map((u) => (
+                <Button
+                  key={u}
+                  size="sm"
+                  variant={units === u ? 'default' : 'ghost'}
+                  className="flex-1 h-7 text-xs"
+                  onClick={() => setUnits(u)}
+                >
+                  {u}
+                </Button>
+              ))}
+            </div>
+            <DropdownMenuSeparator className="bg-slate-700" />
             <DropdownMenuLabel className="text-slate-300">Schematic Tools</DropdownMenuLabel>
-            <DropdownMenuItem
-              className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
               onClick={() => {
                 if (running) return;
-                useEditor.getState().reannotate();
-                toast.success('Re-annotated all components (R1, R2, C1, ...)');
+                useEditor.getState().reannotateByPosition();
+                toast.success('Re-annotated by X-then-Y position');
               }}
               disabled={running}
             >
-              Re-annotate Components
+              Re-annotate (by position)
             </DropdownMenuItem>
-            <DropdownMenuItem
-              className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
               onClick={() => {
-                // Toggle 45° routing — this is a canvas state, so we use a custom event
+                if (running) return;
+                useEditor.getState().reannotate();
+                toast.success('Re-annotated (insertion order)');
+              }}
+              disabled={running}
+            >
+              Re-annotate (insertion order)
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+              onClick={() => {
                 window.dispatchEvent(new KeyboardEvent('keydown', { key: '\\' }));
                 toast.info('Toggled 45° wire routing');
               }}
@@ -371,6 +704,13 @@ export function Toolbar() {
       <MyCircuitsDialog open={showMyCircuits} onClose={() => setShowMyCircuits(false)} />
       <SpiceImportDialog open={showSpiceImport} onClose={() => setShowSpiceImport(false)} />
       <SubCircuitDialog open={showSubCircuit} onClose={() => setShowSubCircuit(false)} />
+      <FindReplaceDialog open={showFindReplace} onClose={() => setShowFindReplace(false)} />
+      <ViolationsBrowserDialog open={showViolations} onClose={() => setShowViolations(false)} />
+      <NetInspectorDialog open={showNetInspector} onClose={() => setShowNetInspector(false)} />
+      <NetClassesDialog open={showNetClasses} onClose={() => setShowNetClasses(false)} />
+      <HierarchicalSheetsDialog open={showSheets} onClose={() => setShowSheets(false)} />
+      <PageSetupDialog open={showPageSetup} onClose={() => setShowPageSetup(false)} />
+      <SavedViewsDialog open={showSavedViews} onClose={() => setShowSavedViews(false)} camera={camera} />
     </TooltipProvider>
   );
 }

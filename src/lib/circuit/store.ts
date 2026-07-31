@@ -9,140 +9,40 @@ import { create } from 'zustand';
 import type {
   CircuitComponent,
   CircuitDocument,
+  ComponentField,
+  DrawingPrimitive,
+  Group,
+  HierarchicalSheet,
+  NetClass,
+  NoConnectMarker,
+  PageSetup,
+  PinElecType,
+  SavedView,
   SimContext,
   Wire,
 } from './types';
+import { DEFAULT_PAGE_SETUP, DEFAULT_TITLE_BLOCK } from './types';
 import { getPlugin } from './registry';
 import { simulateStep, getTerminalsForComponent, buildNodeMap } from './engine';
+import { runFullERC } from './erc';
 import './components'; // register all built-in plugins
 
 // ===== ERC (Electrical Rule Check) =====
-export interface ERCError {
-  type: 'unconnected_pin' | 'power_short' | 'conflicting_drivers' | 'missing_ground';
-  severity: 'error' | 'warning';
-  message: string;
-  componentId: string;
-  terminalId: string;
-  position: { x: number; y: number };
-}
+// Backward-compatible wrapper around the new full ERC engine in `erc.ts`.
+// Use `runFullERC` directly for the full pin-conflict matrix + no-connect honor.
 
-export interface ERCResult {
-  errors: ERCError[];
-  passed: boolean;
-  stats: { errors: number; warnings: number };
-}
+export type ERCError = import('./erc').ERCError;
+export type ERCResult = import('./erc').ERCResult;
 
-function getTerminalElecType(compType: string, terminalId: string): string {
-  if (compType === 'dcVoltage' || compType === 'acVoltage' || compType === 'pulseSource') {
-    return terminalId === 'p' ? 'power' : 'ground';
-  }
-  if (compType === 'ground' || compType === 'powerGND') return 'ground';
-  if (compType.startsWith('power') && compType !== 'powerGND') return 'power';
-  if (compType === 'netLabel') return 'passive';
-  if (compType === 'resistor' || compType === 'capacitor' || compType === 'inductor' ||
-      compType === 'diode' || compType === 'led' || compType === 'switch' || compType === 'pushButton') return 'passive';
-  if (compType === 'npn' || compType === 'pnp' || compType === 'nmos' || compType === 'pmos') {
-    if (terminalId === 'b' || terminalId === 'g') return 'input';
-    return 'passive';
-  }
-  if (compType === 'opamp') {
-    if (terminalId === 'in+' || terminalId === 'in-') return 'input';
-    if (terminalId === 'out') return 'output';
-    if (terminalId === 'vcc' || terminalId === 'vee') return 'power';
-  }
-  if (compType === 'timer555') {
-    if (terminalId === 'out') return 'output';
-    if (terminalId === 'vcc') return 'power';
-    if (terminalId === 'gnd') return 'ground';
-    return 'input';
-  }
-  if (compType === 'arduino' || compType === 'arduinoReal' || compType === 'raspberryPi') {
-    if (terminalId === 'gnd') return 'ground';
-    if (terminalId === '5v' || terminalId === '3v3') return 'power';
-    return 'bidirectional';
-  }
-  return 'unspecified';
-}
-
+/** @deprecated use runFullERC for the complete rule set */
 export function runERC(components: CircuitComponent[], wires: Wire[]): ERCResult {
-  const errors: ERCError[] = [];
-  const plugins = new Map<string, any>();
-  for (const c of components) {
-    const p = getPlugin(c.type);
-    if (p) plugins.set(c.type, p);
-  }
-
-  // Check 1: Unconnected pins
-  const connectedTerminals = new Set<string>();
-  for (const wire of wires) {
-    connectedTerminals.add(`${wire.from.componentId}:${wire.from.terminalId}`);
-    connectedTerminals.add(`${wire.to.componentId}:${wire.to.terminalId}`);
-  }
-  for (const comp of components) {
-    const plugin = plugins.get(comp.type);
-    if (!plugin) continue;
-    for (const term of plugin.terminals) {
-      const key = `${comp.id}:${term.id}`;
-      if (!connectedTerminals.has(key)) {
-        if (comp.type === 'ground' || comp.type === 'powerGND') continue;
-        const elecType = getTerminalElecType(comp.type, term.id);
-        if (elecType === 'input' || elecType === 'output' || elecType === 'power') {
-          errors.push({
-            type: 'unconnected_pin',
-            severity: elecType === 'power' ? 'warning' : 'error',
-            message: `${comp.id}.${term.id} (${elecType}) is unconnected`,
-            componentId: comp.id,
-            terminalId: term.id,
-            position: { x: comp.position.x + term.position.x, y: comp.position.y + term.position.y },
-          });
-        }
-      }
-    }
-  }
-
-  // Check 2: Missing ground
-  const hasGround = components.some(c => c.type === 'ground' || c.type === 'powerGND');
-  if (!hasGround && components.length > 0) {
-    errors.push({
-      type: 'missing_ground', severity: 'error',
-      message: 'Circuit has no ground reference — add a Ground component',
-      componentId: '', terminalId: '', position: { x: 0, y: 0 },
-    });
-  }
-
-  // Check 3: Conflicting drivers (multiple outputs on same net)
-  const nodeMap = buildNodeMap(components, wires, plugins);
-  const netToOutputs = new Map<number, { compId: string; termId: string; refdes: string }[]>();
-  for (const comp of components) {
-    const plugin = plugins.get(comp.type);
-    if (!plugin) continue;
-    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
-    for (const t of terms) {
-      const elecType = getTerminalElecType(comp.type, t.terminalId);
-      if (elecType === 'output' || elecType === 'power') {
-        const node = t.nodeId;
-        if (!netToOutputs.has(node)) netToOutputs.set(node, []);
-        netToOutputs.get(node)!.push({ compId: comp.id, termId: t.terminalId, refdes: comp.id });
-      }
-    }
-  }
-  for (const [node, outputs] of netToOutputs) {
-    if (outputs.length > 1 && node !== 0) {
-      errors.push({
-        type: 'conflicting_drivers', severity: 'error',
-        message: `Net has ${outputs.length} conflicting drivers: ${outputs.map(o => o.refdes).join(', ')}`,
-        componentId: outputs[0].compId, terminalId: outputs[0].termId, position: { x: 0, y: 0 },
-      });
-    }
-  }
-
-  const errorCount = errors.filter(e => e.severity === 'error').length;
-  const warningCount = errors.filter(e => e.severity === 'warning').length;
-  return { errors, passed: errorCount === 0, stats: { errors: errorCount, warnings: warningCount } };
+  return runFullERC(components, wires, []);
 }
+
+// ===== Selection / Probe types =====
 
 export interface Selection {
-  type: 'component' | 'wire' | null;
+  type: 'component' | 'wire' | 'drawing' | 'group' | null;
   id: string | null;
 }
 
@@ -189,10 +89,40 @@ interface EditorState {
   // wire draft
   wireDraft: { from: { componentId: string; terminalId: string }; cursor: { x: number; y: number } } | null;
 
+  // ── New KiCad-parity document state ──────────────────────────────────────
+  sheets: HierarchicalSheet[];
+  netClasses: NetClass[];
+  drawings: DrawingPrimitive[];
+  noConnects: NoConnectMarker[];
+  groups: Group[];
+  pageSetup: PageSetup;
+  savedViews: SavedView[];
+  childSheets: Record<string, CircuitDocument>;
+  activeSheet: string;
+  metadata: {
+    title?: string;
+    company?: string;
+    revision?: string;
+    date?: string;
+    author?: string;
+  };
+
+  // ── Display / units / view state ──────────────────────────────────────────
+  units: 'mm' | 'mil' | 'in' | 'grid';
+  gridSize: number;             // grid spacing in grid units
+  showPinNumbers: boolean;
+  showPinNames: boolean;
+  showPinElecTypes: boolean;
+  showRefdes: boolean;
+  showValues: boolean;
+  showTitleBlock: boolean;
+  activeTool: 'select' | 'wire' | 'bus' | 'label' | 'globalLabel' | 'hierLabel' | 'junction' | 'noConnect' | 'powerPort' | 'text' | 'line' | 'poly' | 'image';
+
   // actions
   addComponent: (type: string, position: { x: number; y: number }) => string;
   moveComponent: (id: string, position: { x: number; y: number }) => void;
   rotateComponent: (id: string) => void;
+  mirrorComponent: (id: string, axis: 'x' | 'y') => void;
   deleteComponent: (id: string) => void;
   deleteWire: (id: string) => void;
   setParameter: (id: string, key: string, value: number | string | boolean) => void;
@@ -203,20 +133,73 @@ interface EditorState {
   clearMultiSelection: () => void;
   moveSelectedComponents: (delta: { x: number; y: number }) => void;
   deleteSelected: () => void;
+  mirrorSelected: (axis: 'x' | 'y') => void;
+  rotateSelected: () => void;
   // copy/paste
   copySelection: () => void;
   paste: () => void;
   duplicate: () => void;
   // ERC
   runERC: () => ERCResult;
+  runFullERCCheck: () => ERCResult;
   // annotation
   reannotate: () => void;
+  reannotateByPosition: () => void;
+  // fields
+  setField: (compId: string, key: string, name: string, value: string, visible?: boolean) => void;
+  removeField: (compId: string, key: string) => void;
+  // lock
+  toggleLock: (compId: string) => void;
+  lockSelected: () => void;
+  unlockSelected: () => void;
+  // multi-unit
+  setComponentUnit: (compId: string, unit: number) => void;
+  setComponentConvert: (compId: string, convert: 1 | 2) => void;
+  // net classes
+  addNetClass: (name: string, description?: string) => string;
+  updateNetClass: (id: string, patch: Partial<NetClass>) => void;
+  removeNetClass: (id: string) => void;
+  // drawings
+  addDrawing: (d: DrawingPrimitive) => void;
+  updateDrawing: (id: string, patch: Partial<DrawingPrimitive>) => void;
+  removeDrawing: (id: string) => void;
+  // no-connects
+  addNoConnect: (componentId: string, terminalId: string) => void;
+  removeNoConnect: (componentId: string, terminalId: string) => void;
+  // groups
+  createGroup: (name: string, componentIds: string[], wireIds?: string[], drawingIds?: string[]) => string;
+  ungroup: (groupId: string) => void;
+  // sheets
+  addSheet: (sheetName: string, fileName: string) => string;
+  removeSheet: (id: string) => void;
+  setActiveSheet: (fileName: string) => void;
+  // saved views
+  saveView: (name: string, camera: { x: number; y: number; zoom: number }) => string;
+  loadView: (id: string) => SavedView | null;
+  removeSavedView: (id: string) => void;
+  // page setup
+  setPageSetup: (patch: Partial<PageSetup>) => void;
+  setMetadata: (patch: Partial<{ title: string; company: string; revision: string; date: string; author: string }>) => void;
+  // display settings
+  setUnits: (u: 'mm' | 'mil' | 'in' | 'grid') => void;
+  setGridSize: (s: number) => void;
+  setShowPinNumbers: (s: boolean) => void;
+  setShowPinNames: (s: boolean) => void;
+  setShowPinElecTypes: (s: boolean) => void;
+  setShowRefdes: (s: boolean) => void;
+  setShowValues: (s: boolean) => void;
+  setShowTitleBlock: (s: boolean) => void;
+  setActiveTool: (t: EditorState['activeTool']) => void;
+  // wire ops
   startWire: (from: { componentId: string; terminalId: string }, cursor: { x: number; y: number }) => void;
   updateWireCursor: (cursor: { x: number; y: number }) => void;
   cancelWire: () => void;
   completeWire: (to: { componentId: string; terminalId: string }) => void;
   setWireWaypoints: (id: string, waypoints: { x: number; y: number }[]) => void;
   toggleSwitch: (id: string) => void;
+  // find/replace
+  findComponents: (query: string, opts?: { searchRefdes?: boolean; searchValue?: boolean; searchFields?: boolean; caseSensitive?: boolean }) => CircuitComponent[];
+  replaceComponentParameter: (compId: string, key: string, newValue: string | number | boolean) => void;
 
   undo: () => void;
   redo: () => void;
@@ -311,10 +294,23 @@ function nextRefdes(type: string, components: CircuitComponent[]): string {
   return `${prefix}${maxNum + 1}`;
 }
 
-function snapshot(s: { components: CircuitComponent[]; wires: Wire[] }) {
+function snapshot(s: {
+  components: CircuitComponent[];
+  wires: Wire[];
+  drawings?: DrawingPrimitive[];
+  noConnects?: NoConnectMarker[];
+  groups?: Group[];
+  sheets?: HierarchicalSheet[];
+  netClasses?: NetClass[];
+}) {
   return {
-    components: s.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined })),
+    components: s.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined, fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined })),
     wires: s.wires.map((w) => ({ ...w })),
+    drawings: s.drawings ? s.drawings.map((d) => ({ ...d })) : [],
+    noConnects: s.noConnects ? s.noConnects.map((n) => ({ ...n })) : [],
+    groups: s.groups ? s.groups.map((g) => ({ ...g, componentIds: [...g.componentIds], wireIds: [...g.wireIds], drawingIds: [...g.drawingIds] })) : [],
+    sheets: s.sheets ? s.sheets.map((sh) => ({ ...sh, pins: sh.pins.map((p) => ({ ...p })) })) : [],
+    netClasses: s.netClasses ? s.netClasses.map((nc) => ({ ...nc, nets: [...nc.nets] })) : [],
   };
 }
 
@@ -348,6 +344,27 @@ export const useEditor = create<EditorState>((set, get) => ({
   showGrid: true,
   snapToGrid: true,
   wireDraft: null,
+  // new doc state
+  sheets: [],
+  netClasses: [],
+  drawings: [],
+  noConnects: [],
+  groups: [],
+  pageSetup: { ...DEFAULT_PAGE_SETUP },
+  savedViews: [],
+  childSheets: {},
+  activeSheet: '',
+  metadata: { title: 'Untitled', revision: 'Rev 1', date: new Date().toISOString().slice(0, 10) },
+  // display
+  units: 'grid',
+  gridSize: 1,
+  showPinNumbers: false,
+  showPinNames: false,
+  showPinElecTypes: false,
+  showRefdes: true,
+  showValues: true,
+  showTitleBlock: false,
+  activeTool: 'select',
 
   addComponent: (type, position) => {
     get().pushHistory();
@@ -385,6 +402,17 @@ export const useEditor = create<EditorState>((set, get) => ({
     }));
   },
 
+  mirrorComponent: (id, axis) => {
+    get().pushHistory();
+    set((s) => ({
+      components: s.components.map((c) =>
+        c.id === id
+          ? { ...c, [axis === 'x' ? 'mirrorX' : 'mirrorY']: !c[axis === 'x' ? 'mirrorX' : 'mirrorY'] }
+          : c,
+      ),
+    }));
+  },
+
   deleteComponent: (id) => {
     get().pushHistory();
     set((s) => ({
@@ -404,6 +432,21 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
 
   setParameter: (id, key, value) => {
+    // KiCad parity: parameter edits must be undoable. Coalesce rapid edits into a single history entry.
+    const s = get();
+    const last = s.past[s.past.length - 1];
+    const isCoalescing = last &&
+      (last as any).__paramEdit?.id === id &&
+      (last as any).__paramEdit?.key === key &&
+      Date.now() - ((last as any).__paramEdit?.ts ?? 0) < 1500;
+    if (!isCoalescing) {
+      get().pushHistory();
+      // mark the snapshot as a param-edit so subsequent edits to same param can coalesce
+      const cur = get();
+      if (cur.past.length > 0) {
+        (cur.past[cur.past.length - 1] as any).__paramEdit = { id, key, ts: Date.now() };
+      }
+    }
     set((s) => ({
       components: s.components.map((c) =>
         c.id === id ? { ...c, parameters: { ...c.parameters, [key]: value } } : c,
@@ -514,6 +557,13 @@ export const useEditor = create<EditorState>((set, get) => ({
     return result;
   },
 
+  runFullERCCheck: () => {
+    const s = get();
+    const result = runFullERC(s.components, s.wires, s.noConnects);
+    set({ ercErrors: result.errors });
+    return result;
+  },
+
   reannotate: () => {
     get().pushHistory();
     const s = get();
@@ -524,6 +574,305 @@ export const useEditor = create<EditorState>((set, get) => ({
       return { ...c, refdes: `${prefix}${counters[prefix]}` };
     });
     set({ components: newComponents });
+  },
+
+  // KiCad parity: annotate by X-then-Y position (left-to-right, top-to-bottom)
+  reannotateByPosition: () => {
+    get().pushHistory();
+    const s = get();
+    // stable sort: y asc (top first), then x asc (left first)
+    const sorted = [...s.components].sort((a, b) => {
+      if (Math.abs(a.position.y - b.position.y) > 0.5) return a.position.y - b.position.y;
+      return a.position.x - b.position.x;
+    });
+    const counters: Record<string, number> = {};
+    const updates = new Map<string, string>();
+    for (const c of sorted) {
+      const prefix = refdesPrefix(c.type);
+      counters[prefix] = (counters[prefix] ?? 0) + 1;
+      updates.set(c.id, `${prefix}${counters[prefix]}`);
+    }
+    set({
+      components: s.components.map((c) => updates.has(c.id) ? { ...c, refdes: updates.get(c.id)! } : c),
+    });
+  },
+
+  // ===== Component fields (KiCad "Fields" tab) =====
+  setField: (compId, key, name, value, visible = true) => {
+    get().pushHistory();
+    set((s) => ({
+      components: s.components.map((c) => {
+        if (c.id !== compId) return c;
+        const fields = c.fields ? [...c.fields] : [];
+        const idx = fields.findIndex((f) => f.key === key);
+        if (idx >= 0) fields[idx] = { ...fields[idx], name, value, visible };
+        else fields.push({ key, name, value, visible });
+        return { ...c, fields };
+      }),
+    }));
+  },
+  removeField: (compId, key) => {
+    get().pushHistory();
+    set((s) => ({
+      components: s.components.map((c) => {
+        if (c.id !== compId || !c.fields) return c;
+        return { ...c, fields: c.fields.filter((f) => f.key !== key) };
+      }),
+    }));
+  },
+
+  // ===== Lock =====
+  toggleLock: (compId) => {
+    get().pushHistory();
+    set((s) => ({
+      components: s.components.map((c) =>
+        c.id === compId ? { ...c, locked: !c.locked } : c,
+      ),
+    }));
+  },
+  lockSelected: () => {
+    get().pushHistory();
+    set((s) => {
+      const ids = new Set(s.multiSelection.components);
+      if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+      return {
+        components: s.components.map((c) => ids.has(c.id) ? { ...c, locked: true } : c),
+      };
+    });
+  },
+  unlockSelected: () => {
+    get().pushHistory();
+    set((s) => {
+      const ids = new Set(s.multiSelection.components);
+      if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+      return {
+        components: s.components.map((c) => ids.has(c.id) ? { ...c, locked: false } : c),
+      };
+    });
+  },
+
+  // ===== Multi-unit components =====
+  setComponentUnit: (compId, unit) => {
+    get().pushHistory();
+    set((s) => ({
+      components: s.components.map((c) =>
+        c.id === compId ? { ...c, unit } : c,
+      ),
+    }));
+  },
+  setComponentConvert: (compId, convert) => {
+    get().pushHistory();
+    set((s) => ({
+      components: s.components.map((c) =>
+        c.id === compId ? { ...c, convert } : c,
+      ),
+    }));
+  },
+
+  // ===== Mirror/Rotate selection =====
+  mirrorSelected: (axis) => {
+    get().pushHistory();
+    set((s) => {
+      const ids = new Set(s.multiSelection.components);
+      if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+      const field = axis === 'x' ? 'mirrorX' : 'mirrorY';
+      return {
+        components: s.components.map((c) =>
+          ids.has(c.id) ? { ...c, [field]: !c[field] } : c,
+        ),
+      };
+    });
+  },
+  rotateSelected: () => {
+    get().pushHistory();
+    set((s) => {
+      const ids = new Set(s.multiSelection.components);
+      if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+      return {
+        components: s.components.map((c) =>
+          ids.has(c.id) ? { ...c, rotation: (((c.rotation + 1) % 4) as 0 | 1 | 2 | 3) } : c,
+        ),
+      };
+    });
+  },
+
+  // ===== Net classes =====
+  addNetClass: (name, description) => {
+    const id = genId('nc');
+    set((s) => ({
+      netClasses: [...s.netClasses, { id, name, description: description ?? '', nets: [], color: '#22d3ee' }],
+    }));
+    return id;
+  },
+  updateNetClass: (id, patch) => {
+    get().pushHistory();
+    set((s) => ({
+      netClasses: s.netClasses.map((nc) => nc.id === id ? { ...nc, ...patch } : nc),
+    }));
+  },
+  removeNetClass: (id) => {
+    get().pushHistory();
+    set((s) => ({
+      netClasses: s.netClasses.filter((nc) => nc.id !== id),
+      components: s.components.map((c) => c.netClassId === id ? { ...c, netClassId: undefined } : c),
+    }));
+  },
+
+  // ===== Drawings =====
+  addDrawing: (d) => {
+    get().pushHistory();
+    set((s) => ({ drawings: [...s.drawings, d] }));
+  },
+  updateDrawing: (id, patch) => {
+    set((s) => ({
+      drawings: s.drawings.map((d) => d.id === id ? { ...d, ...patch } as DrawingPrimitive : d),
+    }));
+  },
+  removeDrawing: (id) => {
+    get().pushHistory();
+    set((s) => ({ drawings: s.drawings.filter((d) => d.id !== id) }));
+  },
+
+  // ===== No-Connect markers =====
+  addNoConnect: (componentId, terminalId) => {
+    get().pushHistory();
+    set((s) => ({
+      noConnects: s.noConnects.filter((n) => !(n.componentId === componentId && n.terminalId === terminalId)),
+    }));
+    set((s) => ({
+      noConnects: [...s.noConnects, { id: genId('nc'), componentId, terminalId }],
+    }));
+  },
+  removeNoConnect: (componentId, terminalId) => {
+    get().pushHistory();
+    set((s) => ({
+      noConnects: s.noConnects.filter((n) => !(n.componentId === componentId && n.terminalId === terminalId)),
+    }));
+  },
+
+  // ===== Groups =====
+  createGroup: (name, componentIds, wireIds = [], drawingIds = []) => {
+    const id = genId('grp');
+    get().pushHistory();
+    set((s) => ({
+      groups: [...s.groups, { id, name, componentIds: [...componentIds], wireIds: [...wireIds], drawingIds: [...drawingIds] }],
+    }));
+    return id;
+  },
+  ungroup: (groupId) => {
+    get().pushHistory();
+    set((s) => ({ groups: s.groups.filter((g) => g.id !== groupId) }));
+  },
+
+  // ===== Hierarchical sheets =====
+  addSheet: (sheetName, fileName) => {
+    const id = genId('sheet');
+    get().pushHistory();
+    set((s) => ({
+      sheets: [...s.sheets, {
+        id, sheetName, fileName,
+        position: { x: 20, y: 10 },
+        size: { width: 10, height: 6 },
+        pins: [],
+      }],
+      childSheets: { ...s.childSheets, [fileName]: { version: 1, components: [], wires: [] } },
+    }));
+    return id;
+  },
+  removeSheet: (id) => {
+    get().pushHistory();
+    set((s) => {
+      const sheet = s.sheets.find((sh) => sh.id === id);
+      const newChild = { ...s.childSheets };
+      if (sheet) delete newChild[sheet.fileName];
+      return {
+        sheets: s.sheets.filter((sh) => sh.id !== id),
+        childSheets: newChild,
+      };
+    });
+  },
+  setActiveSheet: (fileName) => set({ activeSheet: fileName }),
+
+  // ===== Saved views =====
+  saveView: (name, camera) => {
+    const id = genId('view');
+    set((s) => ({ savedViews: [...s.savedViews, { id, name, camera }] }));
+    return id;
+  },
+  loadView: (id) => {
+    const s = get();
+    return s.savedViews.find((v) => v.id === id) ?? null;
+  },
+  removeSavedView: (id) => {
+    set((s) => ({ savedViews: s.savedViews.filter((v) => v.id !== id) }));
+  },
+
+  // ===== Page setup & metadata =====
+  setPageSetup: (patch) => {
+    get().pushHistory();
+    set((s) => ({ pageSetup: { ...s.pageSetup, ...patch } }));
+  },
+  setMetadata: (patch) => {
+    get().pushHistory();
+    set((s) => ({ metadata: { ...s.metadata, ...patch } }));
+  },
+
+  // ===== Display =====
+  setUnits: (u) => set({ units: u }),
+  setGridSize: (s) => set({ gridSize: s }),
+  setShowPinNumbers: (s) => set({ showPinNumbers: s }),
+  setShowPinNames: (s) => set({ showPinNames: s }),
+  setShowPinElecTypes: (s) => set({ showPinElecTypes: s }),
+  setShowRefdes: (s) => set({ showRefdes: s }),
+  setShowValues: (s) => set({ showValues: s }),
+  setShowTitleBlock: (s) => set({ showTitleBlock: s }),
+  setActiveTool: (t) => set({ activeTool: t }),
+
+  // ===== Find / Replace =====
+  findComponents: (query, opts = {}) => {
+    const s = get();
+    if (!query) return [];
+    const { searchRefdes = true, searchValue = true, searchFields = true, caseSensitive = false } = opts;
+    const q = caseSensitive ? query : query.toLowerCase();
+    return s.components.filter((c) => {
+      if (searchRefdes) {
+        const r = c.refdes ?? c.id;
+        if ((caseSensitive ? r : r.toLowerCase()).includes(q)) return true;
+      }
+      if (searchValue) {
+        for (const v of Object.values(c.parameters)) {
+          const s = String(v);
+          if ((caseSensitive ? s : s.toLowerCase()).includes(q)) return true;
+        }
+      }
+      if (searchFields && c.fields) {
+        for (const f of c.fields) {
+          const combined = `${f.name}=${f.value}`;
+          if ((caseSensitive ? combined : combined.toLowerCase()).includes(q)) return true;
+        }
+      }
+      return false;
+    });
+  },
+  replaceComponentParameter: (compId, key, newValue) => {
+    get().pushHistory();
+    set((s) => ({
+      components: s.components.map((c) => {
+        if (c.id !== compId) return c;
+        const params = { ...c.parameters };
+        // try to preserve type: if old was number, coerce newValue to number
+        const old = params[key];
+        if (typeof old === 'number') {
+          const n = parseFloat(newValue as string);
+          params[key] = isNaN(n) ? newValue : n;
+        } else if (typeof old === 'boolean') {
+          params[key] = (newValue === 'true' || newValue === true || newValue === '1');
+        } else {
+          params[key] = newValue;
+        }
+        return { ...c, parameters: params };
+      }),
+    }));
   },
 
   startWire: (from, cursor) => set({ wireDraft: { from, cursor } }),
@@ -599,14 +948,40 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   clear: () => {
     get().pushHistory();
-    set({ components: [], wires: [], selection: { type: null, id: null }, traces: [], simContext: null });
+    set({
+      components: [],
+      wires: [],
+      drawings: [],
+      noConnects: [],
+      groups: [],
+      sheets: [],
+      netClasses: [],
+      savedViews: [],
+      childSheets: {},
+      activeSheet: '',
+      selection: { type: null, id: null },
+      multiSelection: { components: new Set(), wires: new Set() },
+      traces: [],
+      simContext: null,
+    });
   },
 
   loadDocument: (doc) => {
     set({
-      components: doc.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined })),
+      components: doc.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined, fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined })),
       wires: doc.wires.map((w) => ({ ...w })),
+      drawings: doc.drawings ?? [],
+      noConnects: doc.noConnects ?? [],
+      groups: doc.groups ?? [],
+      sheets: doc.sheets ?? [],
+      netClasses: doc.netClasses ?? [],
+      savedViews: doc.savedViews ?? [],
+      childSheets: doc.childSheets ?? {},
+      activeSheet: doc.activeSheet ?? '',
+      pageSetup: doc.pageSetup ?? { ...DEFAULT_PAGE_SETUP },
+      metadata: doc.metadata ?? { title: 'Untitled', revision: 'Rev 1', date: new Date().toISOString().slice(0, 10) },
       selection: { type: null, id: null },
+      multiSelection: { components: new Set(), wires: new Set() },
       traces: [],
       simContext: null,
       past: [],
@@ -620,6 +995,16 @@ export const useEditor = create<EditorState>((set, get) => ({
       version: 1 as const,
       components: s.components.map((c) => ({ ...c, simState: undefined })),
       wires: s.wires.map((w) => ({ ...w })),
+      drawings: s.drawings,
+      noConnects: s.noConnects,
+      groups: s.groups,
+      sheets: s.sheets,
+      netClasses: s.netClasses,
+      savedViews: s.savedViews,
+      childSheets: s.childSheets,
+      activeSheet: s.activeSheet,
+      pageSetup: s.pageSetup,
+      metadata: s.metadata,
     };
   },
 

@@ -280,6 +280,16 @@ export function CircuitCanvas() {
   const showGrid = useEditor((s) => s.showGrid);
   const snapToGrid = useEditor((s) => s.snapToGrid);
   const wireDraft = useEditor((s) => s.wireDraft);
+  // KiCad-parity new state
+  const noConnects = useEditor((s) => s.noConnects);
+  const drawings = useEditor((s) => s.drawings);
+  const units = useEditor((s) => s.units);
+  const showPinNumbers = useEditor((s) => s.showPinNumbers);
+  const showPinNames = useEditor((s) => s.showPinNames);
+  const showPinElecTypes = useEditor((s) => s.showPinElecTypes);
+  const showRefdes = useEditor((s) => s.showRefdes);
+  const showValues = useEditor((s) => s.showValues);
+  const activeTool = useEditor((s) => s.activeTool);
 
   const addComponent = useEditor((s) => s.addComponent);
   const moveComponent = useEditor((s) => s.moveComponent);
@@ -704,6 +714,9 @@ export function CircuitCanvas() {
       const bbCy = plugin.boundingBox.height / 2;
       ctx.translate(bbCx * CELL_SIZE, bbCy * CELL_SIZE);
       ctx.rotate((comp.rotation * Math.PI) / 2);
+      // Mirror (X = vertical flip, Y = horizontal flip)
+      if (comp.mirrorX) ctx.scale(1, -1);
+      if (comp.mirrorY) ctx.scale(-1, 1);
       ctx.translate(-bbCx * CELL_SIZE, -bbCy * CELL_SIZE);
       // selection halo
       if (isSelected || isHover || isMultiSelected) {
@@ -717,6 +730,18 @@ export function CircuitCanvas() {
         ctx.rect(-2, -2, plugin.boundingBox.width * CELL_SIZE + 4, plugin.boundingBox.height * CELL_SIZE + 4);
         ctx.fill();
         ctx.stroke();
+        ctx.restore();
+      }
+      // locked indicator (small lock icon top-right corner)
+      if (comp.locked) {
+        ctx.save();
+        ctx.fillStyle = '#facc15';
+        const lx = plugin.boundingBox.width * CELL_SIZE - 14;
+        const ly = -10;
+        ctx.font = '10px ui-monospace, monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText('🔒', lx, ly);
         ctx.restore();
       }
       ctx.strokeStyle = '#e2e8f0';
@@ -958,6 +983,153 @@ export function CircuitCanvas() {
         ctx.fillStyle = '#fbbf24';
         ctx.fillText(label, centerScreen.x, centerScreen.y + (bb.height / 2 * CELL_SIZE * zoom) + 12);
       }
+
+      // pin number/name/electrical-type labels (KiCad view toggles)
+      if (!running && (showPinNumbers || showPinNames || showPinElecTypes)) {
+        for (const t of plugin.terminals) {
+          if (t.hidden) continue;
+          const tpos = getTerminalPos(comp, t);
+          const sp = gridToScreen(tpos.x, tpos.y);
+          const labels: string[] = [];
+          if (showPinNumbers && t.number) labels.push(`[${t.number}]`);
+          if (showPinNames && t.name) labels.push(t.name);
+          if (showPinElecTypes && t.electricalType) labels.push(t.electricalType);
+          if (labels.length === 0) continue;
+          ctx.save();
+          ctx.fillStyle = '#22d3ee';
+          ctx.font = `${Math.max(8, Math.floor(8 * zoom))}px ui-monospace, monospace`;
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'top';
+          ctx.fillText(labels.join(' '), sp.x + 6, sp.y + 4);
+          ctx.restore();
+        }
+      }
+    }
+
+    // ---- No-Connect markers (red X on intentionally unused pins) ----
+    for (const nc of noConnects) {
+      const comp = components.find((c) => c.id === nc.componentId);
+      if (!comp) continue;
+      const plugin = getPlugin(comp.type);
+      if (!plugin) continue;
+      const t = plugin.terminals.find((tt) => tt.id === nc.terminalId);
+      if (!t) continue;
+      const tpos = getTerminalPos(comp, t);
+      const sp = gridToScreen(tpos.x, tpos.y);
+      const s = 6;
+      ctx.save();
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 2;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(sp.x - s, sp.y - s); ctx.lineTo(sp.x + s, sp.y + s);
+      ctx.moveTo(sp.x + s, sp.y - s); ctx.lineTo(sp.x - s, sp.y + s);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // ---- Drawing primitives (line, polyline, polygon, arc, circle, text, image) ----
+    for (const d of drawings) {
+      ctx.save();
+      try {
+        switch (d.type) {
+          case 'line': {
+            const a = gridToScreen(d.points[0].x, d.points[0].y);
+            const b = gridToScreen(d.points[1].x, d.points[1].y);
+            ctx.strokeStyle = d.color;
+            ctx.lineWidth = d.strokeWidth;
+            ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+            break;
+          }
+          case 'polyline': {
+            ctx.strokeStyle = d.color;
+            ctx.lineWidth = d.strokeWidth;
+            ctx.fillStyle = d.fill ?? 'transparent';
+            ctx.beginPath();
+            for (let i = 0; i < d.points.length; i++) {
+              const p = gridToScreen(d.points[i].x, d.points[i].y);
+              if (i === 0) ctx.moveTo(p.x, p.y);
+              else ctx.lineTo(p.x, p.y);
+            }
+            if (d.closed) { ctx.closePath(); ctx.fill(); }
+            ctx.stroke();
+            break;
+          }
+          case 'polygon': {
+            ctx.fillStyle = d.fill;
+            if (d.stroke) { ctx.strokeStyle = d.stroke; ctx.lineWidth = d.strokeWidth ?? 1; }
+            ctx.beginPath();
+            for (let i = 0; i < d.points.length; i++) {
+              const p = gridToScreen(d.points[i].x, d.points[i].y);
+              if (i === 0) ctx.moveTo(p.x, p.y);
+              else ctx.lineTo(p.x, p.y);
+            }
+            ctx.closePath();
+            ctx.fill();
+            if (d.stroke) ctx.stroke();
+            break;
+          }
+          case 'arc': {
+            const c = gridToScreen(d.center.x, d.center.y);
+            ctx.strokeStyle = d.color;
+            ctx.lineWidth = d.strokeWidth;
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, d.radius * CELL_SIZE * zoom, d.startAngle, d.endAngle);
+            ctx.stroke();
+            break;
+          }
+          case 'circle': {
+            const c = gridToScreen(d.center.x, d.center.y);
+            ctx.strokeStyle = d.color;
+            ctx.lineWidth = d.strokeWidth;
+            ctx.fillStyle = d.fill ?? 'transparent';
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, d.radius * CELL_SIZE * zoom, 0, Math.PI * 2);
+            if (d.fill) ctx.fill();
+            ctx.stroke();
+            break;
+          }
+          case 'text': {
+            const p = gridToScreen(d.position.x, d.position.y);
+            ctx.fillStyle = d.color;
+            ctx.font = `${d.fontSize * zoom}px ui-monospace, monospace`;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            if (d.rotation) {
+              ctx.save();
+              ctx.translate(p.x, p.y);
+              ctx.rotate((d.rotation * Math.PI) / 180);
+              ctx.fillText(d.text, 0, 0);
+              ctx.restore();
+            } else {
+              ctx.fillText(d.text, p.x, p.y);
+            }
+            break;
+          }
+          case 'image': {
+            const p = gridToScreen(d.position.x, d.position.y);
+            const img = (window as any).__circuitlab_images?.[d.id];
+            if (img) {
+              ctx.drawImage(img, p.x, p.y, d.size.width * CELL_SIZE * zoom, d.size.height * CELL_SIZE * zoom);
+            } else {
+              // placeholder box
+              ctx.strokeStyle = '#94a3b8';
+              ctx.setLineDash([4, 4]);
+              ctx.strokeRect(p.x, p.y, d.size.width * CELL_SIZE * zoom, d.size.height * CELL_SIZE * zoom);
+              ctx.setLineDash([]);
+              ctx.fillStyle = '#64748b';
+              ctx.font = '10px ui-monospace';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText('IMG', p.x + d.size.width * CELL_SIZE * zoom / 2, p.y + d.size.height * CELL_SIZE * zoom / 2);
+            }
+            break;
+          }
+        }
+      } catch (e) {
+        console.error('drawing render error:', e);
+      }
+      ctx.restore();
     }
 
     // draw cursor crosshair (when no drag)
@@ -1409,6 +1581,42 @@ export function CircuitCanvas() {
         if (running) return;
         const s = useEditor.getState().selection;
         if (s.type === 'component') rotateComponent(s.id!);
+      } else if (e.key === 'x' || e.key === 'X') {
+        // Mirror X (vertical flip)
+        if (running) return;
+        e.preventDefault();
+        const s = useEditor.getState();
+        if (s.selection.type === 'component' && s.selection.id) s.mirrorComponent(s.selection.id, 'x');
+        else if (s.multiSelection.components.size > 0) s.mirrorSelected('x');
+      } else if (e.key === 'y' || e.key === 'Y') {
+        // Mirror Y (horizontal flip)
+        if (running) return;
+        e.preventDefault();
+        const s = useEditor.getState();
+        if (s.selection.type === 'component' && s.selection.id) s.mirrorComponent(s.selection.id, 'y');
+        else if (s.multiSelection.components.size > 0) s.mirrorSelected('y');
+      } else if (e.key === 'l' || e.key === 'L') {
+        // Lock/unlock component
+        if (running) return;
+        e.preventDefault();
+        const s = useEditor.getState();
+        if (s.selection.type === 'component' && s.selection.id) s.toggleLock(s.selection.id);
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        // Find / Replace — dispatch a custom event the Toolbar listens for
+        if (running) return;
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('circuitlab:open-find-replace'));
+      } else if (e.key === 'n' || e.key === 'N') {
+        // Add no-connect marker to hovered terminal
+        if (running) return;
+        e.preventDefault();
+        if (hover.terminal) {
+          const s = useEditor.getState();
+          // toggle: remove if exists, add if not
+          const exists = s.noConnects.find((nc) => nc.componentId === hover.terminal!.componentId && nc.terminalId === hover.terminal!.terminalId);
+          if (exists) s.removeNoConnect(hover.terminal!.componentId, hover.terminal!.terminalId);
+          else s.addNoConnect(hover.terminal!.componentId, hover.terminal!.terminalId);
+        }
       } else if (e.key === 'Escape') {
         cancelWire();
         setSelection({ type: null, id: null });
