@@ -12,7 +12,8 @@ export function exportBOM(footprints: Footprint[]): string {
   }
   const lines = ['Designator,Quantity,Footprint,Description'];
   for (const [, g] of groups) {
-    lines.push([g.refdes.join(','), g.refdes.length.toString(), g.type, g.type].join(','));
+    const refdes = `"${g.refdes.join(',')}"`;
+    lines.push([refdes, g.refdes.length.toString(), g.type, g.type].join(','));
   }
   return lines.join('\n');
 }

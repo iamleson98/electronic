@@ -286,7 +286,9 @@ export const usePCB = create<PCBState>((set, get) => ({
   togglePadNets: () => set((s) => ({ showPadNets: !s.showPadNets })),
   clearPCB: () => set({
     footprints: [], traces: [], vias: [], ratsnest: [], padNets: new Map(),
-    selectedFootprintId: null, selectedTraceId: null, routingFrom: null, routingPath: [],
+    keepouts: [], netClasses: [], teardrops: [], copperPours: [], drcErrors: [],
+    selectedFootprintId: null, selectedTraceId: null, selectedFootprintIds: new Set(),
+    routingFrom: null, routingPath: [], tool: 'select' as PCBTool,
   }),
 
   serialize: () => {
@@ -299,6 +301,10 @@ export const usePCB = create<PCBState>((set, get) => ({
       vias: s.vias,
       activeLayer: s.activeLayer,
       defaultTraceWidth: s.defaultTraceWidth,
+      padNets: Array.from(s.padNets.entries()),
+      keepouts: s.keepouts,
+      netClasses: s.netClasses,
+      teardrops: s.teardrops,
     };
   },
 
@@ -309,10 +315,19 @@ export const usePCB = create<PCBState>((set, get) => ({
     vias: doc.vias ?? [],
     activeLayer: (doc.activeLayer as 'top' | 'bottom') ?? 'top',
     defaultTraceWidth: doc.defaultTraceWidth,
+    padNets: new Map((doc as any).padNets ?? []),
+    keepouts: (doc as any).keepouts ?? [],
+    netClasses: (doc as any).netClasses ?? [],
+    teardrops: (doc as any).teardrops ?? [],
     ratsnest: [],
-    padNets: new Map(),
     drcErrors: [],
     copperPours: [],
+    selectedFootprintId: null,
+    selectedTraceId: null,
+    selectedFootprintIds: new Set(),
+    routingFrom: null,
+    routingPath: [],
+    tool: 'select',
   }),
 
   runDRC: () => {
@@ -379,7 +394,7 @@ export const usePCB = create<PCBState>((set, get) => ({
         pads: fp.pads.map((p) => ({
           ...p,
           position: { x: -p.position.x, y: p.position.y },
-          layer: newSide as any,
+          layer: newSide,
         })),
       };
     }),

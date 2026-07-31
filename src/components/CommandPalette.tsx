@@ -31,7 +31,7 @@ export function CommandPalette({ open, onClose }: Props) {
       { id: 'reset', label: 'Reset Simulation', category: 'Simulation', icon: <span>↺</span>, action: () => editor.reset() },
       { id: 'erc', label: 'Run ERC', category: 'Schematic', icon: <span>✓</span>, action: () => {
         const r = editor.runERC();
-        r.passed ? toast.success(`ERC passed`) : toast.warning(`ERC: ${r.stats.errors} error(s)`);
+        if (r.passed) toast.success(`ERC passed`); else toast.warning(`ERC: ${r.stats.errors} error(s)`);
       }},
       { id: 'undo', label: 'Undo', category: 'Edit', icon: <span>↶</span>, action: () => editor.undo(), shortcut: 'Ctrl+Z' },
       { id: 'redo', label: 'Redo', category: 'Edit', icon: <span>↷</span>, action: () => editor.redo(), shortcut: 'Ctrl+Y' },

@@ -7,12 +7,18 @@ import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
+  DropdownMenuSeparator, DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
   Download, MousePointer2, Route, Plus, RotateCw, Trash2, Grid3x3, Eye, Zap,
   ShieldCheck, Layers, FileDown, Wand2, GitCompare, Upload,
   ShieldOff, Droplet, AlignLeft, FlipHorizontal, ChevronDown,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { exportBOM, exportIPC2581 } from '@/lib/pcb/additional-exports';
+import { importKiCadFootprint, importKiCadFootprintsFromFile } from '@/lib/pcb/kicad-import';
+import { footprintDefs } from '@/lib/pcb/footprints';
 
 export function PCBToolbar() {
   const tool = usePCB((s) => s.tool);
@@ -87,8 +93,6 @@ export function PCBToolbar() {
     reader.onload = () => {
       try {
         const content = reader.result as string;
-        const { importKiCadFootprint, importKiCadFootprintsFromFile } = require('@/lib/pcb/kicad-import');
-        const { footprintDefs } = require('@/lib/pcb/footprints');
         if (file.name.endsWith('.kicad_mod')) {
           const def = importKiCadFootprint(content);
           if (def) {

@@ -191,5 +191,13 @@ export function createPCBFromSchematic(
   const footprints = generateFootprints(components, boardWidth, boardHeight);
   const { ratsnest, padNets } = computeRatsnest(components, wires, footprints);
 
+  // Propagate net assignments to pads so DRC, copper pour, auto-router, etc. work
+  for (const fp of footprints) {
+    for (const pad of fp.pads) {
+      const net = padNets.get(`${pad.componentId}:${pad.terminalId}`);
+      if (net) pad.net = net;
+    }
+  }
+
   return { footprints, ratsnest, padNets };
 }

@@ -53,15 +53,18 @@ export const partDatabase: PartInfo[] = [
     moq: 1,
   })),
   // Capacitors (common values)
-  ...[1e-9, 10e-9, 100e-9, 1e-6, 10e-6, 100e-6].map((c, i) => ({
-    mpn: `CC0805KKX7R${[1e-9, 10e-9, 100e-9, 1e-6, 10e-6, 100e-6][i]}`,
-    manufacturer: 'Yageo',
-    description: `${[1e-9, 10e-9, 100e-9, 1e-6, 10e-6, 100e-6][i] >= 1e-6 ? `${c * 1e6}µF` : `${c * 1e9}nF`} capacitor, X7R, 50V, 0805`,
-    package: '0805',
-    category: 'capacitor' as const,
-    unitPrice: 0.03,
-    moq: 1,
-  })),
+  ...[1e-9, 10e-9, 100e-9, 1e-6, 10e-6, 100e-6].map(c => {
+    const label = c >= 1e-6 ? `${c * 1e6}uF` : `${c * 1e9}nF`;
+    return {
+      mpn: `CC0805KKX7R${label}`,
+      manufacturer: 'Yageo',
+      description: `${label} capacitor, X7R, 50V, 0805`,
+      package: '0805',
+      category: 'capacitor' as const,
+      unitPrice: 0.03,
+      moq: 1,
+    };
+  }),
 ];
 
 export function searchParts(query: string): PartInfo[] {

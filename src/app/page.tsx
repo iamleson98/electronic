@@ -33,16 +33,13 @@ export default function Home() {
   const [showLibrary, setShowLibrary] = useState(false);
 
   useEffect(() => {
-    const initTimer = setTimeout(() => {
-      try {
-        installScriptingAPI();
-        if (hasSharedCircuit()) {
-          const doc = loadFromShareURL(window.location.hash);
-          if (doc && doc.components && doc.wires) useEditor.getState().loadDocument(doc);
-        }
-      } catch (e) { console.warn('Init failed:', e); }
-    }, 500);
-    return () => clearTimeout(initTimer);
+    try {
+      installScriptingAPI();
+      if (hasSharedCircuit()) {
+        const doc = loadFromShareURL(window.location.hash);
+        if (doc && doc.components && doc.wires) useEditor.getState().loadDocument(doc);
+      }
+    } catch (e) { console.warn('Init failed:', e); }
   }, []);
 
   // Ctrl+K command palette
@@ -59,6 +56,11 @@ export default function Home() {
     const url = createShareURL(doc);
     navigator.clipboard.writeText(url).then(() => toast.success('Share URL copied!')).catch(() => window.prompt('Copy URL:', url));
   };
+
+  // Reactive PCB state for 3D header
+  const pcbFootprints = usePCB((s) => s.footprints);
+  const pcbTraces = usePCB((s) => s.traces);
+  const pcbBoard = usePCB((s) => s.board);
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-950 text-slate-100">
@@ -139,9 +141,9 @@ export default function Home() {
             <span className="text-sm font-semibold text-slate-100">3D PCB Preview</span>
             <span className="text-xs text-slate-500">·</span>
             <span className="text-xs text-slate-400">
-              {usePCB.getState().footprints.length} components ·
-              {' '}{usePCB.getState().traces.length} traces ·
-              {' '}{usePCB.getState().board.width}×{usePCB.getState().board.height}mm
+              {pcbFootprints.length} components ·
+              {' '}{pcbTraces.length} traces ·
+              {' '}{pcbBoard.width}×{pcbBoard.height}mm
             </span>
             <div className="ml-auto flex items-center gap-2">
               <span className="text-xs text-slate-500">Left-drag: rotate · Right-drag: pan · Scroll: zoom</span>
