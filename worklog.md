@@ -827,3 +827,45 @@ Stage Summary:
 - Added second-pass computation for CD4026 VCC current (after 7-seg contributions)
 - Changed wire current selection to prefer the SMALLER non-zero magnitude (correct for shared nodes)
 - Clock circuit now shows differentiated current flow: ON segments conduct, OFF segments don't, VCC/COM carry the correct total per digit
+
+---
+Task ID: physics-validator
+Agent: main
+Task: Create a physics/electrical law rule set that all circuits must follow, to catch simulation bugs systematically.
+
+Work Log:
+- Created src/lib/circuit/physics-validator.ts with 10 physics laws:
+  1. Voltage Sanity — no NaN, Infinity, or voltages > 1MV
+  2. KCL — sum of currents leaving any node ≈ 0 (tolerance: 100nA)
+  3. Series Current Equality — all wires in a series path carry same |I| (2% tolerance)
+  4. Diode/LED Forward Law — ON: I = (V-Vf)/R, OFF: I = 0
+  5. Transistor Off Law — when base current ≈ 0, collector current must be ≈ 0 (catches stuck-on bug)
+  6. Voltage Source — V(p) - V(n) = rated voltage (handles DC, AC, pulse)
+  7. Power Conservation — P_supplied ≈ P_consumed (5% tolerance, with proper 7-seg power accounting)
+  8. Switch Off Law — open switch → 0 current (catches the clock VCC=0 bug)
+  9. 7-Segment Law — ON segments > 2V, OFF segments < 2V (catches convergence traps)
+  10. CD4026 Output Law — segment/CO voltages match the count state
+
+- Each law returns violations with severity (error/warning), component ID, message, expected vs actual values.
+- validatePhysics() returns a ValidationResult with all violations, a `passed` flag (true if no errors), and metadata.
+- formatValidationResult() formats the result as a human-readable string grouped by law.
+
+- Wrote scripts/test-physics-validator.ts that runs all 5 example circuits through the validator:
+  - LED + Resistor: PASS (0 violations)
+  - Transistor Switch (pressed): PASS (0 violations)
+  - Transistor Switch (released): PASS (0 violations) — confirms the stuck-on fix works
+  - 7-Segment Counter: PASS (0 violations)
+  - Digital Clock: PASS (1 minor warning about unconnected CO — correctly flagged)
+
+- Fixed two false positives:
+  1. Power Conservation: initially didn't account for 7-seg power correctly (used wire current sum instead of per-segment V*I). Fixed by computing per-segment power from V_seg and internal R.
+  2. CD4026 CO check: initially checked CO voltage even when unconnected (last stage in chain). Fixed by checking if CO is wired before validating.
+
+- Typecheck: no src errors. Build: succeeds.
+
+Stage Summary:
+- Created a comprehensive physics validator with 10 laws covering voltage, current, power, and component-specific rules.
+- All 5 example circuits pass validation (0 errors, only 1 minor warning on unconnected CO).
+- The validator catches all the bug classes we've fixed: stuck-on transistors, unequal series currents, OFF segments conducting, switch-off current leaks, NaN voltages.
+- Can be run after any simulation step to verify correctness.
+- Test script at scripts/test-physics-validator.ts.
