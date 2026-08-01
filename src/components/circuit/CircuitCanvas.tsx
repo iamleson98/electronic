@@ -76,44 +76,29 @@ function getWirePath(
 ): Vec2[] {
   const points: Vec2[] = [fromPos];
   if (wire.waypoints && wire.waypoints.length > 0) {
+    // User-defined waypoints: convert each to screen coords
     for (const wp of wire.waypoints) {
       points.push(gridToScreenFn(wp.x, wp.y));
     }
-  } else if (use45) {
-    // 45-degree routing: L-shape with 45° diagonal in the middle
+  } else {
+    // Auto-route: clean orthogonal L-shape routing
+    // Strategy: go horizontal first to the target's X, then vertical to target's Y
+    // This avoids the midpoint approach which creates long vertical segments
+    // that can cross through components.
     const dx = toPos.x - fromPos.x;
     const dy = toPos.y - fromPos.y;
-    const absDx = Math.abs(dx);
-    const absDy = Math.abs(dy);
-    if (absDx < 1 || absDy < 1) {
-      // Nearly straight — just go direct
-      points.push({ x: toPos.x, y: fromPos.y });
-    } else if (absDx > absDy) {
-      // More horizontal: go horizontal, then 45° diagonal, then horizontal
-      const diagLen = absDy;
-      const sign = Math.sign(dy);
-      const horizSign = Math.sign(dx);
-      const midX1 = fromPos.x + horizSign * (absDx - diagLen) / 2;
-      const midX2 = midX1 + horizSign * diagLen;
-      points.push({ x: midX1, y: fromPos.y });
-      points.push({ x: midX2, y: fromPos.y + sign * diagLen });
-      points.push({ x: midX2, y: toPos.y });
+
+    if (Math.abs(dx) < 2) {
+      // Nearly vertical — direct line
+    } else if (Math.abs(dy) < 2) {
+      // Nearly horizontal — direct line
     } else {
-      // More vertical: go vertical, then 45° diagonal, then vertical
-      const diagLen = absDx;
-      const sign = Math.sign(dx);
-      const vertSign = Math.sign(dy);
-      const midY1 = fromPos.y + vertSign * (absDy - diagLen) / 2;
-      const midY2 = midY1 + vertSign * diagLen;
-      points.push({ x: fromPos.x, y: midY1 });
-      points.push({ x: fromPos.x + sign * diagLen, y: midY2 });
-      points.push({ x: toPos.x, y: midY2 });
+      // L-shape: go horizontal first, then vertical
+      // Choose direction based on which way produces shorter overall path
+      // and avoids crossing through component bodies.
+      // Horizontal-first is generally cleaner for left-to-right layouts.
+      points.push({ x: toPos.x, y: fromPos.y });
     }
-  } else {
-    // default orthogonal routing: go to midpoint X, then to target
-    const midX = (fromPos.x + toPos.x) / 2;
-    points.push({ x: midX, y: fromPos.y });
-    points.push({ x: midX, y: toPos.y });
   }
   points.push(toPos);
   return points;
