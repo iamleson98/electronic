@@ -4,8 +4,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
 import type { Pad } from '@/lib/pcb/types';
+import {
+  drawDRCErrors,
+  drawCourtyards,
+  drawLockIndicators,
+  drawRoutingCompletion,
+  findDRCErrorAt,
+} from '@/lib/pcb/pcb-overlays';
+import type { DRCError } from '@/lib/pcb/drc';
+import { useAutoDRC } from '@/lib/auto-rule-hooks';
 
-const GRID_SIZE_MM = 2.5; // mm per grid cell
 const PX_PER_MM = 8; // pixels per mm at zoom=1
 
 export function PCBCanvas() {
@@ -52,6 +60,13 @@ export function PCBCanvas() {
   const cancelRouting = usePCB((s) => s.cancelRouting);
   const addVia = usePCB((s) => s.addVia);
   const setTool = usePCB((s) => s.setTool);
+
+  // Live DRC — auto-runs on every change (debounced 300ms) and populates
+  // the store's `drcErrors` field, which the canvas reads below.
+  // We discard the returned array; the store subscription above re-renders.
+  useAutoDRC(true);
+  const [hoveredDRC, setHoveredDRC] = useState<DRCError | null>(null);
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
   // resize observer
   useEffect(() => {
@@ -178,23 +193,18 @@ export function PCBCanvas() {
       }
     }
 
-    // DRC error markers
-    for (const err of drcErrors) {
-      const sp = mmToScreen(err.position.x, err.position.y);
-      ctx.beginPath();
-      ctx.arc(sp.x, sp.y, 6, 0, Math.PI * 2);
-      ctx.fillStyle = err.severity === 'error' ? 'rgba(239, 68, 68, 0.3)' : 'rgba(251, 191, 36, 0.3)';
-      ctx.fill();
-      ctx.strokeStyle = err.severity === 'error' ? '#ef4444' : '#fbbf24';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      // X mark
-      ctx.beginPath();
-      ctx.moveTo(sp.x - 3, sp.y - 3);
-      ctx.lineTo(sp.x + 3, sp.y + 3);
-      ctx.moveTo(sp.x + 3, sp.y - 3);
-      ctx.lineTo(sp.x - 3, sp.y + 3);
-      ctx.stroke();
+    // DRC error markers — drawn early so footprints render on top of them
+    // (then re-drawn later as the final overlay layer so they're always visible)
+    // The early pass keeps the markers from obscuring pads.
+    if (drcErrors.length > 0) {
+      // first pass: just the halos (lower opacity)
+      for (const err of drcErrors) {
+        const sp = mmToScreen(err.position.x, err.position.y);
+        ctx.beginPath();
+        ctx.arc(sp.x, sp.y, 8, 0, Math.PI * 2);
+        ctx.fillStyle = err.severity === 'error' ? 'rgba(239, 68, 68, 0.18)' : 'rgba(251, 191, 36, 0.15)';
+        ctx.fill();
+      }
     }
 
     // Keepout areas — hatched red rectangles
@@ -369,6 +379,27 @@ export function PCBCanvas() {
       }
     }
 
+    // ---- Courtyard outlines (dashed green box around each footprint) ----
+    // Visualizes the keep-out area used by DRC courtyard overlap checks.
+    // Drawn after footprints so it sits on top of body outlines.
+    drawCourtyards(ctx, footprints, mmToScreen, zoom, selectedFootprintId);
+
+    // ---- Lock indicators (small lock icon on locked footprints) ----
+    drawLockIndicators(ctx, footprints, mmToScreen, zoom);
+
+    // ---- DRC markers — final overlay pass with X marks and labels ----
+    // Drawn on top of everything so errors are always visible.
+    if (drcErrors.length > 0) {
+      drawDRCErrors(drcErrors, ctx, mmToScreen, hoveredDRC, zoom);
+    }
+
+    // ---- Routing completion progress bar (bottom-right HUD) ----
+    const totalNets = ratsnest.length;
+    const routedNets = new Set(traces.map((t) => t.net)).size;
+    if (totalNets > 0) {
+      drawRoutingCompletion(ctx, size.width, size.height, routedNets, totalNets);
+    }
+
     // status overlay
     ctx.fillStyle = 'rgba(10, 22, 40, 0.8)';
     ctx.fillRect(0, size.height - 24, size.width, 24);
@@ -378,14 +409,15 @@ export function PCBCanvas() {
     ctx.textBaseline = 'middle';
     const layerName = activeLayer === 'top' ? 'Top (Red)' : 'Bottom (Blue)';
     ctx.fillText(
-      `PCB Layout · ${board.width}×${board.height}mm · Layer: ${layerName} · Tool: ${tool} · ${cursor.x.toFixed(1)},${cursor.y.toFixed(1)}mm · zoom: ${zoom.toFixed(1)}x`,
+      `PCB Layout · ${board.width}×${board.height}mm · Layer: ${layerName} · Tool: ${tool} · ${cursor.x.toFixed(1)},${cursor.y.toFixed(1)}mm · zoom: ${zoom.toFixed(1)}x` +
+      (drcErrors.length > 0 ? ` · DRC: ${drcErrors.filter(e => e.severity === 'error').length} err / ${drcErrors.filter(e => e.severity === 'warning').length} warn` : ' · DRC: clean'),
       8, size.height - 12,
     );
 
     ctx.restore();
   }, [size, pan, zoom, board, footprints, traces, vias, ratsnest, padNets, activeLayer, tool,
       defaultTraceWidth, selectedFootprintId, selectedTraceId, routingFrom, routingPath,
-      showRatsnest, showGrid, showPadNets, cursor, mmToScreen, drcErrors, copperPours, keepouts, teardrops, showKeepouts]);
+      showRatsnest, showGrid, showPadNets, cursor, mmToScreen, drcErrors, copperPours, keepouts, teardrops, showKeepouts, hoveredDRC]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
@@ -485,6 +517,15 @@ export function PCBCanvas() {
     const sy = e.clientY - rect.top;
     const mm = screenToMm(sx, sy);
     setCursor({ x: mm.x, y: mm.y });
+    setMousePos({ x: sx, y: sy });
+
+    // Live DRC hover — check if cursor is over a DRC marker
+    if (drcErrors.length > 0) {
+      const hit = findDRCErrorAt(drcErrors, sx, sy, mmToScreen);
+      setHoveredDRC((prev) => (prev === hit ? prev : hit));
+    } else if (hoveredDRC !== null) {
+      setHoveredDRC(null);
+    }
 
     if (panRef.current) {
       setPan({
@@ -559,6 +600,35 @@ export function PCBCanvas() {
         onMouseLeave={onMouseUp}
         onWheel={onWheel}
       />
+      {/* DRC hover tooltip — appears next to cursor when hovering a violation */}
+      {hoveredDRC && (
+        <div
+          className="pointer-events-none absolute z-20 max-w-xs rounded-md border bg-slate-900/95 p-2 text-xs font-mono shadow-xl"
+          style={{
+            left: Math.min(mousePos.x + 14, size.width - 280),
+            top: Math.min(mousePos.y + 14, size.height - 80),
+            borderColor: hoveredDRC.severity === 'error' ? '#dc2626' : '#f59e0b',
+          }}
+        >
+          <div className="flex items-center gap-1 mb-1">
+            <span
+              className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
+                hoveredDRC.severity === 'error'
+                  ? 'bg-red-600 text-white'
+                  : 'bg-amber-500 text-black'
+              }`}
+            >
+              {hoveredDRC.severity}
+            </span>
+            <span className="text-slate-400">{hoveredDRC.type.replace(/_/g, ' ')}</span>
+            <span className="ml-1 text-slate-500">[{hoveredDRC.layer}]</span>
+          </div>
+          <div className="text-slate-100 leading-snug">{hoveredDRC.message}</div>
+          <div className="mt-1 text-[10px] text-slate-400">
+            @ ({hoveredDRC.position.x.toFixed(2)}, {hoveredDRC.position.y.toFixed(2)})mm
+          </div>
+        </div>
+      )}
     </div>
   );
 }

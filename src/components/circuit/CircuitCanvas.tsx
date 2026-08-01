@@ -7,6 +7,14 @@ import { computeWireCurrents, computeComponentCurrents } from '@/lib/circuit/eng
 import { buildNodeMap } from '@/lib/circuit/engine';
 import type { CircuitComponent, ComponentPlugin, TerminalDef, Vec2, Wire } from '@/lib/circuit/types';
 import { rotateTerminal } from '@/lib/circuit/components/draw';
+import {
+  drawERCMarkers,
+  drawAutoJunctions,
+  drawWireLengthLabel,
+  findERCErrorAt,
+} from '@/lib/circuit/schematic-overlays';
+import type { ERCError } from '@/lib/circuit/erc';
+import { useAutoERC } from '@/lib/auto-rule-hooks';
 
 const CELL_SIZE = 24;
 
@@ -290,6 +298,13 @@ export function CircuitCanvas() {
   const showRefdes = useEditor((s) => s.showRefdes);
   const showValues = useEditor((s) => s.showValues);
   const activeTool = useEditor((s) => s.activeTool);
+
+  // Live ERC — auto-runs on every change, debounced. Disabled while simulating
+  // so it doesn't fight the simulation loop for CPU.
+  useAutoERC(!running);
+  const ercErrors = useEditor((s) => s.ercErrors);
+  const [hoveredERC, setHoveredERC] = useState<ERCError | null>(null);
+  const [mousePos, setMousePos] = useState<Vec2>({ x: 0, y: 0 });
 
   const addComponent = useEditor((s) => s.addComponent);
   const moveComponent = useEditor((s) => s.moveComponent);
@@ -1148,6 +1163,8 @@ export function CircuitCanvas() {
     // ---- Wire overlay: redraw wires ON TOP of components so they're always visible ----
     // This prevents components from hiding wires. We draw a subtle dark background
     // under each wire for contrast, then the wire color on top.
+    let wireLengthScreenPath: Vec2[] | null = null;
+    let wireLengthGridPath: Vec2[] | null = null;
     for (const wire of wires) {
       const fromComp = components.find((c) => c.id === wire.from.componentId);
       const toComp = components.find((c) => c.id === wire.to.componentId);
@@ -1164,6 +1181,16 @@ export function CircuitCanvas() {
       const isSelected = selection.type === 'wire' && selection.id === wire.id;
       const isHover = hover.wireId === wire.id;
       const isOnActiveNode = activeWires.has(wire.id);
+
+      // Capture path for length label (selected/hovered wires only)
+      if (isSelected || isHover) {
+        wireLengthScreenPath = path;
+        // reconstruct grid coords for length calculation
+        const fromGrid = getTerminalPos(fromComp, fromT);
+        const toGrid = getTerminalPos(toComp, toT);
+        // grid path: from terminal → waypoints → to terminal
+        wireLengthGridPath = [fromGrid, ...(wire.waypoints ?? []), toGrid];
+      }
 
       // Only redraw wires that are selected, hovered, or on the active node
       // (to avoid overdrawing every wire on top of every component)
@@ -1185,8 +1212,23 @@ export function CircuitCanvas() {
       }
     }
 
+    // ---- Auto-junction dots (where ≥3 wires meet) ----
+    // Drawn AFTER wires so they sit on top, KiCad-style.
+    drawAutoJunctions(ctx, components, wires, gridToScreen, hover.terminal);
+
+    // ---- Wire length label for selected or hovered wire ----
+    if (wireLengthScreenPath && wireLengthGridPath) {
+      drawWireLengthLabel(ctx, wireLengthScreenPath, wireLengthGridPath, units);
+    }
+
+    // ---- ERC error markers (drawn last so they're on top of everything) ----
+    // Hidden during simulation to avoid visual clutter while current is flowing.
+    if (!running && ercErrors.length > 0) {
+      drawERCMarkers(ercErrors, ctx, gridToScreen, hoveredERC);
+    }
+
     ctx.restore();
-  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, use45Routing, running, gridToScreen, getTerminalPos, plugins, animTick, getRotateHandlePos]);
+  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, use45Routing, running, gridToScreen, getTerminalPos, plugins, animTick, getRotateHandlePos, ercErrors, hoveredERC, units]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
@@ -1345,6 +1387,15 @@ export function CircuitCanvas() {
     const sy = e.clientY - rect.top;
     const g = screenToGrid(sx, sy);
     setCursor(g);
+    setMousePos({ x: sx, y: sy });
+
+    // Live ERC hover — check if cursor is over an ERC marker
+    if (!running && ercErrors.length > 0) {
+      const hit = findERCErrorAt(ercErrors, sx, sy, gridToScreen);
+      setHoveredERC((prev) => (prev === hit ? prev : hit));
+    } else if (hoveredERC !== null) {
+      setHoveredERC(null);
+    }
 
     if (panRef.current) {
       setPan({
@@ -1685,10 +1736,53 @@ export function CircuitCanvas() {
       <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-slate-900/80 px-2 py-1 text-xs font-mono text-slate-400">
         ({cursor.x.toFixed(1)}, {cursor.y.toFixed(1)})  zoom: {zoom.toFixed(2)}x  {running ? '▶ running' : '⏸ paused'}
         {running && <span className="ml-2 text-amber-300">· click switches to toggle</span>}
+        {!running && ercErrors.length > 0 && (
+          <span className="ml-2">
+            · <span className="text-amber-400">ERC: {ercErrors.filter(e => e.severity === 'error').length} err</span>
+            {' / '}
+            <span className="text-yellow-400">{ercErrors.filter(e => e.severity === 'warning').length} warn</span>
+          </span>
+        )}
       </div>
       <div className="pointer-events-none absolute bottom-2 right-2 rounded-md bg-slate-900/80 px-2 py-1 text-xs font-mono text-slate-400">
         {running ? 'Click switches to toggle • Space to pause' : 'Drag from left • Double-click/R to rotate • Del delete • Space play/pause'}
       </div>
+      {/* ERC hover tooltip — appears next to the cursor when hovering an error */}
+      {!running && hoveredERC && (
+        <div
+          className="pointer-events-none absolute z-20 max-w-xs rounded-md border bg-slate-900/95 p-2 text-xs font-mono shadow-xl"
+          style={{
+            left: Math.min(mousePos.x + 14, size.width - 280),
+            top: Math.min(mousePos.y + 14, size.height - 80),
+            borderColor: hoveredERC.severity === 'error' ? '#dc2626' : '#f59e0b',
+          }}
+        >
+          <div className="flex items-center gap-1 mb-1">
+            <span
+              className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
+                hoveredERC.severity === 'error'
+                  ? 'bg-red-600 text-white'
+                  : 'bg-amber-500 text-black'
+              }`}
+            >
+              {hoveredERC.severity}
+            </span>
+            <span className="text-slate-400">{hoveredERC.type.replace(/_/g, ' ')}</span>
+          </div>
+          <div className="text-slate-100 leading-snug">{hoveredERC.message}</div>
+          {hoveredERC.componentId && (
+            <button
+              className="pointer-events-auto mt-1 text-[10px] text-amber-300 hover:text-amber-200 underline"
+              onClick={() => {
+                setSelection({ type: 'component', id: hoveredERC.componentId });
+                setHoveredERC(null);
+              }}
+            >
+              → select component
+            </button>
+          )}
+        </div>
+      )}
       {/* zoom controls */}
       <div className="absolute right-2 top-2 flex flex-col gap-1">
         <button
