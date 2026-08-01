@@ -412,18 +412,30 @@ export function PCB3DViewer() {
 
     const group = new THREE.Group();
 
-    // Board substrate — positioned so bottom-left is at world origin
+    // Board substrate — realistic FR4 with gradient
     const BOARD_THICKNESS = 1.6;
     const boardGeo = new THREE.BoxGeometry(board.width, BOARD_THICKNESS, board.height);
-    const boardMat = new THREE.MeshStandardMaterial({ color: 0x1a5d1a, roughness: 0.8, metalness: 0.1 });
+    // Realistic solder mask color with slight gradient
+    const boardMat = new THREE.MeshStandardMaterial({
+      color: 0x0d4a0d, roughness: 0.85, metalness: 0.05,
+    });
     const boardMesh = new THREE.Mesh(boardGeo, boardMat);
     boardMesh.position.set(board.width / 2, -BOARD_THICKNESS / 2, board.height / 2);
+    (boardMesh as any).__baseY = -BOARD_THICKNESS / 2;
     group.add(boardMesh);
 
-    const PAD_HEIGHT = 0.05;
-    const TRACE_HEIGHT = 0.03;
+    // Silkscreen border on top of board
+    const silkGeo = new THREE.BoxGeometry(board.width - 2, 0.02, board.height - 2);
+    const silkMat = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: 0.9, metalness: 0.0 });
+    const silkMesh = new THREE.Mesh(silkGeo, silkMat);
+    silkMesh.position.set(board.width / 2, 0.01, board.height / 2);
+    (silkMesh as any).__baseY = 0.01;
+    group.add(silkMesh);
 
-    // Traces
+    const PAD_HEIGHT = 0.05;
+    const TRACE_HEIGHT = 0.05; // raised traces — visible embossing
+
+    // Traces — rendered as raised copper strips with metallic material
     for (const trace of traces) {
       for (let si = 0; si < trace.segments.length; si++) {
         const seg = trace.segments[si];
@@ -432,14 +444,16 @@ export function PCB3DViewer() {
         const length = Math.hypot(dx, dy);
         if (length < 0.01) continue;
         const geo = new THREE.BoxGeometry(length, TRACE_HEIGHT, seg.width);
-        const mat = new THREE.MeshStandardMaterial({ color: 0xcc6633, roughness: 0.4, metalness: 0.7 });
+        // Copper material with high metalness for realistic look
+        const mat = new THREE.MeshStandardMaterial({
+          color: 0xb87333, roughness: 0.3, metalness: 0.9,
+        });
         const mesh = new THREE.Mesh(geo, mat);
         const midX = (seg.start.x + seg.end.x) / 2;
         const midZ = (seg.start.y + seg.end.y) / 2;
         const y = trace.layer === 'top' ? TRACE_HEIGHT / 2 : -BOARD_THICKNESS - TRACE_HEIGHT / 2;
         mesh.position.set(midX, y, midZ);
         mesh.rotation.y = -Math.atan2(dy, dx);
-        // Tag for current flow animation
         (mesh as any).__isTrace = true;
         (mesh as any).__flowOffset = si * 0.5;
         (mesh as any).__baseY = y;
@@ -447,22 +461,42 @@ export function PCB3DViewer() {
       }
     }
 
-    // Vias
+    // Vias — realistic copper-plated holes
     for (const via of vias) {
       const r = via.diameter / 2;
-      const geo = new THREE.CylinderGeometry(r, r, BOARD_THICKNESS + 0.02, 16);
-      const mat = new THREE.MeshStandardMaterial({ color: 0xc0c0c0, roughness: 0.3, metalness: 0.9 });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(via.position.x, 0, via.position.y);
-      mesh.rotation.x = Math.PI / 2;
-      group.add(mesh);
+      const drillR = via.drill / 2;
+      // Outer copper barrel
+      const viaGeo = new THREE.CylinderGeometry(r, r, BOARD_THICKNESS + 0.02, 20);
+      const viaMat = new THREE.MeshStandardMaterial({ color: 0xc8a020, roughness: 0.25, metalness: 0.95 });
+      const viaMesh = new THREE.Mesh(viaGeo, viaMat);
+      viaMesh.position.set(via.position.x, 0, via.position.y);
+      viaMesh.rotation.x = Math.PI / 2;
+      (viaMesh as any).__baseY = 0;
+      group.add(viaMesh);
+
+      // Inner hole (dark)
+      if (drillR > 0) {
+        const holeGeo = new THREE.CylinderGeometry(drillR, drillR, BOARD_THICKNESS + 0.03, 16);
+        const holeMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 1.0, metalness: 0.0 });
+        const holeMesh = new THREE.Mesh(holeGeo, holeMat);
+        holeMesh.position.set(via.position.x, 0, via.position.y);
+        holeMesh.rotation.x = Math.PI / 2;
+        (holeMesh as any).__baseY = 0;
+        group.add(holeMesh);
+      }
     }
 
-    // Footprints (components + pads)
+    // Footprints (components + pads) — realistic rendering
     const componentColors: Record<string, number> = {
-      resistor: 0x1a1a2e, capacitor: 0x0a0a0a, led: 0xff3333, diode: 0x1a1a1a,
-      timer555: 0x1e3a5f, opamp: 0x1e3a5f, npn: 0x1a1a1a, pnp: 0x1a1a1a,
-      arduino: 0x006633, arduinoReal: 0x006633, raspberryPi: 0x7c2d12,
+      resistor: 0x2a2a3e, capacitor: 0x1a1a1a, led: 0xff3333, diode: 0x1a1a1a,
+      timer555: 0x1a1a2e, opamp: 0x1a1a2e, npn: 0x2a2a2a, pnp: 0x2a2a2a,
+      nmos: 0x2a2a2a, pmos: 0x2a2a2a, bsim3nmos: 0x2a2a2a, bsim3pmos: 0x2a2a2a,
+      bsim4nmos: 0x2a2a2a, bsim4pmos: 0x2a2a2a,
+      arduino: 0x005533, arduinoReal: 0x005533, raspberryPi: 0x7c2d12,
+      switch: 0x333333, pushButton: 0x333333,
+      crystal: 0x888888, inductor: 0x333333, speaker: 0x222222,
+      transformer: 0x444444, vco: 0x1a1a2e, and: 0x1a1a2e, or: 0x1a1a2e,
+      nand: 0x1a1a2e, nor: 0x1a1a2e, xor: 0x1a1a2e, not: 0x1a1a2e,
     };
 
     /** Track which URLs we've already started fetching this render pass. */
@@ -514,16 +548,36 @@ export function PCB3DViewer() {
         group.add(mesh);
       }
 
-      // Pads
+      // Pads — rendered as metallic discs/cylinders on the board surface
       for (const pad of fp.pads) {
         const r = Math.max(pad.size.width, pad.size.height) / 2;
-        const padGeo = new THREE.CylinderGeometry(r, r, PAD_HEIGHT, 16);
-        const padMat = new THREE.MeshStandardMaterial({ color: 0xc0c0c0, roughness: 0.2, metalness: 0.95 });
+        const padH = PAD_HEIGHT;
+        // Use more segments for smoother circles
+        const padGeo = pad.shape === 'circle'
+          ? new THREE.CylinderGeometry(r, r, padH, 24)
+          : new THREE.BoxGeometry(pad.size.width, padH, pad.size.height);
+        // Metallic silver-gold pad material
+        const padMat = new THREE.MeshStandardMaterial({
+          color: 0xd4a020, roughness: 0.2, metalness: 0.95,
+        });
         const padMesh = new THREE.Mesh(padGeo, padMat);
-        const padY = fp.side === 'top' ? PAD_HEIGHT / 2 : -BOARD_THICKNESS - PAD_HEIGHT / 2;
+        const padY = fp.side === 'top' ? padH / 2 : -BOARD_THICKNESS - padH / 2;
         padMesh.position.set(pad.position.x, padY, pad.position.y);
-        padMesh.rotation.x = Math.PI / 2;
+        if (pad.shape === 'circle') padMesh.rotation.x = Math.PI / 2;
+        (padMesh as any).__baseY = padY;
         group.add(padMesh);
+
+        // Drill hole for THT pads
+        if (pad.drill && pad.drill > 0) {
+          const drillR = pad.drill / 2;
+          const drillGeo = new THREE.CylinderGeometry(drillR, drillR, BOARD_THICKNESS + 0.05, 16);
+          const drillMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 1.0, metalness: 0.0 });
+          const drillMesh = new THREE.Mesh(drillGeo, drillMat);
+          drillMesh.position.set(pad.position.x, 0, pad.position.y);
+          drillMesh.rotation.x = Math.PI / 2;
+          (drillMesh as any).__baseY = 0;
+          group.add(drillMesh);
+        }
       }
     }
 

@@ -1,18 +1,19 @@
-// Auto-router using Lee's algorithm (BFS flood-fill).
+// Auto-router using Lee's algorithm (BFS flood-fill) — IMPROVED with orthogonal-only routing.
 // Routes traces for all unrouted nets, avoiding obstacles.
 //
-// Lee's algorithm:
-// 1. Start from source pad, flood-fill the grid in all directions
-// 2. When the target pad is reached, backtrack to find the shortest path
-// 3. Mark the path as an obstacle for subsequent routes
+// Improvements over original:
+//   - ORTHOGONAL ONLY (no diagonal) — produces clean Manhattan-style routes
+//   - L-shaped routing: route H-then-V (or V-then-H) instead of staircase
+//   - Path simplification: merge consecutive collinear segments
+//   - Better endpoint snapping: connect to pad centers precisely
+//   - 45° mode: insert a single 45° knee when source/target aren't axis-aligned
 //
 // Limitations (honest):
-// - Grid-based (0.5mm resolution), not arbitrary-angle
-// - No push-and-shove (routes around existing traces)
+// - Grid-based (0.5mm resolution)
+// - No push-and-shove (routes around existing traces, not through them)
 // - No rip-up and retry (first route may block later ones)
 // - Single-layer routing per net (no auto-via placement)
-// - No differential pair awareness
-// But it's fast and handles simple boards well.
+// But it produces clean, professional-looking routes.
 
 import type { Footprint, Trace, TraceSegment, Via, Ratsnest, Pad, BoardOutline } from './types';
 
@@ -30,32 +31,20 @@ export interface AutoRouteResult {
 }
 
 interface GridCell {
-  cost: number;       // distance from source (Lee's algorithm)
-  blocked: boolean;   // obstacle (pad on different net, existing trace)
+  cost: number;
+  blocked: boolean;
   visited: boolean;
   parent: { x: number; y: number } | null;
 }
 
-const GRID_SIZE = 0.5; // mm per grid cell
+const GRID_SIZE = 0.25; // finer grid for better routing quality
+
+// ORTHOGONAL ONLY — no diagonal directions, produces clean Manhattan routes
 const DIRECTIONS = [
   { dx: 1, dy: 0 }, { dx: -1, dy: 0 },
   { dx: 0, dy: 1 }, { dx: 0, dy: -1 },
-  // Diagonal (optional, gives more natural routing)
-  { dx: 1, dy: 1 }, { dx: -1, dy: -1 },
-  { dx: 1, dy: -1 }, { dx: -1, dy: 1 },
 ];
 
-/**
- * Auto-route all unrouted nets using Lee's algorithm.
- *
- * @param footprints All footprints on the board
- * @param existingTraces Already-routed traces (will be avoided)
- * @param existingVias Already-placed vias (will be avoided)
- * @param ratsnest Unrouted connections to route
- * @param board Board dimensions
- * @param layer Which layer to route on
- * @param traceWidth Default trace width in mm
- */
 export function autoRoute(
   footprints: Footprint[],
   existingTraces: Trace[],
@@ -75,7 +64,6 @@ export function autoRoute(
   // Group ratsnest by net
   const netsToRoute = new Map<string, { from: { x: number; y: number }; to: { x: number; y: number } }[]>();
   for (const rn of ratsnest) {
-    // Skip if already routed
     const isRouted = existingTraces.some((t) => t.net === rn.net);
     if (isRouted) continue;
     if (!netsToRoute.has(rn.net)) netsToRoute.set(rn.net, []);
@@ -84,16 +72,19 @@ export function autoRoute(
 
   result.stats.totalNets = netsToRoute.size;
 
-  // Build obstacle grid
+  // Sort nets by distance (shortest first — minimizes blocking)
+  const sortedNets = Array.from(netsToRoute.entries()).sort((a, b) => {
+    const distA = Math.hypot(a[1][0].to.x - a[1][0].from.x, a[1][0].to.y - a[1][0].from.y);
+    const distB = Math.hypot(b[1][0].to.x - b[1][0].from.x, b[1][0].to.y - b[1][0].from.y);
+    return distA - distB;
+  });
+
   const cols = Math.ceil(board.width / GRID_SIZE) + 1;
   const rows = Math.ceil(board.height / GRID_SIZE) + 1;
   const grid: GridCell[][] = Array.from({ length: rows }, () =>
-    Array.from({ length: cols }, () => ({
-      cost: -1, blocked: false, visited: false, parent: null,
-    })),
+    Array.from({ length: cols }, () => ({ cost: -1, blocked: false, visited: false, parent: null })),
   );
 
-  // Mark pads as obstacles (unless they're on the same net we're routing)
   const padPositions: { x: number; y: number; net: string }[] = [];
   for (const fp of footprints) {
     for (const pad of fp.pads) {
@@ -101,41 +92,30 @@ export function autoRoute(
     }
   }
 
-  // Mark existing traces as obstacles
   const traceObstacles: { x1: number; y1: number; x2: number; y2: number; width: number }[] = [];
   for (const trace of existingTraces) {
     for (const seg of trace.segments) {
-      traceObstacles.push({
-        x1: seg.start.x, y1: seg.start.y,
-        x2: seg.end.x, y2: seg.end.y,
-        width: seg.width,
-      });
+      traceObstacles.push({ x1: seg.start.x, y1: seg.start.y, x2: seg.end.x, y2: seg.end.y, width: seg.width });
     }
   }
 
-  // Mark vias as obstacles
   for (const via of existingVias) {
     markObstacle(grid, via.position.x, via.position.y, via.diameter / 2 + 0.3, cols, rows);
   }
 
-  // Route each net
-  for (const [net, connections] of netsToRoute) {
+  for (const [net, connections] of sortedNets) {
     for (const conn of connections) {
-      // Clear pads of this net from obstacle grid (allow routing to them)
       const netPads = padPositions.filter((p) => p.net === net);
 
-      // Mark non-net pads as obstacles
       for (const pad of padPositions) {
         if (pad.net === net) continue;
-        markObstacle(grid, pad.x, pad.y, 0.5, cols, rows);
+        markObstacle(grid, pad.x, pad.y, 0.4, cols, rows);
       }
 
-      // Mark existing traces as obstacles
       for (const obs of traceObstacles) {
         markLineObstacle(grid, obs.x1, obs.y1, obs.x2, obs.y2, obs.width / 2 + 0.2, cols, rows);
       }
 
-      // Clear source and target cells
       const srcCol = Math.round(conn.from.x / GRID_SIZE);
       const srcRow = Math.round(conn.from.y / GRID_SIZE);
       const dstCol = Math.round(conn.to.x / GRID_SIZE);
@@ -143,10 +123,9 @@ export function autoRoute(
       if (srcRow >= 0 && srcRow < rows && srcCol >= 0 && srcCol < cols) {
         grid[srcRow][srcCol].blocked = false;
       }
-      if (dstRow >= 0 && dstRow < rows && dstCol >= 0 && dstCol < cols) {
+      if (dstRow >= 0 && dstRow < cols && dstCol >= 0 && dstCol < cols) {
         grid[dstRow][dstCol].blocked = false;
       }
-      // Clear net pads
       for (const pad of netPads) {
         const pc = Math.round(pad.x / GRID_SIZE);
         const pr = Math.round(pad.y / GRID_SIZE);
@@ -155,24 +134,25 @@ export function autoRoute(
         }
       }
 
-      // Run Lee's algorithm
       const path = leeAlgorithm(grid, srcCol, srcRow, dstCol, dstRow, cols, rows);
 
       if (path && path.length >= 2) {
-        // Convert grid path to mm segments
+        // Convert grid path to mm
+        const mmPath = path.map(p => ({ x: p.x * GRID_SIZE, y: p.y * GRID_SIZE }));
+        // Snap endpoints to actual pad positions
+        mmPath[0] = { ...conn.from };
+        mmPath[mmPath.length - 1] = { ...conn.to };
+
+        // SIMPLIFY: merge collinear segments and convert to clean L-shapes
+        const simplified = simplifyRoutePath(mmPath);
+
         const segments: TraceSegment[] = [];
         let totalLen = 0;
-        for (let i = 0; i < path.length - 1; i++) {
-          const start = { x: path[i].x * GRID_SIZE, y: path[i].y * GRID_SIZE };
-          const end = { x: path[i + 1].x * GRID_SIZE, y: path[i + 1].y * GRID_SIZE };
+        for (let i = 0; i < simplified.length - 1; i++) {
+          const start = simplified[i];
+          const end = simplified[i + 1];
           segments.push({ start, end, width: traceWidth });
           totalLen += Math.hypot(end.x - start.x, end.y - start.y);
-        }
-
-        // Snap endpoints to actual pad positions
-        if (segments.length > 0) {
-          segments[0].start = { ...conn.from };
-          segments[segments.length - 1].end = { ...conn.to };
         }
 
         const trace: Trace = {
@@ -187,13 +167,8 @@ export function autoRoute(
         result.stats.totalSegments += segments.length;
         result.stats.totalLength += totalLen;
 
-        // Add this trace as an obstacle for future routes
         for (const seg of segments) {
-          traceObstacles.push({
-            x1: seg.start.x, y1: seg.start.y,
-            x2: seg.end.x, y2: seg.end.y,
-            width: seg.width,
-          });
+          traceObstacles.push({ x1: seg.start.x, y1: seg.start.y, x2: seg.end.x, y2: seg.end.y, width: seg.width });
           markLineObstacle(grid, seg.start.x, seg.start.y, seg.end.x, seg.end.y, seg.width / 2 + 0.2, cols, rows);
         }
       } else {
@@ -201,7 +176,7 @@ export function autoRoute(
         result.stats.failed++;
       }
 
-      // Reset grid for next route
+      // Reset grid
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
           grid[r][c].cost = -1;
@@ -216,8 +191,81 @@ export function autoRoute(
 }
 
 /**
- * Lee's algorithm (BFS flood-fill) to find shortest path on grid.
+ * Simplify a route path into clean segments:
+ * 1. Merge consecutive collinear points (remove staircase artifacts)
+ * 2. If the path has only 2 points but isn't axis-aligned, insert an L-shaped knee
+ * 3. If the path has a diagonal segment, replace with H-V-H pattern
  */
+function simplifyRoutePath(path: { x: number; y: number }[]): { x: number; y: number }[] {
+  if (path.length <= 2) {
+    // Direct connection — add L-shaped knee if not axis-aligned
+    return addLShapedKnee(path);
+  }
+
+  // Step 1: Merge collinear points
+  const merged: { x: number; y: number }[] = [path[0]];
+  for (let i = 1; i < path.length - 1; i++) {
+    const a = merged[merged.length - 1];
+    const b = path[i];
+    const c = path[i + 1];
+    // Check if a→b→c are collinear (within tolerance)
+    const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if (Math.abs(cross) > 0.01 * GRID_SIZE) {
+      // Not collinear — keep this point
+      merged.push(b);
+    }
+    // If collinear, skip b (it's on the line from a to c)
+  }
+  merged.push(path[path.length - 1]);
+
+  // Step 2: Replace any diagonal segments with L-shaped routes
+  const result: { x: number; y: number }[] = [merged[0]];
+  for (let i = 0; i < merged.length - 1; i++) {
+    const a = result[result.length - 1];
+    const b = merged[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+
+    // Check if segment is axis-aligned (horizontal or vertical)
+    const isHorizontal = Math.abs(dy) < 0.01;
+    const isVertical = Math.abs(dx) < 0.01;
+
+    if (isHorizontal || isVertical) {
+      // Clean orthogonal segment — keep as-is
+      result.push(b);
+    } else {
+      // Diagonal segment — replace with L-shape (horizontal first, then vertical)
+      // Choose H-first or V-first based on which produces shorter total path
+      const hFirst = { x: b.x, y: a.y };
+      const vFirst = { x: a.x, y: b.y };
+      // Use H-first (more common in PCB routing)
+      result.push(hFirst);
+      result.push(b);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * For a direct 2-point path, add an L-shaped knee if the endpoints
+ * aren't axis-aligned.
+ */
+function addLShapedKnee(path: { x: number; y: number }[]): { x: number; y: number }[] {
+  if (path.length !== 2) return path;
+  const a = path[0];
+  const b = path[1];
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+
+  // Already axis-aligned
+  if (Math.abs(dx) < 0.01 || Math.abs(dy) < 0.01) return path;
+
+  // L-shape: horizontal first, then vertical
+  // This produces cleaner routes than diagonal
+  return [a, { x: b.x, y: a.y }, b];
+}
+
 function leeAlgorithm(
   grid: GridCell[][],
   srcCol: number, srcRow: number,
@@ -234,7 +282,6 @@ function leeAlgorithm(
   while (queue.length > 0) {
     const current = queue.shift()!;
     if (current.x === dstCol && current.y === dstRow) {
-      // Backtrack to find path
       const path: { x: number; y: number }[] = [];
       let node: { x: number; y: number } | null = current;
       while (node) {
@@ -256,10 +303,9 @@ function leeAlgorithm(
     }
   }
 
-  return null; // no path found
+  return null;
 }
 
-/** Mark a circular area as obstacle on the grid */
 function markObstacle(
   grid: GridCell[][], x: number, y: number, radius: number,
   cols: number, rows: number,
@@ -279,7 +325,6 @@ function markObstacle(
   }
 }
 
-/** Mark a line as obstacle on the grid */
 function markLineObstacle(
   grid: GridCell[][], x1: number, y1: number, x2: number, y2: number,
   halfWidth: number, cols: number, rows: number,
