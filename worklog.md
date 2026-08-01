@@ -778,3 +778,52 @@ Work Log:
 Stage Summary:
 - One-line fix: `result.sim.time = newTime` in the store's digital fast-forward block.
 - The clock now counts at approximately real-time (1 digit per second at speed=1).
+
+---
+Task ID: fix-clock-current-flow
+Agent: main
+Task: Fix current flow visualization in clock circuit — user reported "the same everywhere."
+
+Work Log:
+- Root cause analysis: TWO bugs caused the visual issue.
+  1. VCC/GND/COM wires showed 0 current because `computeTerminalCurrent` didn't handle `cd4026` (returned 0 for all terminals). The wire current fell back to the dcVoltage side, which also showed 0 because `nodeCurrentOut` at the VCC node didn't include the CD4026's draw (voltage sources are skipped in `nodeCurrentOut`).
+  2. When I first added the CD4026 to `nodeCurrentOut`, the CD4026 appeared BEFORE the 7-segment in the component list. So `nodeCurrentOut.get(segNode)` was 0 when the CD4026 block ran — it hadn't been populated yet by the 7-seg's contribution.
+
+- Fix 1: Added `cd4026` case to `computeTerminalCurrent`:
+  - Segment pins (a-g): return `+segI` (current flows OUT of the CD4026 into the wire)
+  - VCC pin: return `-totalSegI` (current ENTERS the CD4026 from the power supply)
+  - CO pin: return current flowing to the next CD4026's CLK
+  - CLK/RST/GND: return 0 (high-impedance inputs)
+
+- Fix 2: Added a SECOND PASS for CD4026 in both `computeWireCurrents` and `computeComponentCurrents`:
+  - First pass: process all passive components (including 7-segment displays) → builds `nodeCurrentOut`
+  - Second pass: process CD4026s → reads `nodeCurrentOut` at segment nodes (now populated) → adds total to VCC node
+  - This ensures the 7-seg's contribution is available when the CD4026 computes its VCC draw
+
+- Fix 3: Changed wire current selection logic:
+  - Old: `if (fromMag > toMag) → use fromCurrent` (takes LARGER magnitude)
+  - New: `if (toMag > 1e-12 && (fromMag < 1e-12 || toMag < fromMag)) → use -toCurrent` (prefers SMALLER)
+  - In a series circuit (LED example), both ends agree → either works (9.063 mA)
+  - In a shared-node circuit (clock VCC), fromCurrent=727mA (total of all 6 CD4026s), toCurrent=45mA (individual draw) → the smaller (45mA) is correct for THIS wire
+
+- Also added sevenSegment + cd4026 to `computeComponentCurrents`'s `nodeCurrentOut` loop (was missing — only `computeWireCurrents` had it).
+
+- Verified (scripts/test-clock-currents.ts):
+  - Segment wires: ON=22.73 mA, OFF=0 mA ✓
+  - VCC wire: 45.45 mA (= 2 × 22.73 mA for digit "1") ✓
+  - COM wire: 45.45 mA (same total, flowing to ground) ✓
+  - GND/RST/CLK wires: 0 mA ✓
+  - Digits showing "0": 136.36 mA each (6 segments) ✓
+  - Digit showing "1": 45.45 mA (2 segments) ✓
+
+- Verified existing tests still pass:
+  - LED example: all 4 wires show 9.063 mA (series circuit unchanged) ✓
+  - Transistor switch: all 4 assertions pass ✓
+
+- Typecheck: no src errors. Build: succeeds.
+
+Stage Summary:
+- Added CD4026 to computeTerminalCurrent (segment + VCC + CO pins)
+- Added second-pass computation for CD4026 VCC current (after 7-seg contributions)
+- Changed wire current selection to prefer the SMALLER non-zero magnitude (correct for shared nodes)
+- Clock circuit now shows differentiated current flow: ON segments conduct, OFF segments don't, VCC/COM carry the correct total per digit

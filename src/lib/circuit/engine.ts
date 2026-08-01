@@ -303,8 +303,32 @@ export function computeWireCurrents(
           nodeCurrentOut.set(com, (nodeCurrentOut.get(com) ?? 0) - iSeg);
         }
       }
+    } else if (comp.type === 'cd4026') {
+      // CD4026: handled in a second pass below (after all 7-segment displays
+      // have contributed their segment currents to nodeCurrentOut).
+      // We can't compute the CD4026's VCC current here because the 7-seg
+      // displays (which determine the segment currents) may not have been
+      // processed yet (they appear later in the component list).
     }
     // Voltage sources, ground, junction, power symbols: skip (they define the current, not draw it)
+  }
+
+  // Second pass: add CD4026 VCC current (sum of all ON segment currents).
+  // This must run AFTER all 7-segment displays have contributed to nodeCurrentOut.
+  for (const comp of components) {
+    if (comp.type !== 'cd4026') continue;
+    const plugin = plugins.get(comp.type);
+    if (!plugin) continue;
+    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+    const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
+    let totalSegI = 0;
+    for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+      const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+      totalSegI += Math.abs(nodeCurrentOut.get(segNode) ?? 0);
+    }
+    if (vccNode > 0) {
+      nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) + totalSegI);
+    }
   }
 
   for (const wire of wires) {
@@ -334,13 +358,21 @@ export function computeWireCurrents(
     // fromCurrent = current leaving from-component → entering wire at from end → flows from→to
     // toCurrent = current leaving to-component → entering wire at to end → flows to→from
     // Wire current (from→to positive) = fromCurrent = -toCurrent
+    //
+    // Prefer the SMALLER non-zero magnitude. In a series circuit both ends agree
+    // (same magnitude), so either works. But when multiple wires share a node
+    // (e.g., 6 CD4026 VCC pins on the same 5V supply), the fromCurrent gives the
+    // TOTAL node current (727mA) while toCurrent gives the INDIVIDUAL draw (45mA).
+    // The individual draw is correct for THIS wire.
     const fromMag = Math.abs(fromCurrent);
     const toMag = Math.abs(toCurrent);
     let current: number;
-    if (fromMag > toMag && fromMag > 1e-12) {
-      current = fromCurrent;
-    } else if (toMag > 1e-12) {
+    if (toMag > 1e-12 && (fromMag < 1e-12 || toMag < fromMag)) {
+      // Prefer toCurrent when it's available and smaller (or fromCurrent is zero)
       current = -toCurrent;
+    } else if (fromMag > 1e-12) {
+      // Fall back to fromCurrent
+      current = fromCurrent;
     } else {
       current = 0;
     }
@@ -440,6 +472,37 @@ function computeTerminalCurrent(
       void comTerm;
       return -segI;
     }
+  } else if (comp.type === 'cd4026') {
+    // CD4026: segment outputs (a-g) are voltage sources driving 5V (ON) or 0V (OFF).
+    // Current flows FROM the CD4026 segment pin INTO the wire → "leaving terminal" = +I_seg.
+    // The current is computed from nodeCurrentOut at the segment node (the 7-seg
+    // draws current through its internal resistance).
+    // For the CLK, RST, VCC, GND, CO pins: return 0 (not visualized).
+    const segIds = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+    if (segIds.includes(terminalId)) {
+      const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+      // nodeCurrentOut at the segment node = current leaving through the 7-seg.
+      // This equals the current the CD4026 is sourcing from this pin.
+      const segI = Math.abs(nodeCurrentOut.get(termNode) ?? 0);
+      return segI;
+    }
+    // VCC pin: current ENTERS the CD4026 (from the power supply).
+    // "leaving terminal" = -totalSegI (negative = current enters component).
+    // Compute THIS CD4026's segment currents only (not the shared VCC node total).
+    if (terminalId === 'vcc') {
+      let totalSegI = 0;
+      for (const seg of segIds) {
+        const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+        totalSegI += Math.abs(nodeCurrentOut.get(segNode) ?? 0);
+      }
+      return -totalSegI;
+    }
+    // CO output: current flows out when HIGH (driving the next CD4026's CLK)
+    if (terminalId === 'co') {
+      const coNode = terms.find((t) => t.terminalId === 'co')?.nodeId ?? 0;
+      return Math.abs(nodeCurrentOut.get(coNode) ?? 0);
+    }
+    return 0;
   }
   return 0;
 }
@@ -551,10 +614,47 @@ export function computeComponentCurrents(
       const i = (sim.nodeVoltage[p] - sim.nodeVoltage[n]) / 1e7;
       nodeCurrentOut.set(p, (nodeCurrentOut.get(p) ?? 0) + i);
       nodeCurrentOut.set(n, (nodeCurrentOut.get(n) ?? 0) - i);
+    } else if (comp.type === 'sevenSegment') {
+      // 7-segment: each segment draws current from its node to com.
+      const com = terms.find((t) => t.terminalId === 'com')?.nodeId ?? 0;
+      const threshold = (comp.parameters.threshold as number) ?? 2.0;
+      const rSeg = 220;
+      const st = sim.state.__global ?? {};
+      const stateKey = `7seg_${terms.map(t => t.nodeId).join('_')}`;
+      const segStates = (st[stateKey] ?? {}) as Record<string, boolean>;
+      for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+        const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+        const v = sim.nodeVoltage[segNode] - sim.nodeVoltage[com];
+        const prevOn = segStates[seg] ?? false;
+        const on = prevOn ? v > threshold * 0.5 : v > threshold;
+        if (on) {
+          const iSeg = v / rSeg;
+          nodeCurrentOut.set(segNode, (nodeCurrentOut.get(segNode) ?? 0) + iSeg);
+          nodeCurrentOut.set(com, (nodeCurrentOut.get(com) ?? 0) - iSeg);
+        }
+      }
     }
     // Voltage sources, 555, opamp, transistors, logic gates, oscillators:
     // Their current is determined by the external circuit, not by their own impedance.
     // We'll compute it from nodeCurrentOut below.
+  }
+
+  // Second pass: add CD4026 VCC current (sum of all ON segment currents).
+  // Must run after 7-segment displays have contributed to nodeCurrentOut.
+  for (const comp of components) {
+    if (comp.type !== 'cd4026') continue;
+    const plugin = plugins.get(comp.type);
+    if (!plugin) continue;
+    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+    const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
+    let totalSegI = 0;
+    for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+      const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+      totalSegI += Math.abs(nodeCurrentOut.get(segNode) ?? 0);
+    }
+    if (vccNode > 0) {
+      nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) + totalSegI);
+    }
   }
 
   // Compute per-component current
@@ -661,6 +761,15 @@ export function computeComponentCurrents(
     } else if (comp.type === 'sevenSegment') {
       // 7-segment: current = sum of segment currents (each segment ~10mA when on)
       const st = sim.state.__global ?? {};
+      let totalI = 0;
+      for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+        const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+        totalI += Math.abs(nodeCurrentOut.get(segNode) ?? 0);
+      }
+      current = totalI;
+    } else if (comp.type === 'cd4026') {
+      // CD4026: total current = sum of all segment output currents.
+      // Each ON segment sources current into the external 7-seg display.
       let totalI = 0;
       for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
         const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
