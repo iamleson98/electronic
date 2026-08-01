@@ -98,22 +98,50 @@ const pnp: ComponentPlugin = {
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `pnp_${e}_${b}_${c}`;
     const prevOn = st[key] ?? false;
-    const on = prevOn ? veb > vebOn - 0.1 : veb > vebOn;
+    // Previous step's actual base current (through the e-b voltage source).
+    // Used to detect when external drive is removed (see NPN comment).
+    const prevIb = (st[key + '_ib'] as number) ?? 0;
+    const on = prevOn
+      ? (veb > vebOn - 0.1 && prevIb > 1e-9)
+      : (veb > vebOn);
     st[key] = on;
     if (!on) {
       sys.stampConductance(c, e, 1e-9);
       sys.stampConductance(b, e, 1e-9);
+      st[key + '_ib'] = 0;
+      st[key + '_branch'] = -1;
       return;
     }
-    // E-B diode: Vsource vebOn between e (+) and b (-), creates branch current I_b
-    // I_c = hfe * I_b, current from e to c
+    // On: E-B diode (Vsource vebOn) and CCCS from e→c of gain hfe.
+    // When external base drive stops, the branch current → 0, so I_C → 0
+    // even though V_EB stays at vebOn.
     const ibBranch = sys.stampVoltageSource(e, b, vebOn);
     sys.stampCCCS(e, c, ibBranch, hfe);
-    // saturation clamp: use high conductance instead of second voltage source
-    // (see NPN comment for rationale)
-    if (vec < vecSat) {
+    st[key + '_branch'] = ibBranch;
+    // Saturation clamp: only when there's actual collector current.
+    const prevIc = hfe * prevIb;
+    if (prevIc > 1e-9 && vec < vecSat) {
       sys.stampConductance(e, c, 100);
     }
+  },
+  step(params, terminals, sim) {
+    const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
+    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = `pnp_${e}_${b}_${c}`;
+    const branchIdx = st[key + '_branch'] as number;
+    if (branchIdx == null || branchIdx < 0) {
+      st[key + '_ib'] = 0;
+      return;
+    }
+    const numNonGround = sim.nodeVoltage.length - 1;
+    const relIdx = branchIdx - numNonGround;
+    if (relIdx < 0 || relIdx >= sim.branchCurrent.length) {
+      st[key + '_ib'] = 0;
+      return;
+    }
+    st[key + '_ib'] = sim.branchCurrent[relIdx];
   },
   measure(params, terminals, sim) {
     const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;

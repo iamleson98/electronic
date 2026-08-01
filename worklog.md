@@ -530,3 +530,38 @@ Stage Summary:
   * Explosion view: slider lifts components ✅
   * Assembly animation: components fly into place ✅
 - Verification: `npx tsc --noEmit` clean; `npx next build` succeeds
+
+---
+Task ID: fix-npn-stuck-on
+Agent: main
+Task: Fix transistor switch circuit — when push button is open, current should not flow through the LED / npn collector path, but it still did.
+
+Work Log:
+- Read engine.ts, semiconductors.ts, sources.ts (pushButton, LED, NPN stamps) to understand the bug.
+- Root cause analysis (3 interacting bugs in the NPN `stamp`):
+  1. `stampVoltageSource(b, e, vbeOn)` clamps V_B to 0.7V even when the external circuit (e.g., an open push button) is no longer driving the base.
+  2. The hysteresis check `vbe > vbeOn - 0.1` always passes because the npn's OWN voltage source keeps V_B at 0.7V — a self-sustaining "stuck on" loop.
+  3. The saturation clamp `sys.stampConductance(c, e, 100)` is stamped whenever the npn is "on" and `vce < vceSat`. With the npn stuck on and vce low (from the previous saturated step), the 100S clamp provides a current path from C → E even when the actual base current (and thus the CCCS collector current) is zero. This is the actual leak that produced visible current when the button was open.
+- Fix (semiconductors.ts NPN stamp + new step function):
+  - Added a `step` function that captures the previous step's branch current through the b-e voltage source. This is the actual external base current — it drops to ~0 when the button is released, even though V_B stays clamped at vbeOn.
+  - Modified the on/off decision: to STAY on, both `vbe > vbeOn - 0.1` AND `prevIb > 1e-9` must hold. When the button opens, prevIb → 0 on the next step, so the npn turns off.
+  - Guarded the saturation clamp with `prevIc > 1e-9` (where prevIc = hfe * prevIb). When there's no actual collector current, no clamp is stamped, so no current can flow C → E.
+  - Stored the branch index from `stampVoltageSource` in `sim.state[key + '_branch']` and used `sim.branchCurrent[branchIdx - numNonGround]` in `step()` to retrieve the actual base current. The conversion uses `sim.nodeVoltage.length - 1` as the non-ground node count.
+- Applied the same fix to the PNP transistor in extra.ts (mirror image: voltage source from e to b, CCCS from e to c, clamp from e to c).
+- Tried an alternative Norton + VCCS model first but it had a numerical instability: the VCCS produced a fixed collector current (43 mA with hfe=100, V_B=0.7V) that the external circuit couldn't sink (limited to ~3 mA by Rc=1kΩ), causing V_C to explode to 1.4e9 V. Reverted to the original voltage source + CCCS model, which correctly produces I_C = hfe * I_B = 0 when the external base current is zero — no numerical explosion.
+- Wrote scripts/test-transistor-switch.ts and scripts/trace-transistor.ts to reproduce the bug and verify the fix. All 4 assertions pass:
+  * Button pressed → LED glowing (>0.1 mA): PASS
+  * Button pressed → NPN conducting (>0.1 mA): PASS
+  * Button released → LED dark (<0.1 mA): PASS
+  * Button released → NPN off (<0.1 mA): PASS
+- Verified phase 1 (button pressed): V_B = 0.7V, V_C ≈ 0V (saturated), LED current = 3 mA — correct.
+- Verified phase 2 (button released): V_B = 0V, V_C = 3V (floating, LED at Vf), all currents = 0 A — correct.
+- Typecheck passes (no src errors). Build succeeds.
+
+Stage Summary:
+- Fixed NPN and PNP transistor models to properly turn off when external base drive is removed.
+- Added `step` functions to capture the actual base branch current, used as the turn-off signal.
+- Guarded the saturation clamp with a prevIc check so it can't provide a current path when the transistor isn't actually conducting.
+- The fix preserves correct behavior when the button is pressed (transistor saturated, LED glows at 3 mA).
+- Test scripts at scripts/test-transistor-switch.ts and scripts/trace-transistor.ts.
+- Build verified.

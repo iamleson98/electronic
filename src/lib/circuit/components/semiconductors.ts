@@ -177,34 +177,72 @@ const npn: ComponentPlugin = {
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `npn_${c}_${b}_${e}`;
     const prevOn = st[key] ?? false;
-    const on = prevOn ? vbe > vbeOn - 0.1 : vbe > vbeOn;
+    // Previous step's actual base current (through the b-e voltage source).
+    // This is the right signal for "is the external circuit still driving
+    // the base?" — when the button is released, this drops to ~0 even though
+    // the npn's own voltage source holds V_B at vbeOn.
+    const prevIb = (st[key + '_ib'] as number) ?? 0;
+    // Turn-on: Vbe above threshold (external circuit drives the base).
+    // Stay-on: Vbe above threshold (with hysteresis) AND external base
+    // current is still flowing (above 1 nA noise floor).
+    // Turn-off: external base current has dropped to ~0 (e.g., button released).
+    const on = prevOn
+      ? (vbe > vbeOn - 0.1 && prevIb > 1e-9)
+      : (vbe > vbeOn);
     st[key] = on;
     if (!on) {
-      // all off, just leak. Use 1e-9 S so we win the voltage divider against
-      // any high-impedance sources (open switches etc.) and keep the base
-      // pulled to a defined voltage.
+      // Off: tiny leak so the matrix stays non-singular and the base is
+      // pulled to a defined voltage by the external circuit.
       sys.stampConductance(c, e, 1e-9);
       sys.stampConductance(b, e, 1e-9);
+      st[key + '_ib'] = 0;
+      st[key + '_branch'] = -1;
       return;
     }
-    // Forward-active OR saturated. Determine based on Vce.
-    // If Vce > vceSat -> forward active: Ic = hfe * (Vb - Ve - vbeOn) / something
-    // For simplicity, model as: B-E diode (Vsource vbeOn) and a CCCS from c->e of gain hfe.
-    // B-E diode: stamp voltage source between b and e with value vbeOn; this creates a branch current I_b.
+    // On: model the B-E junction as a voltage source (Vbe = vbeOn).
+    // The current through this voltage source IS the external base current
+    // — when the button is released, this drops to 0 even though V_B stays
+    // at vbeOn. The CCCS then produces I_C = hfe * I_B = 0, so no collector
+    // current flows. The npn is "on" in state but conducts nothing — which
+    // is exactly the desired behavior for an open base.
     const ibBranch = sys.stampVoltageSource(b, e, vbeOn);
-    // Ic = hfe * Ib, current from c to e
     sys.stampCCCS(c, e, ibBranch, hfe);
-    // saturation clamp: if Vce < vceSat, clamp Vce to vceSat using a HIGH conductance
-    // (NOT a second voltage source — that would create a singular matrix with the CCCS).
-    // Using a large conductance (small resistance) in parallel limits Vce without
-    // creating a second stiff equation on the same nodes.
-    if (vce < vceSat) {
-      // Stamp a large conductance that effectively clamps Vce ≈ vceSat
-      // G_clamp = hfe / (Vce_sat - Vbe) gives a conductance that, combined with
-      // the CCCS, produces Vce ≈ vceSat. Use a simpler approach: just stamp
-      // a large conductance (1/0.01Ω = 100S) to pull Vce toward Ve.
+    st[key + '_branch'] = ibBranch;
+    // Saturation clamp: only when there's actual collector current to
+    // saturate. Without this guard, the 100S clamp would provide a current
+    // path C→E even when I_B (and thus I_C) is zero — which is the
+    // "current flows when switch is open" bug.
+    const prevIc = hfe * prevIb;
+    if (prevIc > 1e-9 && vce < vceSat) {
+      // Clamp Vce ≈ vceSat using a parallel conductance (not a second voltage
+      // source — that would create a singular matrix with the CCCS).
       sys.stampConductance(c, e, 100);
     }
+  },
+  step(params, terminals, sim) {
+    const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
+    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = `npn_${c}_${b}_${e}`;
+    const branchIdx = st[key + '_branch'] as number;
+    if (branchIdx == null || branchIdx < 0) {
+      st[key + '_ib'] = 0;
+      return;
+    }
+    // sim.branchCurrent[i] corresponds to extra var at index numNonGroundNodes + i.
+    // The branch index from stampVoltageSource is the matrix index of the
+    // extra variable. Convert to sim.branchCurrent index.
+    const numNonGround = sim.nodeVoltage.length - 1;
+    const relIdx = branchIdx - numNonGround;
+    if (relIdx < 0 || relIdx >= sim.branchCurrent.length) {
+      st[key + '_ib'] = 0;
+      return;
+    }
+    // Branch current is positive when conventional current flows from b to e
+    // externally (i.e., INTO the base). That's exactly the external base
+    // drive we need to detect turn-off.
+    st[key + '_ib'] = sim.branchCurrent[relIdx];
   },
   measure(params, terminals, sim) {
     const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
