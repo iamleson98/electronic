@@ -755,3 +755,26 @@ Stage Summary:
 - Fixed startup transient (11:11:11 → 00:00:00) using initialized flag
 - Clock counts at approximately real-time (1 digit per second) at speed=1
 - Test script at scripts/test-clock.ts verifies counting
+
+---
+Task ID: fix-clock-not-counting
+Agent: main
+Task: Fix digital clock — everything stays at 0, nothing counts up.
+
+Work Log:
+- Root cause analysis (src/lib/circuit/store.ts, step() function):
+  - The digital fast-forward sets `prev.time = currentTime + advance` for the next iteration WITHIN the subSteps loop.
+  - BUT `result.sim.time` was NOT updated — it remained at the un-fast-forwarded value (prev.time + dt).
+  - At the end of step(), `set({ simContext: result.sim })` saves the un-fast-forwarded time.
+  - On the NEXT step() call, `prev.time = s.simContext.time` — which is the un-fast-forwarded time.
+  - The fast-forward from the previous frame is completely lost. sim.time never advances past ~dt per frame, so a 1Hz pulse never produces a rising edge.
+- Fix: added `result.sim.time = newTime` right after `prev.time = newTime` in the fast-forward block. This ensures the fast-forwarded time persists to simContext and carries over to the next step() call.
+- Verified with scripts/test-clock-store.ts:
+  - Simulates the store's step() function exactly (saves/restores simContext across calls).
+  - Without fix: clock stays at 00:00:00 forever (sim.time only advances by dt=0.1ms per frame).
+  - With fix: clock counts 00:00:00 → 00:00:01 at frame 70 (t≈1.0s), matching real-time.
+- Typecheck: no src errors. Build: succeeds.
+
+Stage Summary:
+- One-line fix: `result.sim.time = newTime` in the store's digital fast-forward block.
+- The clock now counts at approximately real-time (1 digit per second at speed=1).

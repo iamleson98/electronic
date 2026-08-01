@@ -1372,7 +1372,13 @@ export const useEditor = create<EditorState>((set, get) => ({
           // This caps at ~real-time playback speed.
           const advance = Math.min(0.016, timeToRisingEdge + 0.001);
           if (advance > dt) {
-            prev.time = currentTime + advance;
+            const newTime = currentTime + advance;
+            prev.time = newTime;
+            // CRITICAL: also update result.sim.time so it persists to simContext.
+            // Without this, set({ simContext: result.sim }) saves the un-fast-forwarded
+            // time, and the next step() call starts from the old time — making the
+            // clock never advance past 0.
+            result.sim.time = newTime;
           }
         }
       }
