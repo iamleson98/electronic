@@ -718,7 +718,17 @@ export function CircuitCanvas() {
         const absCurrent = Math.abs(current);
         if (absCurrent > 1e-9) {
           const dir = current >= 0 ? 1 : -1;
-          const speed = Math.min(1, Math.max(0.1, Math.log10(absCurrent * 1000 + 1) / 3));
+          // Physics-based flow speed:
+          // The drift velocity of charge carriers is proportional to current.
+          // We normalize to a visual range: 1µA = slowest visible, 1A = fastest.
+          // Use a log scale that maps:
+          //   1µA (1e-6) → 0.15 (slow crawl)
+          //   1mA (1e-3) → 0.4  (moderate)
+          //   10mA (1e-2) → 0.6  (normal)
+          //   100mA (1e-1) → 0.8  (fast)
+          //   1A (1e0) → 1.0     (very fast)
+          // Formula: speed = clamp(0.15 + 0.25 * log10(I / 1e-6), 0.1, 1.2)
+          const speed = Math.min(1.2, Math.max(0.1, 0.15 + 0.25 * Math.log10(absCurrent / 1e-6 + 1)));
           const dotSpacing = 24;
           let totalLen = 0;
           const segLens: number[] = [];
@@ -902,15 +912,9 @@ export function CircuitCanvas() {
         const absCurrent = Math.abs(current);
         if (absCurrent > 1e-9) {
           const dir = current >= 0 ? 1 : -1;
-          // Speed: proportional to current magnitude.
-          // Physics: I = V/R (Ohm's law). Higher current = faster flow.
-          // For inductor: I(t) = V/R·(1-e^(-Rt/L)) — starts at 0, ramps up.
-          // For capacitor: I = C·dV/dt — strong when charging, 0 when fully charged.
-          // The actual current value already reflects these physics because we
-          // compute it from the solved node voltages and component state.
-          // We map current to a visual speed: log-scaled so wide current ranges
-          // are visible. 1mA → ~0.33, 10mA → ~0.67, 100mA → ~1.0
-          const speed = Math.min(1.5, Math.max(0.05, Math.log10(absCurrent * 1000 + 1) / 3));
+          // Physics-based flow speed (same formula as wire dots):
+          //   1µA → 0.15, 1mA → 0.4, 10mA → 0.6, 100mA → 0.8, 1A → 1.0
+          const speed = Math.min(1.2, Math.max(0.1, 0.15 + 0.25 * Math.log10(absCurrent / 1e-6 + 1)));
           // Get the flow path in grid coords (relative to component origin, pre-rotation)
           const flowGridPath = plugin.getFlowPath(comp.parameters, simContext ?? undefined, comp);
           if (flowGridPath && flowGridPath.length >= 2) {
