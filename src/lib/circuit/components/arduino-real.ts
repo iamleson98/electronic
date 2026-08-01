@@ -241,16 +241,20 @@ const arduinoReal: ComponentPlugin = {
   category: 'mcu',
   description: 'Arduino-compatible MCU with user-programmable firmware. Write a tiny sketch with pin/wait/goto/if.',
   symbol: 'ARD',
-  boundingBox: { width: 8, height: 6 },
+  boundingBox: { width: 8, height: 8 },
   terminals: [
     { id: '5v', label: '5V', position: { x: 0, y: 1 } },
     { id: 'gnd', label: 'GND', position: { x: 0, y: 2 } },
+    { id: 'a0', label: 'A0', position: { x: 0, y: 5 } },
+    { id: 'a1', label: 'A1', position: { x: 0, y: 6 } },
+    { id: 'a2', label: 'A2', position: { x: 0, y: 7 } },
     { id: 'd2', label: 'D2', position: { x: 8, y: 1 } },
     { id: 'd3', label: 'D3', position: { x: 8, y: 2 } },
     { id: 'd4', label: 'D4', position: { x: 8, y: 3 } },
     { id: 'd5', label: 'D5', position: { x: 8, y: 4 } },
-    { id: 'a0', label: 'A0', position: { x: 0, y: 4 } },
-    { id: 'a1', label: 'A1', position: { x: 0, y: 5 } },
+    { id: 'd6', label: 'D6', position: { x: 8, y: 5 } },
+    { id: 'd7', label: 'D7', position: { x: 8, y: 6 } },
+    { id: 'd8', label: 'D8', position: { x: 8, y: 7 } },
   ],
   parameters: [
     { key: 'sketch', label: 'Sketch Source', type: 'string', default: sampleSketches.blink },
@@ -258,7 +262,7 @@ const arduinoReal: ComponentPlugin = {
   ],
   render(ctx, params, cellSize) {
     const w = 8 * cellSize;
-    const h = 6 * cellSize;
+    const h = 8 * cellSize;
     ctx.fillStyle = '#16a34a';
     ctx.strokeStyle = '#064e3b';
     ctx.lineWidth = 1.5;
@@ -270,25 +274,25 @@ const arduinoReal: ComponentPlugin = {
     ctx.font = `bold ${Math.floor(cellSize * 1)}px ui-monospace, monospace`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('ARDUINO', 4 * cellSize, 2.4 * cellSize);
+    ctx.fillText('ARDUINO', 4 * cellSize, 3 * cellSize);
     ctx.font = `${Math.floor(cellSize * 0.55)}px ui-monospace, monospace`;
-    ctx.fillText('programmable', 4 * cellSize, 3.2 * cellSize);
+    ctx.fillText('programmable', 4 * cellSize, 4 * cellSize);
     // pin labels
     ctx.textAlign = 'left';
     ctx.font = `${Math.floor(cellSize * 0.5)}px ui-monospace, monospace`;
-    ['5V', 'GND', 'A0', 'A1'].forEach((p, i) => {
-      const y = [1, 2, 4, 5][i];
+    ['5V', 'GND', 'A0', 'A1', 'A2'].forEach((p, i) => {
+      const y = [1, 2, 5, 6, 7][i];
       ctx.fillText(p, cellSize * 0.3, y * cellSize);
     });
     ctx.textAlign = 'right';
-    ['D2', 'D3', 'D4', 'D5'].forEach((p, i) => {
-      const y = [1, 2, 3, 4][i];
+    ['D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8'].forEach((p, i) => {
+      const y = i + 1;
       ctx.fillText(p, w - cellSize * 0.3, y * cellSize);
     });
     // status indicator
     ctx.fillStyle = '#fbbf24';
     ctx.beginPath();
-    ctx.arc(4 * cellSize, 4.5 * cellSize, 3, 0, Math.PI * 2);
+    ctx.arc(4 * cellSize, 6 * cellSize, 3, 0, Math.PI * 2);
     ctx.fill();
   },
   stamp(params, terminals, sys, sim) {
@@ -332,23 +336,29 @@ const arduinoReal: ComponentPlugin = {
         sys.stampVoltageSource(term.nodeId, gnd, v as number);
       }
     }
-    // Inputs (A0, A1): high-Z with weak pull-down
-    ['a0', 'a1'].forEach((tid) => {
+    // Inputs (A0, A1, A2): high-Z with weak pull-down
+    ['a0', 'a1', 'a2'].forEach((tid) => {
       const t = terminals.find((tt) => tt.terminalId === tid);
       if (t && t.nodeId !== gnd) sys.stampConductance(t.nodeId, gnd, 1e-9);
     });
   },
   measure(params, terminals, sim) {
-    const d2 = terminals.find((t) => t.terminalId === 'd2')!.nodeId;
-    const d3 = terminals.find((t) => t.terminalId === 'd3')!.nodeId;
-    const d4 = terminals.find((t) => t.terminalId === 'd4')!.nodeId;
-    const d5 = terminals.find((t) => t.terminalId === 'd5')!.nodeId;
-    const a0 = terminals.find((t) => t.terminalId === 'a0')!.nodeId;
+    const d2 = terminals.find((t) => t.terminalId === 'd2')?.nodeId ?? 0;
+    const d3 = terminals.find((t) => t.terminalId === 'd3')?.nodeId ?? 0;
+    const d4 = terminals.find((t) => t.terminalId === 'd4')?.nodeId ?? 0;
+    const d5 = terminals.find((t) => t.terminalId === 'd5')?.nodeId ?? 0;
+    const d6 = terminals.find((t) => t.terminalId === 'd6')?.nodeId ?? 0;
+    const d7 = terminals.find((t) => t.terminalId === 'd7')?.nodeId ?? 0;
+    const d8 = terminals.find((t) => t.terminalId === 'd8')?.nodeId ?? 0;
+    const a0 = terminals.find((t) => t.terminalId === 'a0')?.nodeId ?? 0;
     return [
       { label: 'D2', value: sim.nodeVoltage[d2].toFixed(2), unit: 'V' },
       { label: 'D3', value: sim.nodeVoltage[d3].toFixed(2), unit: 'V' },
       { label: 'D4', value: sim.nodeVoltage[d4].toFixed(2), unit: 'V' },
       { label: 'D5', value: sim.nodeVoltage[d5].toFixed(2), unit: 'V' },
+      { label: 'D6', value: sim.nodeVoltage[d6].toFixed(2), unit: 'V' },
+      { label: 'D7', value: sim.nodeVoltage[d7].toFixed(2), unit: 'V' },
+      { label: 'D8', value: sim.nodeVoltage[d8].toFixed(2), unit: 'V' },
       { label: 'A0', value: sim.nodeVoltage[a0].toFixed(2), unit: 'V' },
     ];
   },

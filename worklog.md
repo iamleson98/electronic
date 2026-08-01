@@ -565,3 +565,49 @@ Stage Summary:
 - The fix preserves correct behavior when the button is pressed (transistor saturated, LED glows at 3 mA).
 - Test scripts at scripts/test-transistor-switch.ts and scripts/trace-transistor.ts.
 - Build verified.
+
+---
+Task ID: fix-7seg-wires
+Agent: main
+Task: Fix 7-segment example — wires not connecting properly (3 dangling wires + diagonal wire segments).
+
+Work Log:
+- Root cause analysis:
+  1. arduinoReal component only had terminals d2, d3, d4, d5 (plus a0, a1). The 7-seg example wires connect to d6, d7, d8 which DID NOT EXIST. Three wires (we1, wf1, wg1) were dangling — they referenced non-existent terminals and couldn't connect.
+  2. Wire waypoints for wb2, wc2, wd2, we2 were wrong — they routed to (22, y) but the actual 7-seg terminals are at (24, 6), (26, 6), (26, 12), (24, 12). This caused diagonal wire segments.
+  3. The 7-seg sketch used syntax the interpreter doesn't support: `if digit == 0:` (conditional on variable), `D2=H` (should be `D2 = HIGH`), and multiple assignments per line. The entire sketch was being silently skipped, so no segments lit up.
+- Fix 1: Extended arduinoReal component:
+  - Changed boundingBox from 8x6 to 8x8.
+  - Added terminals d6 (8,5), d7 (8,6), d8 (8,7), a2 (0,7).
+  - Updated render function to draw the new pin labels and use the new height.
+  - Updated stamp to include a2 in the input list (high-Z with weak pull-down).
+  - Updated measure to report d6, d7, d8 voltages.
+- Fix 2: Rewrote the 7-segment example layout:
+  - Arduino at [2, 4] (was [2, 6]) — moved up to accommodate taller component.
+  - Resistors reordered to match 7-seg terminal Y positions: ra, rb, rc, rg, rd, re, rf (rg moved between rc and rd so its wire to seg1.g at (22,9) doesn't cross other terminals).
+  - Fixed all wire waypoints to route to actual 7-seg terminal positions:
+    * wa2 → seg1.a (22,6) via [22,5]
+    * wb2 → seg1.b (24,6) via [18,5],[24,5] (routes above 7-seg body)
+    * wc2 → seg1.c (26,6) via [18,5],[26,5] (routes above 7-seg body)
+    * wg2 → seg1.g (22,9) via [20,11],[20,9] (routes through x=20 channel, left of 7-seg body)
+    * wd2 → seg1.d (26,12) via [26,13]
+    * we2 → seg1.e (24,12) via [24,13]
+    * wf2 → seg1.f (22,12) via [22,13]
+  - Fixed ground wire waypoint from [3,20] (component position, not terminal) to [2,20] (routes cleanly to gnd1.g at (4,20)).
+- Fix 3: Rewrote the 7-seg sketch using only the supported language features:
+  - Removed `var digit`, `if digit == 0:`, `digit = digit + 1` (unsupported variable syntax).
+  - Changed `D2=H` to `D2 = HIGH` (correct value format).
+  - Changed `D2=H D3=H ...` (multiple per line) to one pin assignment per line.
+  - Rewrote as a straight-line sequence: for each digit 0-9, set all 7 pins explicitly, then `wait 500ms`. After digit 9, `goto loop`.
+  - Total ~80 lines but each line is a single pin assignment that the interpreter can parse.
+- Verification:
+  - scripts/test-7seg-wires.ts: All 16 wires connect to existing terminals. ✓
+  - scripts/test-7seg-sim.ts: Simulated at t=0.1s (digit 0), t=0.6s (digit 1), t=1.1s (digit 2). All three digits display the correct segment pattern. ✓
+  - Typecheck: no src errors. Build: succeeds.
+
+Stage Summary:
+- Extended arduinoReal with d6, d7, d8, a2 terminals (8x8 bounding box).
+- Rewrote 7-seg example with clean wire routing to actual terminal positions.
+- Rewrote sketch in supported language (straight-line pin assignments, no variables).
+- Verified: all wires connect, simulation counts 0→1→2 correctly with proper segment patterns.
+- Test scripts at scripts/test-7seg-wires.ts and scripts/test-7seg-sim.ts.

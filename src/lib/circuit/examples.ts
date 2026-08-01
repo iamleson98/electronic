@@ -259,10 +259,17 @@ export const exampleNmos: CircuitDocument = {
 // Arduino counts 0-9 on the 7-segment display.
 // Segments a-g are driven from D2-D8 through 220Ω resistors.
 // The sketch implements a BCD-to-7-segment decoder in software.
+//
+// Layout:
+//   Arduino (left, x=2-10) → 7 resistors (column, x=14-18) → 7-seg (right, x=22-26)
+//   Ground at bottom.
+//   7-seg terminals: a,b,c on top; d,e,f on bottom; g on mid-left; com on mid-right.
+//   Resistor order matches 7-seg terminal Y positions to minimize wire crossings:
+//     ra→a, rb→b, rc→c, rg→g, rd→d, re→e, rf→f
 export const exampleSevenSeg: CircuitDocument = {
   version: 1,
   components: [
-    comp('arduinoReal', 'ard1', [2, 6], 0, {
+    comp('arduinoReal', 'ard1', [2, 4], 0, {
       // 7-segment counter: counts 0-9, drives segments a-g on D2-D8
       // Segment encoding: a=D2, b=D3, c=D4, d=D5, e=D6, f=D7, g=D8
       // Digit patterns (1=ON):
@@ -278,50 +285,122 @@ export const exampleSevenSeg: CircuitDocument = {
       //   9: a,b,c,d,f,g
       sketch: `// 7-segment counter 0-9
 // Segments: a=D2 b=D3 c=D4 d=D5 e=D6 f=D7 g=D8
-var digit = 0
+// Common cathode: HIGH=ON, LOW=OFF
 loop:
-  if digit == 0:
-    D2=H D3=H D4=H D5=H D6=H D7=H D8=L
-  if digit == 1:
-    D2=L D3=H D4=H D5=L D6=L D7=L D8=L
-  if digit == 2:
-    D2=H D3=H D4=L D5=H D6=H D7=L D8=H
-  if digit == 3:
-    D2=H D3=H D4=H D5=H D6=L D7=L D8=H
-  if digit == 4:
-    D2=L D3=H D4=H D5=L D6=L D7=H D8=H
-  if digit == 5:
-    D2=H D3=L D4=H D5=H D6=L D7=H D8=H
-  if digit == 6:
-    D2=H D3=L D4=H D5=H D6=H D7=H D8=H
-  if digit == 7:
-    D2=H D3=H D4=H D5=L D6=L D7=L D8=L
-  if digit == 8:
-    D2=H D3=H D4=H D5=H D6=H D7=H D8=H
-  if digit == 9:
-    D2=H D3=H D4=H D5=H D6=L D7=H D8=H
-  wait 500ms
-  digit = digit + 1
-  if digit > 9:
-    digit = 0
-  goto loop`,
+// Digit 0: a b c d e f (g off)
+D2 = HIGH
+D3 = HIGH
+D4 = HIGH
+D5 = HIGH
+D6 = HIGH
+D7 = HIGH
+D8 = LOW
+wait 500ms
+// Digit 1: b c
+D2 = LOW
+D3 = HIGH
+D4 = HIGH
+D5 = LOW
+D6 = LOW
+D7 = LOW
+D8 = LOW
+wait 500ms
+// Digit 2: a b d e g
+D2 = HIGH
+D3 = HIGH
+D4 = LOW
+D5 = HIGH
+D6 = HIGH
+D7 = LOW
+D8 = HIGH
+wait 500ms
+// Digit 3: a b c d g
+D2 = HIGH
+D3 = HIGH
+D4 = HIGH
+D5 = HIGH
+D6 = LOW
+D7 = LOW
+D8 = HIGH
+wait 500ms
+// Digit 4: b c f g
+D2 = LOW
+D3 = HIGH
+D4 = HIGH
+D5 = LOW
+D6 = LOW
+D7 = HIGH
+D8 = HIGH
+wait 500ms
+// Digit 5: a c d f g
+D2 = HIGH
+D3 = LOW
+D4 = HIGH
+D5 = HIGH
+D6 = LOW
+D7 = HIGH
+D8 = HIGH
+wait 500ms
+// Digit 6: a c d e f g
+D2 = HIGH
+D3 = LOW
+D4 = HIGH
+D5 = HIGH
+D6 = HIGH
+D7 = HIGH
+D8 = HIGH
+wait 500ms
+// Digit 7: a b c
+D2 = HIGH
+D3 = HIGH
+D4 = HIGH
+D5 = LOW
+D6 = LOW
+D7 = LOW
+D8 = LOW
+wait 500ms
+// Digit 8: all segments
+D2 = HIGH
+D3 = HIGH
+D4 = HIGH
+D5 = HIGH
+D6 = HIGH
+D7 = HIGH
+D8 = HIGH
+wait 500ms
+// Digit 9: a b c d f g
+D2 = HIGH
+D3 = HIGH
+D4 = HIGH
+D5 = HIGH
+D6 = LOW
+D7 = HIGH
+D8 = HIGH
+wait 500ms
+goto loop`,
       vcc: 5,
     }),
-    // Resistors for each segment
+    // Resistors for each segment — ordered to match 7-seg terminal Y positions
+    // ra→seg.a (top-left), rb→seg.b (top-mid), rc→seg.c (top-right)
+    // rg→seg.g (mid-left), rd→seg.d (bot-right), re→seg.e (bot-mid), rf→seg.f (bot-left)
     comp('resistor', 'ra', [14, 4], 0, { resistance: 220 }),
     comp('resistor', 'rb', [14, 6], 0, { resistance: 220 }),
     comp('resistor', 'rc', [14, 8], 0, { resistance: 220 }),
-    comp('resistor', 'rd', [14, 10], 0, { resistance: 220 }),
-    comp('resistor', 're', [14, 12], 0, { resistance: 220 }),
-    comp('resistor', 'rf', [14, 14], 0, { resistance: 220 }),
-    comp('resistor', 'rg', [14, 16], 0, { resistance: 220 }),
+    comp('resistor', 'rg', [14, 10], 0, { resistance: 220 }),
+    comp('resistor', 'rd', [14, 12], 0, { resistance: 220 }),
+    comp('resistor', 're', [14, 14], 0, { resistance: 220 }),
+    comp('resistor', 'rf', [14, 16], 0, { resistance: 220 }),
+    // 7-segment display: 4 wide x 6 tall, terminals on top/bottom/sides
+    //   a(0,0) b(2,0) c(4,0) — top row
+    //   d(4,6) e(2,6) f(0,6) — bottom row
+    //   g(0,3) — mid-left, com(4,3) — mid-right
     comp('sevenSegment', 'seg1', [22, 6], 0, { color: 'red', threshold: 2.0 }),
     comp('ground', 'gnd1', [3, 20], 0, {}),
   ],
   wires: [
-    // Arduino ground
-    wire('wg', 'ard1', 'gnd', 'gnd1', 'g', [[3, 20]]),
-    // D2-D8 → resistors → 7-segment segments
+    // Arduino ground → ground
+    wire('wg', 'ard1', 'gnd', 'gnd1', 'g', [[2, 20]]),
+    // D2-D8 → resistor a-terminals (auto-routed, no waypoints needed)
     wire('wa1', 'ard1', 'd2', 'ra', 'a'),
     wire('wb1', 'ard1', 'd3', 'rb', 'a'),
     wire('wc1', 'ard1', 'd4', 'rc', 'a'),
@@ -329,16 +408,24 @@ loop:
     wire('we1', 'ard1', 'd6', 're', 'a'),
     wire('wf1', 'ard1', 'd7', 'rf', 'a'),
     wire('wg1', 'ard1', 'd8', 'rg', 'a'),
-    // Resistors → 7-segment
-    wire('wa2', 'ra', 'b', 'seg1', 'a', [[18, 5], [22, 5]]),
-    wire('wb2', 'rb', 'b', 'seg1', 'b', [[18, 7], [22, 7]]),
-    wire('wc2', 'rc', 'b', 'seg1', 'c', [[18, 9], [22, 9]]),
-    wire('wd2', 'rd', 'b', 'seg1', 'd', [[18, 11], [22, 11]]),
-    wire('we2', 're', 'b', 'seg1', 'e', [[18, 13], [22, 13]]),
-    wire('wf2', 'rf', 'b', 'seg1', 'f', [[18, 15], [22, 15]]),
-    wire('wg2', 'rg', 'b', 'seg1', 'g', [[18, 17], [22, 17]]),
-    // Common → GND
-    wire('wcom', 'seg1', 'com', 'gnd1', 'g', [[26, 9], [26, 20], [3, 20]]),
+    // Resistor b-terminals → 7-segment segment terminals
+    // Each wire routes as a clean L-path to the actual terminal position.
+    //   seg1.a at (22,6) — top-left:     route via (22, 5) → down
+    //   seg1.b at (24,6) — top-mid:      route via (24, 5) → down (above 7-seg body)
+    //   seg1.c at (26,6) — top-right:    route via (26, 5) → down
+    //   seg1.g at (22,9) — mid-left:     route via (22, 11) → up (passes through body, but connects)
+    //   seg1.d at (26,12) — bot-right:   route via (26, 13) → up
+    //   seg1.e at (24,12) — bot-mid:     route via (24, 13) → up
+    //   seg1.f at (22,12) — bot-left:    route via (22, 13) → up
+    wire('wa2', 'ra', 'b', 'seg1', 'a', [[22, 5]]),
+    wire('wb2', 'rb', 'b', 'seg1', 'b', [[18, 5], [24, 5]]),
+    wire('wc2', 'rc', 'b', 'seg1', 'c', [[18, 5], [26, 5]]),
+    wire('wg2', 'rg', 'b', 'seg1', 'g', [[20, 11], [20, 9]]),
+    wire('wd2', 'rd', 'b', 'seg1', 'd', [[26, 13]]),
+    wire('we2', 're', 'b', 'seg1', 'e', [[24, 13]]),
+    wire('wf2', 'rf', 'b', 'seg1', 'f', [[22, 13]]),
+    // 7-segment common → ground
+    wire('wcom', 'seg1', 'com', 'gnd1', 'g', [[26, 20]]),
   ],
 };
 
