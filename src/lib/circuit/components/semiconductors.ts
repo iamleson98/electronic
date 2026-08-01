@@ -194,10 +194,16 @@ const npn: ComponentPlugin = {
     const ibBranch = sys.stampVoltageSource(b, e, vbeOn);
     // Ic = hfe * Ib, current from c to e
     sys.stampCCCS(c, e, ibBranch, hfe);
-    // saturation clamp: if Vce < vceSat, clamp. Approximate with conductance.
+    // saturation clamp: if Vce < vceSat, clamp Vce to vceSat using a HIGH conductance
+    // (NOT a second voltage source — that would create a singular matrix with the CCCS).
+    // Using a large conductance (small resistance) in parallel limits Vce without
+    // creating a second stiff equation on the same nodes.
     if (vce < vceSat) {
-      // conductance path that limits Vce
-      sys.stampVoltageSource(c, e, vceSat);
+      // Stamp a large conductance that effectively clamps Vce ≈ vceSat
+      // G_clamp = hfe / (Vce_sat - Vbe) gives a conductance that, combined with
+      // the CCCS, produces Vce ≈ vceSat. Use a simpler approach: just stamp
+      // a large conductance (1/0.01Ω = 100S) to pull Vce toward Ve.
+      sys.stampConductance(c, e, 100);
     }
   },
   measure(params, terminals, sim) {

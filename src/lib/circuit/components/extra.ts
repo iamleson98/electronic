@@ -109,9 +109,10 @@ const pnp: ComponentPlugin = {
     // I_c = hfe * I_b, current from e to c
     const ibBranch = sys.stampVoltageSource(e, b, vebOn);
     sys.stampCCCS(e, c, ibBranch, hfe);
-    // saturation clamp
+    // saturation clamp: use high conductance instead of second voltage source
+    // (see NPN comment for rationale)
     if (vec < vecSat) {
-      sys.stampVoltageSource(e, c, vecSat);
+      sys.stampConductance(e, c, 100);
     }
   },
   measure(params, terminals, sim) {
@@ -141,6 +142,7 @@ const nmos: ComponentPlugin = {
   parameters: [
     { key: 'vth', label: 'Threshold Vth', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 10, step: 0.1 },
     { key: 'kp', label: 'Transconductance Kp', type: 'number', default: 0.1, unit: 'A/V²', min: 0.001, max: 10, step: 0.01 },
+    { key: 'lambda', label: 'Channel-Length Mod (λ)', type: 'number', default: 0.02, unit: 'V⁻¹', min: 0, max: 1, step: 0.005 },
     { key: 'ron', label: 'On Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 1000, step: 0.1 },
   ],
   render(ctx, params, cellSize) {
@@ -216,15 +218,19 @@ const nmos: ComponentPlugin = {
     }
     // On: if vds > (vgs - vth): saturation -> current source Id = Kp * (vgs-vth)^2
     // Else: linear region -> approximately a small resistor (ron)
-    // For simplicity, model as a small resistor when on (linear-region switch model)
-    // OR as a VCCS in saturation. Pick based on vds.
+    // Pick based on vds.
     const vov = vgs - vth;
     if (vds > vov && vov > 0) {
       // saturation: Id = Kp * vov^2 (current from d to s)
+      // Add output conductance gds for channel modulation (Early effect).
+      // gds = Lambda * Id  (SPICE Level-1 model)
       const kp = params.kp as number;
+      const lambda = (params.lambda as number) ?? 0.02; // default 0.02 V^-1
       const id = kp * vov * vov;
       sys.stampCurrentSource(d, s, id);
-      // also output resistance (channel modulation) — skip for simplicity
+      // Output conductance: gds = lambda * Id (limits gain in amplifiers)
+      const gds = lambda * Math.abs(id);
+      sys.stampConductance(d, s, Math.max(gds, 1e-12));
     } else {
       // linear: small resistor
       sys.stampConductance(d, s, 1 / ron);
@@ -259,6 +265,7 @@ const pmos: ComponentPlugin = {
   parameters: [
     { key: 'vth', label: 'Threshold |Vth|', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 10, step: 0.1 },
     { key: 'kp', label: 'Transconductance Kp', type: 'number', default: 0.1, unit: 'A/V²', min: 0.001, max: 10, step: 0.01 },
+    { key: 'lambda', label: 'Channel-Length Mod (λ)', type: 'number', default: 0.02, unit: 'V⁻¹', min: 0, max: 1, step: 0.005 },
     { key: 'ron', label: 'On Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 1000, step: 0.1 },
   ],
   render(ctx, params, cellSize) {
@@ -334,8 +341,12 @@ const pmos: ComponentPlugin = {
     if (vsd > vov && vov > 0) {
       // saturation: Is = Kp * vov^2 (current from s to d)
       const kp = params.kp as number;
+      const lambda = (params.lambda as number) ?? 0.02;
       const id = kp * vov * vov;
       sys.stampCurrentSource(s, d, id);
+      // Output conductance (channel modulation / Early effect)
+      const gds = lambda * Math.abs(id);
+      sys.stampConductance(s, d, Math.max(gds, 1e-12));
     } else {
       sys.stampConductance(s, d, 1 / ron);
     }
@@ -482,7 +493,7 @@ const sevenSegment: ComponentPlugin = {
     ] },
     { key: 'threshold', label: 'On Threshold', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 12, step: 0.1 },
   ],
-  render(ctx, params, cellSize, sim) {
+  render(ctx, params, cellSize, sim, instance) {
     const w = 4 * cellSize;
     const h = 6 * cellSize;
     // body
@@ -519,9 +530,8 @@ const sevenSegment: ComponentPlugin = {
       ctx.fillText(p.label, p.x, p.y);
     }
     // draw each segment if its pin is HIGH
-    // We don't have direct access to node voltages here without terminals; use sim.state if available
-    // For now, store segment state in instance.simState from step()
-    const segState = sim?.state?.__7seg as Record<string, boolean> | undefined;
+    // Use per-instance state set by step()
+    const segState = (instance?.simState?.__7seg as Record<string, boolean> | undefined);
     void threshold;
     for (const [seg, coords] of Object.entries(segmentMap)) {
       const on = segState?.[seg] ?? false;
@@ -553,16 +563,20 @@ const sevenSegment: ComponentPlugin = {
   step(params, terminals, sim, instance) {
     const threshold = params.threshold as number;
     if (!instance.simState) instance.simState = {};
-    if (!sim.state.__7seg) sim.state.__7seg = {};
+    // Use per-instance state key (not shared global) so multiple 7-seg displays don't clobber each other
+    const key = `7seg_${terminals.map(t => t.nodeId).join('_')}`;
+    if (!sim.state[key]) sim.state[key] = {};
     const segState: Record<string, boolean> = {};
     for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
       const node = terminals.find((t) => t.terminalId === seg)!.nodeId;
       segState[seg] = sim.nodeVoltage[node] > threshold;
     }
-    sim.state.__7seg = segState;
+    sim.state[key] = segState;
+    instance.simState.__7seg = segState;
   },
   measure(params, terminals, sim) {
-    const segState = (sim.state.__7seg || {}) as Record<string, boolean>;
+    const key = `7seg_${terminals.map(t => t.nodeId).join('_')}`;
+    const segState = (sim.state[key] || {}) as Record<string, boolean>;
     const onSegs = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].filter(s => segState[s]).join('');
     return [{ label: 'ON', value: onSegs || '—', unit: '' }];
   },
