@@ -918,3 +918,49 @@ Stage Summary:
 - All 13 individual components pass physics validation (0 errors, 0 warnings).
 - Physics validator integrated into the store as a debug-mode check (enable via `window.__PHYSICS_DEBUG__ = true` in browser console).
 - Every existing circuit and component now follows the 10 physics laws.
+
+---
+Task ID: migrate-prisma-to-drizzle
+Agent: main
+Task: Remove Prisma and use Drizzle ORM for database handling. Verify it works. Then perform a code refactor for clean, readable, maintainable code.
+
+Work Log:
+- Exploration: Found Prisma footprint is small — 1 schema file (3 models, only SavedCircuit used), 1 client file, 2 API routes. SQLite at db/custom.db.
+
+- Migration steps:
+  1. Installed drizzle-orm, drizzle-kit, better-sqlite3, @types/better-sqlite3
+  2. Created src/lib/schema.ts — Drizzle schema for savedCircuits table (dropped unused User/Post models). Uses snake_case column names, UUID ids via crypto.randomUUID(), timestamp mode for Date objects, boolean mode for isExample, indexes on name and updatedAt.
+  3. Created drizzle.config.ts — points to src/lib/schema.ts and db/custom.db
+  4. Overwrote src/lib/db.ts — replaced PrismaClient with better-sqlite3 + drizzle() singleton, cached on globalThis for dev hot-reload, WAL journal mode
+  5. Rewrote src/app/api/circuits/route.ts — GET (list without document column), POST (create with validation)
+  6. Rewrote src/app/api/circuits/[id]/route.ts — GET (full with document), PUT (partial update), DELETE
+  7. Updated package.json scripts: db:push → drizzle-kit push, db:generate → drizzle-kit generate, db:migrate → drizzle-kit migrate, added db:studio
+  8. Removed @prisma/client, prisma from dependencies; removed prisma/ directory; ran npm uninstall to clean node_modules
+  9. Deleted old custom.db (had Prisma's camelCase columns) and pushed fresh schema with drizzle-kit push
+
+- Verification:
+  - scripts/test-drizzle-db.ts: INSERT, SELECT, UPDATE, DELETE all work. UUID ids generated. Timestamps auto-set and auto-update. Document JSON round-trips correctly. Response shape matches frontend expectations (ISO date strings, boolean isExample).
+  - scripts/test-api-routes.ts: All 9 test cases pass — GET empty (200), POST create (200), GET list (200, no document column), GET by id (200, with document), PUT update (200, partial update), GET nonexistent (404), POST missing document (400), DELETE (200), GET after delete (0 rows). All 8 frontend compatibility checks pass.
+  - Typecheck: no src errors. Build: succeeds. Physics validator: all 9 example circuits still pass.
+
+- Code refactor:
+  - Created src/lib/circuit-input.ts — extracted input sanitization helpers (toCreateValues, toUpdateValues, LIMITS, normalizeDocument) shared between POST and PUT routes. Eliminates duplicated clamping/stringify logic.
+  - Refactored both API routes to use the helpers — handlers are now thin (just validation + query + response).
+  - All files have clear header comments explaining their purpose.
+  - Schema.ts has inline documentation for each field and exported types (SavedCircuit, NewSavedCircuit).
+
+- Final file structure:
+  - src/lib/schema.ts — Drizzle schema (savedCircuits table + types)
+  - src/lib/db.ts — Drizzle client singleton (better-sqlite3 + WAL)
+  - src/lib/circuit-input.ts — input sanitization helpers (DRY)
+  - src/app/api/circuits/route.ts — GET (list), POST (create)
+  - src/app/api/circuits/[id]/route.ts — GET, PUT, DELETE
+  - drizzle.config.ts — Drizzle Kit config
+
+Stage Summary:
+- Prisma fully removed, Drizzle ORM installed and working.
+- All API routes rewritten with Drizzle query builder syntax.
+- Schema uses snake_case columns, UUID ids, proper Date/boolean types.
+- Input sanitization extracted to shared helper (DRY principle).
+- All tests pass: DB operations, API routes, typecheck, build, physics validator.
+- Code is clean, well-documented, and maintainable.
