@@ -47,6 +47,12 @@ interface PCBState {
   teardrops: { id: string; position: { x: number; y: number }; padId: string; points: { x: number; y: number }[]; layer: string }[];
   // multi-selection
   selectedFootprintIds: Set<string>;
+  /** Cross-probe highlight: component IDs selected on the schematic.
+   *  Set by CircuitCanvas when component selection changes; PCB canvas reads
+   *  this to render a highlight halo on the matching footprints. */
+  crossProbeComponentIds: Set<string>;
+  /** Set cross-probe highlight (called by schematic canvas on selection change) */
+  setCrossProbe: (componentIds: string[]) => void;
   // tool state
   tool: PCBTool;
   selectedFootprintId: string | null;
@@ -133,6 +139,8 @@ export const usePCB = create<PCBState>((set, get) => ({
   netClasses: [],
   teardrops: [],
   selectedFootprintIds: new Set(),
+  crossProbeComponentIds: new Set(),
+  setCrossProbe: (componentIds) => set({ crossProbeComponentIds: new Set(componentIds) }),
   tool: 'select',
   selectedFootprintId: null,
   selectedTraceId: null,

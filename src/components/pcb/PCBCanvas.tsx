@@ -47,6 +47,7 @@ export function PCBCanvas() {
   const copperPours = usePCB((s) => s.copperPours);
   const keepouts = usePCB((s) => s.keepouts);
   const teardrops = usePCB((s) => s.teardrops);
+  const crossProbeComponentIds = usePCB((s) => s.crossProbeComponentIds);
   const showKeepouts = usePCB((s) => s.showKeepouts);
   const addKeepout = usePCB((s) => s.addKeepout);
 
@@ -320,14 +321,24 @@ export function PCBCanvas() {
       const w = fp.bodySize.width * PX_PER_MM * zoom;
       const h = fp.bodySize.height * PX_PER_MM * zoom;
       const isSelected = selectedFootprintId === fp.id;
+      const isCrossProbe = crossProbeComponentIds.has(fp.componentId);
 
       // body outline
       ctx.save();
       ctx.translate(center.x, center.y);
       ctx.rotate((fp.rotation * Math.PI) / 180);
-      ctx.strokeStyle = isSelected ? '#fbbf24' : '#94a3b8';
-      ctx.fillStyle = isSelected ? 'rgba(251, 191, 36, 0.15)' : 'rgba(148, 163, 184, 0.08)';
-      ctx.lineWidth = 1;
+      // Cross-probe highlight takes precedence — cyan halo + thicker outline
+      if (isCrossProbe) {
+        ctx.shadowColor = '#22d3ee';
+        ctx.shadowBlur = 12;
+        ctx.strokeStyle = '#22d3ee';
+        ctx.fillStyle = 'rgba(34, 211, 238, 0.2)';
+        ctx.lineWidth = 2;
+      } else {
+        ctx.strokeStyle = isSelected ? '#fbbf24' : '#94a3b8';
+        ctx.fillStyle = isSelected ? 'rgba(251, 191, 36, 0.15)' : 'rgba(148, 163, 184, 0.08)';
+        ctx.lineWidth = 1;
+      }
       ctx.fillRect(-w / 2, -h / 2, w, h);
       ctx.strokeRect(-w / 2, -h / 2, w, h);
 
@@ -417,7 +428,7 @@ export function PCBCanvas() {
     ctx.restore();
   }, [size, pan, zoom, board, footprints, traces, vias, ratsnest, padNets, activeLayer, tool,
       defaultTraceWidth, selectedFootprintId, selectedTraceId, routingFrom, routingPath,
-      showRatsnest, showGrid, showPadNets, cursor, mmToScreen, drcErrors, copperPours, keepouts, teardrops, showKeepouts, hoveredDRC]);
+      showRatsnest, showGrid, showPadNets, cursor, mmToScreen, drcErrors, copperPours, keepouts, teardrops, showKeepouts, hoveredDRC, crossProbeComponentIds]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {

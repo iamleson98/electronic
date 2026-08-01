@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { getPluginsByCategory } from '@/lib/circuit/registry';
 import { useEditor } from '@/lib/circuit/store';
 import { Search, Cpu, Zap, Radio, Lightbulb, CircuitBoard, Gauge, Microchip, Layers } from 'lucide-react';
@@ -33,7 +33,20 @@ export function ComponentPalette() {
   const [query, setQuery] = useState('');
   const addComponent = useEditor((s) => s.addComponent);
   const running = useEditor((s) => s.running);
-  const groups = useMemo(() => getPluginsByCategory(), []);
+  // Re-fetch the plugin list when a new plugin is registered at runtime
+  // (e.g. from the Symbol Editor or Sub-Circuit dialog). Without this the
+  // palette memoizes an empty-deps snapshot and never sees the new entry.
+  const [registryVersion, setRegistryVersion] = useState(0);
+  useEffect(() => {
+    const handler = () => setRegistryVersion((v) => v + 1);
+    window.addEventListener('circuitlab:plugin-registered', handler);
+    return () => window.removeEventListener('circuitlab:plugin-registered', handler);
+  }, []);
+  const groups = useMemo(
+    () => getPluginsByCategory(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [registryVersion],
+  );
 
   const filtered = useMemo(() => {
     if (!query.trim()) return groups;

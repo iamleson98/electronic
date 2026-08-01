@@ -25,7 +25,7 @@ import { DEFAULT_PAGE_SETUP, DEFAULT_TITLE_BLOCK } from './types';
 import { getPlugin } from './registry';
 import { simulateStep, getTerminalsForComponent, buildNodeMap } from './engine';
 import { runFullERC } from './erc';
-import { snapshotSheet } from './hierarchy';
+import { snapshotSheet, flattenHierarchy } from './hierarchy';
 import { runAnalysis as runAnalysisEngine, type AnalysisConfig, type AnalysisResult } from './analysis';
 import { runBatch as runBatchEngine, type BatchConfig, type BatchResult } from './batch-runner';
 import { execMeas, type MeasCommand, type RealTrace as MeasRealTrace, type MeasResult } from './measurement';
@@ -122,13 +122,23 @@ interface EditorState {
   showRefdes: boolean;
   showValues: boolean;
   showTitleBlock: boolean;
+  /** UI theme: 'dark' (default) or 'light' */
+  theme: 'dark' | 'light';
+  /** Customizable hotkeys (overrides defaults). Keys are hotkey names, values are key strings. */
+  customHotkeys: Record<string, string>;
   activeTool: 'select' | 'wire' | 'bus' | 'label' | 'globalLabel' | 'hierLabel' | 'junction' | 'noConnect' | 'powerPort' | 'text' | 'line' | 'poly' | 'image';
 
   // actions
   addComponent: (type: string, position: { x: number; y: number }) => string;
   moveComponent: (id: string, position: { x: number; y: number }) => void;
   rotateComponent: (id: string) => void;
+  /** Free rotation: rotate by arbitrary degrees (snapped to 15° increments). Stored as degrees. */
+  rotateComponentFree: (id: string, degrees: number) => void;
   mirrorComponent: (id: string, axis: 'x' | 'y') => void;
+  /** Toggle De Morgan alternate body style (convert 1 ↔ 2). No-op if plugin has no alternate body. */
+  toggleDeMorgan: (id: string) => void;
+  /** Swap two pins within a pin-swap group. Returns true if swap was legal. */
+  swapPins: (id: string, pinIdA: string, pinIdB: string) => boolean;
   deleteComponent: (id: string) => void;
   deleteWire: (id: string) => void;
   setParameter: (id: string, key: string, value: number | string | boolean) => void;
@@ -205,6 +215,9 @@ interface EditorState {
   setShowRefdes: (s: boolean) => void;
   setShowValues: (s: boolean) => void;
   setShowTitleBlock: (s: boolean) => void;
+  setTheme: (t: 'dark' | 'light') => void;
+  setHotkey: (name: string, key: string) => void;
+  resetHotkeys: () => void;
   setActiveTool: (t: EditorState['activeTool']) => void;
   // wire ops
   startWire: (from: { componentId: string; terminalId: string }, cursor: { x: number; y: number }) => void;
@@ -396,6 +409,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   showRefdes: true,
   showValues: true,
   showTitleBlock: false,
+  theme: 'dark',
+  customHotkeys: {},
   activeTool: 'select',
 
   addComponent: (type, position) => {
@@ -443,6 +458,64 @@ export const useEditor = create<EditorState>((set, get) => ({
           : c,
       ),
     }));
+  },
+
+  rotateComponentFree: (id, degrees) => {
+    // Snap to 15° increments (24 distinct angles). Stored in `rotationDeg`.
+    // The canvas's render loop should use rotationDeg if present, otherwise fall back to rotation*90.
+    get().pushHistory();
+    const snapped = Math.round(degrees / 15) * 15;
+    set((s) => ({
+      components: s.components.map((c) =>
+        c.id === id ? { ...c, rotationDeg: snapped } : c,
+      ),
+    }));
+  },
+
+  toggleDeMorgan: (id) => {
+    const comp = get().components.find((c) => c.id === id);
+    if (!comp) return;
+    const plugin = getPlugin(comp.type);
+    if (!plugin?.hasAlternateBody) return;
+    get().pushHistory();
+    set((s) => ({
+      components: s.components.map((c) =>
+        c.id === id ? { ...c, convert: c.convert === 2 ? 1 : 2 } : c,
+      ),
+    }));
+  },
+
+  swapPins: (id, pinIdA, pinIdB) => {
+    const comp = get().components.find((c) => c.id === id);
+    if (!comp) return false;
+    const plugin = getPlugin(comp.type);
+    if (!plugin?.pinSwapGroups) return false;
+    // Check if both pins are in the same swap group
+    const inSameGroup = plugin.pinSwapGroups.some((group) =>
+      group.includes(pinIdA) && group.includes(pinIdB),
+    );
+    if (!inSameGroup) return false;
+    // Swap: we re-emit all wires that referenced pinIdA to pinIdB and vice versa.
+    // This requires walking the wires array and swapping terminal IDs.
+    get().pushHistory();
+    set((s) => ({
+      wires: s.wires.map((w) => {
+        if (w.from.componentId === id && w.from.terminalId === pinIdA) {
+          return { ...w, from: { ...w.from, terminalId: pinIdB } };
+        }
+        if (w.from.componentId === id && w.from.terminalId === pinIdB) {
+          return { ...w, from: { ...w.from, terminalId: pinIdA } };
+        }
+        if (w.to.componentId === id && w.to.terminalId === pinIdA) {
+          return { ...w, to: { ...w.to, terminalId: pinIdB } };
+        }
+        if (w.to.componentId === id && w.to.terminalId === pinIdB) {
+          return { ...w, to: { ...w.to, terminalId: pinIdA } };
+        }
+        return w;
+      }),
+    }));
+    return true;
   },
 
   deleteComponent: (id) => {
@@ -591,7 +664,25 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   runFullERCCheck: () => {
     const s = get();
-    const result = runFullERC(s.components, s.wires, s.noConnects);
+    // Run ERC across the flattened hierarchy so cross-sheet errors are caught
+    let ercComponents = s.components;
+    let ercWires = s.wires;
+    if (s.activeSheet || s.sheets.length > 0) {
+      let childSheets = s.childSheets;
+      if (s.activeSheet) {
+        childSheets = {
+          ...childSheets,
+          [s.activeSheet]: snapshotSheet(s.components, s.wires, s.sheets),
+        };
+      }
+      const rootDoc = s.activeSheet
+        ? (childSheets as any).__root__ ?? { version: 1 as const, components: [], wires: [], sheets: [] }
+        : { version: 1 as const, components: s.components, wires: s.wires, sheets: s.sheets };
+      const flat = flattenHierarchy(rootDoc as any, childSheets as any);
+      ercComponents = flat.components;
+      ercWires = flat.wires;
+    }
+    const result = runFullERC(ercComponents, ercWires, s.noConnects);
     set({ ercErrors: result.errors });
     return result;
   },
@@ -996,6 +1087,9 @@ export const useEditor = create<EditorState>((set, get) => ({
   setShowRefdes: (s) => set({ showRefdes: s }),
   setShowValues: (s) => set({ showValues: s }),
   setShowTitleBlock: (s) => set({ showTitleBlock: s }),
+  setTheme: (t) => set({ theme: t }),
+  setHotkey: (name, key) => set((s) => ({ customHotkeys: { ...s.customHotkeys, [name]: key } })),
+  resetHotkeys: () => set({ customHotkeys: {} }),
   setActiveTool: (t) => set({ activeTool: t }),
 
   // ===== Find / Replace =====
@@ -1184,9 +1278,38 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   step: () => {
     const s = get();
-    if (s.components.length === 0) return;
+    if (s.components.length === 0 && s.sheets.length === 0) return;
+
+    // ── Cross-sheet simulation ────────────────────────────────────────────
+    // If we're inside a sub-sheet OR the root has sub-sheets, we need to
+    // flatten the hierarchy into a single (components, wires) pair before
+    // simulating. We do this on every step so sub-sheet edits are picked up
+    // immediately. The flattened components have prefixed IDs (e.g. "amp.R1")
+    // so they don't collide with the active sheet's IDs.
+    let simComponents = s.components;
+    let simWires = s.wires;
+    let usingHierarchy = false;
+    if (s.activeSheet || s.sheets.length > 0) {
+      usingHierarchy = true;
+      // Save the current sheet back into childSheets so flattenHierarchy sees it
+      let childSheets = s.childSheets;
+      if (s.activeSheet) {
+        childSheets = {
+          ...childSheets,
+          [s.activeSheet]: snapshotSheet(s.components, s.wires, s.sheets),
+        };
+      }
+      // Build root document from either the active root state or the saved __root__
+      const rootDoc = s.activeSheet
+        ? (childSheets as any).__root__ ?? { version: 1 as const, components: [], wires: [], sheets: [] }
+        : { version: 1 as const, components: s.components, wires: s.wires, sheets: s.sheets };
+      const flat = flattenHierarchy(rootDoc as any, childSheets as any);
+      simComponents = flat.components;
+      simWires = flat.wires;
+    }
+
     const plugins = new Map<string, any>();
-    for (const c of s.components) {
+    for (const c of simComponents) {
       const p = getPlugin(c.type);
       if (p) plugins.set(c.type, p);
     }
@@ -1205,7 +1328,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const dt = s.dt;
     let result: { sim: SimContext; branchCurrentSize: number; nodeMap: any } | null = null;
     for (let i = 0; i < subSteps; i++) {
-      result = simulateStep(s.components, s.wires, plugins, prev, dt);
+      result = simulateStep(simComponents, simWires, plugins, prev, dt);
       if (!result) break;
       prev.nodeVoltage = result.sim.nodeVoltage;
       prev.branchCurrent = result.sim.branchCurrent;
@@ -1216,19 +1339,24 @@ export const useEditor = create<EditorState>((set, get) => ({
       set({ running: false, paused: true });
       return;
     }
-    // update traces for oscilloscope components
+    // update traces for oscilloscope components — when using hierarchy, the
+    // active sheet's oscilloscope IDs match the flattened IDs (no prefix when
+    // on root). When inside a sub-sheet, oscilloscope IDs need prefix lookup.
     const traces = [...s.traces];
-    for (const comp of s.components) {
+    for (const comp of simComponents) {
       if (comp.type !== 'oscilloscope') continue;
       const plugin = plugins.get('oscilloscope');
       if (!plugin) continue;
       const terminals = getTerminalsForComponent(comp, plugin, result.nodeMap);
       const measurements = plugin.measure(comp.parameters, terminals, result.sim);
       const v = parseFloat(measurements[0]?.value ?? '0');
-      let traceIdx = traces.findIndex((t) => t.componentId === comp.id);
+      // When using hierarchy, the trace's componentId is the active sheet's local ID
+      // (without prefix). Map back: if comp.id contains a '.', strip the prefix.
+      const traceKey = usingHierarchy && comp.id.includes('.') ? comp.id.split('.').slice(1).join('.') : comp.id;
+      let traceIdx = traces.findIndex((t) => t.componentId === traceKey);
       if (traceIdx < 0) {
         traces.push({
-          componentId: comp.id,
+          componentId: traceKey,
           color: (comp.parameters.color as string) || '#22d3ee',
           label: (comp.parameters.label as string) || 'CH',
           samples: [],

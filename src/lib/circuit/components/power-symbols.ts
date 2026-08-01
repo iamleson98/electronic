@@ -11,7 +11,7 @@ function makePowerSymbol(
   type: string,
   name: string,
   netName: string,
-  shape: 'gnd' | 'vcc' | 'plus5' | 'plus3v3' | 'plus12' | 'minus12' | 'flag',
+  shape: 'gnd' | 'agnd' | 'vcc' | 'plus5' | 'plus3v3' | 'plus1v8' | 'plus2v5' | 'plus12' | 'minus12' | 'minus5' | 'avdd' | 'vbat' | 'flag',
   color: string,
   description: string,
 ): ComponentPlugin {
@@ -44,13 +44,26 @@ function makePowerSymbol(
         ctx.moveTo(-w * 0.35, cellSize * 0.4); ctx.lineTo(w * 0.35, cellSize * 0.4);
         ctx.moveTo(-w * 0.2, cellSize * 0.8); ctx.lineTo(w * 0.2, cellSize * 0.8);
         ctx.stroke();
-      } else if (shape === 'vcc' || shape === 'plus5' || shape === 'plus3v3' || shape === 'plus12') {
+      } else if (shape === 'agnd') {
+        // Analog ground: triangle pointing down with a small "AG" mark
+        const w = cellSize * 1.2;
+        ctx.beginPath();
+        ctx.moveTo(-w / 2, 0); ctx.lineTo(w / 2, 0);
+        ctx.moveTo(-w * 0.35, cellSize * 0.4); ctx.lineTo(w * 0.35, cellSize * 0.4);
+        // dashed center bar (distinguishes AGND from GND)
+        ctx.setLineDash([2, 2]);
+        ctx.moveTo(-w * 0.2, cellSize * 0.8); ctx.lineTo(w * 0.2, cellSize * 0.8);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (shape === 'vcc' || shape === 'plus5' || shape === 'plus3v3' ||
+                 shape === 'plus1v8' || shape === 'plus2v5' || shape === 'plus12' ||
+                 shape === 'avdd' || shape === 'vbat') {
         const w = cellSize * 1.2;
         ctx.beginPath();
         ctx.moveTo(-w / 2, 0); ctx.lineTo(w / 2, 0);
         ctx.moveTo(0, 0); ctx.lineTo(0, cellSize * 0.3);
         ctx.stroke();
-      } else if (shape === 'minus12') {
+      } else if (shape === 'minus12' || shape === 'minus5') {
         const w = cellSize * 1.2;
         ctx.beginPath();
         ctx.moveTo(-w / 2, cellSize * 0.5); ctx.lineTo(w / 2, cellSize * 0.5);
@@ -82,11 +95,17 @@ function makePowerSymbol(
 }
 
 export const powerGND = makePowerSymbol('powerGND', 'GND (power)', 'GND', 'gnd', '#94a3b8', 'Power port: GND. All GND power symbols are connected to ground.');
+export const powerAGND = makePowerSymbol('powerAGND', 'AGND (analog ground)', 'AGND', 'agnd', '#65a30d', 'Power port: Analog Ground. Use to separate analog and digital return paths.');
 export const powerVCC = makePowerSymbol('powerVCC', 'VCC (power)', 'VCC', 'vcc', '#ef4444', 'Power port: VCC. All VCC power symbols share the same net.');
 export const power5V = makePowerSymbol('power5V', '+5V (power)', '+5V', 'plus5', '#ef4444', 'Power port: +5V. All +5V power symbols share the same net.');
 export const power3V3 = makePowerSymbol('power3V3', '+3.3V (power)', '+3.3V', 'plus3v3', '#22c55e', 'Power port: +3.3V.');
+export const power1V8 = makePowerSymbol('power1V8', '+1.8V (power)', '+1.8V', 'plus1v8', '#06b6d4', 'Power port: +1.8V (low-voltage core supply).');
+export const power2V5 = makePowerSymbol('power2V5', '+2.5V (power)', '+2.5V', 'plus2v5', '#0ea5e9', 'Power port: +2.5V.');
 export const power12V = makePowerSymbol('power12V', '+12V (power)', '+12V', 'plus12', '#ef4444', 'Power port: +12V.');
 export const powerMinus12V = makePowerSymbol('powerMinus12V', '-12V (power)', '-12V', 'minus12', '#3b82f6', 'Power port: -12V.');
+export const powerMinus5V = makePowerSymbol('powerMinus5V', '-5V (power)', '-5V', 'minus5', '#3b82f6', 'Power port: -5V (dual supply negative rail).');
+export const powerAVDD = makePowerSymbol('powerAVDD', 'AVDD (analog)', 'AVDD', 'avdd', '#f59e0b', 'Power port: Analog VDD. Separate from digital VDD for noise isolation.');
+export const powerVBAT = makePowerSymbol('powerVBAT', 'VBAT (battery)', 'VBAT', 'vbat', '#a855f7', 'Power port: Battery backup supply (e.g. RTC battery).');
 
 // Net Label — names a node. Two net labels with the same name are connected.
 export const netLabel: ComponentPlugin = {
@@ -246,12 +265,80 @@ export const busLabel: ComponentPlugin = {
   getFlowPath() { return [{ x: 0, y: 0 }]; },
 };
 
+/**
+ * Bus Vector Label — names a multi-bit bus with vector syntax "D[0..7]".
+ *
+ * Unlike the single-bit `busLabel`, this component exposes one terminal per
+ * bit. The engine's `buildNodeMap` recognizes the `[start..end]` syntax and
+ * assigns each terminal to the corresponding bit's shared node (D0, D1, …, D7).
+ *
+ * The number of terminals is dynamic — set via the `bits` parameter. The
+ * plugin generates terminals 0..bits-1 at runtime via a custom terminal
+ * generator. (For simplicity, we expose 8 terminals by default; users adjust
+ * the `bits` parameter to control how many are active.)
+ */
+export const busVectorLabel: ComponentPlugin = {
+  type: 'busVectorLabel',
+  name: 'Bus Vector Label',
+  category: 'source',
+  description: 'Names a multi-bit bus with vector syntax (e.g. D[0..7] creates 8 nets D0..D7). Each terminal is one bit. Use a bus wire to connect.',
+  symbol: 'BV',
+  boundingBox: { width: 4, height: 9 }, // tall enough for 8 bits
+  // 8 fixed terminals — engine assigns each to a bit from expandBusVector()
+  terminals: Array.from({ length: 8 }, (_, i) => ({
+    id: `b${i}`, label: `${i}`, position: { x: 0, y: i + 1 },
+  })),
+  parameters: [
+    { key: 'net', label: 'Bus Name', type: 'string' as const, default: 'D[0..7]' },
+    { key: 'bits', label: 'Bit Count', type: 'number' as const, default: 8, min: 1, max: 32, step: 1 },
+  ],
+  render(ctx, params, cellSize) {
+    const net = (params.net as string) || 'D[0..7]';
+    const bits = (params.bits as number) || 8;
+    ctx.save();
+    ctx.strokeStyle = '#a855f7'; ctx.fillStyle = 'rgba(168,85,247,0.12)'; ctx.lineWidth = 1.5;
+    // header tag
+    const w = Math.max(net.length * cellSize * 0.4, cellSize * 2);
+    const h = cellSize * 0.7;
+    ctx.beginPath();
+    ctx.moveTo(0, 0); ctx.lineTo(w * 0.2, -h / 2); ctx.lineTo(w, -h / 2);
+    ctx.lineTo(w, h / 2); ctx.lineTo(w * 0.2, h / 2); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#c084fc';
+    ctx.font = `bold ${Math.floor(cellSize * 0.4)}px ui-monospace, monospace`;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(net, cellSize * 0.3, 0);
+    // bit terminals
+    ctx.font = `${Math.floor(cellSize * 0.35)}px ui-monospace, monospace`;
+    ctx.fillStyle = '#a78bfa';
+    for (let i = 0; i < bits && i < 8; i++) {
+      const y = (i + 1) * cellSize;
+      // small filled square
+      ctx.fillStyle = '#a855f7';
+      ctx.fillRect(-3, y - 3, 6, 6);
+      ctx.fillStyle = '#a78bfa';
+      ctx.fillText(`b${i}`, cellSize * 0.3, y);
+    }
+    ctx.restore();
+  },
+  stamp() {},
+  getFlowPath() { return [{ x: 0, y: 0 }]; },
+};
+
 registerPlugin(powerGND);
+registerPlugin(powerAGND);
 registerPlugin(powerVCC);
 registerPlugin(power5V);
 registerPlugin(power3V3);
+registerPlugin(power1V8);
+registerPlugin(power2V5);
 registerPlugin(power12V);
 registerPlugin(powerMinus12V);
+registerPlugin(powerMinus5V);
+registerPlugin(powerAVDD);
+registerPlugin(powerVBAT);
 registerPlugin(netLabel);
 registerPlugin(bus);
 registerPlugin(busLabel);
+registerPlugin(busVectorLabel);
+registerPlugin(hierLabel);

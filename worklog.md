@@ -236,3 +236,66 @@ Stage Summary:
   * Priority #5 (3D model loader) — STL/VRML/OBJ + default parametric models
   * Priority #6 (hierarchical sheets) — sheet boxes, drag, double-click-to-enter, breadcrumb, pin management, cross-sheet net propagation
   * Priority #7 (BSIM3v3 + sparse solver) — full compact model + sparse KLU
+
+---
+Task ID: p6b-symbol-editor
+Agent: general-purpose
+Task: Build WYSIWYG symbol editor canvas
+
+Work Log:
+- Read the project layout (Next.js 16 + TS + Tailwind + Zustand) and existing integration surfaces: `ComponentPlugin`/`TerminalDef` in `src/lib/circuit/types.ts`, the registry in `src/lib/circuit/registry.ts`, the dialog primitive in `src/components/ui/dialog.tsx`, the existing list-based `SubCircuitDialog.tsx`, the `Toolbar.tsx` dialog-mount pattern, and the `ComponentPalette.tsx` empty-deps `useMemo` that prevents new plugins from showing up at runtime.
+- Created `src/lib/circuit/symbol-editor-types.ts` (650 lines):
+  * `SymbolPin`, `SymbolRect`, `SymbolLine`, `SymbolText`, `SymbolDesign` interfaces matching the spec (extended `SymbolPin` with an optional `direction: 'left'|'right'|'up'|'down'` field so the user can pin-stub in any direction; auto-derived from position relative to the bounding-box centre when not set).
+  * `PIN_ELEC_TYPE_COLOR` map (KiCad eeschema-style colour per electrical type) + `PIN_ELEC_TYPE_LABELS` and `PIN_SHAPE_LABELS` for the right-panel selects.
+  * `drawPin()` — full KiCad-parity pin renderer: coloured stub line by electrical type, body-end decoration for `inverted` (bubble), `clock` / `inverted_clock` / `clock_low` / `falling_edge` (chevron), small filled square at the outer connection end, and label/name/number text positioned by direction.
+  * `drawSymbolDesign()` — renders rects → lines → pins → texts onto a canvas context. Used by BOTH the editor canvas and the generated plugin's `render()` so what-you-see-is-what-you-get.
+  * `computeDesignBoundingBox()` — auto-fit from extents of all elements (rects, lines, pins including stub ends, texts).
+  * `symbolDesignToPlugin()` — builds a `ComponentPlugin` with `category: 'ic'`, terminals copied from pins (id, label, position, electricalType, name, number, length, shape), a single `value` parameter, NO `stamp()` (structural placeholder as specified), and a `render()` that calls `drawSymbolDesign()` + draws the refdes above the box. The design is deep-frozen at registration time so subsequent editor edits don't mutate already-placed instances.
+  * `sampleOpAmpDesign()` — 5-pin op-amp (in+, in-, vcc, vee, out) with body rect + +/- input markers + "OP" text, used as the editor's default template so users can immediately hit Save to see the full pipeline work.
+  * `blankDesign()` — empty body rect for "New".
+- Created `src/components/circuit/SymbolEditorDialog.tsx` (1241 lines):
+  * Full-screen overlay using the existing shadcn `Dialog` primitive (overrode max-w/w/h/p to fill the viewport).
+  * Top toolbar: New, Sample, Save, Cancel, Grid toggle, Pin-# toggle, Pin-name toggle, Zoom in/out, Reset view. HUD at the bottom shows zoom %, live grid coords, and current tool.
+  * Left toolbar (vertical): Select, Pin, Rectangle, Line, Text, Delete (rose-coloured when active).
+  * Canvas (`<canvas>`) with snap-to-grid (1.0 grid units, matching the main CircuitCanvas), pan (middle/right mouse), zoom (wheel, cursor-anchored), click-to-select, drag-to-move (single endpoint for lines, captured at mousedown so it doesn't flip mid-drag), double-click to focus an element.
+  * Right panel: `DesignMetaEditor` (name / type id / description / live bounding box / element counts) when nothing is selected, or `SelectedElementEditor` with kind-specific sub-editors:
+    - `PinEditor` — preview swatch (color by elec type), label, name, number, electrical type (Select with colour swatches), graphical shape (Select), direction (Select), length, position X/Y.
+    - `RectEditor` — position, size, stroke color (color picker + hex), fill color.
+    - `LineEditor` — from X/Y, to X/Y, color, width.
+    - `TextEditor` — text, position, font size, color.
+  * State is kept entirely inside the dialog (not the global store) so opening/closing the editor doesn't pollute the main editor's undo history.
+  * Mouse handlers use a ref-mirror pattern (dragRef/draftRef/panRef/toolRef/cameraRef/designRef) so the handlers can read the latest state without re-binding on every state change (which would leak closure over stale values).
+  * Hit-testing: pins (point-in-square tol 0.4), texts (approx bbox), lines (point-to-segment distance), rects (inside-or-edge).
+  * Drawing tools use a rubber-band draft (dashed yellow line / rect) that finalises on mouseup.
+- Modified `src/components/circuit/Toolbar.tsx` (+20 lines):
+  * Imported `SymbolEditorDialog`.
+  * Added a `showSymbolEditor` state.
+  * Added a top-level "Symbol Editor" button using the existing `Pencil` icon (placed next to "Sub-Circuit" since they're conceptually similar — both create reusable parts). Tooltip + disabled while running.
+  * Rendered `<SymbolEditorDialog open=... onClose=... onSaved=... />` at the bottom alongside the other dialogs.
+  * `onSaved` callback dispatches a `circuitlab:plugin-registered` window event (in addition to the dialog's own dispatch — idempotent) so any listening UI refreshes.
+- Modified `src/components/circuit/ComponentPalette.tsx` (+11 lines):
+  * Added a `registryVersion` state + `useEffect` that listens for the `circuitlab:plugin-registered` event.
+  * Changed `useMemo(() => getPluginsByCategory(), [])` (empty deps — never refreshed) to depend on `registryVersion`, so newly registered user symbols appear in the palette immediately after Save.
+- Modified `src/lib/circuit/registry.ts` (+1/-3 lines):
+  * `registerPlugin()` now actually overwrites when called with an existing type (previously the comment said "silently overwrite" but the code returned without doing anything). This means re-saving a user symbol with the same type id now correctly updates the registered plugin, and HMR re-registration of built-in plugins remains a no-op (overwriting identical data).
+- Verified the user flow end-to-end on paper: open Symbol Editor → see sample op-amp → Save → toast "Symbol 'My Op-Amp' registered (5 pins)" → palette refreshes via event → "My Op-Amp" appears under "Integrated Circuits" category → drag onto canvas → wires connect to the 5 pins. The new plugin has no `stamp()` so simulation treats it as a structural placeholder (the wires' nodes still get unified through the engine's normal node-map, so the user can wire pins together even though the symbol itself contributes no MNA stamp).
+
+Stage Summary:
+- Files created:
+  * `src/lib/circuit/symbol-editor-types.ts` (650 lines) — types, draw helpers, sample designs, symbolDesignToPlugin converter
+  * `src/components/circuit/SymbolEditorDialog.tsx` (1241 lines) — full-screen WYSIWYG canvas editor with top/left/right panels and property editors for every element kind
+- Files modified:
+  * `src/components/circuit/Toolbar.tsx` (835 lines, +20 net) — Symbol Editor button + dialog mount + onSaved event dispatch
+  * `src/components/circuit/ComponentPalette.tsx` (135 lines, +11 net) — listens for `circuitlab:plugin-registered` and refreshes the memoized plugin list
+  * `src/lib/circuit/registry.ts` (52 lines, -3/+4 net) — `registerPlugin` actually overwrites existing entries (fixes the "save twice silently does nothing" UX bug)
+- Key decisions:
+  * Used a window event (`circuitlab:plugin-registered`) for palette refresh instead of touching the Zustand store — avoids a circular dependency between `registry.ts` and `store.ts`, and keeps the change surface small.
+  * The generated plugin's `render()` calls the same `drawSymbolDesign()` the editor uses — guaranteed WYSIWYG.
+  * The design is deep-frozen at `symbolDesignToPlugin` time so subsequent edits in the editor don't mutate already-placed instances on the schematic.
+  * Pin direction is stored on the pin (`'left'|'right'|'up'|'down'`) rather than derived at draw-time only — this lets the user place pins in any orientation via the right-panel Select, and matches KiCad's pin-orientation model.
+  * Pin shape decorations (bubble / clock chevron) are drawn at the body end of the stub, matching KiCad's eeschema convention.
+  * The plugin has NO `stamp()` — pins still unify into nets via the engine's `buildNodeMap` because wires connect through the terminal IDs, so the user can wire up the symbol structurally even though it contributes nothing to the MNA system. The user can later associate a sub-circuit definition (via the existing SubCircuitDialog flow) if they want electrical behaviour.
+  * Default template is a working 5-pin op-amp so the user can immediately Save and see the new part appear in the palette without having to draw anything first.
+- Verification:
+  * `npx tsc --noEmit` — passes (only pre-existing `skills/image-edit` and `skills/stock-analysis-skill` errors remain; zero new errors in `src/`).
+  * `npx next build` — succeeds: "Compiled successfully in 14.6s", 6/6 static pages, no warnings.

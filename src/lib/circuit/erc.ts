@@ -59,13 +59,17 @@ export function getTerminalElecType(compType: string, terminalId: string, plugin
   if (compType === 'dcVoltage' || compType === 'acVoltage' || compType === 'pulseSource') {
     return terminalId === 'p' ? 'power_out' : 'power_in';
   }
-  if (compType === 'ground' || compType === 'powerGND') return 'power_in';
+  if (compType === 'ground' || compType === 'powerGND' || compType === 'powerAGND') return 'power_in';
   if (compType === 'powerVCC' || compType === 'power5V' || compType === 'power3V3' ||
-      compType === 'power12V' || compType === 'powerMinus12V') {
+      compType === 'power1V8' || compType === 'power2V5' ||
+      compType === 'power12V' || compType === 'powerMinus12V' ||
+      compType === 'powerMinus5V' || compType === 'powerAVDD' ||
+      compType === 'powerVBAT') {
     return 'power_out';
   }
   if (compType === 'powerFlag') return 'power_out';
-  if (compType === 'netLabel') return 'passive';
+  if (compType === 'netLabel' || compType === 'busLabel' ||
+      compType === 'busVectorLabel' || compType === 'hierLabel') return 'passive';
   if (compType === 'resistor' || compType === 'capacitor' || compType === 'inductor' ||
       compType === 'fuse' || compType === 'crystal' || compType === 'photoresistor') return 'passive';
   if (compType === 'diode' || compType === 'led' || compType === 'zener' || compType === 'schottky') return 'passive';

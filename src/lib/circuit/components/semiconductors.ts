@@ -216,7 +216,7 @@ const opamp: ComponentPlugin = {
   type: 'opamp',
   name: 'Op-Amp (ideal)',
   category: 'ic',
-  description: 'Ideal op-amp with infinite gain (VCCS model). Power terminals omitted for simplicity.',
+  description: 'Ideal op-amp with infinite gain (VCCS model). Power terminals omitted for simplicity. Press M to toggle De Morgan alternate body (rectangle form).',
   symbol: 'OP',
   boundingBox: { width: 4, height: 4 },
   terminals: [
@@ -224,11 +224,15 @@ const opamp: ComponentPlugin = {
     { id: 'in-', label: '-', position: { x: 0, y: 3 } },
     { id: 'out', label: 'out', position: { x: 4, y: 2 } },
   ],
+  // Pin swap groups: the two inputs can be swapped (with sign inversion in the
+  // external circuit, but for purely structural purposes they're swappable)
+  pinSwapGroups: [['in+', 'in-']],
+  hasAlternateBody: true,
   parameters: [
     { key: 'gain', label: 'Open-loop Gain', type: 'number', default: 1e5, unit: '', min: 1, max: 1e9, step: 100 },
   ],
-  render(ctx, params, cellSize) {
-    // leads
+  render(ctx, params, cellSize, _sim, instance) {
+    // leads (common to both body styles)
     ctx.beginPath();
     ctx.moveTo(0, cellSize);
     ctx.lineTo(cellSize * 1.2, cellSize);
@@ -237,18 +241,38 @@ const opamp: ComponentPlugin = {
     ctx.moveTo(2.8 * cellSize, 2 * cellSize);
     ctx.lineTo(4 * cellSize, 2 * cellSize);
     ctx.stroke();
-    // triangle body
-    ctx.beginPath();
-    ctx.moveTo(cellSize * 1.2, cellSize * 0.4);
-    ctx.lineTo(cellSize * 1.2, cellSize * 3.6);
-    ctx.lineTo(cellSize * 2.8, cellSize * 2);
-    ctx.closePath();
-    ctx.fillStyle = '#fef3c7';
-    ctx.fill();
-    ctx.stroke();
-    // + and -
-    drawLabel(ctx, '+', cellSize * 1.5, cellSize);
-    drawLabel(ctx, '−', cellSize * 1.5, 3 * cellSize);
+    // De Morgan alternate body style: rectangular box (IEC convention)
+    if (instance?.convert === 2) {
+      ctx.fillStyle = '#fef3c7';
+      ctx.strokeStyle = '#e2e8f0';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.rect(cellSize * 1.2, cellSize * 0.4, cellSize * 1.6, cellSize * 3.2);
+      ctx.fill();
+      ctx.stroke();
+      // IEC op-mp symbol: ampersand-like character or "∞" for infinite gain
+      ctx.fillStyle = '#0f172a';
+      ctx.font = `bold ${Math.floor(cellSize * 0.7)}px serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('∞', cellSize * 2, cellSize * 2);
+      // + and - markers (smaller, inside the box)
+      ctx.font = `${Math.floor(cellSize * 0.4)}px ui-monospace, monospace`;
+      ctx.fillText('+', cellSize * 1.4, cellSize);
+      ctx.fillText('−', cellSize * 1.4, 3 * cellSize);
+    } else {
+      // Default triangle body
+      ctx.beginPath();
+      ctx.moveTo(cellSize * 1.2, cellSize * 0.4);
+      ctx.lineTo(cellSize * 1.2, cellSize * 3.6);
+      ctx.lineTo(cellSize * 2.8, cellSize * 2);
+      ctx.closePath();
+      ctx.fillStyle = '#fef3c7';
+      ctx.fill();
+      ctx.stroke();
+      drawLabel(ctx, '+', cellSize * 1.5, cellSize);
+      drawLabel(ctx, '−', cellSize * 1.5, 3 * cellSize);
+    }
   },
   stamp(params, terminals, sys) {
     const gain = params.gain as number;

@@ -323,6 +323,18 @@ export function CircuitCanvas() {
   const sheetDragRef = useRef<{ id: string; offset: Vec2 } | null>(null);
   useEffect(() => { sheetDragRef.current = sheetDrag; }, [sheetDrag]);
 
+  // Cross-probing: push schematic selection to PCB store so the PCB canvas
+  // can highlight the matching footprints. Also includes multi-selection.
+  useEffect(() => {
+    const ids: string[] = [];
+    if (selection.type === 'component' && selection.id) ids.push(selection.id);
+    for (const id of multiSelection.components) ids.push(id);
+    // Lazy import to avoid circular dep at module load time
+    import('@/lib/pcb/store').then(({ usePCB }) => {
+      usePCB.getState().setCrossProbe(ids);
+    });
+  }, [selection, multiSelection]);
+
   const addComponent = useEditor((s) => s.addComponent);
   const moveComponent = useEditor((s) => s.moveComponent);
   const rotateComponent = useEditor((s) => s.rotateComponent);
@@ -568,13 +580,14 @@ export function CircuitCanvas() {
     if (!ctx) return;
     ctx.save();
     ctx.scale(dpr, dpr);
-    // bg
-    ctx.fillStyle = '#0f172a';
+    // bg — theme-aware (dark default, light when user picks it)
+    const isLight = useEditor.getState().theme === 'light';
+    ctx.fillStyle = isLight ? '#f8fafc' : '#0f172a';
     ctx.fillRect(0, 0, size.width, size.height);
 
     // grid
     if (showGrid) {
-      ctx.strokeStyle = '#1e293b';
+      ctx.strokeStyle = isLight ? '#cbd5e1' : '#1e293b';
       ctx.lineWidth = 1;
       const stepPx = CELL_SIZE * zoom;
       const startX = pan.x % stepPx;
@@ -789,7 +802,11 @@ export function CircuitCanvas() {
       const bbCx = plugin.boundingBox.width / 2;
       const bbCy = plugin.boundingBox.height / 2;
       ctx.translate(bbCx * CELL_SIZE, bbCy * CELL_SIZE);
-      ctx.rotate((comp.rotation * Math.PI) / 2);
+      // Free rotation (rotationDeg) takes precedence over the 90°-step rotation field
+      const rotationRad = comp.rotationDeg != null
+        ? (comp.rotationDeg * Math.PI) / 180
+        : (comp.rotation * Math.PI) / 2;
+      ctx.rotate(rotationRad);
       // Mirror (X = vertical flip, Y = horizontal flip)
       if (comp.mirrorX) ctx.scale(1, -1);
       if (comp.mirrorY) ctx.scale(-1, 1);
@@ -1783,6 +1800,25 @@ export function CircuitCanvas() {
         e.preventDefault();
         const s = useEditor.getState();
         if (s.selection.type === 'component' && s.selection.id) s.toggleLock(s.selection.id);
+      } else if (e.key === 'm' || e.key === 'M') {
+        // De Morgan alternate body toggle (KiCad parity)
+        if (running) return;
+        e.preventDefault();
+        const s = useEditor.getState();
+        if (s.selection.type === 'component' && s.selection.id) s.toggleDeMorgan(s.selection.id);
+      } else if (e.shiftKey && (e.key === 'R' || e.key === 'r')) {
+        // Shift+R = free rotation by 15° (clockwise). R alone still does 90° steps.
+        if (running) return;
+        e.preventDefault();
+        const s = useEditor.getState();
+        if (s.selection.type === 'component' && s.selection.id) {
+          const comp = s.components.find((c) => c.id === s.selection.id);
+          if (comp) {
+            const cur = comp.rotationDeg ?? (comp.rotation * 90);
+            const next = (cur + 15) % 360;
+            s.rotateComponentFree(s.selection.id, next);
+          }
+        }
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         // Find / Replace — dispatch a custom event the Toolbar listens for
         if (running) return;

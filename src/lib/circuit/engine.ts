@@ -22,6 +22,30 @@ export interface NodeMap {
 }
 
 /**
+ * Expand a bus vector name like "D[0..7]" into ["D0", "D1", ..., "D7"].
+ * Supports [start..end] (ascending or descending).
+ * Single-bit names like "D0" return ["D0"].
+ * Invalid patterns return [name] unchanged.
+ */
+export function expandBusVector(name: string): string[] {
+  // Match patterns: BASE[START..END] or BASE[START:END]
+  const m = name.match(/^([A-Za-z_]\w*)\[(\d+)\.\.(\d+)\]$/);
+  if (!m) return [name];
+  const [, base, startStr, endStr] = m;
+  const start = parseInt(startStr, 10);
+  const end = parseInt(endStr, 10);
+  if (start <= end) {
+    const bits: string[] = [];
+    for (let i = start; i <= end; i++) bits.push(`${base}${i}`);
+    return bits;
+  } else {
+    const bits: string[] = [];
+    for (let i = start; i >= end; i--) bits.push(`${base}${i}`);
+    return bits;
+  }
+}
+
+/**
  * Build a node map by union-find over all terminal connections.
  * Any terminal connected to a `ground` plugin's terminal becomes node 0.
  */
@@ -82,16 +106,33 @@ export function buildNodeMap(components: CircuitComponent[], wires: Wire[], plug
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
     const isPowerSymbol =
-      comp.type === 'powerGND' || comp.type === 'powerVCC' ||
-      comp.type === 'power5V' || comp.type === 'power3V3' ||
+      comp.type === 'powerGND' || comp.type === 'powerAGND' ||
+      comp.type === 'powerVCC' || comp.type === 'power5V' || comp.type === 'power3V3' ||
+      comp.type === 'power1V8' || comp.type === 'power2V5' ||
       comp.type === 'power12V' || comp.type === 'powerMinus12V' ||
+      comp.type === 'powerMinus5V' || comp.type === 'powerAVDD' ||
+      comp.type === 'powerVBAT' || comp.type === 'powerFlag' ||
       comp.type === 'netLabel' || comp.type === 'busLabel' ||
-      comp.type === 'hierLabel';
+      comp.type === 'busVectorLabel' || comp.type === 'hierLabel';
     if (!isPowerSymbol) continue;
     const netName = (comp.parameters.net as string) || '';
     if (!netName) continue;
     if (netName === 'GND' || netName === 'gnd' || netName === '0') {
       for (const t of plugin.terminals) terminalNode.set(termKey(comp.id, t.id), 0);
+      continue;
+    }
+    // Bus vector expansion: a label with text "D[0..7]" creates 8 implicit
+    // nodes D0, D1, ..., D7. Each terminal of the busVectorLabel plugin gets
+    // unified to its corresponding bit's shared node.
+    const expandedBits = expandBusVector(netName);
+    if (expandedBits.length > 1) {
+      // Multi-bit bus vector — assign each terminal a separate bit's node
+      for (let i = 0; i < plugin.terminals.length && i < expandedBits.length; i++) {
+        const bitName = expandedBits[i];
+        let bitNode = netToNode.get(bitName);
+        if (bitNode === undefined) { bitNode = newNode(); netToNode.set(bitName, bitNode); }
+        terminalNode.set(termKey(comp.id, plugin.terminals[i].id), bitNode);
+      }
       continue;
     }
     let sharedNode = netToNode.get(netName);

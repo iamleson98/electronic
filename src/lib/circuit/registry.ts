@@ -17,10 +17,10 @@ const categoryOrder: Record<string, number> = {
 };
 
 export function registerPlugin(plugin: ComponentPlugin) {
-  if (registry.has(plugin.type)) {
-    // Silently overwrite (HMR may cause re-registration)
-    return;
-  }
+  // Overwrite if a plugin with the same type already exists — this matches
+  // the comment below (HMR re-registration, plus user-symbol re-saves).
+  // Built-in plugins are registered at module load and re-registering them
+  // with identical data is a no-op.
   registry.set(plugin.type, plugin);
 }
 

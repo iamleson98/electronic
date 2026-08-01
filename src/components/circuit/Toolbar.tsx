@@ -24,9 +24,11 @@ import {
 import { MyCircuitsDialog } from './MyCircuitsDialog';
 import { SpiceImportDialog } from './SpiceImportDialog';
 import { SubCircuitDialog } from './SubCircuitDialog';
+import { SymbolEditorDialog } from './SymbolEditorDialog';
 import {
   FindReplaceDialog, ViolationsBrowserDialog, NetInspectorDialog,
   PageSetupDialog, SavedViewsDialog, HierarchicalSheetsDialog, NetClassesDialog,
+  SettingsDialog,
 } from './SchematicDialogs';
 import {
   AnalysisDialog, OptionsDialog, MeasurementDialog, BatchSweepDialog, StimuliEditorDialog,
@@ -87,6 +89,7 @@ export function Toolbar() {
   const [showMyCircuits, setShowMyCircuits] = useState(false);
   const [showSpiceImport, setShowSpiceImport] = useState(false);
   const [showSubCircuit, setShowSubCircuit] = useState(false);
+  const [showSymbolEditor, setShowSymbolEditor] = useState(false);
   const [showFindReplace, setShowFindReplace] = useState(false);
   const [showViolations, setShowViolations] = useState(false);
   const [showNetInspector, setShowNetInspector] = useState(false);
@@ -94,6 +97,7 @@ export function Toolbar() {
   const [showSavedViews, setShowSavedViews] = useState(false);
   const [showSheets, setShowSheets] = useState(false);
   const [showNetClasses, setShowNetClasses] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   // Simulation analysis dialogs
   const [showAnalysis, setShowAnalysis] = useState(false);
   const [showOptions, setShowOptions] = useState(false);
@@ -414,6 +418,17 @@ export function Toolbar() {
           <TooltipContent>{running ? 'Pause simulation to create sub-circuits' : 'Convert current circuit into a reusable component'}</TooltipContent>
         </Tooltip>
 
+        {/* Symbol Editor — WYSIWYG symbol designer */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => setShowSymbolEditor(true)} disabled={running}>
+              <Pencil size={14} />
+              <span className="ml-1 hidden lg:inline">Symbol Editor</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{running ? 'Pause simulation to design symbols' : 'Open the WYSIWYG symbol editor to design new component symbols'}</TooltipContent>
+        </Tooltip>
+
         {/* ERC (Electrical Rule Check) */}
         <Tooltip>
           <TooltipTrigger asChild>
@@ -644,6 +659,22 @@ export function Toolbar() {
           </DropdownMenuContent>
         </DropdownMenu>
 
+        {/* Settings — theme + hotkeys */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setShowSettings(true)}
+              className="text-slate-300"
+            >
+              <Settings2 size={14} />
+              <span className="ml-1 hidden lg:inline">Settings</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Theme + hotkey customization</TooltipContent>
+        </Tooltip>
+
         {/* Import KiCad / Eagle schematic */}
         <Tooltip>
           <TooltipTrigger asChild>
@@ -795,10 +826,20 @@ export function Toolbar() {
       <MyCircuitsDialog open={showMyCircuits} onClose={() => setShowMyCircuits(false)} />
       <SpiceImportDialog open={showSpiceImport} onClose={() => setShowSpiceImport(false)} />
       <SubCircuitDialog open={showSubCircuit} onClose={() => setShowSubCircuit(false)} />
+      <SymbolEditorDialog
+        open={showSymbolEditor}
+        onClose={() => setShowSymbolEditor(false)}
+        onSaved={() => {
+          // Notify the component palette to refresh — newly registered plugin
+          // won't show up otherwise because it uses a memoized empty-deps fetch.
+          window.dispatchEvent(new CustomEvent('circuitlab:plugin-registered'));
+        }}
+      />
       <FindReplaceDialog open={showFindReplace} onClose={() => setShowFindReplace(false)} />
       <ViolationsBrowserDialog open={showViolations} onClose={() => setShowViolations(false)} />
       <NetInspectorDialog open={showNetInspector} onClose={() => setShowNetInspector(false)} />
       <NetClassesDialog open={showNetClasses} onClose={() => setShowNetClasses(false)} />
+      <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} />
       <HierarchicalSheetsDialog open={showSheets} onClose={() => setShowSheets(false)} />
       <PageSetupDialog open={showPageSetup} onClose={() => setShowPageSetup(false)} />
       <SavedViewsDialog open={showSavedViews} onClose={() => setShowSavedViews(false)} camera={camera} />

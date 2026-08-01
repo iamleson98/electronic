@@ -145,6 +145,8 @@ export interface CircuitComponent {
   unit?: number;
   /** De Morgan conversion: 1=normal, 2=alternate body style */
   convert?: 1 | 2;
+  /** Free rotation in degrees (overrides `rotation` when set). Snapped to 15° increments. */
+  rotationDeg?: number;
   /** user-defined fields (Footprint, Datasheet, MPN, custom...) */
   fields?: ComponentField[];
   /** net class assigned to this component's primary net (schematic-side) */
