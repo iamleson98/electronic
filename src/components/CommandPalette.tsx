@@ -43,6 +43,7 @@ export function CommandPalette({ open, onClose }: Props) {
         const s = useEditor.getState(); usePCB.getState().importFromSchematic(s.components, s.wires); toast.success('Imported to PCB');
       }},
       { id: 'pcb-drc', label: 'Run DRC', category: 'PCB', icon: <span>✓</span>, action: () => usePCB.getState().runDRC() },
+      { id: 'pcb-topo-route', label: 'Auto-Route (Topological)', category: 'PCB', icon: <span>⚡</span>, action: () => usePCB.getState().runTopoRoute() },
       { id: 'pcb-gerbers', label: 'Export Gerbers', category: 'Manufacturing', icon: <span>⬇</span>, action: () => usePCB.getState().exportGerbers() },
       { id: 'pcb-teardrops', label: 'Generate Teardrops', category: 'PCB', icon: <span>💧</span>, action: () => usePCB.getState().generateTeardrops() },
       ...getAllPlugins().slice(0, 15).map(p => ({

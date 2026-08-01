@@ -23,6 +23,7 @@ import { generateCopperPour } from './copper-pour';
 import type { CopperPour } from './copper-pour';
 import { exportAllGerbers } from './gerber-export';
 import { autoRoute } from './auto-router';
+import { routeTopologically, DEFAULT_ROUTER_OPTIONS } from './topological-router';
 import { verifyNetlist } from './netlist-verify';
 import type { NetlistVerifyResult } from './netlist-verify';
 
@@ -94,6 +95,8 @@ interface PCBState {
   removeCopperPour: (layer: 'top' | 'bottom') => void;
   exportGerbers: () => void;
   runAutoRoute: () => void;
+  /** Topological push-and-shove router — replaces Lee's BFS. Real A* + 45° snapping + shove + rip-up. */
+  runTopoRoute: () => { routed: number; failed: number; shoved: number; rippedUp: number };
   runNetlistVerify: () => NetlistVerifyResult | null;
   // keepout
   addKeepout: (rect: { x: number; y: number; width: number; height: number }, layers: 'all' | string[], reason?: string) => void;
@@ -371,6 +374,25 @@ export const usePCB = create<PCBState>((set, get) => ({
       s.activeLayer, s.defaultTraceWidth,
     );
     set({ traces: result.traces, vias: result.vias });
+  },
+
+  runTopoRoute: () => {
+    const s = get();
+    const result = routeTopologically(
+      s.footprints, s.traces, s.vias, s.ratsnest, s.board,
+      {
+        ...DEFAULT_ROUTER_OPTIONS,
+        clearance: DEFAULT_DRC_CONFIG.minClearance,
+        traceWidth: s.defaultTraceWidth,
+      },
+    );
+    set({ traces: result.traces, vias: result.vias });
+    return {
+      routed: result.stats.routed,
+      failed: result.stats.failed,
+      shoved: result.stats.shoved,
+      rippedUp: result.stats.rippedUp,
+    };
   },
 
   runNetlistVerify: () => {

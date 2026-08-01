@@ -11,6 +11,7 @@ import './power-symbols';
 import './kicad-parity';
 import './advanced-semi';
 import './advanced-devices';
+import '../bsim3-full';  // BSIM3v3 N-channel and P-channel MOSFET models
 import { registerBuiltinSubCircuits } from '../subcircuit';
 
 // Register built-in sub-circuits (voltage divider, diode-DL AND gate, etc.)

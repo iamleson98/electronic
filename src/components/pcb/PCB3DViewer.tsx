@@ -1,9 +1,119 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { usePCB } from '@/lib/pcb/store';
+import { parseSTL, parseVRML, parseOBJ, modelToGeometry } from '@/lib/pcb/model-loader';
+import type { LoadedModel } from '@/lib/pcb/model-loader';
+import { DEFAULT_MODELS } from '@/lib/pcb/3d-models';
+import type { Footprint } from '@/lib/pcb/types';
+
+/** Cache key prefix for default (registered) models. */
+const DEFAULT_KEY_PREFIX = 'default:';
+/** Sentinel stored in the geometry cache to mark a model-URL load that failed. */
+const FAILED_SENTINEL: unique symbol = Symbol('failed');
+
+/**
+ * Look up (and lazily build) the default geometry for a component type.
+ * Returns `null` if no default model is registered, or `{ failed: true }`
+ * if parsing threw.
+ */
+function getDefaultGeometry(
+  type: string,
+  cache: Map<string, THREE.BufferGeometry | typeof FAILED_SENTINEL>,
+): THREE.BufferGeometry | null {
+  const key = `${DEFAULT_KEY_PREFIX}${type}`;
+  const cached = cache.get(key);
+  if (cached === FAILED_SENTINEL) return null;
+  if (cached) return cached;
+  const entry = DEFAULT_MODELS.get(type);
+  if (!entry) return null;
+  try {
+    const model: LoadedModel = parseSTL(entry.stlAscii);
+    const geo = modelToGeometry(model);
+    cache.set(key, geo);
+    return geo;
+  } catch (err) {
+    console.warn(`[PCB3DViewer] Failed to parse default model for ${type}:`, err);
+    cache.set(key, FAILED_SENTINEL);
+    return null;
+  }
+}
+
+/** Fetch and parse a model from a URL, caching the resulting geometry. */
+async function fetchModelGeometry(
+  url: string,
+  cache: Map<string, THREE.BufferGeometry | typeof FAILED_SENTINEL>,
+): Promise<void> {
+  const cached = cache.get(url);
+  if (cached) return;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    const buf = await res.arrayBuffer();
+    // Parse by inferring the format from the URL's file extension.
+    const lower = url.toLowerCase();
+    let model: LoadedModel;
+    if (lower.endsWith('.stl')) {
+      model = parseSTL(buf);
+    } else if (lower.endsWith('.wrl') || lower.endsWith('.vrml') || lower.endsWith('.x3dv')) {
+      model = parseVRML(new TextDecoder().decode(buf));
+    } else if (lower.endsWith('.obj')) {
+      model = parseOBJ(new TextDecoder().decode(buf));
+    } else {
+      throw new Error(`Unknown model extension for ${url}`);
+    }
+    cache.set(url, modelToGeometry(model));
+  } catch (err) {
+    console.warn(`[PCB3DViewer] Failed to load model ${url}:`, err);
+    cache.set(url, FAILED_SENTINEL);
+  }
+}
+
+/** Compute the parametric body height used by the box fallback. */
+function parametricBodyHeight(componentType: string): number {
+  switch (componentType) {
+    case 'dcVoltage':
+    case 'acVoltage':
+      return 5.0;
+    case 'timer555':
+    case 'opamp':
+      return 3.5;
+    case 'arduino':
+    case 'arduinoReal':
+      return 1.5;
+    case 'led':
+      return 0.6;
+    default:
+      return 1.0;
+  }
+}
+
+/** Position a mesh so its model sits flush on the board surface. */
+function positionMeshOnBoard(
+  mesh: THREE.Mesh,
+  geo: THREE.BufferGeometry,
+  fp: Footprint,
+  boardThickness: number,
+  padHeight: number,
+): void {
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox;
+  if (!bb) return;
+  const minY = bb.min.y;
+  const maxY = bb.max.y;
+  if (fp.side === 'top') {
+    // Bottom of model aligns with top of pads.
+    mesh.position.y = padHeight - minY;
+  } else {
+    // Top of model aligns with bottom of pads (under the board).
+    mesh.position.y = -boardThickness - padHeight - maxY;
+  }
+  mesh.position.x = fp.position.x;
+  mesh.position.z = fp.position.y;
+  mesh.rotation.y = (fp.rotation * Math.PI) / 180;
+}
 
 export function PCB3DViewer() {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -12,6 +122,18 @@ export function PCB3DViewer() {
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const pcbGroupRef = useRef<THREE.Group | null>(null);
+  /**
+   * Persistent cache of parsed 3D models keyed by either `default:<type>`
+   * (for the built-in registry) or by the raw `modelUrl` (for externally
+   * fetched STL/VRML/OBJ). Survives re-renders so we don't re-parse every
+   * frame. A `FAILED_SENTINEL` entry marks a model that failed to load.
+   */
+  const modelCacheRef = useRef<
+    Map<string, THREE.BufferGeometry | typeof FAILED_SENTINEL>
+  >(new Map());
+  /** Bumped whenever an async model fetch resolves to trigger a re-render. */
+  const [modelVersion, setModelVersion] = useState(0);
+  const bumpModelVersion = useCallback(() => setModelVersion((v) => v + 1), []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -194,20 +316,52 @@ export function PCB3DViewer() {
       arduino: 0x006633, arduinoReal: 0x006633, raspberryPi: 0x7c2d12,
     };
 
+    /** Track which URLs we've already started fetching this render pass. */
+    const inFlight = new Set<string>();
+
     for (const fp of footprints) {
-      // Component body
-      const bodyH = fp.componentType === 'dcVoltage' || fp.componentType === 'acVoltage' ? 5.0
-                  : fp.componentType === 'timer555' || fp.componentType === 'opamp' ? 3.5
-                  : fp.componentType === 'arduino' || fp.componentType === 'arduinoReal' ? 1.5
-                  : fp.componentType === 'led' ? 0.6 : 1.0;
       const color = componentColors[fp.componentType] ?? 0x111111;
-      const geo = new THREE.BoxGeometry(fp.bodySize.width, bodyH, fp.bodySize.height);
-      const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.2 });
-      const mesh = new THREE.Mesh(geo, mat);
-      const y = fp.side === 'top' ? PAD_HEIGHT + bodyH / 2 : -BOARD_THICKNESS - PAD_HEIGHT - bodyH / 2;
-      mesh.position.set(fp.position.x, y, fp.position.y);
-      mesh.rotation.y = (fp.rotation * Math.PI) / 180;
-      group.add(mesh);
+      const mat = new THREE.MeshStandardMaterial({
+        color, roughness: 0.6, metalness: 0.2,
+      });
+
+      // 1) External modelUrl takes precedence — look it up in the cache.
+      //    If not cached yet, kick off an async fetch (handled below).
+      let geo: THREE.BufferGeometry | null = null;
+      const modelUrl = fp.modelUrl;
+      if (modelUrl) {
+        const cached = modelCacheRef.current.get(modelUrl);
+        if (cached && cached !== FAILED_SENTINEL) {
+          geo = cached;
+        } else if (!cached && !inFlight.has(modelUrl)) {
+          inFlight.add(modelUrl);
+          // Fire-and-forget; when it resolves we bump modelVersion to trigger
+          // a re-render, then the cached geometry is picked up synchronously.
+          fetchModelGeometry(modelUrl, modelCacheRef.current).finally(bumpModelVersion);
+        }
+      }
+
+      // 2) Fall back to the default registered model for this type.
+      if (!geo) {
+        geo = getDefaultGeometry(fp.componentType, modelCacheRef.current);
+      }
+
+      // 3) Final fallback: parametric box (matches the pre-model rendering).
+      if (geo) {
+        const mesh = new THREE.Mesh(geo, mat);
+        positionMeshOnBoard(mesh, geo, fp, BOARD_THICKNESS, PAD_HEIGHT);
+        group.add(mesh);
+      } else {
+        const bodyH = parametricBodyHeight(fp.componentType);
+        const boxGeo = new THREE.BoxGeometry(fp.bodySize.width, bodyH, fp.bodySize.height);
+        const mesh = new THREE.Mesh(boxGeo, mat);
+        const y = fp.side === 'top'
+          ? PAD_HEIGHT + bodyH / 2
+          : -BOARD_THICKNESS - PAD_HEIGHT - bodyH / 2;
+        mesh.position.set(fp.position.x, y, fp.position.y);
+        mesh.rotation.y = (fp.rotation * Math.PI) / 180;
+        group.add(mesh);
+      }
 
       // Pads
       for (const pad of fp.pads) {
@@ -235,7 +389,7 @@ export function PCB3DViewer() {
       controlsRef.current.target.set(centerX, 0, centerZ);
       controlsRef.current.update();
     }
-  }, [footprints, traces, vias, board, padNets]);
+  }, [footprints, traces, vias, board, padNets, modelVersion, bumpModelVersion]);
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#0a1628]"

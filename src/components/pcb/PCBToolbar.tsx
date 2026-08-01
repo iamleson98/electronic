@@ -47,6 +47,7 @@ export function PCBToolbar() {
   const copperPours = usePCB((s) => s.copperPours);
   const exportGerbers = usePCB((s) => s.exportGerbers);
   const runAutoRoute = usePCB((s) => s.runAutoRoute);
+  const runTopoRoute = usePCB((s) => s.runTopoRoute);
   const runNetlistVerify = usePCB((s) => s.runNetlistVerify);
 
   const components = useEditor((s) => s.components);
@@ -128,10 +129,24 @@ export function PCBToolbar() {
       toast.error('No footprints to route');
       return;
     }
-    runAutoRoute();
+    // Use the new topological push-and-shove router (A* + 45° + shove + rip-up).
+    // Falls back to legacy BFS if it fails completely.
+    const stats = runTopoRoute();
     const state = usePCB.getState();
-    const autoRouteCount = state.traces.filter(t => t.id.startsWith('auto_')).length;
-    toast.success(`Auto-route complete: ${autoRouteCount} traces added`);
+    const topoCount = state.traces.filter(t => t.id.startsWith('topo_')).length;
+    if (stats.routed === 0 && topoCount === 0) {
+      // Topo router produced nothing — try legacy
+      runAutoRoute();
+      const legacyCount = usePCB.getState().traces.filter(t => t.id.startsWith('auto_')).length;
+      toast.success(`Legacy BFS router: ${legacyCount} traces added`);
+    } else {
+      toast.success(
+        `Topological router: ${stats.routed} routed` +
+        (stats.failed ? ` · ${stats.failed} failed` : '') +
+        (stats.shoved ? ` · ${stats.shoved} shoved` : '') +
+        (stats.rippedUp ? ` · ${stats.rippedUp} ripped` : ''),
+      );
+    }
   };
 
   const handleNetlistVerify = () => {

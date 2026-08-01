@@ -75,6 +75,12 @@ export interface Footprint {
   pads: Pad[];
   /** which side of the board */
   side: CopperLayer;
+  /**
+   * Optional URL to a 3D model file (STL, VRML, or OBJ) for this footprint.
+   * When set, the 3D viewer fetches and parses the model asynchronously;
+   * on failure it falls back to a default model or parametric box.
+   */
+  modelUrl?: string;
 }
 
 /** A copper trace segment on the PCB */

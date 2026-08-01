@@ -12,6 +12,7 @@ import type {
   Wire,
 } from './types';
 import { createMnaSystem, solveMna } from './solver';
+import { createSparseMnaSystem, solveSparse, shouldUseSparseSolver, asMnaSystem } from './sparse-klu';
 
 export interface NodeMap {
   /** key = `${componentId}:${terminalId}` -> node id (0 = ground) */
@@ -587,7 +588,11 @@ export function simulateStep(
   const numNodes = nodeMap.numNodes; // includes ground (0)
   const maxExtras = components.length * 4 + 8;
 
-  const sys = createMnaSystem(numNodes - 1, maxExtras);
+  // Use the sparse solver for circuits > 80 nodes — much faster for big designs.
+  // Below that threshold, the dense solver wins (less overhead per stamp).
+  const useSparse = shouldUseSparseSolver(numNodes - 1, maxExtras);
+  const sparseSys = useSparse ? createSparseMnaSystem(numNodes - 1, maxExtras) : null;
+  const sys = useSparse ? asMnaSystem(sparseSys!) : createMnaSystem(numNodes - 1, maxExtras);
 
   const time = prev && prev.nodeVoltage.length > 0 ? prev.time + dt : 0;
 
@@ -655,7 +660,7 @@ export function simulateStep(
     sys.numExtra = actualSize - (numNodes - 1);
   }
 
-  const x = solveMna(sys);
+  const x = useSparse && sparseSys ? solveSparse(sparseSys) : solveMna(sys);
   if (!x) {
     return null;
   }
