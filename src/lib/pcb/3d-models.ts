@@ -164,28 +164,97 @@ function makeDIPSTL(w: number, h: number, d: number): string {
 /** Build the default-model registry keyed by `CircuitComponent.type`. */
 function buildDefaultModels(): Map<string, ComponentModelEntry> {
   const entries: ComponentModelEntry[] = [
-    // Axial THT resistor — cylinder 1.6mm dia × 3.2mm long, lying on its side
-    // (we rotate it 90° around Z at the viewer level so the axis aligns with X).
+    // Axial THT resistor — cylinder 1.6mm dia × 3.2mm long
     { type: 'resistor', stlAscii: makeCylinderSTL(0.8, 3.2, 16) },
-    // Ceramic capacitor — box 2.0 × 1.25 × 1.25 mm.
+    // Ceramic capacitor — box 2.0 × 1.25 × 1.25 mm
     { type: 'capacitor', stlAscii: makeBoxSTL(2.0, 1.25, 1.25) },
-    // Electrolytic capacitor — cylinder 5mm dia × 11mm tall.
+    // Electrolytic capacitor — cylinder 5mm dia × 11mm tall
     { type: 'capacitorElectrolytic', stlAscii: makeCylinderSTL(2.5, 11.0, 24) },
-    // LED — cylinder 5mm dia × 8mm tall.
+    // LED — cylinder 5mm dia × 8mm tall
     { type: 'led', stlAscii: makeCylinderSTL(2.5, 8.0, 24) },
-    // THT diode — cylinder 1.8mm dia × 4.5mm.
+    // THT diode — cylinder 1.8mm dia × 4.5mm
     { type: 'diode', stlAscii: makeCylinderSTL(0.9, 4.5, 16) },
-    // 555 timer / opamp (DIP-8) — box 9.6 × 3.2 × 6.5 mm (W × H × D).
+    // Zener diode — small cylinder (like diode but smaller)
+    { type: 'zener', stlAscii: makeCylinderSTL(0.8, 3.5, 16) },
+    // Schottky diode — same as zener
+    { type: 'schottky', stlAscii: makeCylinderSTL(0.8, 3.5, 16) },
+    // 555 timer / opamp (DIP-8) — box 9.6 × 3.2 × 6.5 mm
     { type: 'timer555', stlAscii: makeDIPSTL(9.6, 3.2, 6.5) },
     { type: 'opamp', stlAscii: makeDIPSTL(9.6, 3.2, 6.5) },
-    // NPN / PNP (TO-92) — box 4.8 × 5.2 × 4.8 mm (flat-front approximation).
+    { type: 'opampRails', stlAscii: makeDIPSTL(9.6, 3.2, 6.5) },
+    { type: 'opampReal', stlAscii: makeDIPSTL(9.6, 3.2, 6.5) },
+    // NPN / PNP (TO-92) — box 4.8 × 5.2 × 4.8 mm (flat-front approximation)
     { type: 'npn', stlAscii: makeBoxSTL(4.8, 5.2, 4.8) },
     { type: 'pnp', stlAscii: makeBoxSTL(4.8, 5.2, 4.8) },
-    // Arduino Uno R3 — board only: box 68.6 × 1.6 × 53.4 mm.
+    // MOSFETs (BSIM3/BSIM4) — SOT-23: box 2.9 × 1.1 × 2.4 mm
+    { type: 'nmos', stlAscii: makeBoxSTL(2.9, 1.1, 2.4) },
+    { type: 'pmos', stlAscii: makeBoxSTL(2.9, 1.1, 2.4) },
+    { type: 'bsim3nmos', stlAscii: makeBoxSTL(2.9, 1.1, 2.4) },
+    { type: 'bsim3pmos', stlAscii: makeBoxSTL(2.9, 1.1, 2.4) },
+    { type: 'bsim4nmos', stlAscii: makeBoxSTL(2.9, 1.1, 2.4) },
+    { type: 'bsim4pmos', stlAscii: makeBoxSTL(2.9, 1.1, 2.4) },
+    // JFET — TO-92 same as BJT
+    { type: 'jfetN', stlAscii: makeBoxSTL(4.8, 5.2, 4.8) },
+    { type: 'jfetP', stlAscii: makeBoxSTL(4.8, 5.2, 4.8) },
+    // Logic gates (SOIC-14) — box 8.7 × 1.75 × 3.9 mm
+    { type: 'and', stlAscii: makeDIPSTL(8.7, 1.75, 3.9) },
+    { type: 'or', stlAscii: makeDIPSTL(8.7, 1.75, 3.9) },
+    { type: 'nand', stlAscii: makeDIPSTL(8.7, 1.75, 3.9) },
+    { type: 'nor', stlAscii: makeDIPSTL(8.7, 1.75, 3.9) },
+    { type: 'xor', stlAscii: makeDIPSTL(8.7, 1.75, 3.9) },
+    { type: 'not', stlAscii: makeDIPSTL(6.0, 1.75, 3.9) },
+    // Voltage sources — battery cylinder 12mm dia × 25mm tall
+    { type: 'dcVoltage', stlAscii: makeCylinderSTL(6.0, 25.0, 24) },
+    { type: 'acVoltage', stlAscii: makeCylinderSTL(6.0, 25.0, 24) },
+    { type: 'pulseSource', stlAscii: makeBoxSTL(8.0, 3.0, 6.0) },
+    // Switch / pushButton — small rectangular box
+    { type: 'switch', stlAscii: makeBoxSTL(6.0, 3.0, 4.0) },
+    { type: 'pushButton', stlAscii: makeBoxSTL(6.0, 3.0, 6.0) },
+    // Crystal — cylindrical can 3mm dia × 8mm tall
+    { type: 'crystal', stlAscii: makeCylinderSTL(1.5, 8.0, 16) },
+    // Inductor — cylinder with coil rings (approximate as cylinder 5mm dia × 5mm)
+    { type: 'inductor', stlAscii: makeCylinderSTL(2.5, 5.0, 24) },
+    // Coupled inductor / transformer — E-core box 10 × 8 × 8 mm
+    { type: 'coupledInductor', stlAscii: makeBoxSTL(10.0, 8.0, 8.0) },
+    { type: 'transformer', stlAscii: makeBoxSTL(14.0, 12.0, 10.0) },
+    // Speaker — cone (approximate as short cylinder 30mm dia × 5mm)
+    { type: 'speaker', stlAscii: makeCylinderSTL(15.0, 5.0, 32) },
+    // Voltmeter / ammeter — bench equipment box
+    { type: 'voltmeter', stlAscii: makeBoxSTL(10.0, 4.0, 8.0) },
+    { type: 'ammeter', stlAscii: makeBoxSTL(10.0, 4.0, 8.0) },
+    // Oscilloscope — bench equipment box 20 × 8 × 15 mm
+    { type: 'oscilloscope', stlAscii: makeBoxSTL(20.0, 8.0, 15.0) },
+    // Potentiometer — box with knob (6mm box + 3mm cylinder on top)
+    { type: 'potentiometer', stlAscii: makeBoxSTL(6.0, 5.0, 6.0) },
+    // Fuse — small cylinder 2.5mm dia × 8mm
+    { type: 'fuse', stlAscii: makeCylinderSTL(1.25, 8.0, 16) },
+    // Photoresistor — disc 5mm dia × 2mm
+    { type: 'photoresistor', stlAscii: makeCylinderSTL(2.5, 2.0, 24) },
+    // Seven segment display — box 12 × 6 × 5 mm
+    { type: 'sevenSegment', stlAscii: makeBoxSTL(12.0, 6.0, 5.0) },
+    // VCO — SOIC-8 box 5 × 1.75 × 6.3 mm
+    { type: 'vco', stlAscii: makeDIPSTL(5.0, 1.75, 6.3) },
+    // Voltage regulator — TO-220 box 10 × 4.5 × 15 mm
+    { type: 'voltageRegulator', stlAscii: makeBoxSTL(10.0, 4.5, 15.0) },
+    // Arduino Uno R3 — board only: box 68.6 × 1.6 × 53.4 mm
     { type: 'arduino', stlAscii: makeBoxSTL(68.6, 1.6, 53.4) },
     { type: 'arduinoReal', stlAscii: makeBoxSTL(68.6, 1.6, 53.4) },
-    // Raspberry Pi (3B+): 85 × 1.4 × 56 mm.
+    // Raspberry Pi (3B+): 85 × 1.4 × 56 mm
     { type: 'raspberryPi', stlAscii: makeBoxSTL(85.0, 1.4, 56.0) },
+    // Behavioral sources — small box
+    { type: 'bvSource', stlAscii: makeBoxSTL(4.0, 2.0, 3.0) },
+    { type: 'biSource', stlAscii: makeBoxSTL(4.0, 2.0, 3.0) },
+    // Voltage-controlled switch — small box
+    { type: 'vcSwitch', stlAscii: makeBoxSTL(4.0, 2.0, 4.0) },
+    // Lossless transmission line — thin rectangular
+    { type: 'transLineLossless', stlAscii: makeBoxSTL(12.0, 1.0, 3.0) },
+    // Lossy transmission line — thin rectangular with segment marks
+    { type: 'transLineLossy', stlAscii: makeBoxSTL(16.0, 1.0, 3.0) },
+    // User-defined controlled sources (E/G/F/H) — small boxes
+    { type: 'vcvsUser', stlAscii: makeBoxSTL(6.0, 2.0, 4.0) },
+    { type: 'vccsUser', stlAscii: makeBoxSTL(6.0, 2.0, 4.0) },
+    { type: 'cccsUser', stlAscii: makeBoxSTL(6.0, 2.0, 4.0) },
+    { type: 'ccvsUser', stlAscii: makeBoxSTL(6.0, 2.0, 4.0) },
   ];
   return new Map(entries.map((e) => [e.type, e]));
 }

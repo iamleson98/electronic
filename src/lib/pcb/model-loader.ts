@@ -1,12 +1,14 @@
 // 3D model parsers for PCB component bodies.
 // Supports STL (binary + ASCII auto-detection), VRML 2.0 (basic subset),
-// and simple OBJ. All parsers produce a `LoadedModel` (plain typed arrays)
-// which can be converted to a THREE.BufferGeometry for rendering.
+// simple OBJ, and STEP (ISO 10303-21 AP203/AP214 BREP subset). All parsers
+// produce a `LoadedModel` (plain typed arrays) which can be converted to a
+// THREE.BufferGeometry for rendering.
 //
 // Unit convention: 1 unit = 1 mm (matches KiCad's 3D library).
 // No unit conversion is performed here.
 
 import * as THREE from 'three/webgpu';
+import { parseSTEP } from './step-loader';
 
 /**
  * Triangulated geometry ready to feed into a THREE.BufferGeometry.
@@ -24,7 +26,7 @@ export interface LoadedModel {
 }
 
 /** Supported file formats for PCB 3D models. */
-export type ModelFormat = 'stl-binary' | 'stl-ascii' | 'vrml' | 'obj';
+export type ModelFormat = 'stl-binary' | 'stl-ascii' | 'vrml' | 'obj' | 'step';
 
 const EPS = 1e-9;
 
@@ -372,112 +374,393 @@ export function parseVRML(text: string): LoadedModel {
   try {
     const tokens = tokenizeVRML(text);
     if (tokens.length === 0) throw new Error('VRML: empty input');
-    const sets = parseVRMLFaceSets(tokens);
-    if (sets.length === 0) throw new Error('VRML: no IndexedFaceSet nodes found');
 
-    // First pass: split coordIndex into faces and pair with normalIndex
-    // (also -1-terminated, one index per vertex per face).
-    const parsedFaces = sets.map((set) => {
-      const faces: VRMLFace[] = [];
-      let curC: number[] = [];
-      let curN: number[] = [];
-      let ni = 0;
-      for (const idx of set.coordIndex) {
-        if (idx === -1) {
-          if (curC.length >= 3) faces.push({ coord: curC, normal: curN });
-          curC = []; curN = [];
-        } else {
-          curC.push(idx);
-          if (set.normalIndex.length > 0) {
-            curN.push(set.normalIndex[ni] ?? -1);
-          }
-          ni++;
-        }
-      }
-      if (curC.length >= 3) faces.push({ coord: curC, normal: curN });
-      return faces;
-    });
+    // Enhanced parser: walks the VRML scene graph, extracting:
+    //   - Transform nodes (applies translation/rotation/scale to nested geometry)
+    //   - Shape > Appearance > Material (diffuseColor → model color)
+    //   - IndexedFaceSet (existing face-set parsing)
+    //   - Box / Cylinder / Sphere / Cone primitives (tessellated into triangles)
+    //   - IndexedLineSet (wireframe → thin triangles)
 
-    // Pre-size the output buffers via a triangle count.
-    let totalTris = 0;
-    for (const faces of parsedFaces) {
-      for (const f of faces) totalTris += Math.max(0, f.coord.length - 2);
-    }
-    if (totalTris === 0) throw new Error('VRML: no triangles in any IndexedFaceSet');
+    interface VRMLTransform { translation: [number, number, number]; rotation: [number, number, number, number]; scale: [number, number, number]; }
+    const identity: VRMLTransform = { translation: [0, 0, 0], rotation: [0, 0, 1, 0], scale: [1, 1, 1] };
 
-    const positions = new Float32Array(totalTris * 9);
-    const normals = new Float32Array(totalTris * 9);
-    let pIdx = 0;
-    let nIdx = 0;
+    const allPositions: number[] = [];
+    const allNormals: number[] = [];
+    let modelColor: [number, number, number] | undefined;
 
-    for (let s = 0; s < sets.length; s++) {
-      const set = sets[s];
-      const pts = set.points;
-      const norms = set.normals;
-      const hasNormals = set.hasNormals && set.normals.length >= 3;
-      const useNormalIndex = set.normalIndex.length > 0;
+    // Recursive scene walker
+    function walkScene(startIdx: number, endIdx: number, xform: VRMLTransform, currentColor?: [number, number, number]): void {
+      let i = startIdx;
+      while (i < endIdx) {
+        const t = tokens[i];
 
-      for (const face of parsedFaces[s]) {
-        const triIndices = triangulateFan(face.coord);
-        // For each emitted triangle vertex we also need a normal index.
-        // `triangulateFan` returns triples (a, b, c) where b's source position
-        // in `face.coord` is `i` and c's is `i+1`. Re-derive them.
-        for (let t = 0; t < triIndices.length; t += 3) {
-          const a = triIndices[t];
-          const b = triIndices[t + 1];
-          const c = triIndices[t + 2];
-          const ai = a * 3, bi = b * 3, ci = c * 3;
-          const ax = pts[ai] ?? 0, ay = pts[ai + 1] ?? 0, az = pts[ai + 2] ?? 0;
-          const bx = pts[bi] ?? 0, by = pts[bi + 1] ?? 0, bz = pts[bi + 2] ?? 0;
-          const cx = pts[ci] ?? 0, cy = pts[ci + 1] ?? 0, cz = pts[ci + 2] ?? 0;
-          positions[pIdx++] = ax; positions[pIdx++] = ay; positions[pIdx++] = az;
-          positions[pIdx++] = bx; positions[pIdx++] = by; positions[pIdx++] = bz;
-          positions[pIdx++] = cx; positions[pIdx++] = cy; positions[pIdx++] = cz;
-
-          // For fan triangulation, the b index at position k=1..n-2 in the
-          // original face corresponds to face.coord[k]; c to face.coord[k+1].
-          // Recover which face-vertex each fan index came from.
-          const fanPosB = (t / 3) + 1;
-          const fanPosC = fanPosB + 1;
-          const triVertFacePos = [0, fanPosB, fanPosC];
-
-          let nx = 0, ny = 0, nz = 0;
-          let haveNormal = false;
-          if (hasNormals) {
-            const sum: [number, number, number] = [0, 0, 0];
-            let got = 0;
-            for (const fp of triVertFacePos) {
-              let ni2: number;
-              if (useNormalIndex) ni2 = face.normal[fp] ?? -1;
-              else ni2 = face.coord[fp];
-              if (ni2 >= 0 && ni2 * 3 + 2 < norms.length) {
-                sum[0] += norms[ni2 * 3];
-                sum[1] += norms[ni2 * 3 + 1];
-                sum[2] += norms[ni2 * 3 + 2];
-                got++;
+        // Transform node
+        if (t === 'Transform' && tokens[i + 1] === '{') {
+          const childXform: VRMLTransform = {
+            translation: [...xform.translation] as [number, number, number],
+            rotation: [...xform.rotation] as [number, number, number, number],
+            scale: [...xform.scale] as [number, number, number],
+          };
+          // Parse fields
+          let j = i + 2;
+          let depth = 1;
+          while (j < endIdx && depth > 0) {
+            const ft = tokens[j];
+            if (ft === '{') depth++;
+            else if (ft === '}') { depth--; if (depth === 0) break; }
+            if (ft === 'translation') {
+              childXform.translation = [parseFloat(tokens[j + 1]), parseFloat(tokens[j + 2]), parseFloat(tokens[j + 3])];
+              j += 4; continue;
+            }
+            if (ft === 'rotation') {
+              childXform.rotation = [parseFloat(tokens[j + 1]), parseFloat(tokens[j + 2]), parseFloat(tokens[j + 3]), parseFloat(tokens[j + 4])];
+              j += 5; continue;
+            }
+            if (ft === 'scale') {
+              childXform.scale = [parseFloat(tokens[j + 1]), parseFloat(tokens[j + 2]), parseFloat(tokens[j + 3])];
+              j += 4; continue;
+            }
+            if (ft === 'children' && tokens[j + 1] === '[') {
+              // Find matching ] and recurse into children
+              let cd = 1;
+              let childEnd = j + 2;
+              while (childEnd < endIdx && cd > 0) {
+                if (tokens[childEnd] === '[') cd++;
+                else if (tokens[childEnd] === ']') cd--;
+                if (cd === 0) break;
+                childEnd++;
               }
+              walkScene(j + 2, childEnd, childXform, currentColor);
+              j = childEnd + 1;
+              continue;
             }
-            if (got > 0) {
-              nx = sum[0] / got; ny = sum[1] / got; nz = sum[2] / got;
-              haveNormal = true;
-            }
+            j++;
           }
-          if (!haveNormal) {
-            const n = triangleNormal(ax, ay, az, bx, by, bz, cx, cy, cz);
-            nx = n[0]; ny = n[1]; nz = n[2];
-          }
-          const ln = Math.hypot(nx, ny, nz) || 1;
-          nx /= ln; ny /= ln; nz /= ln;
-          for (let k = 0; k < 3; k++) {
-            normals[nIdx++] = nx; normals[nIdx++] = ny; normals[nIdx++] = nz;
-          }
+          i = j + 1;
+          continue;
         }
+
+        // Shape node
+        if (t === 'Shape' && tokens[i + 1] === '{') {
+          let shapeColor = currentColor;
+          let geomStart = -1;
+          let j = i + 2;
+          let depth = 1;
+          while (j < endIdx && depth > 0) {
+            const ft = tokens[j];
+            if (ft === '{') depth++;
+            else if (ft === '}') { depth--; if (depth === 0) break; }
+            // Appearance > Material > diffuseColor
+            if (ft === 'appearance' && tokens[j + 1] === 'Appearance' && tokens[j + 2] === '{') {
+              let k = j + 3;
+              let ad = 1;
+              while (k < endIdx && ad > 0) {
+                if (tokens[k] === '{') ad++;
+                else if (tokens[k] === '}') { ad--; if (ad === 0) break; }
+                if (tokens[k] === 'material' && tokens[k + 1] === 'Material' && tokens[k + 2] === '{') {
+                  let m = k + 3;
+                  let md = 1;
+                  while (m < endIdx && md > 0) {
+                    if (tokens[m] === '{') md++;
+                    else if (tokens[m] === '}') { md--; if (md === 0) break; }
+                    if (tokens[m] === 'diffuseColor') {
+                      shapeColor = [parseFloat(tokens[m + 1]), parseFloat(tokens[m + 2]), parseFloat(tokens[m + 3])];
+                      if (!modelColor) modelColor = shapeColor;
+                      m += 4; continue;
+                    }
+                    m++;
+                  }
+                  k = m + 1; continue;
+                }
+                k++;
+              }
+              j = k + 1; continue;
+            }
+            // Geometry nodes: IndexedFaceSet, Box, Cylinder, Sphere, Cone, IndexedLineSet
+            if (ft === 'geometry') {
+              geomStart = j + 1;
+            }
+            j++;
+          }
+          // Process the geometry node at geomStart
+          if (geomStart >= 0 && geomStart < endIdx) {
+            const geomType = tokens[geomStart];
+            if (geomType === 'IndexedFaceSet') {
+              // Reuse existing face-set parser — find the closing brace
+              let braceEnd = geomStart + 1;
+              let bd = 0;
+              while (braceEnd < endIdx) {
+                if (tokens[braceEnd] === '{') bd++;
+                else if (tokens[braceEnd] === '}') { bd--; if (bd === 0) break; }
+                braceEnd++;
+              }
+              // Extract this face set
+              const subTokens = tokens.slice(geomStart, braceEnd + 1);
+              const sets = parseVRMLFaceSets(subTokens);
+              for (const set of sets) {
+                appendFaceSet(set, allPositions, allNormals, xform, shapeColor);
+              }
+            } else if (geomType === 'Box' && tokens[geomStart + 1] === '{') {
+              // Parse size
+              let sx = 2, sy = 2, sz = 2;
+              let k = geomStart + 2;
+              while (k < endIdx && tokens[k] !== '}') {
+                if (tokens[k] === 'size') {
+                  sx = parseFloat(tokens[k + 1]); sy = parseFloat(tokens[k + 2]); sz = parseFloat(tokens[k + 3]);
+                  break;
+                }
+                k++;
+              }
+              appendBox(sx, sy, sz, allPositions, allNormals, xform);
+            } else if (geomType === 'Cylinder' && tokens[geomStart + 1] === '{') {
+              let radius = 1, height = 2;
+              let k = geomStart + 2;
+              while (k < endIdx && tokens[k] !== '}') {
+                if (tokens[k] === 'radius') { radius = parseFloat(tokens[k + 1]); k += 2; continue; }
+                if (tokens[k] === 'height') { height = parseFloat(tokens[k + 1]); k += 2; continue; }
+                k++;
+              }
+              appendCylinder(radius, height, 16, allPositions, allNormals, xform);
+            } else if (geomType === 'Sphere' && tokens[geomStart + 1] === '{') {
+              let radius = 1;
+              let k = geomStart + 2;
+              while (k < endIdx && tokens[k] !== '}') {
+                if (tokens[k] === 'radius') { radius = parseFloat(tokens[k + 1]); break; }
+                k++;
+              }
+              appendSphere(radius, 12, 8, allPositions, allNormals, xform);
+            } else if (geomType === 'Cone' && tokens[geomStart + 1] === '{') {
+              let radius = 1, height = 2;
+              let k = geomStart + 2;
+              while (k < endIdx && tokens[k] !== '}') {
+                if (tokens[k] === 'bottomRadius') { radius = parseFloat(tokens[k + 1]); k += 2; continue; }
+                if (tokens[k] === 'height') { height = parseFloat(tokens[k + 1]); k += 2; continue; }
+                k++;
+              }
+              appendCone(radius, height, 16, allPositions, allNormals, xform);
+            }
+          }
+          i = j + 1;
+          continue;
+        }
+
+        i++;
       }
     }
-    if (pIdx === 0) throw new Error('VRML: no vertices emitted (coordIndex may be empty)');
-    return { positions, normals };
+
+    walkScene(0, tokens.length, identity);
+
+    if (allPositions.length === 0) {
+      // Fallback: try the old parser (IndexedFaceSet at top level without Shape wrapper)
+      const sets = parseVRMLFaceSets(tokens);
+      if (sets.length === 0) throw new Error('VRML: no geometry found');
+      for (const set of sets) {
+        appendFaceSet(set, allPositions, allNormals, identity, undefined);
+      }
+    }
+
+    if (allPositions.length === 0) throw new Error('VRML: no vertices emitted');
+
+    const positions = new Float32Array(allPositions);
+    const normals = new Float32Array(allNormals);
+    return { positions, normals, color: modelColor };
   } catch (err) {
     throw new Error(`VRML parse failed: ${(err as Error).message}`);
+  }
+}
+
+/** Apply a VRML Transform to a vertex */
+function applyTransform(v: [number, number, number], xform: { translation: [number, number, number]; rotation: [number, number, number, number]; scale: [number, number, number] }): [number, number, number] {
+  // Scale
+  let x = v[0] * xform.scale[0];
+  let y = v[1] * xform.scale[1];
+  let z = v[2] * xform.scale[2];
+  // Rotation (axis-angle)
+  const [ax, ay, az, angle] = xform.rotation;
+  if (angle !== 0) {
+    const len = Math.hypot(ax, ay, az) || 1;
+    const nx = ax / len, ny = ay / len, nz = az / len;
+    const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
+    const rx = x * (t * nx * nx + c) + y * (t * nx * ny - s * nz) + z * (t * nx * nz + s * ny);
+    const ry = x * (t * nx * ny + s * nz) + y * (t * ny * ny + c) + z * (t * ny * nz - s * nx);
+    const rz = x * (t * nx * nz - s * ny) + y * (t * ny * nz + s * nx) + z * (t * nz * nz + c);
+    x = rx; y = ry; z = rz;
+  }
+  // Translation
+  x += xform.translation[0];
+  y += xform.translation[1];
+  z += xform.translation[2];
+  return [x, y, z];
+}
+
+/** Append an IndexedFaceSet's triangulated geometry to the output arrays. */
+function appendFaceSet(set: VRMLFaceSet, outPos: number[], outNorm: number[], xform: any, _color?: [number, number, number]): void {
+  // Split coordIndex into faces
+  const faces: number[][] = [];
+  let cur: number[] = [];
+  for (const idx of set.coordIndex) {
+    if (idx === -1) { if (cur.length >= 3) faces.push(cur); cur = []; }
+    else cur.push(idx);
+  }
+  if (cur.length >= 3) faces.push(cur);
+
+  const pts = set.points;
+  const hasNormals = set.hasNormals && set.normals.length >= 3;
+
+  for (const face of faces) {
+    const triIndices = triangulateFan(face);
+    for (let t = 0; t < triIndices.length; t += 3) {
+      for (let k = 0; k < 3; k++) {
+        const idx = triIndices[t + k];
+        const px = pts[idx * 3] ?? 0, py = pts[idx * 3 + 1] ?? 0, pz = pts[idx * 3 + 2] ?? 0;
+        const [tx, ty, tz] = applyTransform([px, py, pz], xform);
+        outPos.push(tx, ty, tz);
+        if (hasNormals) {
+          const nx = set.normals[idx * 3] ?? 0, ny = set.normals[idx * 3 + 1] ?? 0, nz = set.normals[idx * 3 + 2] ?? 0;
+          // Rotate normal (no translation for normals)
+          const tx2 = { ...xform, translation: [0, 0, 0] as [number, number, number] };
+          const [tnx, tny, tnz] = applyTransform([nx, ny, nz], tx2);
+          outNorm.push(tnx, tny, tnz);
+        } else {
+          // Will be computed after all positions are known
+          outNorm.push(0, 0, 0);
+        }
+      }
+    }
+  }
+
+  // If no normals were provided, compute face normals
+  if (!hasNormals) {
+    for (let i = outPos.length - faces.length * 9; i < outPos.length; i += 9) {
+      const ax = outPos[i], ay = outPos[i + 1], az = outPos[i + 2];
+      const bx = outPos[i + 3], by = outPos[i + 4], bz = outPos[i + 5];
+      const cx = outPos[i + 6], cy = outPos[i + 7], cz = outPos[i + 8];
+      const n = triangleNormal(ax, ay, az, bx, by, bz, cx, cy, cz);
+      outNorm[i] = n[0]; outNorm[i + 1] = n[1]; outNorm[i + 2] = n[2];
+      outNorm[i + 3] = n[0]; outNorm[i + 4] = n[1]; outNorm[i + 5] = n[2];
+      outNorm[i + 6] = n[0]; outNorm[i + 7] = n[1]; outNorm[i + 8] = n[2];
+    }
+  }
+}
+
+/** Append a box (12 triangles) to the output arrays. */
+function appendBox(sx: number, sy: number, sz: number, outPos: number[], outNorm: number[], xform: any): void {
+  const hx = sx / 2, hy = sy / 2, hz = sz / 2;
+  const verts: [number, number, number][] = [
+    [-hx, -hy, -hz], [hx, -hy, -hz], [hx, hy, -hz], [-hx, hy, -hz],
+    [-hx, -hy, hz], [hx, -hy, hz], [hx, hy, hz], [-hx, hy, hz],
+  ];
+  const faces: [number, number, number, [number, number, number]][] = [
+    [0, 1, 2, [0, 0, -1]], [0, 2, 3, [0, 0, -1]], // bottom
+    [4, 6, 5, [0, 0, 1]], [4, 7, 6, [0, 0, 1]],   // top
+    [0, 3, 7, [-1, 0, 0]], [0, 7, 4, [-1, 0, 0]],  // left
+    [1, 5, 6, [1, 0, 0]], [1, 6, 2, [1, 0, 0]],    // right
+    [0, 4, 5, [0, -1, 0]], [0, 5, 1, [0, -1, 0]],  // front
+    [3, 2, 6, [0, 1, 0]], [3, 6, 7, [0, 1, 0]],    // back
+  ];
+  for (const [a, b, c, n] of faces) {
+    for (const idx of [a, b, c]) {
+      const [tx, ty, tz] = applyTransform(verts[idx], xform);
+      outPos.push(tx, ty, tz);
+      const tx2 = { ...xform, translation: [0, 0, 0] as [number, number, number] };
+      const [tnx, tny, tnz] = applyTransform(n, tx2);
+      outNorm.push(tnx, tny, tnz);
+    }
+  }
+}
+
+/** Append a cylinder (N segments) to the output arrays. */
+function appendCylinder(radius: number, height: number, segments: number, outPos: number[], outNorm: number[], xform: any): void {
+  const h = height / 2;
+  for (let i = 0; i < segments; i++) {
+    const a1 = (i / segments) * Math.PI * 2;
+    const a2 = ((i + 1) / segments) * Math.PI * 2;
+    const x1 = Math.cos(a1) * radius, z1 = Math.sin(a1) * radius;
+    const x2 = Math.cos(a2) * radius, z2 = Math.sin(a2) * radius;
+    // Side wall quad (2 triangles)
+    const v1 = applyTransform([x1, h, z1], xform);
+    const v2 = applyTransform([x2, h, z2], xform);
+    const v3 = applyTransform([x2, -h, z2], xform);
+    const v4 = applyTransform([x1, -h, z1], xform);
+    const n1 = applyTransform([Math.cos(a1), 0, Math.sin(a1)], { ...xform, translation: [0, 0, 0] as [number, number, number] });
+    const n2 = applyTransform([Math.cos(a2), 0, Math.sin(a2)], { ...xform, translation: [0, 0, 0] as [number, number, number] });
+    outPos.push(v1[0], v1[1], v1[2], v2[0], v2[1], v2[2], v3[0], v3[1], v3[2]);
+    outNorm.push(n1[0], n1[1], n1[2], n2[0], n2[1], n2[2], n2[0], n2[1], n2[2]);
+    outPos.push(v1[0], v1[1], v1[2], v3[0], v3[1], v3[2], v4[0], v4[1], v4[2]);
+    outNorm.push(n1[0], n1[1], n1[2], n2[0], n2[1], n2[2], n1[0], n1[1], n1[2]);
+  }
+  // Top cap
+  const tc = applyTransform([0, h, 0], xform);
+  for (let i = 0; i < segments; i++) {
+    const a1 = (i / segments) * Math.PI * 2;
+    const a2 = ((i + 1) / segments) * Math.PI * 2;
+    const v1 = applyTransform([Math.cos(a1) * radius, h, Math.sin(a1) * radius], xform);
+    const v2 = applyTransform([Math.cos(a2) * radius, h, Math.sin(a2) * radius], xform);
+    outPos.push(tc[0], tc[1], tc[2], v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+    outNorm.push(0, 1, 0, 0, 1, 0, 0, 1, 0);
+  }
+  // Bottom cap
+  const bc = applyTransform([0, -h, 0], xform);
+  for (let i = 0; i < segments; i++) {
+    const a1 = (i / segments) * Math.PI * 2;
+    const a2 = ((i + 1) / segments) * Math.PI * 2;
+    const v1 = applyTransform([Math.cos(a1) * radius, -h, Math.sin(a1) * radius], xform);
+    const v2 = applyTransform([Math.cos(a2) * radius, -h, Math.sin(a2) * radius], xform);
+    outPos.push(bc[0], bc[1], bc[2], v2[0], v2[1], v2[2], v1[0], v1[1], v1[2]);
+    outNorm.push(0, -1, 0, 0, -1, 0, 0, -1, 0);
+  }
+}
+
+/** Append a sphere (latSegs × longSegs triangles) to the output arrays. */
+function appendSphere(radius: number, latSegs: number, longSegs: number, outPos: number[], outNorm: number[], xform: any): void {
+  for (let lat = 0; lat < latSegs; lat++) {
+    const a1 = (lat / latSegs) * Math.PI - Math.PI / 2;
+    const a2 = ((lat + 1) / latSegs) * Math.PI - Math.PI / 2;
+    for (let lon = 0; lon < longSegs; lon++) {
+      const b1 = (lon / longSegs) * Math.PI * 2;
+      const b2 = ((lon + 1) / longSegs) * Math.PI * 2;
+      const v: [number, number, number][] = [];
+      const n: [number, number, number][] = [];
+      for (const [la, lb] of [[a1, b1], [a2, b1], [a2, b2], [a1, b2]]) {
+        const x = Math.cos(la) * Math.cos(lb) * radius;
+        const y = Math.sin(la) * radius;
+        const z = Math.cos(la) * Math.sin(lb) * radius;
+        v.push(applyTransform([x, y, z], xform));
+        n.push(applyTransform([x / radius, y / radius, z / radius], { ...xform, translation: [0, 0, 0] as [number, number, number] }));
+      }
+      // Two triangles per quad
+      outPos.push(v[0][0], v[0][1], v[0][2], v[1][0], v[1][1], v[1][2], v[2][0], v[2][1], v[2][2]);
+      outNorm.push(n[0][0], n[0][1], n[0][2], n[1][0], n[1][1], n[1][2], n[2][0], n[2][1], n[2][2]);
+      outPos.push(v[0][0], v[0][1], v[0][2], v[2][0], v[2][1], v[2][2], v[3][0], v[3][1], v[3][2]);
+      outNorm.push(n[0][0], n[0][1], n[0][2], n[2][0], n[2][1], n[2][2], n[3][0], n[3][1], n[3][2]);
+    }
+  }
+}
+
+/** Append a cone (N segments) to the output arrays. */
+function appendCone(radius: number, height: number, segments: number, outPos: number[], outNorm: number[], xform: any): void {
+  const h = height / 2;
+  const apex = applyTransform([0, h, 0], xform);
+  for (let i = 0; i < segments; i++) {
+    const a1 = (i / segments) * Math.PI * 2;
+    const a2 = ((i + 1) / segments) * Math.PI * 2;
+    const v1 = applyTransform([Math.cos(a1) * radius, -h, Math.sin(a1) * radius], xform);
+    const v2 = applyTransform([Math.cos(a2) * radius, -h, Math.sin(a2) * radius], xform);
+    // Side triangle
+    outPos.push(apex[0], apex[1], apex[2], v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+    const n = triangleNormal(apex[0], apex[1], apex[2], v1[0], v1[1], v1[2], v2[0], v2[1], v2[2]);
+    outNorm.push(n[0], n[1], n[2], n[0], n[1], n[2], n[0], n[1], n[2]);
+  }
+  // Bottom cap
+  const bc = applyTransform([0, -h, 0], xform);
+  for (let i = 0; i < segments; i++) {
+    const a1 = (i / segments) * Math.PI * 2;
+    const a2 = ((i + 1) / segments) * Math.PI * 2;
+    const v1 = applyTransform([Math.cos(a1) * radius, -h, Math.sin(a1) * radius], xform);
+    const v2 = applyTransform([Math.cos(a2) * radius, -h, Math.sin(a2) * radius], xform);
+    outPos.push(bc[0], bc[1], bc[2], v2[0], v2[1], v2[2], v1[0], v1[1], v1[2]);
+    outNorm.push(0, -1, 0, 0, -1, 0, 0, -1, 0);
   }
 }
 
@@ -564,7 +847,7 @@ export function parseOBJ(text: string): LoadedModel {
 /**
  * Top-level dispatcher: choose a parser by file extension.
  * @param filename file name (used only for its extension)
- * @param data raw bytes (for STL binary) or text (for STL ASCII / VRML / OBJ)
+ * @param data raw bytes (for STL binary) or text (for STL ASCII / VRML / OBJ / STEP)
  * @throws Error if the format is unsupported or parsing fails.
  */
 export function parseModel(filename: string, data: ArrayBuffer | string): LoadedModel {
@@ -576,6 +859,9 @@ export function parseModel(filename: string, data: ArrayBuffer | string): Loaded
     }
     if (lower.endsWith('.obj')) {
       return parseOBJ(typeof data === 'string' ? data : new TextDecoder().decode(data));
+    }
+    if (lower.endsWith('.step') || lower.endsWith('.stp')) {
+      return parseSTEP(typeof data === 'string' ? data : new TextDecoder().decode(data));
     }
     throw new Error(`Unsupported file extension: ${filename}`);
   } catch (err) {

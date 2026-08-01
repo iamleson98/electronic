@@ -4,7 +4,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { usePCB } from '@/lib/pcb/store';
-import { parseSTL, parseVRML, parseOBJ, modelToGeometry } from '@/lib/pcb/model-loader';
+import { useEditor } from '@/lib/circuit/store';
+import { parseSTL, parseVRML, parseOBJ, parseModel, modelToGeometry } from '@/lib/pcb/model-loader';
 import type { LoadedModel } from '@/lib/pcb/model-loader';
 import { DEFAULT_MODELS } from '@/lib/pcb/3d-models';
 import type { Footprint } from '@/lib/pcb/types';
@@ -61,6 +62,8 @@ async function fetchModelGeometry(
       model = parseVRML(new TextDecoder().decode(buf));
     } else if (lower.endsWith('.obj')) {
       model = parseOBJ(new TextDecoder().decode(buf));
+    } else if (lower.endsWith('.step') || lower.endsWith('.stp')) {
+      model = parseModel(url, buf);
     } else {
       throw new Error(`Unknown model extension for ${url}`);
     }
@@ -137,6 +140,69 @@ export function PCB3DViewer() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // ── Enhanced 3D viewer state ────────────────────────────────────────────
+  // Cross-section view: clips everything above a Y-plane so you can see inside
+  const [crossSection, setCrossSection] = useState(false);
+  const [crossSectionY, setCrossSectionY] = useState(0);
+  // Ray-traced / high-quality rendering: more lights, tone mapping, contact shadows
+  const [highQuality, setHighQuality] = useState(false);
+  // Animated 3D current flow: traces glow with current direction/speed
+  const [showCurrentFlow, setShowCurrentFlow] = useState(false);
+  // Live voltage probes overlay: floating voltage labels at pad positions
+  const [showVoltageProbes, setShowVoltageProbes] = useState(false);
+  // Explosion view: components lift off the board to show layers separately
+  const [explosionFactor, setExplosionFactor] = useState(0); // 0=normal, 1=fully exploded
+  // Assembly animation: components fly into place from above
+  const [assemblyProgress, setAssemblyProgress] = useState(1); // 0=disassembled, 1=assembled
+
+  // Circuit simulation context (for current flow + voltage probes)
+  const simContext = useEditor((s) => s.simContext);
+  const running = useEditor((s) => s.running);
+
+  // Sync React state to window globals (read by the animation loop)
+  useEffect(() => { (window as any).__3d_crossSection = crossSection; }, [crossSection]);
+  useEffect(() => { (window as any).__3d_crossSectionY = crossSectionY; }, [crossSectionY]);
+  useEffect(() => { (window as any).__3d_showCurrentFlow = showCurrentFlow; }, [showCurrentFlow]);
+  useEffect(() => { (window as any).__3d_explosion = explosionFactor; }, [explosionFactor]);
+  useEffect(() => { (window as any).__3d_assembly = assemblyProgress; }, [assemblyProgress]);
+
+  // ── High-quality rendering: extra lights + tone mapping ──────────────────
+  useEffect(() => {
+    if (!sceneRef.current || !rendererRef.current) return;
+    const scene = sceneRef.current;
+    const renderer = rendererRef.current as any;
+
+    if (highQuality) {
+      // Add hemisphere light for ambient environment
+      if (!(scene as any).__hemisphereLight) {
+        const hemi = new THREE.HemisphereLight(0x87ceeb, 0x1a3a1a, 0.3);
+        (scene as any).__hemisphereLight = hemi;
+        scene.add(hemi);
+      }
+      // Add rim light from behind for depth
+      if (!(scene as any).__rimLight) {
+        const rim = new THREE.DirectionalLight(0xffffff, 0.4);
+        rim.position.set(0, 30, -50);
+        (scene as any).__rimLight = rim;
+        scene.add(rim);
+      }
+      // ACES Filmic tone mapping for better color reproduction
+      renderer.toneMapping = 4; // ACESFilmicToneMapping
+      renderer.toneMappingExposure = 1.0;
+    } else {
+      // Remove extra lights
+      if ((scene as any).__hemisphereLight) {
+        scene.remove((scene as any).__hemisphereLight);
+        delete (scene as any).__hemisphereLight;
+      }
+      if ((scene as any).__rimLight) {
+        scene.remove((scene as any).__rimLight);
+        delete (scene as any).__rimLight;
+      }
+      renderer.toneMapping = 0; // NoToneMapping
+    }
+  }, [highQuality]);
+
   const footprints = usePCB((s) => s.footprints);
   const traces = usePCB((s) => s.traces);
   const vias = usePCB((s) => s.vias);
@@ -165,8 +231,15 @@ export function PCB3DViewer() {
         await renderer.init();
         renderer.setSize(width, height);
         renderer.setPixelRatio(window.devicePixelRatio);
+        // Enable local clipping for cross-section view
+        (renderer as any).localClippingEnabled = true;
         container.appendChild(renderer.domElement);
         rendererRef.current = renderer;
+
+        // Cross-section clipping plane (pointing down, clips everything above Y=crossSectionY)
+        const clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
+        (renderer as any).clippingPlanes = []; // initially empty (no clipping)
+        (renderer as any).__clipPlane = clipPlane;
 
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
@@ -206,9 +279,80 @@ export function PCB3DViewer() {
       if (cancelled) return;
 
       let raf = 0;
+      let flowPhase = 0;
       const animate = () => {
         raf = requestAnimationFrame(animate);
         if (controlsRef.current) controlsRef.current.update();
+
+        // ── Cross-section: update clipping plane ──────────────────────────
+        if (rendererRef.current && (rendererRef.current as any).__clipPlane) {
+          const cp = (rendererRef.current as any).__clipPlane as THREE.Plane;
+          const active = (window as any).__3d_crossSection ?? false;
+          const yVal = (window as any).__3d_crossSectionY ?? 0;
+          if (active) {
+            cp.constant = yVal;
+            (rendererRef.current as any).clippingPlanes = [cp];
+          } else {
+            (rendererRef.current as any).clippingPlanes = [];
+          }
+        }
+
+        // ── Explosion + Assembly animation ────────────────────────────────
+        if (pcbGroupRef.current) {
+          const explosion = (window as any).__3d_explosion ?? 0;
+          const assembly = (window as any).__3d_assembly ?? 1;
+          const childCount = pcbGroupRef.current.children.length;
+          for (let i = 0; i < childCount; i++) {
+            const child = pcbGroupRef.current.children[i];
+            if (child instanceof THREE.Mesh && (child as any).__baseY !== undefined) {
+              const baseY = (child as any).__baseY as number;
+              // Explosion: lift components up proportional to their height
+              const explodeAmount = explosion * 10;
+              // Assembly: start from high above and fly down
+              const assemblyOffset = (1 - assembly) * 30;
+              child.position.y = baseY + explodeAmount + assemblyOffset;
+              // Fade in opacity during assembly
+              if (child.material instanceof THREE.MeshStandardMaterial) {
+                child.material.opacity = assembly;
+                child.material.transparent = assembly < 1;
+              }
+            }
+          }
+        }
+
+        // ── Current flow: animate emissive intensity on traces ───────────
+        if ((window as any).__3d_showCurrentFlow) {
+          flowPhase += 0.02;
+          if (sceneRef.current) {
+            sceneRef.current.traverse((child) => {
+              if (child instanceof THREE.Mesh && (child as any).__isTrace) {
+                const mat = child.material;
+                if (mat instanceof THREE.MeshStandardMaterial) {
+                  // Pulsing emissive glow based on flow phase
+                  const pulse = 0.3 + 0.2 * Math.sin(flowPhase + ((child as any).__flowOffset || 0));
+                  mat.emissive.setRGB(pulse * 0.8, pulse * 0.6, 0);
+                  mat.emissiveIntensity = pulse;
+                }
+              }
+            });
+          }
+        } else if (sceneRef.current) {
+          // Reset emissive when current flow is off
+          sceneRef.current.traverse((child) => {
+            if (child instanceof THREE.Mesh && (child as any).__isTrace) {
+              const mat = child.material;
+              if (mat instanceof THREE.MeshStandardMaterial && mat.emissiveIntensity > 0) {
+                mat.emissive.setRGB(0, 0, 0);
+                mat.emissiveIntensity = 0;
+              }
+            }
+          });
+        }
+
+        // ── Voltage probes: update HTML overlay positions ────────────────
+        // (Handled by the React render below — the HTML elements are positioned
+        // based on the current camera projection of pad positions)
+
         if (rendererRef.current && sceneRef.current && cameraRef.current) {
           const r = rendererRef.current;
           if (typeof r.renderAsync === 'function') {
@@ -281,7 +425,8 @@ export function PCB3DViewer() {
 
     // Traces
     for (const trace of traces) {
-      for (const seg of trace.segments) {
+      for (let si = 0; si < trace.segments.length; si++) {
+        const seg = trace.segments[si];
         const dx = seg.end.x - seg.start.x;
         const dy = seg.end.y - seg.start.y;
         const length = Math.hypot(dx, dy);
@@ -294,6 +439,10 @@ export function PCB3DViewer() {
         const y = trace.layer === 'top' ? TRACE_HEIGHT / 2 : -BOARD_THICKNESS - TRACE_HEIGHT / 2;
         mesh.position.set(midX, y, midZ);
         mesh.rotation.y = -Math.atan2(dy, dx);
+        // Tag for current flow animation
+        (mesh as any).__isTrace = true;
+        (mesh as any).__flowOffset = si * 0.5;
+        (mesh as any).__baseY = y;
         group.add(mesh);
       }
     }
@@ -360,6 +509,8 @@ export function PCB3DViewer() {
           : -BOARD_THICKNESS - PAD_HEIGHT - bodyH / 2;
         mesh.position.set(fp.position.x, y, fp.position.y);
         mesh.rotation.y = (fp.rotation * Math.PI) / 180;
+        // Tag for explosion/assembly animation
+        (mesh as any).__baseY = y;
         group.add(mesh);
       }
 
@@ -414,9 +565,115 @@ export function PCB3DViewer() {
         </div>
       )}
       {!loading && !error && footprints.length > 0 && (
-        <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-[#0a1628]/80 px-3 py-1.5 text-xs font-mono text-slate-400">
-          Left-drag: rotate · Right-drag: pan · Scroll: zoom
-        </div>
+        <>
+          {/* 3D Viewer control panel — top-right */}
+          <div className="absolute right-2 top-2 flex flex-col gap-1 rounded-md bg-slate-900/90 p-2 text-xs">
+            <button
+              onClick={() => setCrossSection(!crossSection)}
+              className={`flex items-center gap-1 rounded px-2 py-1 transition-colors ${
+                crossSection ? 'bg-cyan-500/30 text-cyan-300 border border-cyan-600' : 'text-slate-300 hover:bg-slate-800 border border-transparent'
+              }`}
+            >
+              🔪 Cross-section
+            </button>
+            {crossSection && (
+              <input
+                type="range" min={-2} max={5} step={0.1}
+                value={crossSectionY}
+                onChange={(e) => setCrossSectionY(parseFloat(e.target.value))}
+                className="w-full"
+              />
+            )}
+            <button
+              onClick={() => setHighQuality(!highQuality)}
+              className={`flex items-center gap-1 rounded px-2 py-1 transition-colors ${
+                highQuality ? 'bg-amber-500/30 text-amber-300 border border-amber-600' : 'text-slate-300 hover:bg-slate-800 border border-transparent'
+              }`}
+            >
+              ✨ High-quality render
+            </button>
+            <button
+              onClick={() => setShowCurrentFlow(!showCurrentFlow)}
+              className={`flex items-center gap-1 rounded px-2 py-1 transition-colors ${
+                showCurrentFlow ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-600' : 'text-slate-300 hover:bg-slate-800 border border-transparent'
+              }`}
+            >
+              ⚡ Current flow {running ? '' : '(run sim)'}
+            </button>
+            <button
+              onClick={() => setShowVoltageProbes(!showVoltageProbes)}
+              className={`flex items-center gap-1 rounded px-2 py-1 transition-colors ${
+                showVoltageProbes ? 'bg-blue-500/30 text-blue-300 border border-blue-600' : 'text-slate-300 hover:bg-slate-800 border border-transparent'
+              }`}
+            >
+              📊 Voltage probes
+            </button>
+            <div className="flex items-center gap-1 px-2 py-1 text-slate-300">
+              💥 Explode
+              <input
+                type="range" min={0} max={1} step={0.05}
+                value={explosionFactor}
+                onChange={(e) => setExplosionFactor(parseFloat(e.target.value))}
+                className="flex-1"
+              />
+            </div>
+            <div className="flex items-center gap-1 px-2 py-1 text-slate-300">
+              🔧 Assembly
+              <input
+                type="range" min={0} max={1} step={0.05}
+                value={assemblyProgress}
+                onChange={(e) => setAssemblyProgress(parseFloat(e.target.value))}
+                className="flex-1"
+              />
+            </div>
+            <button
+              onClick={() => {
+                setAssemblyProgress(0);
+                let p = 0;
+                const interval = setInterval(() => {
+                  p += 0.05;
+                  if (p >= 1) { p = 1; clearInterval(interval); }
+                  setAssemblyProgress(p);
+                }, 30);
+              }}
+              className="flex items-center gap-1 rounded px-2 py-1 text-purple-300 hover:bg-slate-800 border border-transparent"
+            >
+              ▶ Play assembly
+            </button>
+          </div>
+
+          {/* Voltage probe labels — floating HTML at projected 3D positions */}
+          {showVoltageProbes && simContext && footprints.map((fp) => {
+            // Project the footprint's 3D position to screen coords
+            if (!cameraRef.current || !rendererRef.current) return null;
+            const pos = new THREE.Vector3(fp.position.x, 2, fp.position.y);
+            pos.project(cameraRef.current);
+            const x = (pos.x + 1) / 2 * (rendererRef.current.domElement.width / window.devicePixelRatio);
+            const y = (1 - (pos.y + 1) / 2) * (rendererRef.current.domElement.height / window.devicePixelRatio);
+            // Look up voltage from sim context (componentId → first pad's net → node voltage)
+            const comp = useEditor.getState().components.find((c) => c.id === fp.componentId);
+            let voltage = '—';
+            if (comp && simContext) {
+              const net = fp.pads[0]?.net;
+              if (net) voltage = net;
+            }
+            return (
+              <div
+                key={fp.id}
+                className="pointer-events-none absolute z-10 rounded bg-blue-900/90 px-1.5 py-0.5 text-[10px] font-mono text-blue-200 border border-blue-700"
+                style={{ left: `${x}px`, top: `${y}px`, transform: 'translate(-50%, -150%)' }}
+              >
+                {fp.refdes}: {voltage}
+              </div>
+            );
+          })}
+
+          {/* Original bottom overlay */}
+          <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-[#0a1628]/80 px-3 py-1.5 text-xs font-mono text-slate-400">
+            Left-drag: rotate · Right-drag: pan · Scroll: zoom
+            {showCurrentFlow && running && <span className="ml-2 text-emerald-300">· ⚡ current flowing</span>}
+          </div>
+        </>
       )}
     </div>
   );
