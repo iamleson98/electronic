@@ -325,6 +325,20 @@ const arduinoReal: ComponentPlugin = {
     }
     const compiled = (sim.state as any)[`${key}_compiled`];
 
+    // Fast-forward: if the firmware is in a wait state, jump sim.time ahead
+    // to waitUntil. Otherwise the sketch would advance at dt=0.1ms per step,
+    // making a 500ms wait take 5000 steps (~80 seconds at 60Hz). By jumping
+    // sim.time directly to waitUntil, the wait completes in ONE step and the
+    // next instruction executes immediately.
+    //
+    // This is safe because during a wait, the firmware isn't doing anything —
+    // the pin outputs are unchanged from the previous step. Other components
+    // (capacitors, inductors) may see a slight time discontinuity, but for
+    // digital circuits this is negligible.
+    if (st.waitUntil > sim.time) {
+      sim.time = st.waitUntil;
+    }
+
     // Execute firmware
     executeFirmwareTick(st, compiled.instructions, compiled.labels, sim, pinToNode, vccV);
 
