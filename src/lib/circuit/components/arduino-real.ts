@@ -325,18 +325,24 @@ const arduinoReal: ComponentPlugin = {
     }
     const compiled = (sim.state as any)[`${key}_compiled`];
 
-    // Fast-forward: if the firmware is in a wait state, jump sim.time ahead
-    // to waitUntil. Otherwise the sketch would advance at dt=0.1ms per step,
-    // making a 500ms wait take 5000 steps (~80 seconds at 60Hz). By jumping
-    // sim.time directly to waitUntil, the wait completes in ONE step and the
-    // next instruction executes immediately.
+    // Fast-forward: if the firmware is in a wait state, advance sim.time by
+    // a bounded amount so the wait completes in roughly real-time (at speed=1)
+    // instead of 5000 steps. Without this, a 500ms wait would take 80 seconds
+    // of real time at 60Hz (dt=0.1ms per step).
+    //
+    // Cap: advance by at most 16ms per simulateStep call. Since step() in the
+    // store runs `speed` sub-steps per RAF frame (16ms), sim.time advances by
+    // ~speed*16ms per frame = ~speed seconds per real second. At speed=1, a
+    // 500ms wait takes ~31 steps = ~517ms real time — close to actual real-time,
+    // so each digit is clearly visible.
     //
     // This is safe because during a wait, the firmware isn't doing anything —
-    // the pin outputs are unchanged from the previous step. Other components
-    // (capacitors, inductors) may see a slight time discontinuity, but for
-    // digital circuits this is negligible.
+    // pin outputs are unchanged. Other components (capacitors, inductors) see a
+    // small time discontinuity (16ms) which is negligible for digital circuits.
     if (st.waitUntil > sim.time) {
-      sim.time = st.waitUntil;
+      const maxAdvance = Math.max(sim.dt, 0.016); // at least dt, at most 16ms
+      const target = Math.min(st.waitUntil, sim.time + maxAdvance);
+      sim.time = target;
     }
 
     // Execute firmware

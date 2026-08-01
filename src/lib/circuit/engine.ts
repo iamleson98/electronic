@@ -283,6 +283,26 @@ export function computeWireCurrents(
       const nNode = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
       nodeCurrentOut.set(pNode, (nodeCurrentOut.get(pNode) ?? 0) + i);
       nodeCurrentOut.set(nNode, (nodeCurrentOut.get(nNode) ?? 0) - i);
+    } else if (comp.type === 'sevenSegment') {
+      // 7-segment: each segment is a conductance to com (no Vf).
+      // Use the same hysteresis model as the stamp.
+      const com = terms.find((t) => t.terminalId === 'com')?.nodeId ?? 0;
+      const threshold = (comp.parameters.threshold as number) ?? 2.0;
+      const rSeg = 220;
+      const st = sim.state.__global ?? {};
+      const stateKey = `7seg_${terms.map(t => t.nodeId).join('_')}`;
+      const segStates = (st[stateKey] ?? {}) as Record<string, boolean>;
+      for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+        const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+        const v = sim.nodeVoltage[segNode] - sim.nodeVoltage[com];
+        const prevOn = segStates[seg] ?? false;
+        const on = prevOn ? v > threshold * 0.5 : v > threshold;
+        if (on) {
+          const iSeg = v / rSeg;
+          nodeCurrentOut.set(segNode, (nodeCurrentOut.get(segNode) ?? 0) + iSeg);
+          nodeCurrentOut.set(com, (nodeCurrentOut.get(com) ?? 0) - iSeg);
+        }
+      }
     }
     // Voltage sources, ground, junction, power symbols: skip (they define the current, not draw it)
   }
@@ -400,6 +420,25 @@ function computeTerminalCurrent(
     } else {
       // Base/Gate: small current, return 0 for flow visualization
       return 0;
+    }
+  } else if (comp.type === 'sevenSegment') {
+    // 7-segment: current flows from segment terminal → com terminal.
+    // compCurrent > 0 = current flows from each segment to com (through the LED).
+    // For each segment terminal: current ENTERS the display → "leaving terminal" = -I_per_seg
+    // For the com terminal: current EXITS the display → "leaving terminal" = +totalI
+    const comTerm = terms.find((t) => t.terminalId === 'com')?.nodeId ?? 0;
+    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+    if (terminalId === 'com') {
+      // Current exits through com (sum of all segment currents)
+      return compCurrent;
+    } else {
+      // For a segment terminal: compute this segment's current from nodeCurrentOut
+      // (current leaving the segment node through the display's LED).
+      // nodeCurrentOut at the segment node includes the display's draw.
+      // We want -I_seg (current enters the display at this terminal).
+      const segI = Math.abs(nodeCurrentOut.get(termNode) ?? 0);
+      void comTerm;
+      return -segI;
     }
   }
   return 0;

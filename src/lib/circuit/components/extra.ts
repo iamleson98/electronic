@@ -578,15 +578,41 @@ const sevenSegment: ComponentPlugin = {
       ctx.shadowBlur = 0;
     }
   },
-  stamp(params, terminals, sys) {
+  stamp(params, terminals, sys, sim) {
     const threshold = params.threshold as number;
-    // Each segment is a high-impedance input (we just sense voltage)
+    // Model each segment as an LED with a pure conductance model (no Vf
+    // current source). This converges naturally: when the Arduino drives
+    // a pin LOW, the segment node drops to 0V immediately (no current
+    // source to hold it up), so the next step sees V < threshold → OFF.
+    //
+    // With a Norton model (Vf + current source), the segment node gets stuck
+    // at Vf/2 ≈ 0.9V when the pin is driven LOW — the current source keeps
+    // pushing current, preventing the OFF transition. The pure conductance
+    // model avoids this convergence trap.
+    //
+    // Trade-off: no forward voltage drop, so current = V_pin / (R_ext + R_seg).
+    // For 5V, 220Ω + 220Ω = 11.4mA per ON segment — realistic for visualization.
     const com = terminals.find((t) => t.terminalId === 'com')!.nodeId;
+    const rSeg = 220; // internal segment resistance (Ω)
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const stateKey = `7seg_${terminals.map(t => t.nodeId).join('_')}`;
+    if (!st[stateKey]) st[stateKey] = {};
+    const segStates = st[stateKey] as Record<string, boolean>;
     for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
       const node = terminals.find((t) => t.terminalId === seg)!.nodeId;
-      sys.stampConductance(node, com, 1e-9);
+      const v = sim.nodeVoltage[node] - sim.nodeVoltage[com];
+      const prevOn = segStates[seg] ?? false;
+      // Hysteresis: ON stays ON until V < threshold/2; OFF stays OFF until V > threshold
+      const on = prevOn ? v > threshold * 0.5 : v > threshold;
+      segStates[seg] = on;
+      if (on) {
+        // ON: conductance to com (current flows segment → com through LED)
+        sys.stampConductance(node, com, 1 / rSeg);
+      } else {
+        // OFF: high impedance
+        sys.stampConductance(node, com, 1e-9);
+      }
     }
-    void threshold;
   },
   step(params, terminals, sim, instance) {
     const threshold = params.threshold as number;

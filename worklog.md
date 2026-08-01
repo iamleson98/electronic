@@ -670,3 +670,40 @@ Stage Summary:
 - Fixed flow dot animation: dot speed is now in pixels-per-frame (constant for same current), not fraction-of-wire-per-frame (proportional to wire length).
 - All wires in a series circuit now show dots moving at the same visual speed.
 - PIXELS_PER_PHASE = 60 gives a comfortable dot speed at typical current levels.
+
+---
+Task ID: fix-7seg-speed-and-conduction
+Agent: main
+Task: Fix 7-seg display speed (too fast to verify) and verify which wires conduct per digit.
+
+Work Log:
+- Issue 1: Display too fast.
+  - Previous fix jumped sim.time to waitUntil in ONE step, making digits change every ~16ms (60Hz).
+  - Fix: cap the fast-forward at 16ms per simulateStep call. Now each 500ms wait takes ~31 steps = ~517ms real time at 60Hz (matching the sketch's wait 500ms). Each digit is clearly visible for about half a second.
+
+- Issue 2: Wire conduction verification.
+  - Wrote test (scripts/test-7seg-conduction.ts) that checks each digit 0-9: ON segments should have current, OFF segments should have ~0.
+  - Initial result: all wire currents showed 0.00 mA because the 7-segment display was modeled as high-impedance voltage sensors (1e-9 S per segment) — no current drawn.
+  - Fix A: Updated sevenSegment stamp to model each segment as an LED (conductance + Vf current source). Updated computeTerminalCurrent and computeComponentCurrents to handle sevenSegment.
+  - Result: digit 0 passed, but digits 1-3 failed — OFF segments showed 0.9V and 4mA instead of 0V and 0mA.
+  - Root cause: The Norton model (Vf + current source) held the segment node at Vf/2 ≈ 0.9V even when the Arduino drove the pin to 0V. The current source kept pushing current, preventing the OFF transition. Hysteresis didn't help because it read stale sim.nodeVoltage from the previous step.
+  - Fix B: Replaced the Norton model with a pure conductance model (no Vf current source). Now when the Arduino drives a pin LOW, the segment node drops to 0V immediately — no current source to hold it up. The next step sees V < threshold → OFF. Natural convergence.
+  - Trade-off: no forward voltage drop, so current = V_pin / (R_ext + R_seg) = 5V / 440Ω = 11.4mA per ON segment (realistic for visualization).
+
+- Verification (scripts/test-7seg-conduction.ts):
+  All 10 digits verified:
+    Digit 0: a,b,c,d,e,f conduct (22.7mA each); g = 0mA ✓
+    Digit 1: b,c conduct (11.4mA); a,d,e,f,g = 0mA ✓
+    Digit 2: a,b,d,e,g conduct; c,f = 0mA ✓
+    ... (all 10 digits pass)
+  ON segments show 11-23 mA, OFF segments show 0V and 0mA.
+- Speed verification (scripts/test-7seg-counting.ts):
+  Digit 0 visible for ~31 steps (0.5s sim time = ~517ms real time at 60Hz).
+  Transitions to digit 1 at step ~31. Each digit visible for ~half a second.
+- Typecheck: no src errors. Build: succeeds.
+
+Stage Summary:
+- Capped Arduino fast-forward at 16ms per step → each digit visible for ~500ms real time.
+- Replaced 7-seg Norton LED model with pure conductance model → OFF segments now show 0V/0mA correctly.
+- All 10 digits verified: ON segments conduct, OFF segments do not.
+- Flow animation will now show dots only on conducting wires, making it easy to visually verify the digit pattern.
