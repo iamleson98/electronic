@@ -869,3 +869,52 @@ Stage Summary:
 - The validator catches all the bug classes we've fixed: stuck-on transistors, unequal series currents, OFF segments conducting, switch-off current leaks, NaN voltages.
 - Can be run after any simulation step to verify correctness.
 - Test script at scripts/test-physics-validator.ts.
+
+---
+Task ID: validate-all-circuits-follow-laws
+Agent: main
+Task: Make sure every existing circuit and component follows the physics law set.
+
+Work Log:
+- Created scripts/test-all-examples-physics.ts — runs the validator on all 9 example circuits:
+  1. LED + Resistor: PASS (0 errors, 0 warnings)
+  2. 555 Astable Blink: PASS (0 errors, 0 warnings)
+  3. RC Low-pass Filter: PASS (0 errors, 0 warnings)
+  4. Transistor Switch: PASS (0 errors, 0 warnings)
+  5. Arduino Blink: PASS (0 errors, 0 warnings)
+  6. Op-Amp Inverting Amp: PASS (0 errors, 0 warnings)
+  7. NMOS Switch: PASS (0 errors, 0 warnings)
+  8. 7-Segment Counter: PASS (0 errors, 0 warnings)
+  9. Digital Clock: PASS (0 errors, 1 minor warning — unconnected CO on last stage)
+  Total: 0 errors, 1 warning across all 9 circuits.
+
+- Created scripts/test-components-physics.ts — tests 13 individual components not fully covered by examples:
+  1. PNP Transistor Switch: PASS
+  2. PMOS Switch: PASS
+  3. SPST Switch (closed): PASS
+  4. SPST Switch (open): PASS
+  5. Current Source: PASS
+  6. AND Gate (A=H, B=H → Y=H): PASS
+  7. NOT Gate (A=H → Y=L): PASS
+  8. Diode (forward biased): PASS
+  9. Speaker: PASS
+  10. Potentiometer (voltage divider): PASS
+  11. Fuse: PASS
+  12. Lamp: PASS
+  13. DC Motor: PASS
+  Total: 0 errors, 0 warnings across all 13 component tests.
+
+- Integrated physics validation into the store (src/lib/circuit/store.ts):
+  - Added `physicsViolations: PhysicsViolation[]` to EditorState
+  - Initialized to `[]` in the initial state and on reset
+  - Added validatePhysics() call in step() — runs only when `window.__PHYSICS_DEBUG__` is true (avoids perf overhead in production)
+  - When violations are detected, logs a warning to console
+  - Violations are stored in state for UI display if needed
+
+- Typecheck: no src errors. Build: succeeds.
+
+Stage Summary:
+- All 9 example circuits pass physics validation (0 errors total).
+- All 13 individual components pass physics validation (0 errors, 0 warnings).
+- Physics validator integrated into the store as a debug-mode check (enable via `window.__PHYSICS_DEBUG__ = true` in browser console).
+- Every existing circuit and component now follows the 10 physics laws.

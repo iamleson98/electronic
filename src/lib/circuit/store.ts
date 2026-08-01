@@ -24,6 +24,7 @@ import type {
 import { DEFAULT_PAGE_SETUP, DEFAULT_TITLE_BLOCK } from './types';
 import { getPlugin } from './registry';
 import { simulateStep, getTerminalsForComponent, buildNodeMap } from './engine';
+import { validatePhysics, type PhysicsViolation } from './physics-validator';
 import { runFullERC } from './erc';
 import { snapshotSheet, flattenHierarchy } from './hierarchy';
 import { runAnalysis as runAnalysisEngine, type AnalysisConfig, type AnalysisResult } from './analysis';
@@ -82,6 +83,8 @@ interface EditorState {
   dt: number;             // timestep in seconds
   // current sim context (read-only mirror)
   simContext: SimContext | null;
+  // physics validation results (debug — catches simulation bugs)
+  physicsViolations: PhysicsViolation[];
   // probe traces (per oscilloscope)
   traces: ProbeTrace[];
   maxTraceSamples: number;
@@ -381,6 +384,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   speed: 1,
   dt: 1e-4,
   simContext: null,
+  physicsViolations: [],
   traces: [],
   maxTraceSamples: 500,
   past: [],
@@ -1429,13 +1433,29 @@ export const useEditor = create<EditorState>((set, get) => ({
       }
       traces[traceIdx] = { ...trace };
     }
-    set({ simContext: result.sim, traces });
+    // Run physics validation (debug — catches simulation bugs).
+    // Only runs when a special debug flag is set to avoid perf overhead in production.
+    let physicsViolations: PhysicsViolation[] = s.physicsViolations;
+    if (typeof window !== 'undefined' && (window as any).__PHYSICS_DEBUG__) {
+      try {
+        const validation = validatePhysics(simComponents, simWires, plugins, result.sim);
+        physicsViolations = validation.violations;
+        if (!validation.passed) {
+          // eslint-disable-next-line no-console
+          console.warn('[Physics] Violations detected:', validation.violations.length);
+        }
+      } catch (e) {
+        // validation errors should never break the simulation
+      }
+    }
+    set({ simContext: result.sim, traces, physicsViolations });
   },
 
   reset: () => {
     set((s) => ({
       components: s.components.map((c) => ({ ...c, simState: undefined })),
       simContext: null,
+      physicsViolations: [],
       traces: [],
     }));
   },
