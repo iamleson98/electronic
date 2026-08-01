@@ -425,7 +425,8 @@ export function computeComponentCurrents(
   const result = new Map<string, number>();
   const nodeMap = buildNodeMap(components, wires, plugins);
 
-  // Build nodeCurrentOut (same as in computeWireCurrents)
+  // ── Compute per-node current leaving through passive components ──────
+  // This is used to find the current supplied by voltage sources.
   const nodeCurrentOut = new Map<number, number>();
   for (const comp of components) {
     const plugin = plugins.get(comp.type);
@@ -449,7 +450,6 @@ export function computeComponentCurrents(
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
     } else if (comp.type === 'inductor') {
-      // Compute fresh inductor current (no one-step lag)
       const L = Math.max(1e-12, comp.parameters.inductance as number);
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
@@ -469,15 +469,8 @@ export function computeComponentCurrents(
         ? Math.max(0.01, comp.parameters.seriesR as number)
         : Math.max(0.001, comp.parameters.onR as number);
       const st = sim.state.__global ?? {};
-      // The stamp function stores state as `led_${a}_${k}` or `diode_${a}_${k}`.
-      // The state key in the stamp is: `led_${a}_${k}` for LED, `diode_${a}_${k}` for diode.
-      // The state key here uses `${comp.type}_${a}_${k}` which is the same. ✓
       const on = st[`${comp.type}_${a}_${k}`] ?? false;
-      // Current flows a→k when on: I = (V_a - V_k - Vf) / R
-      // Positive I = current leaves node 'a' (goes into component), enters node 'k'.
       const i = on ? Math.max(0, (v - vf) / r) : 0;
-      // KCL: current leaving node 'a' = +i (flows into component at 'a')
-      //       current leaving node 'k' = -i (flows out of component at 'k')
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(k, (nodeCurrentOut.get(k) ?? 0) - i);
     } else if (comp.type === 'switch' || comp.type === 'pushButton') {
@@ -495,7 +488,34 @@ export function computeComponentCurrents(
       const i = comp.parameters.current as number;
       nodeCurrentOut.set(p, (nodeCurrentOut.get(p) ?? 0) + i);
       nodeCurrentOut.set(n, (nodeCurrentOut.get(n) ?? 0) - i);
+    } else if (comp.type === 'speaker' || comp.type === 'lamp' || comp.type === 'dcMotor') {
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      const r = Math.max(0.1, (comp.parameters.impedance as number) ?? (comp.parameters.resistance as number) ?? 8);
+      const i = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+      nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
+    } else if (comp.type === 'photoresistor') {
+      const darkR = comp.parameters.darkR as number;
+      const lightR = comp.parameters.lightR as number;
+      const light = Math.max(0, Math.min(1, comp.parameters.light as number));
+      const r = Math.max(1e-6, darkR + (lightR - darkR) * light);
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      const i = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+      nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
+    } else if (comp.type === 'voltmeter' || comp.type === 'ammeter' || comp.type === 'oscilloscope') {
+      // Meters: very high impedance (10MΩ)
+      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+      const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+      const i = (sim.nodeVoltage[p] - sim.nodeVoltage[n]) / 1e7;
+      nodeCurrentOut.set(p, (nodeCurrentOut.get(p) ?? 0) + i);
+      nodeCurrentOut.set(n, (nodeCurrentOut.get(n) ?? 0) - i);
     }
+    // Voltage sources, 555, opamp, transistors, logic gates, oscillators:
+    // Their current is determined by the external circuit, not by their own impedance.
+    // We'll compute it from nodeCurrentOut below.
   }
 
   // Compute per-component current
@@ -509,7 +529,7 @@ export function computeComponentCurrents(
       const r = Math.max(1e-9, comp.parameters.resistance as number);
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r; // a→b
+      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
     } else if (comp.type === 'capacitor') {
       const C = Math.max(1e-15, comp.parameters.capacitance as number);
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
@@ -518,8 +538,6 @@ export function computeComponentCurrents(
       const vPrev = st[`cap_${a}_${b}`] ?? 0;
       current = (C / Math.max(sim.dt, 1e-12)) * ((sim.nodeVoltage[a] - sim.nodeVoltage[b]) - vPrev);
     } else if (comp.type === 'inductor') {
-      // Compute fresh inductor current from V = L·dI/dt using current voltage
-      // This avoids the one-step-behind bug from reading stored state
       const L = Math.max(1e-12, comp.parameters.inductance as number);
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
@@ -527,7 +545,6 @@ export function computeComponentCurrents(
       const iPrev = st[`ind_${a}_${b}`] ?? 0;
       const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
       const dt = Math.max(sim.dt, 1e-12);
-      // I_now = I_prev + (V/L)*dt — uses current voltage (no lag)
       current = iPrev + (v / L) * dt;
     } else if (comp.type === 'led' || comp.type === 'diode') {
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
@@ -539,12 +556,8 @@ export function computeComponentCurrents(
         : Math.max(0.001, comp.parameters.onR as number);
       const st = sim.state.__global ?? {};
       const on = st[`${comp.type}_${a}_${k}`] ?? false;
-      current = on ? Math.max(0, (v - vf) / r) : 0; // a→k
+      current = on ? Math.max(0, (v - vf) / r) : 0;
     } else if (comp.type === 'dcVoltage' || comp.type === 'acVoltage' || comp.type === 'pulseSource') {
-      // Voltage source: current = total current drawn by passive components at + node.
-      // nodeCurrentOut was built from passive components only (resistors, LEDs, etc.)
-      // so it represents the current LEAVING the + node through the external circuit.
-      // Positive = current flowing out of + through external circuit = current the source supplies.
       const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
       current = nodeCurrentOut.get(p) ?? 0;
     } else if (comp.type === 'currentSource') {
@@ -557,66 +570,79 @@ export function computeComponentCurrents(
         current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / 0.01;
       }
     } else if (comp.type === 'npn' || comp.type === 'pnp') {
-      // BJT: collector→emitter current (NPN) or emitter→collector (PNP)
-      // nodeCurrentOut at collector = current LEAVING collector node
-      // For NPN: current ENTERS collector (leaves node = negative), so negate
-      // For PNP: current ENTERS emitter, EXITS collector
       const isNpn = comp.type === 'npn';
       const cNode = terms.find((t) => t.terminalId === 'c')?.nodeId ?? 0;
       const eNode = terms.find((t) => t.terminalId === 'e')?.nodeId ?? 0;
       if (isNpn) {
-        // NPN: current flows C→E. At collector node, current leaves toward transistor (negative out).
-        // So component current = -nodeCurrentOut(cNode) = current entering collector
         current = -(nodeCurrentOut.get(cNode) ?? 0);
       } else {
-        // PNP: current flows E→C. At emitter node, current leaves toward transistor (negative out).
         current = -(nodeCurrentOut.get(eNode) ?? 0);
       }
     } else if (comp.type === 'nmos' || comp.type === 'pmos') {
-      // MOSFET: drain→source (NMOS) or source→drain (PMOS)
       const isNmos = comp.type === 'nmos';
       const dNode = terms.find((t) => t.terminalId === 'd')?.nodeId ?? 0;
       const sNode = terms.find((t) => t.terminalId === 's')?.nodeId ?? 0;
       if (isNmos) {
-        // NMOS: current flows D→S. At drain, current enters (leaves node = negative).
         current = -(nodeCurrentOut.get(dNode) ?? 0);
       } else {
-        // PMOS: current flows S→D. At source, current enters (leaves node = negative).
         current = -(nodeCurrentOut.get(sNode) ?? 0);
       }
     } else if (comp.type === 'timer555') {
-      // 555: current flows from VCC through OUT pin
       const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
       current = nodeCurrentOut.get(outNode) ?? 0;
-    } else if (comp.type === 'opamp') {
-      // Op-amp: output current
+    } else if (comp.type === 'opamp' || comp.type === 'opampRails') {
       const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
       current = nodeCurrentOut.get(outNode) ?? 0;
     } else if (comp.type === 'arduino' || comp.type === 'arduinoReal' || comp.type === 'raspberryPi') {
-      // MCU: sum of currents on all digital pins
       let totalCurrent = 0;
       for (const t of terms) {
         totalCurrent += Math.abs(nodeCurrentOut.get(t.nodeId) ?? 0);
       }
       current = totalCurrent;
     } else if (comp.type === 'voltmeter' || comp.type === 'ammeter' || comp.type === 'oscilloscope') {
-      // Meters: very high impedance, negligible current
       const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
       const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
-      current = (sim.nodeVoltage[p] - sim.nodeVoltage[n]) / 1e7; // 10MΩ input impedance
+      current = (sim.nodeVoltage[p] - sim.nodeVoltage[n]) / 1e7;
     } else if (comp.type === 'vco' || comp.type === 'crystal') {
-      // Oscillators: output current
       const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
       current = nodeCurrentOut.get(outNode) ?? 0;
     } else if (comp.type === 'speaker' || comp.type === 'lamp' || comp.type === 'dcMotor') {
-      // Load components: same as resistor
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-      const r = (comp.type === 'speaker') ? Math.max(1, comp.parameters.resistance as number) :
-                (comp.type === 'lamp') ? Math.max(1, comp.parameters.resistance as number) :
-                Math.max(1, comp.parameters.resistance as number);
+      const r = Math.max(0.1, (comp.parameters.impedance as number) ?? (comp.parameters.resistance as number) ?? 8);
+      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+    } else if (comp.type === 'photoresistor') {
+      const darkR = comp.parameters.darkR as number;
+      const lightR = comp.parameters.lightR as number;
+      const light = Math.max(0, Math.min(1, comp.parameters.light as number));
+      const r = Math.max(1e-6, darkR + (lightR - darkR) * light);
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+    } else if (comp.type === 'sevenSegment') {
+      // 7-segment: current = sum of segment currents (each segment ~10mA when on)
+      const st = sim.state.__global ?? {};
+      let totalI = 0;
+      for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+        const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+        totalI += Math.abs(nodeCurrentOut.get(segNode) ?? 0);
+      }
+      current = totalI;
+    } else if (comp.type === 'transformer') {
+      const p1 = terms.find((t) => t.terminalId === 'p1')?.nodeId ?? 0;
+      current = nodeCurrentOut.get(p1) ?? 0;
+    } else if (comp.type === 'potentiometer') {
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      const r = Math.max(1e-6, comp.parameters.resistance as number);
+      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+    } else if (comp.type === 'fuse') {
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      const r = Math.max(1e-6, comp.parameters.resistance as number);
       current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
     }
+    // For all other types (logic gates, power symbols, etc.), current = 0
 
     result.set(comp.id, current);
   }
