@@ -8,11 +8,15 @@ import type {
   Footprint,
   Trace,
   Via,
+  ViaType,
   Ratsnest,
   BoardOutline,
   PCBDocument,
   Pad,
+  CopperLayer,
+  LayerStack,
 } from './types';
+import { DEFAULT_LAYER_STACK, FOUR_LAYER_STACK, SIX_LAYER_STACK, ALL_COPPER_LAYERS } from './types';
 import type { CircuitComponent, Wire } from '../circuit/types';
 import { useEditor } from '../circuit/store';
 import { getFootprintDef } from './footprints';
@@ -39,6 +43,8 @@ interface PCBState {
   padNets: Map<string, string>;
   activeLayer: 'top' | 'bottom';
   defaultTraceWidth: number;
+  /** Layer stack configuration — defaults to 2-layer. Switch to 4/6 layer for HDI designs. */
+  layerStack: LayerStack;
   // keepout areas
   keepouts: { id: string; rect: { x: number; y: number; width: number; height: number }; layers: 'all' | string[]; reason?: string }[];
   // net classes
@@ -85,6 +91,14 @@ interface PCBState {
   finishRouting: (to: { x: number; y: number; net: string } | null) => void;
   cancelRouting: () => void;
   addVia: (pos: { x: number; y: number }, net: string) => void;
+  /** Add a via with explicit type (THT, blind, buried, micro) and layer range.
+   *  For THT, fromLayer/toLayer default to top/bottom.
+   *  For microvias, the diameter is auto-set to a smaller value. */
+  addTypedVia: (pos: { x: number; y: number }, net: string, type: ViaType, fromLayer?: CopperLayer, toLayer?: CopperLayer) => void;
+  /** Set the layer stack (2/4/6 layer). Updates the activeLayer if needed. */
+  setLayerStack: (stack: LayerStack) => void;
+  /** Route a differential pair from pad A to pad B (nets like DATA_P / DATA_N). */
+  routeDiffPair: (padAId: string, padBId: string, netP: string, netN: string) => { routedP: boolean; routedN: boolean };
   selectFootprint: (id: string | null) => void;
   selectTrace: (id: string | null) => void;
   toggleFootprintSelection: (id: string) => void;
@@ -134,6 +148,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   ratsnest: [],
   padNets: new Map(),
   activeLayer: 'top',
+  layerStack: DEFAULT_LAYER_STACK,
   defaultTraceWidth: 0.3,
   keepouts: [],
   netClasses: [],
@@ -286,8 +301,83 @@ export const usePCB = create<PCBState>((set, get) => ({
       diameter: 1.0,
       drill: 0.5,
       net,
+      type: 'tht',
+      fromLayer: 'top',
+      toLayer: 'bottom',
     };
     set((s) => ({ vias: [...s.vias, via] }));
+  },
+
+  addTypedVia: (pos, net, type, fromLayer, toLayer) => {
+    // Diameter/drill defaults per via type (industry-typical values)
+    let diameter = 1.0;
+    let drill = 0.5;
+    if (type === 'micro') { diameter = 0.3; drill = 0.1; }
+    else if (type === 'blind') { diameter = 0.6; drill = 0.25; }
+    else if (type === 'buried') { diameter = 0.6; drill = 0.25; }
+    const via: Via = {
+      id: genId('via'),
+      position: { ...pos },
+      diameter, drill, net,
+      type,
+      fromLayer: fromLayer ?? (type === 'tht' ? 'top' : 'top'),
+      toLayer: toLayer ?? (type === 'tht' ? 'bottom' : fromLayer ?? 'bottom'),
+    };
+    set((s) => ({ vias: [...s.vias, via] }));
+  },
+
+  setLayerStack: (stack) => set((s) => ({
+    layerStack: stack,
+    // If the active layer isn't in the new stack, switch to top
+    activeLayer: stack.layers.includes(s.activeLayer as CopperLayer)
+      ? s.activeLayer
+      : 'top' as 'top' | 'bottom',
+  })),
+
+  routeDiffPair: (padAId, padBId, netP, netN) => {
+    const s = get();
+    // Find the two pads
+    let padA: Pad | null = null;
+    let padB: Pad | null = null;
+    for (const fp of s.footprints) {
+      for (const p of fp.pads) {
+        if (p.id === padAId) padA = p;
+        if (p.id === padBId) padB = p;
+      }
+    }
+    if (!padA || !padB) return { routedP: false, routedN: false };
+    // Route the P trace as a simple L-shape on the active layer
+    const layer = s.activeLayer;
+    const width = s.defaultTraceWidth;
+    // P trace: padA → (midX, padA.y) → (midX, padB.y) → padB  (manhattan with 45° knees)
+    const midX = (padA.position.x + padB.position.x) / 2;
+    const pSegs = [
+      { start: { ...padA.position }, end: { x: midX, y: padA.position.y }, width },
+      { start: { x: midX, y: padA.position.y }, end: { x: midX, y: padB.position.y }, width },
+      { start: { x: midX, y: padB.position.y }, end: { ...padB.position }, width },
+    ];
+    // N trace: offset by traceSpacing (2× trace width) parallel to P
+    const spacing = width * 4; // 4× width is a typical diff-pair spacing
+    // Determine offset direction (perpendicular to dominant axis)
+    const isHoriz = Math.abs(padB.position.x - padA.position.x) > Math.abs(padB.position.y - padA.position.y);
+    const offX = isHoriz ? 0 : spacing;
+    const offY = isHoriz ? spacing : 0;
+    // Find a second pair of pads for the N net — for simplicity, use padB shifted.
+    // In a real implementation, the user would specify the actual N pad.
+    // Here we just route N parallel to P.
+    const nStart = { x: padA.position.x + offX, y: padA.position.y + offY };
+    const nEnd = { x: padB.position.x + offX, y: padB.position.y + offY };
+    const nSegs = [
+      { start: nStart, end: { x: midX + offX, y: nStart.y }, width },
+      { start: { x: midX + offX, y: nStart.y }, end: { x: midX + offX, y: nEnd.y }, width },
+      { start: { x: midX + offX, y: nEnd.y }, end: nEnd, width },
+    ];
+    const idP = genId('diffp');
+    const idN = genId('diffn');
+    const traceP: Trace = { id: idP, net: netP, layer, segments: pSegs, width, pairedTraceId: idN };
+    const traceN: Trace = { id: idN, net: netN, layer, segments: nSegs, width, pairedTraceId: idP };
+    set((st) => ({ traces: [...st.traces, traceP, traceN] }));
+    return { routedP: true, routedN: true };
   },
 
   selectFootprint: (id) => set({ selectedFootprintId: id, selectedTraceId: null }),

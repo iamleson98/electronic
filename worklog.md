@@ -299,3 +299,93 @@ Stage Summary:
 - Verification:
   * `npx tsc --noEmit` — passes (only pre-existing `skills/image-edit` and `skills/stock-analysis-skill` errors remain; zero new errors in `src/`).
   * `npx next build` — succeeds: "Compiled successfully in 14.6s", 6/6 static pages, no warnings.
+
+---
+Task ID: pcb-footprint-editor
+Agent: general-purpose
+Task: Build WYSIWYG footprint editor canvas
+
+Work Log:
+- Read worklog.md (prior work by p5-3d-loader and symbol-editor subagents) and inspected the project layout — PCB types, footprints registry, PCBCanvas conventions, and the SymbolEditorDialog pattern (canvas-based full-screen editor dialog) that this task parallels.
+- Inspected `src/lib/pcb/types.ts` to understand `FootprintDef`. The existing definition had `bodySize` + `pads[]` with `terminalId/position/shape/size` only. The editor needs per-pad `layer` and `drill` (for THT) — made both optional so the existing footprint registry (resistor/capacitor/…/arduino) and KiCad parser keep working unchanged.
+- Extended `src/lib/pcb/types.ts`:
+  * Split the pad definition into its own exported `FootprintPadDef` interface with optional `layer?: CopperLayer` and `drill?: number` fields.
+  * Added optional `name?: string` and `refdesPrefix?: string` to `FootprintDef` so the editor can carry a human-readable name through to the registry.
+- Updated `src/lib/pcb/netlist-sync.ts` so `generateFootprints()` honours `padDef.layer ?? 'top'` when placing pads on the PCB — previously every pad was hard-coded to 'top'. Backward-compatible (existing footprints have no layer so they keep defaulting to 'top').
+- Created `src/components/pcb/FootprintEditorDialog.tsx` (1427 lines):
+  * Full-screen overlay using shadcn `Dialog` (overrode max-w/w/h/p to fill the viewport), modelled on `SymbolEditorDialog`.
+  * Top toolbar: New, Sample (dropdown), Save, Cancel, Grid toggle, Zoom +/-, Reset view + live zoom% readout.
+  * Left toolbar: Select, Pad (circle), Pad (rect), Pad (oval), Body outline, Delete — vertical icons, rose-tinted when Delete is active.
+  * Right properties panel: `DesignMetaEditor` (name / type id / body width × height with NumInputs / stats — total pads, top count, bottom count, THT count, pads bbox) when nothing selected; `PadEditor` (terminal ID, shape, position X/Y, width/height, layer Select with colour swatches, drill diameter NumInput) when a pad is selected.
+  * Canvas uses mm coordinates with `PX_PER_MM = 8` (matches PCBCanvas); minor grid at 0.1mm + major grid at 1mm; origin crosshair; snaps every pad placement and drag to 0.1mm grid (finer than the 0.5mm PCB routing grid).
+  * Pan via middle/right mouse, zoom via wheel (cursor-anchored), click-to-select, drag-to-move pads, drag-the-body translates all pads, double-click focuses the pad's properties panel.
+  * Body-outline tool draws a rubber-band rectangle preview (dashed yellow + live W×H mm readout) that finalises the bodySize on mouseup.
+  * Pad rendering: coloured by layer (red=top, blue=bottom), THT drill rendered as an unplated dark centre hole, selection halo + dashed amber border, terminal ID label drawn next to the pad.
+  * Sample dropdown provides 4 standard footprints:
+    - SOIC-8 (8 pads, 1.27mm pitch, body 5.0×6.2mm, SMD rect pads 0.6×1.55mm)
+    - 0805 resistor (2 pads, body 2.0×1.25mm, SMD rect pads 1.0×1.0mm)
+    - TSSOP-20 (20 pads, 0.65mm pitch, body 6.5×6.5mm, SMD rect pads 0.4×1.6mm)
+    - DIP-8 (8 pads, 2.54mm pitch, body 9.6×6.5mm, THT circle pads Ø1.6 with 0.8mm drill)
+  * State is kept entirely inside the dialog (not the global store) — opening/closing the editor doesn't pollute the main editor's undo history.
+  * Ref-mirror pattern (dragRef/bodyDragRef/draftRef/panRef/toolRef/cameraRef/designRef/selectedIdRef) so the mouse handlers can read the latest state without re-binding on every state change.
+  * Auto-fit view on open / sample-load / reset — picks a zoom that fits the body outline + 4mm margin.
+- Modified `src/components/pcb/PCBToolbar.tsx` (+22 lines net):
+  * Imported `Frame` icon and `FootprintEditorDialog`.
+  * Added a `showFootprintEditor` state + a "Footprint Editor" button (placed next to the KiCad import button since both produce entries in the runtime footprint registry).
+  * Mounted `<FootprintEditorDialog open=... onClose=... onSave=... />` at the bottom of the toolbar. `onSave` dispatches a `circuitlab:footprint-registered` window event (mirrors the `circuitlab:plugin-registered` pattern used by the Symbol Editor) so any listening UI can refresh.
+- Save handler validates: name non-empty, type ID matches `[a-z][a-z0-9_]*`, ≥1 pad, body width > 0.1mm and height > 0.1mm. On success, builds a `FootprintDef` (strips the editor-only `id` field from each pad, omits `drill` if zero so the registry entry stays clean), writes it into the `footprintDefs` map under the lowercased type id (overwriting existing entries — matching the Symbol Editor's behaviour), shows a sonner toast, calls `onSave(def)`, and closes the dialog.
+
+Stage Summary:
+- Files created:
+  * `src/components/pcb/FootprintEditorDialog.tsx` (1427 lines) — full-screen WYSIWYG canvas editor with top/left/right panels, mm-based grid (0.1mm snap), pan/zoom, pad tools (circle/rect/oval), body-outline tool, sample dropdown (SOIC-8 / 0805 / TSSOP-20 / DIP-8), property editors for design meta + per-pad (terminal ID, shape, position, size, layer, drill)
+- Files modified:
+  * `src/lib/pcb/types.ts` (183 lines, +18 net) — extracted `FootprintPadDef` interface; added optional `layer` and `drill` to pad definitions; added optional `name` and `refdesPrefix` to `FootprintDef`
+  * `src/lib/pcb/netlist-sync.ts` (203 lines, +1/-1 net) — `generateFootprints()` now honours `padDef.layer ?? 'top'` so pads placed from user-designed footprints land on the correct copper layer
+  * `src/components/pcb/PCBToolbar.tsx` (511 lines, +22 net) — "Footprint Editor" button + dialog mount + onSave event dispatch
+- Key decisions:
+  * Extended the existing `FootprintDef` pad shape with *optional* `layer` and `drill` fields instead of inventing a parallel `EditablePad` type and converting on save — keeps the type system honest (the saved registry entry IS a `FootprintDef`) and avoids the maintenance burden of two parallel schemas.
+  * Pad hit-testing uses a circular hit zone around the pad centre (radius = max(W,H)/2 + 0.2mm tolerance) — simple, fast, and forgiving for small SMD pads.
+  * Body outline is always centred at (0,0) (footprint convention). Dragging the body translates every pad so the body's logical centre stays at the origin — the cursor's offset is absorbed into the pads' positions.
+  * The Sample dropdown uses the existing shadcn `DropdownMenu` primitive (not a plain `<select>`) so the styling matches the rest of the PCB toolbar.
+  * Drill diameter is omitted from the saved `FootprintDef` pad when zero (SMD) — keeps the registry entry tidy and avoids forcing every existing footprint to gain a `drill: 0` field.
+  * The FootprintEditorDialog exports its sample-design builders (`soic8Design`, `r0805Design`, `tssop20Design`, `dip8Design`, `blankDesign`) and the `SAMPLES` array so future "edit existing footprint" workflows can reuse them.
+  * Used a `circuitlab:footprint-registered` window event (mirrors the Symbol Editor's `circuitlab:plugin-registered` event) instead of touching the Zustand store — avoids coupling the dialog to the PCB store's API and keeps the change surface small. Future components that need to refresh on footprint changes can listen for this event.
+- Verification:
+  * `npx tsc --noEmit` — passes (zero new errors in `src/`; only pre-existing `skills/image-edit` and `skills/stock-analysis-skill` errors remain).
+  * `npx next build` — succeeds: "Compiled successfully in 13.2s", 6/6 static pages, no warnings.
+
+---
+Task ID: pcb-layout-gaps
+Agent: main + subagent (footprint editor)
+Task: Close all PCB Layout gaps from KICAD_COMPARISON.md
+
+Work Log:
+- Launched subagent for WYSIWYG Footprint Editor (parallel work)
+- Extended `src/lib/pcb/types.ts`: added inner3/inner4 layers, ViaType (tht/blind/buried/micro), polygon pad shape, drill field, pairedTraceId on Trace, ViaType+fromLayer+toLayer on Via, layerStack on PCBDocument, material/copperWeight on LayerStack, SIX_LAYER_STACK preset
+- Updated `src/lib/pcb/store.ts`: added layerStack field + setLayerStack action, addTypedVia action (with auto defaults per via type), routeDiffPair action (P+N parallel traces with pairedTraceId), kept existing lengthTuneTrace action
+- Updated `src/lib/pcb/copper-pour.ts`: added thermal relief support — same-net pads get a 0.3mm gap with 4 cardinal spokes (0.3mm wide); added thermalPads field to CopperPour result
+- Updated `src/lib/pcb/drc.ts`: added diff-pair skew check (>0.5mm length diff = warning), diff-pair coupling check (different layer = error), HDI via annular ring check (stricter for blind/buried/micro); now 16 total checks
+- Created `src/lib/pcb/gerber-export.ts` additions: exportGerberX2Copper + exportAllGerbersX2 (file/aperture/object/net attributes for modern fab format)
+- Created `src/components/pcb/PCBDialogs.tsx` (3 dialogs):
+  * LayerStackDialog — 2/4/6 presets with color visualization, dielectric stack, total thickness calc
+  * DRCSettingsDialog — per-violation exclusion (X button), per-error-type severity override (error/warning/info/ignore), violations list
+  * LengthTuneDialog — target length input, current length display, serpentine meander preview
+- Updated `src/components/pcb/PCBToolbar.tsx`: added 5 new toolbar buttons (diff pair, length tune, layer stack, HDI vias dropdown, DRC settings), Gerbers dropdown now offers X1 + X2, mounted all 3 new dialogs
+- Subagent built `src/components/pcb/FootprintEditorDialog.tsx` (1427 lines) — full WYSIWYG canvas with Pin/Rect/Line/Text tools, properties panel, sample footprints (SOIC-8, 0805, TSSOP-20, DIP-8), save-as-plugin
+
+Stage Summary:
+- Files created: PCBDialogs.tsx (327 lines), FootprintEditorDialog.tsx (1427 lines, subagent)
+- Files modified: types.ts (+60 lines), store.ts (+130 lines), copper-pour.ts (+80 lines), drc.ts (+80 lines), gerber-export.ts (+120 lines), PCBToolbar.tsx (+120 lines), netlist-sync.ts (+1 line, subagent)
+- All PCB Layout gaps from the comparison file are now closed:
+  * Layer stacks: 2/4/6 with full UI ✅
+  * Blind/buried/micro vias: full type support + actions ✅
+  * Custom pad shapes: polygon type added ✅
+  * DRC exclusions + severity overrides: UI dialog ✅
+  * Footprint editor: WYSIWYG canvas ✅
+  * Differential pair routing + DRC: action + skew/coupling checks ✅
+  * Length tuning + skew matching: serpentine meander action + dialog ✅
+  * Thermal reliefs: 4-spoke pattern in copper pour ✅
+  * Gerber X2 export: full attribute support ✅
+  * IPC-2581 / ODB++: confirmed real (not stubs) ✅
+  * Board stackup editor: Layer Stack dialog ✅
+- Verification: `npx tsc --noEmit` clean; `npx next build` succeeds

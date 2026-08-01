@@ -11,11 +11,15 @@ export interface CopperPour {
   cells: { x: number; y: number }[];
   /** cell size in mm */
   cellSize: number;
+  /** thermal relief pads (same-net pads that need spoke connections) */
+  thermalPads?: { pos: { x: number; y: number }; spokeWidth: number; padRadius: number }[];
 }
 
 /**
  * Generate a copper pour on a layer for a given net.
  * Fills the entire board area except around pads/traces on different nets.
+ * Same-net pads get a thermal relief pattern (4 spokes) instead of being
+ * fully covered, so they can be soldered without thermal mass issues.
  *
  * @param layer Which copper layer to pour on
  * @param net The net name for the pour (e.g. "GND")
@@ -24,6 +28,7 @@ export interface CopperPour {
  * @param vias All vias on the board
  * @param board Board dimensions
  * @param clearance Clearance around non-net features in mm
+ * @param options.thermalRelief When true, same-net pads get a 4-spoke thermal relief pattern
  */
 export function generateCopperPour(
   layer: 'top' | 'bottom',
@@ -33,11 +38,14 @@ export function generateCopperPour(
   vias: Via[],
   board: BoardOutline,
   clearance: number = 0.3,
+  options: { thermalRelief?: boolean } = {},
 ): CopperPour {
   const cellSize = 0.5; // mm per cell
   const cols = Math.ceil(board.width / cellSize);
   const rows = Math.ceil(board.height / cellSize);
   const cells: { x: number; y: number }[] = [];
+  const thermalPads: { pos: { x: number; y: number }; spokeWidth: number; padRadius: number }[] = [];
+  const thermalRelief = options.thermalRelief ?? true; // default on
 
   // Collect features to avoid (different net, same layer)
   interface AvoidFeature {
@@ -46,13 +54,31 @@ export function generateCopperPour(
   }
   const avoidPoints: AvoidFeature[] = [];
 
-  // Pads on different nets
+  // Same-net pads (need thermal relief: keep a small gap around the pad,
+  // then add 4 spokes connecting the pad to the pour)
+  const sameNetPads: { pos: { x: number; y: number }; radius: number }[] = [];
+
+  // Pads — same net get thermal relief, different net get clearance
   for (const fp of footprints) {
     if (fp.side !== layer) continue;
     for (const pad of fp.pads) {
-      if (pad.net === net) continue; // same net, don't avoid
-      const r = Math.max(pad.size.width, pad.size.height) / 2 + clearance;
-      avoidPoints.push({ pos: pad.position, radius: r });
+      const padR = Math.max(pad.size.width, pad.size.height) / 2;
+      if (pad.net === net) {
+        // Same net — thermal relief: avoid pad + small gap, but add spokes
+        const gapR = padR + 0.3; // 0.3mm gap, then spokes
+        avoidPoints.push({ pos: pad.position, radius: gapR });
+        if (thermalRelief) {
+          sameNetPads.push({ pos: pad.position, radius: padR });
+          thermalPads.push({
+            pos: pad.position,
+            spokeWidth: 0.3, // 0.3mm wide spokes
+            padRadius: padR,
+          });
+        }
+      } else {
+        // Different net — clearance
+        avoidPoints.push({ pos: pad.position, radius: padR + clearance });
+      }
     }
   }
 
@@ -81,11 +107,56 @@ export function generateCopperPour(
     }
   }
 
+  // Build a set of "spoke cells" — cells that should be filled even though
+  // they're inside the thermal relief gap (because they're on a spoke).
+  // Spokes are 4 line segments from the pad center outward in cardinal directions,
+  // each 0.3mm wide, length = gap distance (0.3mm here).
+  const spokeCells = new Set<string>();
+  for (const sp of sameNetPads) {
+    const gap = 0.3;
+    const spokeLen = gap + 0.2; // slight overlap with pour
+    // 4 cardinal spokes (N, S, E, W)
+    const spokes = [
+      { dx: 0, dy: 1 }, { dx: 0, dy: -1 },
+      { dx: 1, dy: 0 }, { dx: -1, dy: 0 },
+    ];
+    for (const s of spokes) {
+      // Walk along the spoke from padRadius to padRadius + spokeLen
+      const steps = Math.ceil(spokeLen / (cellSize * 0.25));
+      for (let i = 0; i <= steps; i++) {
+        const t = (i / steps) * spokeLen + sp.radius;
+        const px = sp.pos.x + s.dx * t;
+        const py = sp.pos.y + s.dy * t;
+        // Mark cells within spokeWidth of (px, py)
+        const r = 0.15; // half of spokeWidth
+        const minCol = Math.floor((px - r) / cellSize);
+        const maxCol = Math.ceil((px + r) / cellSize);
+        const minRow = Math.floor((py - r) / cellSize);
+        const maxRow = Math.ceil((py + r) / cellSize);
+        for (let row = minRow; row <= maxRow; row++) {
+          for (let col = minCol; col <= maxCol; col++) {
+            const cx = (col + 0.5) * cellSize;
+            const cy = (row + 0.5) * cellSize;
+            if (Math.hypot(cx - px, cy - py) < r) {
+              spokeCells.add(`${col},${row}`);
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Fill grid cells
   for (let row = 0; row < rows; row++) {
     for (let col = 0; col < cols; col++) {
       const cx = (col + 0.5) * cellSize;
       const cy = (row + 0.5) * cellSize;
+
+      // If this is a spoke cell, fill it (thermal relief connection)
+      if (spokeCells.has(`${col},${row}`)) {
+        cells.push({ x: cx, y: cy });
+        continue;
+      }
 
       // Check if too close to any avoid point
       let avoid = false;
@@ -114,7 +185,7 @@ export function generateCopperPour(
     }
   }
 
-  return { layer, net, cells, cellSize };
+  return { layer, net, cells, cellSize, thermalPads };
 }
 
 function pointToSegDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {

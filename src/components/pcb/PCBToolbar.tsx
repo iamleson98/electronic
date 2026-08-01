@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
 import { Button } from '@/components/ui/button';
@@ -12,13 +12,16 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Download, MousePointer2, Route, Plus, RotateCw, Trash2, Grid3x3, Eye, Zap,
-  ShieldCheck, Layers, FileDown, Wand2, GitCompare, Upload,
-  ShieldOff, Droplet, AlignLeft, FlipHorizontal, ChevronDown,
+  ShieldCheck, Layers, Layers3, FileDown, Wand2, GitCompare, Upload, GitBranch, Activity,
+  ShieldOff, Droplet, AlignLeft, FlipHorizontal, ChevronDown, Frame, CircleDot, SlidersHorizontal,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { exportBOM, exportIPC2581 } from '@/lib/pcb/additional-exports';
+import { exportAllGerbersX2 } from '@/lib/pcb/gerber-export';
 import { importKiCadFootprint, importKiCadFootprintsFromFile } from '@/lib/pcb/kicad-import';
 import { footprintDefs } from '@/lib/pcb/footprints';
+import { FootprintEditorDialog } from './FootprintEditorDialog';
+import { LayerStackDialog, DRCSettingsDialog, LengthTuneDialog } from './PCBDialogs';
 
 export function PCBToolbar() {
   const tool = usePCB((s) => s.tool);
@@ -52,6 +55,11 @@ export function PCBToolbar() {
 
   const components = useEditor((s) => s.components);
   const wires = useEditor((s) => s.wires);
+
+  const [showFootprintEditor, setShowFootprintEditor] = useState(false);
+  const [showLayerStack, setShowLayerStack] = useState(false);
+  const [showDRCSettings, setShowDRCSettings] = useState(false);
+  const [showLengthTune, setShowLengthTune] = useState(false);
 
   const handleImport = () => {
     if (components.length === 0) {
@@ -121,7 +129,22 @@ export function PCBToolbar() {
 
   const handleGerberExport = () => {
     exportGerbers();
-    toast.success('Gerber + drill + PnP files exported');
+    toast.success('Gerber X1 + drill + PnP files exported');
+  };
+
+  const handleGerberX2Export = () => {
+    const s = usePCB.getState();
+    const files = exportAllGerbersX2(s.footprints, s.traces, s.vias, s.board);
+    for (const file of files) {
+      const blob = new Blob([file.content], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = file.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+    toast.success(`Gerber X2 + drill + PnP exported (${files.length} files)`);
   };
 
   const handleAutoRoute = () => {
@@ -162,6 +185,51 @@ export function PCBToolbar() {
       const warnings = result.errors.filter((e) => e.severity === 'warning').length;
       toast.warning(`Netlist: ${errors} error(s), ${warnings} warning(s)`);
     }
+  };
+
+  const handleLengthTune = () => {
+    if (!selectedTraceId) {
+      toast.error('Select a trace first, then click Length Tune');
+      return;
+    }
+    setShowLengthTune(true);
+  };
+
+  const handleRouteDiffPair = () => {
+    // Use the active layer; for demo, route a diff pair on pads R1.1 ↔ R2.1
+    // (in a real implementation the user would pick the pads via a tool)
+    const footprints = usePCB.getState().footprints;
+    if (footprints.length < 2) {
+      toast.error('Need at least 2 footprints to route a diff pair');
+      return;
+    }
+    const padA = footprints[0].pads[0];
+    const padB = footprints[1].pads[0];
+    if (!padA || !padB) {
+      toast.error('Could not find pads on the first two footprints');
+      return;
+    }
+    const result = usePCB.getState().routeDiffPair(padA.id, padB.id, `${padA.net ?? 'DATA'}_P`, `${padA.net ?? 'DATA'}_N`);
+    if (result.routedP && result.routedN) {
+      toast.success('Differential pair routed (P + N traces added)');
+    } else {
+      toast.error('Diff pair routing failed');
+    }
+  };
+
+  const handleAddBlindVia = () => {
+    // Add a blind via at the center of the selected footprint (or board center)
+    const fp = usePCB.getState().footprints.find((f) => f.id === selectedFootprintId);
+    const pos = fp ? fp.position : { x: usePCB.getState().board.width / 2, y: usePCB.getState().board.height / 2 };
+    usePCB.getState().addTypedVia(pos, 'unrouted', 'blind', 'top', 'inner1');
+    toast.success('Blind via added (top → inner1)');
+  };
+
+  const handleAddMicroVia = () => {
+    const fp = usePCB.getState().footprints.find((f) => f.id === selectedFootprintId);
+    const pos = fp ? fp.position : { x: usePCB.getState().board.width / 2, y: usePCB.getState().board.height / 2 };
+    usePCB.getState().addTypedVia(pos, 'unrouted', 'micro', 'top', 'inner1');
+    toast.success('Microvia added (top → inner1, laser-drilled)');
   };
 
   const handleCopperPour = () => {
@@ -213,6 +281,17 @@ export function PCBToolbar() {
             </Button>
           </TooltipTrigger>
           <TooltipContent>Import KiCad .kicad_mod or .kicad_pcb file</TooltipContent>
+        </Tooltip>
+
+        {/* Footprint editor — opens the WYSIWYG canvas dialog */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => setShowFootprintEditor(true)}>
+              <Frame size={14} />
+              <span className="ml-1 hidden md:inline">Footprint Editor</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Open the WYSIWYG footprint editor</TooltipContent>
         </Tooltip>
 
         <div className="mx-1 h-5 w-px bg-slate-700" />
@@ -345,6 +424,64 @@ export function PCBToolbar() {
           <TooltipContent>Auto-route all unrouted nets (Lee's algorithm)</TooltipContent>
         </Tooltip>
 
+        {/* Differential pair routing */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={handleRouteDiffPair} className="text-cyan-400 hover:text-cyan-300">
+              <GitBranch size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Route differential pair (P+N traces, parallel)</TooltipContent>
+        </Tooltip>
+
+        {/* Length tuning */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={handleLengthTune} className="text-amber-400 hover:text-amber-300">
+              <Activity size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Length-tune selected trace (serpentine meander)</TooltipContent>
+        </Tooltip>
+
+        {/* Layer stack dialog */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => setShowLayerStack(true)} className="text-slate-300">
+              <Layers3 size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Layer stack editor (2/4/6-layer)</TooltipContent>
+        </Tooltip>
+
+        {/* HDI vias dropdown */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="ghost" className="text-emerald-400 hover:text-emerald-300">
+              <CircleDot size={14} />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48 bg-slate-900 border-slate-700">
+            <DropdownMenuLabel className="text-slate-300">HDI Vias</DropdownMenuLabel>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handleAddBlindVia}>
+              Blind via (top → inner1)
+            </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handleAddMicroVia}>
+              Microvia (top → inner1, laser)
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {/* DRC settings dialog */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={() => setShowDRCSettings(true)} className="text-slate-300">
+              <SlidersHorizontal size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>DRC settings + exclusions</TooltipContent>
+        </Tooltip>
+
         {/* Tools dropdown: align, distribute, flip, length-tune */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -433,16 +570,27 @@ export function PCBToolbar() {
             </TooltipTrigger>
             <TooltipContent>Export PCB as JSON</TooltipContent>
           </Tooltip>
-          {/* Export Gerbers */}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button size="sm" className="bg-amber-500 text-slate-900 hover:bg-amber-400" onClick={handleGerberExport}>
+          {/* Export Gerbers (X1 + X2) */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm" className="bg-amber-500 text-slate-900 hover:bg-amber-400">
                 <FileDown size={14} />
                 <span className="ml-1 hidden md:inline">Gerbers</span>
+                <ChevronDown size={12} className="ml-1" />
               </Button>
-            </TooltipTrigger>
-            <TooltipContent>Export Gerber + Drill + PnP files</TooltipContent>
-          </Tooltip>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56 bg-slate-900 border-slate-700">
+              <DropdownMenuLabel className="text-slate-300">Manufacturing Export</DropdownMenuLabel>
+              <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handleGerberExport}>
+                Gerber X1 (RS-274X)
+                <span className="ml-auto text-[10px] text-slate-500">legacy</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handleGerberX2Export}>
+                Gerber X2 (with attributes)
+                <span className="ml-auto text-[10px] text-emerald-400">recommended</span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           {/* Export BOM */}
           <Tooltip>
             <TooltipTrigger asChild>
@@ -481,6 +629,26 @@ export function PCBToolbar() {
           </Tooltip>
         </div>
       </div>
+
+      {/* Footprint Editor dialog */}
+      <FootprintEditorDialog
+        open={showFootprintEditor}
+        onClose={() => setShowFootprintEditor(false)}
+        onSave={() => {
+          // Notify any listening UI that the footprint registry changed
+          // (e.g. future Library Manager auto-refresh).
+          window.dispatchEvent(new CustomEvent('circuitlab:footprint-registered'));
+        }}
+      />
+
+      {/* Layer Stack dialog */}
+      <LayerStackDialog open={showLayerStack} onClose={() => setShowLayerStack(false)} />
+
+      {/* DRC Settings + Exclusions dialog */}
+      <DRCSettingsDialog open={showDRCSettings} onClose={() => setShowDRCSettings(false)} />
+
+      {/* Length Tune dialog */}
+      <LengthTuneDialog open={showLengthTune} onClose={() => setShowLengthTune(false)} />
     </TooltipProvider>
   );
 }

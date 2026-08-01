@@ -301,3 +301,145 @@ export function exportAllGerbers(
 
   return files;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gerber X2 (RS-274X revision 2) export.
+//
+// Gerber X2 adds:
+//   - Standardized metadata via %TF.* % attributes (file function, generation software, etc.)
+//   - Aperture attributes (%TA.* %) for pad/trace roles (conductor, via, component)
+//   - Object attributes (%TO.* %) for component reference designator, MPN, etc.
+//   - Net attributes (%TN.* %) for trace net name
+//
+// X2 is what modern fabricators (JLC, PCBWay, etc.) actually want — it eliminates
+// the need to interpret layer filenames.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function exportGerberX2Copper(
+  layer: 'top' | 'bottom',
+  footprints: Footprint[],
+  traces: Trace[],
+  vias: Via[],
+  board: BoardOutline,
+): string {
+  const lines: string[] = [];
+  const fmt = (n: number) => (n * 1e6).toFixed(0).padStart(7, '0');
+
+  // X2 file attributes
+  lines.push('%TF.GenerationSoftware,CircuitLab,v1.0*%');
+  lines.push('%TF.CreationDate,2026-08-01T00:00:00Z*%');
+  lines.push(`%TF.ProjectId,CircuitLab-PCB,rev1,*%`);
+  lines.push(`%TF.FileFunction,Copper,${layer === 'top' ? 'L1' : 'L2'}*%`);
+  lines.push('%TF.FilePolarity,Positive*%');
+  lines.push('%TF.SameCoordinates*%');
+  lines.push('%MOMM*%');
+  lines.push('%FSLAX26Y26*%');
+  lines.push('%LPD*%');
+
+  // Aperture attributes
+  lines.push('%TA.AperFunction,Conductor*%');
+  lines.push('%TA.AperFunction,ViaPad*%');
+  lines.push('%TA.AperFunction,ComponentPad*%');
+
+  // Apertures
+  lines.push('%ADD10C,0.200*%');
+  lines.push('%ADD11C,0.300*%');
+  lines.push('%ADD12C,0.500*%');
+  lines.push('%ADD13C,0.800*%');
+  lines.push('%ADD14C,1.000*%');
+  lines.push('%ADD15C,1.800*%');
+  lines.push('%ADD16R,1.500X0.800*%');
+  lines.push('%ADD17R,1.000X1.000*%');
+  lines.push('%ADD18R,1.800X1.800*%');
+  lines.push('%ADD20C,0.150*%');
+
+  // Board outline
+  lines.push('%TO.N,*%'); // no net for outline
+  lines.push('G54D20*');
+  lines.push(`X${fmt(0)}Y${fmt(0)}D02*`);
+  lines.push(`X${fmt(board.width)}Y${fmt(0)}D01*`);
+  lines.push(`X${fmt(board.width)}Y${fmt(board.height)}D01*`);
+  lines.push(`X${fmt(0)}Y${fmt(board.height)}D01*`);
+  lines.push(`X${fmt(0)}Y${fmt(0)}D01*`);
+
+  // Pads — with component attributes
+  for (const fp of footprints) {
+    // Component object open
+    lines.push(`%TO.C,${fp.refdes}*%`);
+    lines.push(`%TO.P,${fp.refdes},${fp.componentType}*%`);
+    for (const pad of fp.pads) {
+      if (pad.layer !== layer && fp.side !== layer) continue;
+      // Net attribute
+      lines.push(`%TO.N,${pad.net ?? 'unconnected'}*%`);
+      const size = Math.max(pad.size.width, pad.size.height);
+      let ap = 10;
+      if (pad.shape === 'circle') {
+        if (size >= 1.7) ap = 15;
+        else if (size >= 0.9) ap = 14;
+        else if (size >= 0.7) ap = 13;
+        else if (size >= 0.4) ap = 12;
+        else ap = 11;
+      } else {
+        if (size >= 1.5) ap = 18;
+        else if (size >= 1.0) ap = 17;
+        else ap = 16;
+      }
+      lines.push(`G54D${ap}*`);
+      lines.push(`X${fmt(pad.position.x)}Y${fmt(pad.position.y)}D03*`);
+    }
+    lines.push('%TD*%'); // close component attributes
+  }
+
+  // Traces — with net attributes
+  for (const trace of traces) {
+    if (trace.layer !== layer) continue;
+    lines.push(`%TO.N,${trace.net}*%`);
+    const w = trace.width;
+    let ap = 11;
+    if (w >= 0.7) ap = 13;
+    else if (w >= 0.4) ap = 12;
+    else ap = 11;
+    lines.push(`G54D${ap}*`);
+    for (const seg of trace.segments) {
+      lines.push(`X${fmt(seg.start.x)}Y${fmt(seg.start.y)}D02*`);
+      lines.push(`X${fmt(seg.end.x)}Y${fmt(seg.end.y)}D01*`);
+    }
+  }
+
+  // Vias — with via function attribute
+  lines.push('%TA.AperFunction,ViaPad*%');
+  for (const via of vias) {
+    lines.push(`%TO.N,${via.net}*%`);
+    const ap = via.diameter >= 0.9 ? 14 : 13;
+    lines.push(`G54D${ap}*`);
+    lines.push(`X${fmt(via.position.x)}Y${fmt(via.position.y)}D03*`);
+  }
+  lines.push('%TD*%');
+
+  lines.push('M02*');
+  // X2 file end
+  lines.push('%TF.EndOfBlock*%');
+
+  return lines.join('\n');
+}
+
+/**
+ * Export all Gerber X2 files (copper top + bottom + masks + silk + drill).
+ */
+export function exportAllGerbersX2(
+  footprints: Footprint[],
+  traces: Trace[],
+  vias: Via[],
+  board: BoardOutline,
+): { filename: string; content: string }[] {
+  const files: { filename: string; content: string }[] = [];
+  files.push({ filename: 'top_copper.gbr', content: exportGerberX2Copper('top', footprints, traces, vias, board) });
+  files.push({ filename: 'bottom_copper.gbr', content: exportGerberX2Copper('bottom', footprints, traces, vias, board) });
+  files.push({ filename: 'top_soldermask.gbr', content: exportGerberSolderMask('top', footprints, board) });
+  files.push({ filename: 'bottom_soldermask.gbr', content: exportGerberSolderMask('bottom', footprints, board) });
+  files.push({ filename: 'top_silkscreen.gbr', content: exportGerberSilkscreen('top', footprints, board) });
+  files.push({ filename: 'bottom_silkscreen.gbr', content: exportGerberSilkscreen('bottom', footprints, board) });
+  files.push({ filename: 'drill.drl', content: exportExcellonDrill(footprints, vias) });
+  files.push({ filename: 'pick_and_place.csv', content: exportPickAndPlace(footprints) });
+  return files;
+}

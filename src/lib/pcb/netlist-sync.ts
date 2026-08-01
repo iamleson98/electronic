@@ -47,7 +47,7 @@ export function generateFootprints(
         position: { x: x + px, y: y + py },
         shape: padDef.shape,
         size: { ...padDef.size },
-        layer: 'top' as const,
+        layer: padDef.layer ?? 'top' as const,
       };
     });
 

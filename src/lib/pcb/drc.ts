@@ -358,7 +358,79 @@ export function runDRC(
   // 15. Check footprint count matches schematic (netlist verification)
   // This is handled by the netlist-verify module separately
 
+  // 16. Differential pair skew check — paired traces must be within max skew
+  // (default 5mil = 0.127mm). Length difference above this is a DRC warning.
+  const diffPairs = new Map<string, Trace[]>(); // key = base net name (without _P/_N)
+  for (const trace of traces) {
+    // Detect diff-pair traces by their `pairedTraceId` field, or by net name suffix
+    if (trace.pairedTraceId) {
+      const key = trace.id < trace.pairedTraceId ? `${trace.id}|${trace.pairedTraceId}` : `${trace.pairedTraceId}|${trace.id}`;
+      if (!diffPairs.has(key)) diffPairs.set(key, []);
+      diffPairs.get(key)!.push(trace);
+    }
+  }
+  for (const [pairKey, pair] of diffPairs) {
+    if (pair.length !== 2) continue;
+    const [a, b] = pair;
+    const lenA = traceLength(a);
+    const lenB = traceLength(b);
+    const skew = Math.abs(lenA - lenB);
+    const maxSkew = 0.5; // 0.5mm default max skew (configurable later)
+    if (skew > maxSkew) {
+      // Position the error at the midpoint of the longer trace
+      const longer = lenA > lenB ? a : b;
+      const midSeg = longer.segments[Math.floor(longer.segments.length / 2)];
+      errors.push({
+        type: 'clearance', // reusing existing type — could be 'skew' if we extend the type
+        severity: 'warning',
+        message: `Diff pair skew: ${pairKey} length diff ${skew.toFixed(3)}mm > ${maxSkew}mm (P=${lenA.toFixed(2)}mm, N=${lenB.toFixed(2)}mm)`,
+        position: midSeg ? { x: (midSeg.start.x + midSeg.end.x) / 2, y: (midSeg.start.y + midSeg.end.y) / 2 } : { x: 0, y: 0 },
+        layer: 'both',
+      });
+    }
+  }
+
+  // 17. Differential pair coupling check — paired traces should stay parallel
+  // and within coupling distance. Simplified: just check they're on the same layer.
+  for (const [pairKey, pair] of diffPairs) {
+    if (pair.length !== 2) continue;
+    if (pair[0].layer !== pair[1].layer) {
+      errors.push({
+        type: 'clearance',
+        severity: 'error',
+        message: `Diff pair ${pairKey} routed on different layers (${pair[0].layer} vs ${pair[1].layer})`,
+        position: pair[0].segments[0]?.start ?? { x: 0, y: 0 },
+        layer: 'both',
+      });
+    }
+  }
+
+  // 18. Min annular ring for blind/buried vias (stricter than THT)
+  for (const via of vias) {
+    if (via.type === 'blind' || via.type === 'buried' || via.type === 'micro') {
+      const annularRing = (via.diameter - via.drill) / 2;
+      const minRing = via.type === 'micro' ? 0.05 : 0.1; // stricter for HDI vias
+      if (annularRing < minRing) {
+        errors.push({
+          type: 'annular_ring',
+          severity: 'warning',
+          message: `${via.type} via annular ring ${annularRing.toFixed(3)}mm < minimum ${minRing}mm for HDI vias`,
+          position: via.position,
+          layer: 'both',
+        });
+      }
+    }
+  }
+
   return errors;
+}
+
+function traceLength(trace: Trace): number {
+  let len = 0;
+  for (const seg of trace.segments) {
+    len += Math.hypot(seg.end.x - seg.start.x, seg.end.y - seg.start.y);
+  }
+  return len;
 }
 
 // ----- Geometry helpers -----
