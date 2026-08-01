@@ -641,3 +641,32 @@ Stage Summary:
 - Fixed the Arduino firmware execution to fast-forward sim.time when in a wait state.
 - The 7-segment counter now cycles 0→1→2→...→9→0 at ~10 digits per second (visible counting).
 - Test script at scripts/test-7seg-counting.ts verifies all 10 digits appear.
+
+---
+Task ID: fix-flow-dot-speed-unequal
+Agent: main
+Task: Fix current flow dot animation — dots move at different speeds on different wires even when current is identical (user reported in LED circuit).
+
+Work Log:
+- Root cause analysis (CircuitCanvas.tsx, flow dot rendering):
+  - Old formula: `position = (n/numDots + fracPhase) * totalLen` where `fracPhase = (flowPhase * speed * dir) mod 1`.
+  - `flowPhaseRef` increments by ~0.012 per frame.
+  - Dot pixel advance per frame = `delta(fracPhase) * totalLen = 0.012 * speed * totalLen`.
+  - The dot speed in pixels per second is **proportional to totalLen** (wire length).
+  - In a series circuit (like the LED example), all wires carry the same current → same `speed` value. But wires have different lengths (different totalLen), so dots move at different visual speeds. A 2× longer wire has dots moving 2× faster.
+  - This is physically wrong: in a series circuit, drift velocity is the same everywhere (current = n·e·A·v_d, and if A is constant, v_d is the same).
+- Fix:
+  - Changed the dot position formula to use an absolute pixel offset instead of a fractional phase:
+    - `rawOffset = flowPhaseRef.current * speed * dir * PIXELS_PER_PHASE` (PIXELS_PER_PHASE = 60)
+    - `dotOffset = ((rawOffset % totalLen) + totalLen) % totalLen`
+    - `distAlong = (n * dotSpacing + dotOffset) mod totalLen`
+  - Now the dot advances by `0.012 * speed * 60 = 0.72 * speed` pixels per frame, **independent of totalLen**.
+  - All wires with the same current magnitude now have dots moving at the same pixels-per-second, regardless of wire length.
+  - The `PIXELS_PER_PHASE = 60` constant was chosen so that at speed=1 (≈10mA), dots move at ~43 px/sec — a comfortable visual speed.
+- Verified: component and wire currents in the LED example are all 0.009063 A (confirmed equal via scripts/test-led-currents.ts). The visual inequality was purely a rendering bug.
+- Typecheck: no src errors. Build: succeeds.
+
+Stage Summary:
+- Fixed flow dot animation: dot speed is now in pixels-per-frame (constant for same current), not fraction-of-wire-per-frame (proportional to wire length).
+- All wires in a series circuit now show dots moving at the same visual speed.
+- PIXELS_PER_PHASE = 60 gives a comfortable dot speed at typical current levels.
