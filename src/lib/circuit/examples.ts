@@ -429,6 +429,141 @@ goto loop`,
   ],
 };
 
+// ----- Example 9: Digital Clock (HH:MM:SS) -----
+// A 6-digit digital clock using CD4026 decade counter ICs.
+//
+// Architecture:
+//   1Hz pulse source (crystal) → sec-ones CD4026 → CO → sec-tens → CO →
+//   min-ones → CO → min-tens → CO → hr-ones → CO → hr-tens
+//
+// Each CD4026 counts on the rising edge of its CLK input and drives a 7-segment
+// display directly via its a-g outputs. The carry-out (CO) goes HIGH for the
+// first half of the count cycle, producing a rising edge on the next CD4026's
+// CLK when this counter wraps to 0.
+//
+// maxCount settings:
+//   - ones digits: maxCount=10 (counts 0-9)
+//   - tens digits: maxCount=6 (counts 0-5, for seconds/minutes tens)
+//   - hours tens: maxCount=3 (counts 0-2, for 24h format)
+//
+// Note: For a true 24-hour reset (00:00:00 at 24:00:00), add an AND gate that
+// detects hr-tens=2 AND hr-ones=4 and drives RST on both hour counters.
+// This example omits that for simplicity — it counts 00:00:00 to 29:59:59.
+//
+// Layout: 6 digit columns, each with a CD4026 (top) and 7-seg (bottom).
+//   x=2: hr-tens, x=10: hr-ones, x=20: min-tens, x=28: min-ones,
+//   x=38: sec-tens, x=46: sec-ones
+//   Crystal at far right, power and ground at bottom.
+function digitSegWires(prefix: string, cx: number, segId: string, segCx: number) {
+  // Generate 7 segment wires from CD4026 (at cx, y=2) to 7-seg (at segCx, y=8)
+  // CD4026 segment outputs at (cx+0..6, 6)
+  // 7-seg segment inputs at various positions
+  const segPositions: Record<string, [number, number]> = {
+    a: [segCx + 0, 8],   // top-left
+    b: [segCx + 2, 8],   // top-mid
+    c: [segCx + 4, 8],   // top-right
+    d: [segCx + 4, 14],  // bot-right
+    e: [segCx + 2, 14],  // bot-mid
+    f: [segCx + 0, 14],  // bot-left
+    g: [segCx + 0, 11],  // mid-left
+  };
+  const cd4026SegY = 6; // bottom of CD4026
+  const segIds = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+  return segIds.map((s, i) => {
+    const [sx, sy] = segPositions[s];
+    // Route from (cx+i, 6) to (sx, sy)
+    // Simple L-path: go down from CD4026 output to a routing channel, then to the segment
+    const waypoints: [number, number][] = [];
+    if (sy <= 8) {
+      // Top-row segments (a, b, c): route directly down
+      waypoints.push([cx + i, 7], [sx, 7]);
+    } else {
+      // Bottom/side segments (d, e, f, g): route around the 7-seg body
+      // Go down to y=7, then horizontal to sx, then down to sy
+      waypoints.push([cx + i, 7], [sx, 7]);
+    }
+    return wire(`${prefix}_${s}`, `ic_${prefix}`, s, `seg_${prefix}`, s, waypoints);
+  });
+}
+
+export const exampleClock: CircuitDocument = {
+  version: 1,
+  components: [
+    // 1Hz crystal oscillator (pulse source) — drives the seconds-ones counter
+    comp('pulseSource', 'xtal', [53, 2], 0, { high: 5, low: 0, frequency: 1, duty: 50 }),
+    // 5V power for the CD4026 ICs
+    comp('dcVoltage', 'vcc1', [53, 8], 0, { voltage: 5 }),
+    comp('ground', 'gnd1', [25, 18], 0, {}),
+    // 6 CD4026 decade counters (left to right: hr-tens, hr-ones, min-tens, min-ones, sec-tens, sec-ones)
+    comp('cd4026', 'ic_ht', [2, 2], 0, { maxCount: 3, vcc: 5 }),   // hours tens (0-2)
+    comp('cd4026', 'ic_ho', [10, 2], 0, { maxCount: 10, vcc: 5 }),  // hours ones (0-9)
+    comp('cd4026', 'ic_mt', [20, 2], 0, { maxCount: 6, vcc: 5 }),   // minutes tens (0-5)
+    comp('cd4026', 'ic_mo', [28, 2], 0, { maxCount: 10, vcc: 5 }),  // minutes ones (0-9)
+    comp('cd4026', 'ic_st', [38, 2], 0, { maxCount: 6, vcc: 5 }),   // seconds tens (0-5)
+    comp('cd4026', 'ic_so', [46, 2], 0, { maxCount: 10, vcc: 5 }),  // seconds ones (0-9)
+    // 6 seven-segment displays (below the CD4026s)
+    comp('sevenSegment', 'seg_ht', [3, 8], 0, { color: 'green', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_ho', [11, 8], 0, { color: 'green', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_mt', [21, 8], 0, { color: 'green', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_mo', [29, 8], 0, { color: 'green', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_st', [39, 8], 0, { color: 'green', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_so', [47, 8], 0, { color: 'green', threshold: 2.0 }),
+  ],
+  wires: [
+    // Crystal → sec-ones CLK
+    wire('clk_so', 'xtal', 'p', 'ic_so', 'clk', [[54, 1], [46, 1]]),
+    wire('xtal_gnd', 'xtal', 'n', 'gnd1', 'g', [[54, 18]]),
+    // Carry chain: CO → CLK of next stage (right to left: so→st→mo→mt→ho→ht)
+    wire('co_so_st', 'ic_so', 'co', 'ic_st', 'clk', [[52, 4], [38, 4], [38, 1], [44, 1]]),
+    wire('co_st_mo', 'ic_st', 'co', 'ic_mo', 'clk', [[44, 4], [28, 4], [28, 1], [34, 1]]),
+    wire('co_mo_mt', 'ic_mo', 'co', 'ic_mt', 'clk', [[34, 4], [20, 4], [20, 1], [26, 1]]),
+    wire('co_mt_ho', 'ic_mt', 'co', 'ic_ho', 'clk', [[26, 4], [10, 4], [10, 1], [16, 1]]),
+    wire('co_ho_ht', 'ic_ho', 'co', 'ic_ht', 'clk', [[16, 4], [2, 4], [2, 1], [8, 1]]),
+
+    // VCC for all CD4026s (connect to 5V supply)
+    wire('vcc_ht', 'vcc1', 'p', 'ic_ht', 'vcc', [[54, 3], [3, 3]]),
+    wire('vcc_ho', 'vcc1', 'p', 'ic_ho', 'vcc', [[54, 3], [11, 3]]),
+    wire('vcc_mt', 'vcc1', 'p', 'ic_mt', 'vcc', [[54, 3], [21, 3]]),
+    wire('vcc_mo', 'vcc1', 'p', 'ic_mo', 'vcc', [[54, 3], [29, 3]]),
+    wire('vcc_st', 'vcc1', 'p', 'ic_st', 'vcc', [[54, 3], [39, 3]]),
+    wire('vcc_so', 'vcc1', 'p', 'ic_so', 'vcc', [[54, 3], [47, 3]]),
+    wire('vcc_gnd', 'vcc1', 'n', 'gnd1', 'g', [[54, 18]]),
+
+    // GND for all CD4026s
+    wire('gnd_ht', 'ic_ht', 'gnd', 'gnd1', 'g', [[7, 18]]),
+    wire('gnd_ho', 'ic_ho', 'gnd', 'gnd1', 'g', [[15, 18]]),
+    wire('gnd_mt', 'ic_mt', 'gnd', 'gnd1', 'g', [[25, 18]]),
+    wire('gnd_mo', 'ic_mo', 'gnd', 'gnd1', 'g', [[33, 18]]),
+    wire('gnd_st', 'ic_st', 'gnd', 'gnd1', 'g', [[43, 18]]),
+    wire('gnd_so', 'ic_so', 'gnd', 'gnd1', 'g', [[51, 18]]),
+
+    // RST for all CD4026s (tie to ground — no reset)
+    wire('rst_ht', 'ic_ht', 'rst', 'gnd1', 'g', [[2, 18]]),
+    wire('rst_ho', 'ic_ho', 'rst', 'gnd1', 'g', [[10, 18]]),
+    wire('rst_mt', 'ic_mt', 'rst', 'gnd1', 'g', [[20, 18]]),
+    wire('rst_mo', 'ic_mo', 'rst', 'gnd1', 'g', [[28, 18]]),
+    wire('rst_st', 'ic_st', 'rst', 'gnd1', 'g', [[38, 18]]),
+    wire('rst_so', 'ic_so', 'rst', 'gnd1', 'g', [[46, 18]]),
+
+    // COM for all 7-seg displays → ground
+    wire('com_ht', 'seg_ht', 'com', 'gnd1', 'g', [[7, 11], [7, 18]]),
+    wire('com_ho', 'seg_ho', 'com', 'gnd1', 'g', [[15, 11], [15, 18]]),
+    wire('com_mt', 'seg_mt', 'com', 'gnd1', 'g', [[25, 11], [25, 18]]),
+    wire('com_mo', 'seg_mo', 'com', 'gnd1', 'g', [[33, 11], [33, 18]]),
+    wire('com_st', 'seg_st', 'com', 'gnd1', 'g', [[43, 11], [43, 18]]),
+    wire('com_so', 'seg_so', 'com', 'gnd1', 'g', [[51, 11], [51, 18]]),
+
+    // Segment wires for each digit (7 per digit × 6 digits = 42 wires)
+    // Generated by the helper function
+    ...digitSegWires('ht', 2, 'seg_ht', 3),
+    ...digitSegWires('ho', 10, 'seg_ho', 11),
+    ...digitSegWires('mt', 20, 'seg_mt', 21),
+    ...digitSegWires('mo', 28, 'seg_mo', 29),
+    ...digitSegWires('st', 38, 'seg_st', 39),
+    ...digitSegWires('so', 46, 'seg_so', 47),
+  ],
+};
+
 export const examples: { name: string; description: string; doc: CircuitDocument }[] = [
   { name: 'LED + Resistor', description: 'Simple DC circuit: 5V → R → LED → GND', doc: exampleLed },
   { name: '555 Astable Blink', description: 'Classic 555 timer in astable mode driving an LED', doc: example555 },
@@ -438,4 +573,5 @@ export const examples: { name: string; description: string; doc: CircuitDocument
   { name: 'Op-Amp Inverting Amp', description: 'Op-amp with gain -10 (Rf/Rin = 10k/1k)', doc: exampleOpamp },
   { name: 'NMOS Switch', description: 'NMOS transistor switching an LED, push-button on gate', doc: exampleNmos },
   { name: '7-Segment Counter', description: 'Arduino drives 7-segment display counting 0-9 with BCD decoder', doc: exampleSevenSeg },
+  { name: 'Digital Clock', description: 'HH:MM:SS digital clock using CD4026 counters and 1Hz crystal', doc: exampleClock },
 ];

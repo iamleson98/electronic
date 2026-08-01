@@ -1020,6 +1020,164 @@ const photoresistor: ComponentPlugin = {
   },
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CD4026 — Decade Counter with 7-Segment Decoder
+//
+// A classic CMOS IC that:
+//   - Counts 0 to (maxCount-1) on each rising edge of CLK
+//   - Drives 7 segment outputs (a-g) directly to drive a 7-seg display
+//   - Outputs a carry signal (CO) that goes HIGH for the first half of the count
+//     cycle, clocking the next CD4026 on its rising edge (when this wraps to 0)
+//   - Has an active-high reset (RST) that forces count to 0
+//
+// Used in clock circuits: chain 6 of them (sec-ones → sec-tens → min-ones → ... → hr-tens)
+// with maxCount=6 for tens digits and maxCount=10 for ones digits.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 7-segment patterns for digits 0-9 (1 = ON, 0 = OFF)
+// Segment order: a, b, c, d, e, f, g
+const SEG_PATTERNS: Record<number, number[]> = {
+  0: [1, 1, 1, 1, 1, 1, 0],
+  1: [0, 1, 1, 0, 0, 0, 0],
+  2: [1, 1, 0, 1, 1, 0, 1],
+  3: [1, 1, 1, 1, 0, 0, 1],
+  4: [0, 1, 1, 0, 0, 1, 1],
+  5: [1, 0, 1, 1, 0, 1, 1],
+  6: [1, 0, 1, 1, 1, 1, 1],
+  7: [1, 1, 1, 0, 0, 0, 0],
+  8: [1, 1, 1, 1, 1, 1, 1],
+  9: [1, 1, 1, 1, 0, 1, 1],
+};
+
+const cd4026: ComponentPlugin = {
+  type: 'cd4026',
+  name: 'CD4026 Counter',
+  category: 'ic',
+  description: 'Decade counter with built-in 7-segment decoder. Counts on CLK rising edge, drives a-g outputs directly. CO carries to next stage. Set maxCount=6 for tens digits (0-5), maxCount=10 for ones (0-9).',
+  symbol: '4026',
+  boundingBox: { width: 6, height: 4 },
+  terminals: [
+    { id: 'vcc', label: 'VCC', position: { x: 1, y: 0 }, electricalType: 'power_in' },
+    { id: 'gnd', label: 'GND', position: { x: 5, y: 0 }, electricalType: 'power_in' },
+    { id: 'clk', label: 'CLK', position: { x: 0, y: 1 }, electricalType: 'input' },
+    { id: 'rst', label: 'RST', position: { x: 0, y: 3 }, electricalType: 'input' },
+    { id: 'co', label: 'CO', position: { x: 6, y: 2 }, electricalType: 'output' },
+    // Segment outputs (a-g) on the bottom, driving the 7-seg display directly
+    { id: 'a', label: 'a', position: { x: 0, y: 4 }, electricalType: 'output' },
+    { id: 'b', label: 'b', position: { x: 1, y: 4 }, electricalType: 'output' },
+    { id: 'c', label: 'c', position: { x: 2, y: 4 }, electricalType: 'output' },
+    { id: 'd', label: 'd', position: { x: 3, y: 4 }, electricalType: 'output' },
+    { id: 'e', label: 'e', position: { x: 4, y: 4 }, electricalType: 'output' },
+    { id: 'f', label: 'f', position: { x: 5, y: 4 }, electricalType: 'output' },
+    { id: 'g', label: 'g', position: { x: 6, y: 4 }, electricalType: 'output' },
+  ],
+  parameters: [
+    { key: 'maxCount', label: 'Max Count', type: 'number', default: 10, min: 2, max: 16, step: 1 },
+    { key: 'vcc', label: 'VCC', type: 'number', default: 5, unit: 'V', min: 1, max: 18, step: 0.1 },
+  ],
+  render(ctx, params, cellSize) {
+    const w = 6 * cellSize;
+    const h = 4 * cellSize;
+    ctx.fillStyle = '#1e293b';
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.rect(cellSize * 0.2, cellSize * 0.2, w - cellSize * 0.4, h - cellSize * 0.4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#e2e8f0';
+    ctx.font = `bold ${Math.floor(cellSize * 0.6)}px ui-monospace, monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('4026', 3 * cellSize, 2 * cellSize);
+    ctx.font = `${Math.floor(cellSize * 0.35)}px ui-monospace, monospace`;
+    // pin labels
+    const labels: { x: number; y: number; label: string }[] = [
+      { x: 1, y: 0.5, label: 'VCC' },
+      { x: 5, y: 0.5, label: 'GND' },
+      { x: 0.5, y: 1, label: 'CLK' },
+      { x: 0.5, y: 3, label: 'RST' },
+      { x: 5.5, y: 2, label: 'CO' },
+    ];
+    ctx.textAlign = 'left';
+    for (const l of labels) {
+      ctx.fillText(l.label, l.x * cellSize, l.y * cellSize);
+    }
+    // segment output labels
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#94a3b8';
+    for (const s of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+      const i = s.charCodeAt(0) - 97;
+      ctx.fillText(s, i * cellSize, (h / cellSize - 0.3) * cellSize);
+    }
+  },
+  stamp(params, terminals, sys, sim) {
+    const vccV = params.vcc as number;
+    const maxCount = params.maxCount as number;
+    const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
+    const vcc = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
+    // Power: weak pull-up on vcc to gnd (avoid floating)
+    if (vcc !== gnd) sys.stampConductance(vcc, gnd, 1e-9);
+
+    // Persistent state for this counter instance
+    const key = `cd4026_${terminals.map(t => `${t.terminalId}=${t.nodeId}`).join('_')}`;
+    const st = sim.state[key] ?? (sim.state[key] = { count: 0, prevClkV: -1, initialized: false });
+
+    // Read clock and reset inputs (from previous step's solution)
+    const clkNode = terminals.find((t) => t.terminalId === 'clk')!.nodeId;
+    const rstNode = terminals.find((t) => t.terminalId === 'rst')?.nodeId ?? 0;
+    const clkV = sim.nodeVoltage[clkNode] ?? 0;
+    const rstV = sim.nodeVoltage[rstNode] ?? 0;
+    const clkHigh = clkV > vccV * 0.5;
+    const rstHigh = rstV > vccV * 0.5;
+    const prevClkHigh = st.prevClkV > vccV * 0.5;
+
+    // On the very first step, sim.nodeVoltage is all zeros (no previous solve).
+    // We detect this by checking if the clk voltage is ~0V AND the CD4026 hasn't
+    // been initialized yet. Once we see a real voltage (either HIGH or LOW from
+    // the solver's output), we mark the CD4026 as initialized and enable edge
+    // detection. This prevents a spurious "rising edge" at startup when all
+    // node voltages transition from 0V (uninitialized) to their driven values.
+    const hasRealVoltage = Math.abs(clkV) > 0.01 || st.initialized;
+
+    if (rstHigh) {
+      st.count = 0;
+    } else if (st.initialized && clkHigh && !prevClkHigh) {
+      // Rising edge of clock: increment.
+      st.count = (st.count + 1) % maxCount;
+    }
+    st.prevClkV = clkV;
+    st.initialized = hasRealVoltage;
+
+    // Drive segment outputs based on current count
+    const pattern = SEG_PATTERNS[st.count] ?? [0, 0, 0, 0, 0, 0, 0];
+    const segIds = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+    for (let i = 0; i < 7; i++) {
+      const segNode = terminals.find((t) => t.terminalId === segIds[i])!.nodeId;
+      if (segNode !== gnd) {
+        sys.stampVoltageSource(segNode, gnd, pattern[i] ? vccV : 0);
+      }
+    }
+
+    // Carry out: HIGH for first half of count cycle (0 to maxCount/2 - 1)
+    // This produces a rising edge on CO exactly when the count wraps to 0,
+    // clocking the next CD4026 at the right time.
+    const coNode = terminals.find((t) => t.terminalId === 'co')!.nodeId;
+    const coHigh = st.count < maxCount / 2;
+    if (coNode !== gnd) {
+      sys.stampVoltageSource(coNode, gnd, coHigh ? vccV : 0);
+    }
+  },
+  measure(params, terminals, sim) {
+    const key = `cd4026_${terminals.map(t => `${t.terminalId}=${t.nodeId}`).join('_')}`;
+    const st = sim.state[key] ?? { count: 0, prevClk: false };
+    return [
+      { label: 'Count', value: String(st.count), unit: '' },
+      { label: 'Max', value: String(params.maxCount), unit: '' },
+    ];
+  },
+};
+
 registerPlugin(pnp);
 registerPlugin(nmos);
 registerPlugin(pmos);
@@ -1030,5 +1188,6 @@ registerPlugin(crystal);
 registerPlugin(transformer);
 registerPlugin(speaker);
 registerPlugin(photoresistor);
+registerPlugin(cd4026);
 
-export { pnp, nmos, pmos, opampRails, sevenSegment, vco, crystal, transformer, speaker, photoresistor };
+export { pnp, nmos, pmos, opampRails, sevenSegment, vco, crystal, transformer, speaker, photoresistor, cd4026 };

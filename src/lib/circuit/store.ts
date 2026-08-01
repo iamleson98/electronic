@@ -1339,6 +1339,43 @@ export const useEditor = create<EditorState>((set, get) => ({
       prev.branchCurrent = result.sim.branchCurrent;
       prev.time = result.sim.time;
       prev.state = result.sim.state;
+
+      // Digital fast-forward: if the circuit has pulse sources but no
+      // capacitors/inductors, advance sim.time toward the next rising edge.
+      // Without this, a 1Hz pulse would take 10000 steps (~166s real time)
+      // to produce one clock edge — making digital circuits unusably slow.
+      // With the fast-forward, sim.time advances at ~real-time (1s sim per
+      // 1s real at 60Hz), so a 1Hz clock ticks at approximately 1 digit/sec.
+      const hasCapacitor = simComponents.some(c => c.type === 'capacitor' || c.type === 'inductor');
+      const hasPulseSource = simComponents.some(c => c.type === 'pulseSource');
+      const hasArduino = simComponents.some(c => c.type === 'arduinoReal' || c.type === 'arduino');
+      if (hasPulseSource && !hasCapacitor && !hasArduino) {
+        // Find the minimum pulse frequency (determines the fastest clock)
+        let minFreq = Infinity;
+        let dutyCycle = 0.5;
+        for (const c of simComponents) {
+          if (c.type === 'pulseSource') {
+            const f = c.parameters.frequency as number;
+            if (f > 0 && f < minFreq) {
+              minFreq = f;
+              dutyCycle = ((c.parameters.duty as number) ?? 50) / 100;
+            }
+          }
+        }
+        if (minFreq !== Infinity && minFreq > 0) {
+          const currentTime = result.sim.time;
+          const phase = (currentTime * minFreq) % 1;
+          // Next rising edge is at phase = 0 (after wrapping from ~1)
+          // timeToRisingEdge = time until phase wraps to 0
+          const timeToRisingEdge = (1.0 - phase) / minFreq;
+          // Advance by min(16ms, timeToRisingEdge + 1ms to cross the edge)
+          // This caps at ~real-time playback speed.
+          const advance = Math.min(0.016, timeToRisingEdge + 0.001);
+          if (advance > dt) {
+            prev.time = currentTime + advance;
+          }
+        }
+      }
     }
     if (!result) {
       set({ running: false, paused: true });
