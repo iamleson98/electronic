@@ -430,11 +430,11 @@ export function OptionsDialog({ open, onClose }: { open: boolean; onClose: () =>
   );
 }
 
-function Param({ label, value, step, onChange }: { label: string; value: number; step: number; onChange: (v: number) => void }) {
+function Param({ label, value, step, onChange }: { label: string; value: number | undefined; step: number; onChange: (v: number) => void }) {
   return (
     <div>
       <Label className="text-slate-300 text-xs">{label}</Label>
-      <Input type="number" value={value} step={step} onChange={(e) => onChange(parseFloat(e.target.value))} className="bg-slate-800 border-slate-700 h-8" />
+      <Input type="number" value={value ?? 0} step={step} onChange={(e) => onChange(parseFloat(e.target.value))} className="bg-slate-800 border-slate-700 h-8" />
     </div>
   );
 }

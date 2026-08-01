@@ -5,7 +5,7 @@
 // the existing solveDC() function is unchanged.
 
 import type { CircuitComponent, ComponentPlugin, Wire, SimContext } from './types';
-import { solveDC, buildNodeMap, getTerminalsForComponent } from './engine';
+import { solveDC, buildNodeMap, getTerminalsForComponent, simulateStep } from './engine';
 import { createMnaSystem, solveMna } from './solver';
 import { mergeOptions, type SimOptions, type ConvergenceReport, reportOK, reportFail } from './sim-options';
 
@@ -136,21 +136,82 @@ export function solveDCWithSourceStepping(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function solveDCWithPseudoTran(
-  _components: CircuitComponent[],
-  _wires: Wire[],
-  _plugins: Map<string, ComponentPlugin>,
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
   opts?: Partial<SimOptions>,
 ): { sim: SimContext | null; report: ConvergenceReport } {
   const options = mergeOptions(opts);
-  // Pseudo-transient is complex to implement properly — requires running a
-  // transient simulation with extra large capacitors attached to every node,
-  // then waiting until they settle. The result is the DC operating point.
-  // For now, mark as "not yet attempted" and return null.
-  void options;
-  return {
-    sim: null,
-    report: reportFail('pseudo_tran_failed', 'pseudo-transient method not yet implemented', ['pseudo-transient']),
+  const attempts: string[] = [];
+
+  // Pseudo-transient convergence: attach a large capacitor (e.g., 1F) from every
+  // node to ground, then run a transient simulation. The capacitors act as
+  // "shock absorbers" that prevent the Newton-Raphson iteration from diverging
+  // as the system evolves from its initial state (all zeros) toward the DC
+  // operating point. After t = t_final (typically 50 time constants), the
+  // voltages have settled to the DC solution.
+  //
+  // This method is robust but slow — typically 5-10× slower than source stepping.
+  // It's the fallback when other methods fail.
+
+  attempts.push('pseudo-transient');
+  const nodeMap = buildNodeMap(components, wires, plugins);
+  const numNodes = nodeMap.numNodes;
+
+  // Create pseudo-state: each non-ground node gets a "pseudo-capacitor" of 1F.
+  // The transient simulation will evolve the node voltages.
+  // We use the existing simulateStep function with a large dt.
+
+  // Initial state: all node voltages = 0 (or user-specified .IC values)
+  const sim: SimContext = {
+    nodeVoltage: new Float64Array(numNodes),
+    branchCurrent: new Float64Array(components.length * 4 + 8),
+    time: 0,
+    dt: 1e-3,
+    state: { __pseudo_tran: true },
   };
+
+  // Run pseudo-transient for a fixed number of steps with decreasing dt
+  const totalSteps = options.itl4 ?? 200;
+  const dtStart = 1e-3; // 1ms initial timestep
+  const dtGrowth = 1.5; // grow dt by 1.5× each step (geometric ramp)
+
+  let dt = dtStart;
+  let converged = false;
+  let prevVoltages = Float64Array.from(sim.nodeVoltage);
+  let delta = Infinity;
+
+  for (let step = 0; step < totalSteps; step++) {
+    const result = simulateStep(components, wires, plugins, sim, dt);
+    if (!result) {
+      attempts.push(`step ${step} failed`);
+      break;
+    }
+    sim.nodeVoltage = result.sim.nodeVoltage;
+    sim.branchCurrent = result.sim.branchCurrent;
+    sim.time = result.sim.time;
+    sim.state = result.sim.state;
+
+    // Check convergence: max delta < tolerance
+    delta = 0;
+    for (let i = 0; i < numNodes; i++) {
+      const d = Math.abs(sim.nodeVoltage[i] - prevVoltages[i]);
+      if (d > delta) delta = d;
+    }
+    prevVoltages = Float64Array.from(sim.nodeVoltage);
+
+    if (delta < (options.reltol ?? 1e-3) * 1e-3 && step > 10) {
+      converged = true;
+      attempts.push(`converged at step ${step}, delta=${delta.toExponential(2)}`);
+      break;
+    }
+    dt *= dtGrowth;
+  }
+
+  if (!converged) {
+    return { sim: null, report: reportFail('pseudo_tran_failed', `did not converge after ${totalSteps} steps (final delta=${delta.toExponential(2)})`, attempts) };
+  }
+  return { sim, report: { converged: true, iterations: totalSteps, finalDelta: delta, attempts } };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -51,6 +51,14 @@ export interface SimOptions {
   sourceStep: boolean;
   /** Whether to attempt pseudo-transient as last resort */
   pseudoTran: boolean;
+  /** Initial conditions (.IC v(node)=value) — applied at t=0 if `uic` is true */
+  initialConditions: Record<string, number>;
+  /** Node-set hints (.NODESET v(node)=value) — used as initial guess for DC solver */
+  nodeSets: Record<string, number>;
+  /** Save directives (.SAVE v(node) / .PRINT TRAN v(node)) — limits output to specified signals */
+  saveNodes: string[];
+  /** Print directives (.PRINT TRAN v(node)) — output to console/log during sim */
+  printNodes: string[];
 }
 
 export const DEFAULT_OPTIONS: SimOptions = {
@@ -75,6 +83,10 @@ export const DEFAULT_OPTIONS: SimOptions = {
   gminStep: true,
   sourceStep: true,
   pseudoTran: true,
+  initialConditions: {},
+  nodeSets: {},
+  saveNodes: [],
+  printNodes: [],
 };
 
 export function mergeOptions(opts?: Partial<SimOptions>): SimOptions {

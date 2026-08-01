@@ -625,6 +625,7 @@ export function simulateStep(
   plugins: Map<string, ComponentPlugin>,
   prev?: PrevState,
   dt: number = 1e-4,
+  simOptions?: { initialConditions?: Record<string, number>; nodeSets?: Record<string, number> },
 ): StepResult | null {
   const nodeMap = buildNodeMap(components, wires, plugins);
   const numNodes = nodeMap.numNodes; // includes ground (0)
@@ -642,6 +643,36 @@ export function simulateStep(
   // If prev has no data yet (first step), allocate fresh arrays sized to numNodes.
   const hasPrev = prev && prev.nodeVoltage.length > 0;
   const nodeVoltage = hasPrev ? Float64Array.from(prev.nodeVoltage) : new Float64Array(numNodes);
+
+  // Apply .IC (initial conditions) on the very first step (no prev) — these override
+  // the default 0V initialization and are used when `uic` is true.
+  // Apply .NODESET as a hint for the DC solver (initial guess).
+  if (!hasPrev && simOptions) {
+    // .IC — overrides node voltages at t=0
+    if (simOptions.initialConditions) {
+      for (const [termKey, voltage] of Object.entries(simOptions.initialConditions)) {
+        const nodeId = nodeMap.terminalNode.get(termKey);
+        if (nodeId != null && nodeId > 0 && nodeId - 1 < nodeVoltage.length) {
+          nodeVoltage[nodeId - 1] = voltage;
+        }
+      }
+    }
+    // .NODESET — same as .IC but only used as an initial guess for the DC solver
+    // (it gets overwritten by the solve, but helps convergence).
+    // For the transient engine, .NODESET and .IC behave the same way at t=0.
+    if (simOptions.nodeSets) {
+      for (const [termKey, voltage] of Object.entries(simOptions.nodeSets)) {
+        const nodeId = nodeMap.terminalNode.get(termKey);
+        if (nodeId != null && nodeId > 0 && nodeId - 1 < nodeVoltage.length) {
+          // Only apply if not already set by .IC
+          if (simOptions.initialConditions?.[termKey] === undefined) {
+            nodeVoltage[nodeId - 1] = voltage;
+          }
+        }
+      }
+    }
+  }
+
   const branchCurrent = hasPrev ? Float64Array.from(prev.branchCurrent) : new Float64Array(maxExtras);
   // PERSISTENT state: reuse the same state object across steps so plugins (capacitors,
   // inductors, 555, MCU) keep their memory. Created once per session.

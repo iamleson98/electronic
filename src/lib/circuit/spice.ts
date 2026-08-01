@@ -150,16 +150,53 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
     lines.push(line);
   }
 
-  // 1. First pass: collect .subckt definitions and .model statements
+  // 1. First pass: collect .subckt definitions, .model statements, .ic, .nodeset, .save, .print
   const models = new Map<string, SpiceModel>();
   const subckts = new Map<string, SubCkt>();
   let currentSubckt: SubCkt | null = null;
+  const initialConditions: Record<string, number> = {};
+  const nodeSets: Record<string, number> = {};
+  const saveNodes: string[] = [];
+  const printNodes: string[] = [];
 
   for (const line of lines) {
     if (!line || line.startsWith('*') || line.startsWith(';')) continue;
     const tokens = tokenize(line);
     if (tokens.length === 0) continue;
     const head = tokens[0].toLowerCase();
+
+    // .IC v(node)=value [v(node2)=value2 ...]
+    if (head === '.ic') {
+      for (let i = 1; i < tokens.length; i++) {
+        const m = tokens[i].match(/^v\(([^)]+)\)\s*=\s*(.+)$/i);
+        if (m) initialConditions[m[1]] = parseSpiceValue(m[2]);
+      }
+      continue;
+    }
+    // .NODESET v(node)=value
+    if (head === '.nodeset') {
+      for (let i = 1; i < tokens.length; i++) {
+        const m = tokens[i].match(/^v\(([^)]+)\)\s*=\s*(.+)$/i);
+        if (m) nodeSets[m[1]] = parseSpiceValue(m[2]);
+      }
+      continue;
+    }
+    // .SAVE v(node) [v(node2) ...]
+    if (head === '.save') {
+      for (let i = 1; i < tokens.length; i++) {
+        const m = tokens[i].match(/^v\(([^)]+)\)$/i);
+        if (m) saveNodes.push(m[1]);
+      }
+      continue;
+    }
+    // .PRINT TRAN v(node) [v(node2) ...]
+    if (head === '.print') {
+      for (let i = 2; i < tokens.length; i++) {
+        const m = tokens[i].match(/^v\(([^)]+)\)$/i);
+        if (m) printNodes.push(m[1]);
+      }
+      continue;
+    }
 
     if (head === '.subckt') {
       const name = tokens[1];
@@ -465,27 +502,73 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
         const type = model?.type || 'npn';
         allNodes.add(nc); allNodes.add(nb); allNodes.add(ne);
         const pluginType = type === 'pnp' ? 'pnp' : 'npn';
-        const hfe = model?.params['bf'] || 100;
+        // Apply ALL model parameters as component parameters (full .MODEL card support)
+        // Common BJT params: Bf (hfe), Is, Vaf, Nf, Ikf, Ise, Ne, Br, Var, Nc, Ikr, Isc, Nc, Rb, Rc, Re, Cje, Cjc, Cjs, Mje, Mjc, Mjs, Vje, Vjc, Vjs, Tf, Xtf, Itf, Vtf, Tr)
+        const params: Record<string, number> = {
+          hfe: model?.params['bf'] ?? 100,
+          is: model?.params['is'] ?? 1e-14,
+          vaf: model?.params['vaf'] ?? 0,
+          nf: model?.params['nf'] ?? 1,
+          ikf: model?.params['ikf'] ?? 0,
+          br: model?.params['br'] ?? 1,
+          var: model?.params['var'] ?? 0,
+          rb: model?.params['rb'] ?? 0,
+          rc: model?.params['rc'] ?? 0,
+          re: model?.params['re'] ?? 0,
+          cje: model?.params['cje'] ?? 0,
+          cjc: model?.params['cjc'] ?? 0,
+          cjs: model?.params['cjs'] ?? 0,
+          tf: model?.params['tf'] ?? 0,
+          tr: model?.params['tr'] ?? 0,
+        };
         addComponent(pluginType, name, [
           { terminalId: 'c', node: nc },
           { terminalId: 'b', node: nb },
           { terminalId: 'e', node: ne },
-        ], { hfe });
+        ], params);
         break;
       }
       case 'M': {
-        // M<name> nd ng ns [nb] <model>
+        // M<name> nd ng ns [nb] <model> [L=...] [W=...]
         const nd = tokens[1], ng = tokens[2], ns = tokens[3];
         const modelName = tokens[tokens.length - 1];
         const model = models.get(modelName?.toLowerCase());
         const type = model?.type || 'nmos';
         allNodes.add(nd); allNodes.add(ng); allNodes.add(ns);
         const pluginType = type === 'pmos' ? 'pmos' : 'nmos';
+        // Apply ALL model parameters (full .MODEL card support)
+        // Common MOSFET params: Vto, Kp, Gamma, Phi, Lambda, Rd, Rs, Cbd, Cbs, Cgso, Cgdo, Is, N, Pb, Mj, Cj, Cjsw, Mjsw, Tox, U0, Vmax, L, W)
+        const params: Record<string, number> = {
+          Vto: model?.params['vto'] ?? (type === 'pmos' ? -1 : 1),
+          Kp: model?.params['kp'] ?? 0.05,
+          Gamma: model?.params['gamma'] ?? 0.5,
+          Phi: model?.params['phi'] ?? 0.7,
+          Lambda: model?.params['lambda'] ?? 0.02,
+          Rd: model?.params['rd'] ?? 0,
+          Rs: model?.params['rs'] ?? 0,
+          Cbd: model?.params['cbd'] ?? 0,
+          Cbs: model?.params['cbs'] ?? 0,
+          Cgso: model?.params['cgso'] ?? 0,
+          Cgdo: model?.params['cgdo'] ?? 0,
+          W: model?.params['w'] ?? 100e-6,
+          L: model?.params['l'] ?? 10e-6,
+          Is: model?.params['is'] ?? 1e-14,
+          N: model?.params['n'] ?? 1,
+          Tox: model?.params['tox'] ?? 4e-9,
+          U0: model?.params['u0'] ?? 670,
+        };
+        // Also parse inline L=/W= from the M line itself
+        for (let i = 4; i < tokens.length; i++) {
+          const m = tokens[i].match(/^([LW])=(.+)$/i);
+          if (m) {
+            params[m[1].toUpperCase()] = parseSpiceValue(m[2]);
+          }
+        }
         addComponent(pluginType, name, [
           { terminalId: 'd', node: nd },
           { terminalId: 'g', node: ng },
           { terminalId: 's', node: ns },
-        ]);
+        ], params);
         break;
       }
       case 'X': {
@@ -548,5 +631,12 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
     version: 1,
     components,
     wires,
-  };
+    // SPICE directives attached for the engine to consume
+    simOptions: {
+      initialConditions,
+      nodeSets,
+      saveNodes,
+      printNodes,
+    },
+  } as any;
 }

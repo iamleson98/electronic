@@ -1326,9 +1326,14 @@ export const useEditor = create<EditorState>((set, get) => ({
     // run sub-steps based on speed
     const subSteps = Math.max(1, Math.floor(s.speed));
     const dt = s.dt;
+    // Build simOptions from the editor's settings (temperature, .IC, .NODESET)
+    const simOpts = {
+      initialConditions: s.simOptions?.initialConditions,
+      nodeSets: s.simOptions?.nodeSets,
+    };
     let result: { sim: SimContext; branchCurrentSize: number; nodeMap: any } | null = null;
     for (let i = 0; i < subSteps; i++) {
-      result = simulateStep(simComponents, simWires, plugins, prev, dt);
+      result = simulateStep(simComponents, simWires, plugins, prev, dt, simOpts);
       if (!result) break;
       prev.nodeVoltage = result.sim.nodeVoltage;
       prev.branchCurrent = result.sim.branchCurrent;
@@ -1350,6 +1355,17 @@ export const useEditor = create<EditorState>((set, get) => ({
       const terminals = getTerminalsForComponent(comp, plugin, result.nodeMap);
       const measurements = plugin.measure(comp.parameters, terminals, result.sim);
       const v = parseFloat(measurements[0]?.value ?? '0');
+      // .PRINT directive: if printNodes is set, log matching node voltages to console
+      if (s.simOptions.printNodes && s.simOptions.printNodes.length > 0) {
+        for (const termKey of s.simOptions.printNodes) {
+          const nodeId = result.nodeMap.terminalNode.get(termKey);
+          if (nodeId != null && nodeId > 0) {
+            const nodeV = result.sim.nodeVoltage[nodeId - 1] ?? 0;
+            // eslint-disable-next-line no-console
+            console.log(`[.PRINT t=${result.sim.time.toFixed(6)}] V(${termKey}) = ${nodeV.toFixed(6)} V`);
+          }
+        }
+      }
       // When using hierarchy, the trace's componentId is the active sheet's local ID
       // (without prefix). Map back: if comp.id contains a '.', strip the prefix.
       const traceKey = usingHierarchy && comp.id.includes('.') ? comp.id.split('.').slice(1).join('.') : comp.id;
