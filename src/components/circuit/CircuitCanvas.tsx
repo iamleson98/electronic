@@ -15,6 +15,13 @@ import {
 } from '@/lib/circuit/schematic-overlays';
 import type { ERCError } from '@/lib/circuit/erc';
 import { useAutoERC } from '@/lib/auto-rule-hooks';
+import {
+  drawSheetBox,
+  findSheetAt,
+  findSheetPinAt,
+  getSheetPinAbsPos,
+} from '@/lib/circuit/sheet-render';
+import type { HierarchicalSheet } from '@/lib/circuit/types';
 
 const CELL_SIZE = 24;
 
@@ -306,6 +313,16 @@ export function CircuitCanvas() {
   const [hoveredERC, setHoveredERC] = useState<ERCError | null>(null);
   const [mousePos, setMousePos] = useState<Vec2>({ x: 0, y: 0 });
 
+  // Hierarchical sheet state — sheet box rendering, dragging, double-click-to-enter
+  const sheets = useEditor((s) => s.sheets);
+  const activeSheet = useEditor((s) => s.activeSheet);
+  const moveSheet = useEditor((s) => s.moveSheet);
+  const setActiveSheet = useEditor((s) => s.setActiveSheet);
+  const [hoveredSheetId, setHoveredSheetId] = useState<string | null>(null);
+  const [sheetDrag, setSheetDrag] = useState<{ id: string; offset: Vec2 } | null>(null);
+  const sheetDragRef = useRef<{ id: string; offset: Vec2 } | null>(null);
+  useEffect(() => { sheetDragRef.current = sheetDrag; }, [sheetDrag]);
+
   const addComponent = useEditor((s) => s.addComponent);
   const moveComponent = useEditor((s) => s.moveComponent);
   const rotateComponent = useEditor((s) => s.rotateComponent);
@@ -383,6 +400,36 @@ export function CircuitCanvas() {
     };
   }, []);
 
+  /**
+   * Resolve a wire endpoint (componentId + terminalId) to its absolute grid position.
+   * Handles both real components (looked up in `components`) and sheet pins
+   * (componentId is `__sheet:${sheetId}`, terminalId is `pin:${pinId}`).
+   * Returns null if the endpoint can't be resolved (e.g. dangling wire).
+   */
+  const resolveEndpointPos = useCallback((endpoint: { componentId: string; terminalId: string }): Vec2 | null => {
+    // Sheet pin?
+    if (endpoint.componentId.startsWith('__sheet:')) {
+      const sheetId = endpoint.componentId.slice('__sheet:'.length);
+      const sheet = sheets.find((s) => s.id === sheetId);
+      if (!sheet) return null;
+      const pinId = endpoint.terminalId.startsWith('pin:') ? endpoint.terminalId.slice('pin:'.length) : endpoint.terminalId;
+      const pin = sheet.pins.find((p) => p.id === pinId);
+      if (!pin) return null;
+      return {
+        x: sheet.position.x + pin.position.x,
+        y: sheet.position.y + pin.position.y,
+      };
+    }
+    // Real component terminal
+    const comp = components.find((c) => c.id === endpoint.componentId);
+    if (!comp) return null;
+    const plugin = getPlugin(comp.type);
+    if (!plugin) return null;
+    const t = plugin.terminals.find((tt) => tt.id === endpoint.terminalId);
+    if (!t) return null;
+    return getTerminalPos(comp, t);
+  }, [components, sheets, getTerminalPos]);
+
   const findTerminalAt = useCallback((gx: number, gy: number) => {
     for (const comp of components) {
       const plugin = getPlugin(comp.type);
@@ -396,8 +443,26 @@ export function CircuitCanvas() {
         }
       }
     }
+    // Also check sheet pins — they behave as wire endpoints too
+    for (const sheet of sheets) {
+      for (const pin of sheet.pins) {
+        const pos = {
+          x: sheet.position.x + pin.position.x,
+          y: sheet.position.y + pin.position.y,
+        };
+        const dx = pos.x - gx;
+        const dy = pos.y - gy;
+        if (dx * dx + dy * dy < 0.5 * 0.5) {
+          return {
+            componentId: `__sheet:${sheet.id}`,
+            terminalId: `pin:${pin.id}`,
+            pos,
+          };
+        }
+      }
+    }
     return null;
-  }, [components, getTerminalPos]);
+  }, [components, getTerminalPos, sheets]);
 
   const findComponentAt = useCallback((gx: number, gy: number): CircuitComponent | null => {
     for (let i = components.length - 1; i >= 0; i--) {
@@ -594,17 +659,13 @@ export function CircuitCanvas() {
 
     // ---- Draw wires FIRST (below components) ----
     for (const wire of wires) {
-      const fromComp = components.find((c) => c.id === wire.from.componentId);
-      const toComp = components.find((c) => c.id === wire.to.componentId);
-      if (!fromComp || !toComp) continue;
-      const fromPlugin = getPlugin(fromComp.type);
-      const toPlugin = getPlugin(toComp.type);
-      if (!fromPlugin || !toPlugin) continue;
-      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
-      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
-      if (!fromT || !toT) continue;
-      const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
-      const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
+      // Resolve both endpoints to grid positions — handles both real components
+      // and sheet pins (componentId starts with __sheet:).
+      const fromGrid = resolveEndpointPos(wire.from);
+      const toGrid = resolveEndpointPos(wire.to);
+      if (!fromGrid || !toGrid) continue;
+      const fromPos = gridToScreen(fromGrid.x, fromGrid.y);
+      const toPos = gridToScreen(toGrid.x, toGrid.y);
       const path = getWirePath(wire, fromPos, toPos, gridToScreen, use45Routing);
       const isSelected = selection.type === 'wire' && selection.id === wire.id;
       const isHover = hover.wireId === wire.id;
@@ -1166,17 +1227,12 @@ export function CircuitCanvas() {
     let wireLengthScreenPath: Vec2[] | null = null;
     let wireLengthGridPath: Vec2[] | null = null;
     for (const wire of wires) {
-      const fromComp = components.find((c) => c.id === wire.from.componentId);
-      const toComp = components.find((c) => c.id === wire.to.componentId);
-      if (!fromComp || !toComp) continue;
-      const fromPlugin = getPlugin(fromComp.type);
-      const toPlugin = getPlugin(toComp.type);
-      if (!fromPlugin || !toPlugin) continue;
-      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
-      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
-      if (!fromT || !toT) continue;
-      const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
-      const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
+      // Resolve both endpoints — handles both real components and sheet pins
+      const fromGrid = resolveEndpointPos(wire.from);
+      const toGrid = resolveEndpointPos(wire.to);
+      if (!fromGrid || !toGrid) continue;
+      const fromPos = gridToScreen(fromGrid.x, fromGrid.y);
+      const toPos = gridToScreen(toGrid.x, toGrid.y);
       const path = getWirePath(wire, fromPos, toPos, gridToScreen, use45Routing);
       const isSelected = selection.type === 'wire' && selection.id === wire.id;
       const isHover = hover.wireId === wire.id;
@@ -1185,9 +1241,6 @@ export function CircuitCanvas() {
       // Capture path for length label (selected/hovered wires only)
       if (isSelected || isHover) {
         wireLengthScreenPath = path;
-        // reconstruct grid coords for length calculation
-        const fromGrid = getTerminalPos(fromComp, fromT);
-        const toGrid = getTerminalPos(toComp, toT);
         // grid path: from terminal → waypoints → to terminal
         wireLengthGridPath = [fromGrid, ...(wire.waypoints ?? []), toGrid];
       }
@@ -1221,6 +1274,20 @@ export function CircuitCanvas() {
       drawWireLengthLabel(ctx, wireLengthScreenPath, wireLengthGridPath, units);
     }
 
+    // ---- Hierarchical sheet boxes (drawn before ERC markers so markers stay on top) ----
+    // Only draw sheets when not running a simulation — they're a structural view.
+    if (!running) {
+      for (const sheet of sheets) {
+        const isSelected = selection.type === 'sheet' && selection.id === sheet.id;
+        const isHover = hoveredSheetId === sheet.id;
+        drawSheetBox(ctx, sheet, gridToScreen, {
+          isSelected,
+          isHover,
+          zoom,
+        });
+      }
+    }
+
     // ---- ERC error markers (drawn last so they're on top of everything) ----
     // Hidden during simulation to avoid visual clutter while current is flowing.
     if (!running && ercErrors.length > 0) {
@@ -1228,7 +1295,7 @@ export function CircuitCanvas() {
     }
 
     ctx.restore();
-  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, use45Routing, running, gridToScreen, getTerminalPos, plugins, animTick, getRotateHandlePos, ercErrors, hoveredERC, units]);
+  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, use45Routing, running, gridToScreen, getTerminalPos, plugins, animTick, getRotateHandlePos, ercErrors, hoveredERC, units, sheets, hoveredSheetId, resolveEndpointPos]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
@@ -1243,9 +1310,44 @@ export function CircuitCanvas() {
       return;
     }
 
+    // Hierarchical sheet interaction (only when not running)
+    const isRunningNow = useEditor.getState().running;
+    if (!isRunningNow && sheets.length > 0) {
+      // Check sheet pin first — start a wire from the sheet pin (just like a terminal)
+      const pinHit = findSheetPinAt(sheets, sx, sy, gridToScreen);
+      if (pinHit) {
+        // Treat the sheet pin as a wire endpoint — use the same startWire() API
+        // but with a synthetic componentId/terminalId that the engine can resolve.
+        const endpoint = {
+          componentId: `__sheet:${pinHit.sheet.id}`,
+          terminalId: `pin:${pinHit.pin.id}`,
+        };
+        // If we're already mid-wire-draft, complete the wire to this pin
+        const wd = useEditor.getState().wireDraft;
+        if (wd) {
+          completeWire(endpoint);
+        } else {
+          startWire(endpoint, g);
+        }
+        return;
+      }
+      // Check sheet box body — start a sheet drag
+      const sheetHit = findSheetAt(sheets, sx, sy, gridToScreen);
+      if (sheetHit) {
+        setSelection({ type: 'sheet', id: sheetHit.id });
+        const offset = {
+          x: g.x - sheetHit.position.x,
+          y: g.y - sheetHit.position.y,
+        };
+        const drag = { id: sheetHit.id, offset };
+        sheetDragRef.current = drag;
+        setSheetDrag(drag);
+        return;
+      }
+    }
+
     // If simulation is running, check for toggleable components FIRST
     // Use getState() for the latest running state
-    const isRunningNow = useEditor.getState().running;
     if (isRunningNow) {
       const term = findTerminalAt(g.x, g.y);
       if (term) return; // no wire drawing during simulation
@@ -1397,6 +1499,23 @@ export function CircuitCanvas() {
       setHoveredERC(null);
     }
 
+    // Hierarchical sheet hover detection
+    if (!running && sheets.length > 0) {
+      const hit = findSheetAt(sheets, sx, sy, gridToScreen);
+      setHoveredSheetId((prev) => (prev === hit?.id ? prev : hit?.id ?? null));
+    }
+
+    // Sheet drag — if we're dragging a sheet box, move it
+    if (sheetDragRef.current) {
+      const sd = sheetDragRef.current;
+      const newPos = {
+        x: Math.round(g.x - sd.offset.x),
+        y: Math.round(g.y - sd.offset.y),
+      };
+      moveSheet(sd.id, newPos);
+      return;
+    }
+
     if (panRef.current) {
       setPan({
         x: panRef.current.origin.x + (sx - panRef.current.start.x),
@@ -1532,6 +1651,12 @@ export function CircuitCanvas() {
       panRef.current = null;
       return;
     }
+    // End sheet drag
+    if (sheetDragRef.current) {
+      sheetDragRef.current = null;
+      setSheetDrag(null);
+      return;
+    }
     if (rotateDragRef.current) {
       // History was already pushed at drag start
       rotateDragRef.current = null;
@@ -1591,6 +1716,12 @@ export function CircuitCanvas() {
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     const g = screenToGrid(sx, sy);
+    // Sheet double-click → enter the sub-sheet (KiCad parity)
+    const sheetHit = findSheetAt(sheets, sx, sy, gridToScreen);
+    if (sheetHit) {
+      setActiveSheet(sheetHit.fileName);
+      return;
+    }
     const comp = findComponentAt(g.x, g.y);
     if (comp) rotateComponent(comp.id);
   };
@@ -1669,9 +1800,15 @@ export function CircuitCanvas() {
           else s.addNoConnect(hover.terminal!.componentId, hover.terminal!.terminalId);
         }
       } else if (e.key === 'Escape') {
-        cancelWire();
-        setSelection({ type: null, id: null });
-        useEditor.getState().clearMultiSelection();
+        // If we're inside a sub-sheet, Escape goes back to the parent (KiCad parity).
+        // Otherwise clear selection / cancel wire draft.
+        if (useEditor.getState().activeSheet) {
+          setActiveSheet('');
+        } else {
+          cancelWire();
+          setSelection({ type: null, id: null });
+          useEditor.getState().clearMultiSelection();
+        }
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
         if (running) return;
         e.preventDefault();
@@ -1726,7 +1863,7 @@ export function CircuitCanvas() {
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
-        onMouseLeave={() => { dragRef.current = null; panRef.current = null; wireDragRef.current = null; rotateDragRef.current = null; setRotateDrag(null); }}
+        onMouseLeave={() => { dragRef.current = null; panRef.current = null; wireDragRef.current = null; rotateDragRef.current = null; setRotateDrag(null); sheetDragRef.current = null; setSheetDrag(null); setHoveredSheetId(null); }}
         onWheel={onWheel}
         onDrop={onDrop}
         onDragOver={onDragOver}

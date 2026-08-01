@@ -85,7 +85,8 @@ export function buildNodeMap(components: CircuitComponent[], wires: Wire[], plug
       comp.type === 'powerGND' || comp.type === 'powerVCC' ||
       comp.type === 'power5V' || comp.type === 'power3V3' ||
       comp.type === 'power12V' || comp.type === 'powerMinus12V' ||
-      comp.type === 'netLabel' || comp.type === 'busLabel';
+      comp.type === 'netLabel' || comp.type === 'busLabel' ||
+      comp.type === 'hierLabel';
     if (!isPowerSymbol) continue;
     const netName = (comp.parameters.net as string) || '';
     if (!netName) continue;

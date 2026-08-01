@@ -8,7 +8,7 @@ import {
   Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Square, Gauge, Zap,
   FileText, ChevronDown, Settings2, Database, FileCode, Boxes, ShieldCheck,
   Search, FileDown, Network, Layers, BookOpen, Wand2, Ruler, Pencil,
-  Activity, Sliders, Sigma, Waves,
+  Activity, Sliders, Sigma, Waves, ChevronRight,
 } from 'lucide-react';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
@@ -55,6 +55,11 @@ export function Toolbar() {
   const redo = useEditor((s) => s.redo);
   const serialize = useEditor((s) => s.serialize);
   const loadDocument = useEditor((s) => s.loadDocument);
+  // Hierarchical sheet navigation
+  const activeSheet = useEditor((s) => s.activeSheet);
+  const setActiveSheet = useEditor((s) => s.setActiveSheet);
+  const sheets = useEditor((s) => s.sheets);
+  const childSheets = useEditor((s) => s.childSheets);
   const showGrid = useEditor((s) => s.showGrid);
   const setShowGrid = useEditor((s) => s.setShowGrid);
   const snapToGrid = useEditor((s) => s.snapToGrid);
@@ -244,6 +249,25 @@ export function Toolbar() {
           </div>
           <span className="hidden text-sm font-semibold text-slate-100 sm:inline">CircuitLab</span>
         </div>
+
+        {/* Hierarchical sheet breadcrumb — shows Root / Sub-sheet when navigating */}
+        {activeSheet && (
+          <div className="mr-2 flex items-center gap-1 rounded bg-slate-800/60 px-2 py-1 text-xs font-mono">
+            <button
+              className="text-slate-300 hover:text-emerald-300 transition-colors"
+              onClick={() => setActiveSheet('')}
+              title="Back to root sheet (Esc)"
+            >
+              Root
+            </button>
+            <ChevronRight size={12} className="text-slate-500" />
+            <span className="text-emerald-300">
+              {sheets.find((s) => s.fileName === activeSheet)?.sheetName ??
+                childSheets[activeSheet]?.sheets?.find?.((s: any) => s.fileName === activeSheet)?.sheetName ??
+                activeSheet.replace(/\.kicad_sch$/, '')}
+            </span>
+          </div>
+        )}
 
         {/* Run / Pause / Step */}
         <Tooltip>
@@ -555,6 +579,28 @@ export function Toolbar() {
             </DropdownMenuCheckboxItem>
           </DropdownMenuContent>
         </DropdownMenu>
+
+        {/* Hierarchical Sheets — quick actions */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={running}
+              onClick={() => setShowSheets(true)}
+              className="text-slate-300"
+            >
+              <BookOpen size={14} />
+              <span className="ml-1 hidden lg:inline">Sheets</span>
+              {sheets.length > 0 && (
+                <span className="ml-1 rounded bg-emerald-500/20 px-1 text-[10px] text-emerald-300">
+                  {sheets.length}
+                </span>
+              )}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Manage hierarchical sheets</TooltipContent>
+        </Tooltip>
 
         {/* Plot menu — PDF/SVG/PNG */}
         <DropdownMenu>

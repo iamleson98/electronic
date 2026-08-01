@@ -25,6 +25,7 @@ import { DEFAULT_PAGE_SETUP, DEFAULT_TITLE_BLOCK } from './types';
 import { getPlugin } from './registry';
 import { simulateStep, getTerminalsForComponent, buildNodeMap } from './engine';
 import { runFullERC } from './erc';
+import { snapshotSheet } from './hierarchy';
 import { runAnalysis as runAnalysisEngine, type AnalysisConfig, type AnalysisResult } from './analysis';
 import { runBatch as runBatchEngine, type BatchConfig, type BatchResult } from './batch-runner';
 import { execMeas, type MeasCommand, type RealTrace as MeasRealTrace, type MeasResult } from './measurement';
@@ -47,7 +48,7 @@ export function runERC(components: CircuitComponent[], wires: Wire[]): ERCResult
 // ===== Selection / Probe types =====
 
 export interface Selection {
-  type: 'component' | 'wire' | 'drawing' | 'group' | null;
+  type: 'component' | 'wire' | 'drawing' | 'group' | 'sheet' | null;
   id: string | null;
 }
 
@@ -178,6 +179,16 @@ interface EditorState {
   addSheet: (sheetName: string, fileName: string) => string;
   removeSheet: (id: string) => void;
   setActiveSheet: (fileName: string) => void;
+  /** Move a sheet box on the canvas (drag). Position is in grid coords. */
+  moveSheet: (id: string, position: { x: number; y: number }) => void;
+  /** Add a sheet pin to a sheet box. Auto-places on the right side if no side given. */
+  addSheetPin: (sheetId: string, name: string, side?: 'top' | 'bottom' | 'left' | 'right') => string;
+  /** Rename a sheet pin. */
+  renameSheetPin: (sheetId: string, pinId: string, name: string) => void;
+  /** Remove a sheet pin. */
+  removeSheetPin: (sheetId: string, pinId: string) => void;
+  /** Move a sheet pin to a new position (in grid coords, relative to sheet box). */
+  moveSheetPin: (sheetId: string, pinId: string, position: { x: number; y: number }) => void;
   // saved views
   saveView: (name: string, camera: { x: number; y: number; zoom: number }) => string;
   loadView: (id: string) => SavedView | null;
@@ -812,7 +823,145 @@ export const useEditor = create<EditorState>((set, get) => ({
       };
     });
   },
-  setActiveSheet: (fileName) => set({ activeSheet: fileName }),
+  setActiveSheet: (fileName) => {
+    const s = get();
+    // Snapshot the current sheet into childSheets (or root, kept implicitly as the
+    // active components/wires when activeSheet === '').
+    const currentSheetFileName = s.activeSheet;
+    if (currentSheetFileName) {
+      // Save the current sheet's contents back to childSheets[currentSheetFileName]
+      const snap = snapshotSheet(s.components, s.wires, s.sheets);
+      set((st) => ({
+        childSheets: {
+          ...st.childSheets,
+          [currentSheetFileName]: snap,
+        },
+      }));
+    } else {
+      // We were on root — root's components/wires stay in place (no swap needed
+      // when navigating back to root, just restore the saved snapshot below
+      // when going elsewhere).
+    }
+
+    if (!fileName) {
+      // Navigating back to root — restore root's saved snapshot if we have one.
+      // Root's components/wires are kept as the "current" state when on root,
+      // so if we're already on root there's nothing to do. If we're returning
+      // from a sub-sheet, the root snapshot is in `childSheets['__root__']`
+      // (a special key we use to preserve root state across sub-sheet edits).
+      const rootSnap = (s.childSheets as any)['__root__'];
+      if (rootSnap) {
+        set({
+          activeSheet: '',
+          components: rootSnap.components,
+          wires: rootSnap.wires,
+          sheets: rootSnap.sheets ?? [],
+        });
+        // Remove the temporary __root__ key
+        const newChild = { ...get().childSheets };
+        delete (newChild as any)['__root__'];
+        set({ childSheets: newChild });
+      } else {
+        set({ activeSheet: '' });
+      }
+      return;
+    }
+
+    // Save current root state into __root__ if we're leaving root
+    if (!currentSheetFileName) {
+      const rootSnap = snapshotSheet(s.components, s.wires, s.sheets);
+      set((st) => ({
+        childSheets: {
+          ...st.childSheets,
+          __root__: rootSnap as any,
+        },
+      }));
+    }
+
+    // Switch to the target sub-sheet
+    const targetDoc = get().childSheets[fileName];
+    if (targetDoc) {
+      set({
+        activeSheet: fileName,
+        components: targetDoc.components ?? [],
+        wires: targetDoc.wires ?? [],
+        sheets: (targetDoc as any).sheets ?? [],
+      });
+    } else {
+      // Sub-sheet doesn't exist yet — create an empty one
+      set({
+        activeSheet: fileName,
+        components: [],
+        wires: [],
+        sheets: [],
+      });
+    }
+  },
+
+  moveSheet: (id, position) => {
+    get().pushHistory();
+    set((s) => ({
+      sheets: s.sheets.map((sh) => sh.id === id ? { ...sh, position } : sh),
+    }));
+  },
+
+  addSheetPin: (sheetId, name, side = 'right') => {
+    const id = genId('pin');
+    get().pushHistory();
+    set((s) => ({
+      sheets: s.sheets.map((sh) => {
+        if (sh.id !== sheetId) return sh;
+        // Auto-place on the chosen side
+        const pinsOnSide = sh.pins.filter((p) => p.side === side);
+        const idx = pinsOnSide.length + 1;
+        let position: { x: number; y: number };
+        switch (side) {
+          case 'left':   position = { x: 0, y: idx }; break;
+          case 'right':  position = { x: sh.size.width, y: idx }; break;
+          case 'top':    position = { x: idx, y: 0 }; break;
+          case 'bottom': position = { x: idx, y: sh.size.height }; break;
+        }
+        return {
+          ...sh,
+          pins: [...sh.pins, {
+            id, name, electricalType: 'passive' as const,
+            position, side,
+          }],
+        };
+      }),
+    }));
+    return id;
+  },
+
+  renameSheetPin: (sheetId, pinId, name) => {
+    get().pushHistory();
+    set((s) => ({
+      sheets: s.sheets.map((sh) => sh.id !== sheetId ? sh : {
+        ...sh,
+        pins: sh.pins.map((p) => p.id === pinId ? { ...p, name } : p),
+      }),
+    }));
+  },
+
+  removeSheetPin: (sheetId, pinId) => {
+    get().pushHistory();
+    set((s) => ({
+      sheets: s.sheets.map((sh) => sh.id !== sheetId ? sh : {
+        ...sh,
+        pins: sh.pins.filter((p) => p.id !== pinId),
+      }),
+    }));
+  },
+
+  moveSheetPin: (sheetId, pinId, position) => {
+    get().pushHistory();
+    set((s) => ({
+      sheets: s.sheets.map((sh) => sh.id !== sheetId ? sh : {
+        ...sh,
+        pins: sh.pins.map((p) => p.id === pinId ? { ...p, position } : p),
+      }),
+    }));
+  },
 
   // ===== Saved views =====
   saveView: (name, camera) => {

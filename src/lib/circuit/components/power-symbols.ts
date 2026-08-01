@@ -119,6 +119,73 @@ export const netLabel: ComponentPlugin = {
   getFlowPath() { return [{ x: 0, y: 0 }]; },
 };
 
+// Hierarchical Label — connects to a matching sheet pin on the parent sheet.
+// In KiCad, a hierLabel inside a sub-sheet with text "IN" becomes electrically
+// connected to the sheet pin named "IN" on the parent sheet's sheet box.
+//
+// Visually, hierLabels are drawn as a green tag pointing in the direction of
+// signal flow (left/right/up/down), distinct from the cyan netLabel.
+export const hierLabel: ComponentPlugin = {
+  type: 'hierLabel',
+  name: 'Hierarchical Label',
+  category: 'source',
+  description: 'Hierarchical net label. Connects to a sheet pin of the same name on the parent sheet. Use inside sub-sheets to expose nets to the parent.',
+  symbol: 'H',
+  boundingBox: { width: 4, height: 1 },
+  terminals: [{ id: 'p', label: 'Net', position: { x: 0, y: 0 } }],
+  parameters: [
+    { key: 'net', label: 'Label Name', type: 'string' as const, default: 'IN' },
+    { key: 'direction', label: 'Direction', type: 'select' as const, default: 'right',
+      options: [
+        { label: '→ Right', value: 'right' },
+        { label: '← Left', value: 'left' },
+        { label: '↑ Up', value: 'up' },
+        { label: '↓ Down', value: 'down' },
+      ] },
+  ],
+  render(ctx, params, cellSize) {
+    const text = (params.net as string) || 'IN';
+    const dir = (params.direction as string) || 'right';
+    ctx.save();
+    // Hierarchical labels are green (distinct from cyan netLabels)
+    ctx.strokeStyle = '#22c55e';
+    ctx.fillStyle = 'rgba(34, 197, 94, 0.12)';
+    ctx.lineWidth = 1.5;
+    const w = Math.max(text.length * cellSize * 0.4, cellSize * 2);
+    const h = cellSize * 0.9;
+    // Draw a tag pointing in the signal direction
+    const arrow = cellSize * 0.4;
+    ctx.beginPath();
+    switch (dir) {
+      case 'right':
+        ctx.moveTo(0, 0); ctx.lineTo(w, 0); ctx.lineTo(w + arrow, h / 2); ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+        break;
+      case 'left':
+        ctx.moveTo(arrow, 0); ctx.lineTo(w + arrow, 0); ctx.lineTo(w + arrow, h); ctx.lineTo(arrow, h); ctx.lineTo(0, h / 2); ctx.closePath();
+        break;
+      case 'up':
+        ctx.moveTo(0, h); ctx.lineTo(w, h); ctx.lineTo(w, arrow); ctx.lineTo(w / 2, 0); ctx.lineTo(0, arrow); ctx.closePath();
+        break;
+      case 'down':
+        ctx.moveTo(0, 0); ctx.lineTo(w, 0); ctx.lineTo(w, h - arrow); ctx.lineTo(w / 2, h); ctx.lineTo(0, h - arrow); ctx.closePath();
+        break;
+    }
+    ctx.fill();
+    ctx.stroke();
+    // Label text
+    ctx.fillStyle = '#22c55e';
+    ctx.font = `bold ${Math.floor(cellSize * 0.45)}px ui-monospace, monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const cx = dir === 'left' || dir === 'right' ? (w + arrow) / 2 : w / 2;
+    const cy = dir === 'up' ? h / 2 + arrow / 2 : h / 2;
+    ctx.fillText(text, cx, cy);
+    ctx.restore();
+  },
+  stamp() {},
+  getFlowPath() { return [{ x: 0, y: 0 }]; },
+};
+
 // Bus component (thick line for multi-bit signals)
 export const bus: ComponentPlugin = {
   type: 'bus',
