@@ -841,14 +841,14 @@ goto loop`,
   ],
 };
 
-// ----- Example 10: Simple Seconds Counter (0-59) -----
-// A minimalist 2-digit clock using only 2 CD4026 chips (vs 6 in the full clock).
+// ----- Example 10: Simple Seconds Counter (0-99) -----
+// A minimalist 2-digit counter using only 2 CD4026 chips (vs 6 in the full clock).
 // Architecture:
-//   1Hz crystal → CD4026 ones (0-9) → CO → CD4026 tens (0-5) → 7-seg displays
+//   1Hz crystal → CD4026 ones (0-9) → CO → CD4026 tens (0-9) → 7-seg displays
 //
 // The ones counter increments on each clock pulse. When it wraps from 9→0,
-// its CO output produces a rising edge that clocks the tens counter. The tens
-// counter uses maxCount=6 so it wraps at 5→0, giving a 00-59 range.
+// its CO output produces a rising edge that clocks the tens counter. Both
+// counters use maxCount=10, giving a 00-99 range (counts 00→01→...→99→00).
 //
 // Total: 7 components, ~25 wires (vs 15 components, 74 wires for the 6-digit clock).
 export const exampleSimpleClock: CircuitDocument = {
@@ -859,10 +859,10 @@ export const exampleSimpleClock: CircuitDocument = {
     // 5V power supply
     comp('dcVoltage', 'vcc1', [32, 8], 0, { voltage: 5 }),
     comp('ground', 'gnd1', [16, 18], 0, {}),
-    // CD4026 #1 — seconds ones (counts 0-9)
+    // CD4026 #1 — ones digit (counts 0-9)
     comp('cd4026', 'ic_so', [10, 2], 0, { maxCount: 10, vcc: 5 }),
-    // CD4026 #2 — seconds tens (counts 0-5, carries from ones)
-    comp('cd4026', 'ic_st', [22, 2], 0, { maxCount: 6, vcc: 5 }),
+    // CD4026 #2 — tens digit (counts 0-9, carries from ones)
+    comp('cd4026', 'ic_st', [22, 2], 0, { maxCount: 10, vcc: 5 }),
     // 7-segment displays (green) — offset by 1 from CD4026 to center segments
     comp('sevenSegment', 'seg_so', [11, 8], 0, { color: 'green', threshold: 2.0 }),
     comp('sevenSegment', 'seg_st', [23, 8], 0, { color: 'green', threshold: 2.0 }),
@@ -946,7 +946,7 @@ export const exampleCategories: ExampleCategory[] = [
   {
     label: 'Clocks & Counters',
     examples: [
-      { name: 'Simple Seconds Counter', description: 'Minimalist 2-digit (0-59) seconds counter using only 2 CD4026 chips', doc: exampleSimpleClock },
+      { name: 'Simple Seconds Counter', description: 'Minimalist 2-digit (0-99) counter using only 2 CD4026 chips', doc: exampleSimpleClock },
       { name: 'Arduino Clock (MM:SS)', description: '2-digit clock driven by a single Arduino — no counter ICs needed', doc: exampleArduinoClock },
       { name: '555 Timer Clock (HH:MM:SS)', description: 'Complete 6-digit clock using a 555 timer oscillator + CD4026 chain', doc: example555Clock },
       { name: 'Digital Clock (HH:MM:SS)', description: '6-digit digital clock using CD4026 counters and 1Hz crystal oscillator', doc: exampleClock },
