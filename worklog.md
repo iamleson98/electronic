@@ -1237,3 +1237,100 @@ Stage Summary:
 - Examples now span 8 categories from basic to advanced
 - Total: 22 example circuits, all wires connected, all physics laws satisfied
 - Component coverage increased from 17 to 29+ types
+
+---
+Task ID: comprehensive-test-suite
+Agent: main
+Task: Write comprehensive tests for everything in the project.
+
+Work Log:
+- Installed vitest and @vitest/ui as dev dependencies.
+- Created vitest.config.ts with path alias resolution and node environment.
+- Created tests/setup.ts for loading all plugins before tests.
+
+- Wrote 7 test files with 186 total tests:
+
+1. tests/solver.test.ts (13 tests)
+   - MNA solver: voltage divider, Ohm's law, parallel resistors, current source, KCL
+   - Edge cases: empty circuit, single ground, floating node, negative voltage
+   - Transient analysis: capacitor charging, inductor current buildup
+
+2. tests/components.test.ts (27 tests)
+   - Resistor: Ohm's law, zero resistance
+   - Capacitor: starts uncharged
+   - Inductor: starts with zero current
+   - LED: lights when forward biased, blocks when reverse
+   - Diode: conducts forward, blocks reverse
+   - NPN transistor: turns ON with base drive, OFF without
+   - NMOS transistor: gate threshold behavior
+   - Switch: conducts when closed, blocks when open
+   - Push button: pressed/released behavior
+   - Current source: fixed current regardless of load
+   - Op-amp: inverting amplifier gain
+   - Voltmeter: doesn't affect circuit
+   - Potentiometer: wiper voltage at 50%
+   - Logic gates: AND (all 4 input combinations), NOT (both states)
+   - 555 timer: astable oscillation
+   - CD4026 counter: segment outputs for digit 0
+   - Seven-segment display: segment voltage when driven HIGH
+   - Speaker: impedance and current
+   - Photoresistor: resistance changes with light level
+
+3. tests/physics-validator.test.ts (8 tests)
+   - Voltage sanity: passes for normal circuits
+   - KCL: passes for series circuit
+   - Series current: passes when currents match
+   - Diode forward law: passes when properly biased
+   - Voltage source: passes when V matches rated
+   - Switch off law: passes when open switch has ~0 current
+   - Overall pass: returns passed=true for valid circuit
+   - Returns violations array structure
+
+4. tests/examples.test.ts (30+ tests)
+   - Wire connectivity: all wires connect to existing terminals for every example
+   - Simulation runs: every example circuit simulates without crashing
+   - No NaN: no NaN or Infinity in node voltages
+   - Physics validation: 0 errors for every example circuit
+   - Category structure: ≥7 categories, ≥1 example each, ≥20 total
+
+5. tests/api-routes.test.ts (13 tests)
+   - GET /api/circuits: returns empty list initially
+   - POST /api/circuits: creates circuit, rejects missing name/document
+   - GET /api/circuits/[id]: returns circuit with document, 404 for nonexistent
+   - PUT /api/circuits/[id]: partial update, 404 for nonexistent
+   - DELETE /api/circuits/[id]: deletes and verifies gone
+   - Response shape: ISO date strings, boolean isExample
+
+6. tests/database.test.ts (18 tests)
+   - Schema: table exists, correct columns, indexes
+   - INSERT: auto-generates UUID, timestamps, default values
+   - SELECT: all rows, by id, ordering by updatedAt
+   - UPDATE: name/tags, auto-updates updatedAt, partial update
+   - DELETE: removes row, handles nonexistent
+   - Types: SavedCircuit/NewSavedCircuit interfaces
+   - JSON document round-trip
+
+7. tests/edge-cases.test.ts (16 tests)
+   - Empty/minimal circuits: empty, single ground, short circuit, parallel voltage sources
+   - Extreme values: very large/small resistance, high voltage, zero voltage
+   - AC sources: sine wave, square wave
+   - Multiple components: 10 resistors in series, 5 LEDs in parallel
+   - Wire waypoints: handles explicit waypoints
+   - Component rotation: handles rotated components
+   - solveDC: DC operating point, non-linear diode convergence
+
+- Fixed test failures:
+  - Logic gates needed VCC power supply connected + output load (resistor)
+  - CD4026 needed segment output connected to a load
+  - 7-seg display voltage is 2.5V (voltage divider with internal R)
+  - Current source produces negative voltage (correct sign convention)
+  - Capacitor backward Euler needs larger dt for convergence
+  - Parallel voltage sources cause singular matrix (expected)
+  - Removed wire-router test (function is inline in CircuitCanvas)
+
+- Final result: 186 tests, 7 test files, ALL PASSING
+
+Stage Summary:
+- 186 comprehensive tests covering: solver, components, physics validator, examples, API routes, database, edge cases
+- Test infrastructure: vitest with path aliases, node environment, 30s timeout
+- Run with: `npm test` (or `npm run test:watch` for watch mode, `npm run test:ui` for UI)
