@@ -1392,3 +1392,67 @@ Stage Summary:
 - 251 comprehensive tests across 12 test files — all passing
 - Found and fixed 2 bugs (PNP and PMOS current computation used wrong node)
 - Test coverage: solver, all component types, physics validator, examples, API routes, database, edge cases, wire currents, node map, Arduino firmware, input sanitization, physics violations
+
+---
+Task ID: intensive-simulation-tests
+Agent: main
+Task: Write intensive tests for simulation logic and circuit logic.
+
+Work Log:
+- Added tests/simulation-physics.test.ts with 27 intensive simulation/circuit tests:
+
+1. KCL (Kirchhoff Current Law) — 4 tests:
+   - 2-wire node (series midpoint): current in = current out
+   - 3-wire node (2 parallel branches): input = sum of branch currents
+   - 4-wire node (3 parallel branches): input = sum of 3 branch currents
+   - Voltage source node: current out of + = current into -
+
+2. KVL (Kirchhoff Voltage Law) — 4 tests:
+   - 2-resistor loop: V_source = V_R1 + V_R2
+   - 3-resistor loop: V_source = V_R1 + V_R2 + V_R3
+   - Parallel loop: both branches see same voltage
+   - Voltage divider: midpoint voltage = V * R2/(R1+R2)
+
+3. Transient convergence — 3 tests:
+   - Capacitor steady-state: approaches source voltage (open circuit at DC)
+   - Inductor steady-state: approaches V/R (short circuit at DC)
+   - RC time constant: capacitor charges to significant voltage after 1 RC
+
+4. State persistence — 3 tests:
+   - LED hysteresis: stays ON across 20 steps
+   - NPN transistor: stays ON across 20 steps when base driven
+   - Capacitor voltage: increases with more steps (charging persists)
+
+5. Power balance — 3 tests:
+   - Single resistor: P = V²/R = 0.1W
+   - Series resistors: P_total = P_R1 + P_R2
+   - Parallel resistors: P_total = P_R1 + P_R2 (different V/I per branch)
+
+6. Determinism — 2 tests:
+   - Same circuit → same node voltages (exact match to 10 decimal places)
+   - Same circuit → same component currents
+
+7. State isolation — 1 test:
+   - Two independent simulations with different voltages don't contaminate each other
+
+8. Node voltage accuracy — 4 tests:
+   - Wheatstone bridge (balanced): midpoint = V/2 = 2.5V
+   - Wheatstone bridge (symmetric): both midpoints = 5V
+   - 3-resistor divider: exact midpoint values (7.5V and 4.5V)
+   - Current source + resistor: V = I*R = 10V
+
+9. Wire current sign conventions — 3 tests:
+   - Forward direction (V+ → R → GND): positive current
+   - Reverse direction (R → V+): negative current
+   - Parallel branches: all branch currents positive
+
+- Fixed KCL tests to use computeComponentCurrents instead of wireCurrents
+  for multi-wire nodes (wire current only measures one wire, not the total
+  current at a shared node).
+
+- Final result: 278 tests, 13 test files, ALL PASSING
+
+Stage Summary:
+- 27 intensive simulation/circuit logic tests added (KCL, KVL, transient convergence, state persistence, power balance, determinism, state isolation, node voltage accuracy, wire current signs)
+- Total: 278 tests across 13 files — all passing
+- No bugs found in this round (previous PNP/PMOS fix was already correct)
