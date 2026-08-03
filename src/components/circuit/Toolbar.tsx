@@ -8,7 +8,7 @@ import {
   Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Square, Gauge, Zap,
   FileText, ChevronDown, Settings2, Database, FileCode, Boxes, ShieldCheck,
   Search, FileDown, Network, Layers, BookOpen, Wand2, Ruler, Pencil,
-  Activity, Sliders, Sigma, Waves, ChevronRight,
+  Activity, Sliders, Sigma, Waves, ChevronRight, RotateCcw,
 } from 'lucide-react';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
@@ -48,11 +48,19 @@ export function Toolbar() {
   const running = useEditor((s) => s.running);
   const speed = useEditor((s) => s.speed);
   const dt = useEditor((s) => s.dt);
+  const simError = useEditor((s) => s.simError);
   const setRunning = useEditor((s) => s.setRunning);
   const setSpeed = useEditor((s) => s.setSpeed);
   const setDt = useEditor((s) => s.setDt);
   const step = useEditor((s) => s.step);
   const reset = useEditor((s) => s.reset);
+
+  // Toast sim errors when they occur
+  useEffect(() => {
+    if (simError) {
+      toast.error(simError);
+    }
+  }, [simError]);
   const clear = useEditor((s) => s.clear);
   const undo = useEditor((s) => s.undo);
   const redo = useEditor((s) => s.redo);
@@ -147,13 +155,14 @@ export function Toolbar() {
     reader.onload = () => {
       try {
         const doc = JSON.parse(reader.result as string);
-        if (doc.version === 1 && Array.isArray(doc.components) && Array.isArray(doc.wires)) {
+        if (doc && doc.version === 1 && Array.isArray(doc.components) && Array.isArray(doc.wires)) {
           loadDocument(doc);
+          toast.success(`Loaded circuit: ${file.name}`);
         } else {
-          alert('Invalid circuit file');
+          toast.error('Invalid circuit file: missing version, components, or wires array');
         }
       } catch (err) {
-        alert('Failed to parse file: ' + (err as Error).message);
+        toast.error('Failed to parse file: ' + (err as Error).message);
       }
     };
     reader.readAsText(file);
@@ -291,7 +300,7 @@ export function Toolbar() {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button size="sm" variant="ghost" onClick={() => step()}>
+            <Button size="sm" variant="ghost" onClick={() => step()} disabled={running}>
               <SkipForward size={14} />
             </Button>
           </TooltipTrigger>
@@ -299,11 +308,11 @@ export function Toolbar() {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button size="sm" variant="ghost" onClick={() => reset()}>
-              <Square size={14} />
+            <Button size="sm" variant="ghost" onClick={() => reset()} disabled={running}>
+              <RotateCcw size={14} />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Reset time / state</TooltipContent>
+          <TooltipContent>Reset simulation (stops + clears state)</TooltipContent>
         </Tooltip>
 
         <div className="mx-1 h-5 w-px bg-slate-700" />

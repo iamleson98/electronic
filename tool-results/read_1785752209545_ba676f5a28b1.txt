@@ -1,0 +1,1517 @@
+     1→     1→// Zustand store for the circuit editor.
+     2→     2→// Holds: components, wires, selection, simulation settings, current sim state.
+     3→     3→// Provides: add/move/rotate/delete components, add/remove wires, undo/redo,
+     4→     4→// serialize/deserialize, run/pause/step simulation.
+     5→     5→
+     6→     6→'use client';
+     7→     7→
+     8→     8→import { create } from 'zustand';
+     9→     9→import type {
+    10→    10→  CircuitComponent,
+    11→    11→  CircuitDocument,
+    12→    12→  ComponentField,
+    13→    13→  DrawingPrimitive,
+    14→    14→  Group,
+    15→    15→  HierarchicalSheet,
+    16→    16→  NetClass,
+    17→    17→  NoConnectMarker,
+    18→    18→  PageSetup,
+    19→    19→  PinElecType,
+    20→    20→  SavedView,
+    21→    21→  SimContext,
+    22→    22→  Wire,
+    23→    23→} from './types';
+    24→    24→import { DEFAULT_PAGE_SETUP, DEFAULT_TITLE_BLOCK } from './types';
+    25→    25→import { getPlugin } from './registry';
+    26→    26→import { simulateStep, getTerminalsForComponent, buildNodeMap } from './engine';
+    27→    27→import { validatePhysics, type PhysicsViolation } from './physics-validator';
+    28→    28→import { runFullERC } from './erc';
+    29→    29→import { snapshotSheet, flattenHierarchy } from './hierarchy';
+    30→    30→import { runAnalysis as runAnalysisEngine, type AnalysisConfig, type AnalysisResult } from './analysis';
+    31→    31→import { runBatch as runBatchEngine, type BatchConfig, type BatchResult } from './batch-runner';
+    32→    32→import { execMeas, type MeasCommand, type RealTrace as MeasRealTrace, type MeasResult } from './measurement';
+    33→    33→import { solveDCRobust as solveDCRobustEngine } from './convergence';
+    34→    34→import { DEFAULT_OPTIONS, type SimOptions, type ConvergenceReport } from './sim-options';
+    35→    35→import './components'; // register all built-in plugins
+    36→    36→
+    37→    37→// ===== ERC (Electrical Rule Check) =====
+    38→    38→// Backward-compatible wrapper around the new full ERC engine in `erc.ts`.
+    39→    39→// Use `runFullERC` directly for the full pin-conflict matrix + no-connect honor.
+    40→    40→
+    41→    41→export type ERCError = import('./erc').ERCError;
+    42→    42→export type ERCResult = import('./erc').ERCResult;
+    43→    43→
+    44→    44→/** @deprecated use runFullERC for the complete rule set */
+    45→    45→export function runERC(components: CircuitComponent[], wires: Wire[]): ERCResult {
+    46→    46→  return runFullERC(components, wires, []);
+    47→    47→}
+    48→    48→
+    49→    49→// ===== Selection / Probe types =====
+    50→    50→
+    51→    51→export interface Selection {
+    52→    52→  type: 'component' | 'wire' | 'drawing' | 'group' | 'sheet' | null;
+    53→    53→  id: string | null;
+    54→    54→}
+    55→    55→
+    56→    56→export interface ProbeSample {
+    57→    57→  time: number;
+    58→    58→  voltage: number;
+    59→    59→}
+    60→    60→
+    61→    61→export interface ProbeTrace {
+    62→    62→  componentId: string;
+    63→    63→  color: string;
+    64→    64→  label: string;
+    65→    65→  samples: ProbeSample[];
+    66→    66→}
+    67→    67→
+    68→    68→interface EditorState {
+    69→    69→  // document
+    70→    70→  components: CircuitComponent[];
+    71→    71→  wires: Wire[];
+    72→    72→  // selection (single)
+    73→    73→  selection: Selection;
+    74→    74→  // multi-selection
+    75→    75→  multiSelection: { components: Set<string>; wires: Set<string> };
+    76→    76→  // clipboard
+    77→    77→  clipboard: { components: CircuitComponent[]; wires: Wire[] } | null;
+    78→    78→  // ERC results
+    79→    79→  ercErrors: ERCError[];
+    80→    80→  // simulation settings
+    81→    81→  running: boolean;
+    82→    82→  speed: number;          // multiplier (1 = real-time at chosen dt)
+    83→    83→  dt: number;             // timestep in seconds
+    84→    84→  // current sim context (read-only mirror)
+    85→    85→  simContext: SimContext | null;
+    86→    86→  // physics validation results (debug — catches simulation bugs)
+    87→    87→  physicsViolations: PhysicsViolation[];
+    88→    88→  // probe traces (per oscilloscope)
+    89→    89→  traces: ProbeTrace[];
+    90→    90→  maxTraceSamples: number;
+    91→    91→  // history
+    92→    92→  past: { components: CircuitComponent[]; wires: Wire[] }[];
+    93→    93→  future: { components: CircuitComponent[]; wires: Wire[] }[];
+    94→    94→  // ui
+    95→    95→  paused: boolean;
+    96→    96→  showGrid: boolean;
+    97→    97→  snapToGrid: boolean;
+    98→    98→  // wire draft
+    99→    99→  wireDraft: { from: { componentId: string; terminalId: string }; cursor: { x: number; y: number } } | null;
+   100→   100→
+   101→   101→  // ── New KiCad-parity document state ──────────────────────────────────────
+   102→   102→  sheets: HierarchicalSheet[];
+   103→   103→  netClasses: NetClass[];
+   104→   104→  drawings: DrawingPrimitive[];
+   105→   105→  noConnects: NoConnectMarker[];
+   106→   106→  groups: Group[];
+   107→   107→  pageSetup: PageSetup;
+   108→   108→  savedViews: SavedView[];
+   109→   109→  childSheets: Record<string, CircuitDocument>;
+   110→   110→  activeSheet: string;
+   111→   111→  metadata: {
+   112→   112→    title?: string;
+   113→   113→    company?: string;
+   114→   114→    revision?: string;
+   115→   115→    date?: string;
+   116→   116→    author?: string;
+   117→   117→  };
+   118→   118→
+   119→   119→  // ── Display / units / view state ──────────────────────────────────────────
+   120→   120→  units: 'mm' | 'mil' | 'in' | 'grid';
+   121→   121→  gridSize: number;             // grid spacing in grid units
+   122→   122→  showPinNumbers: boolean;
+   123→   123→  showPinNames: boolean;
+   124→   124→  showPinElecTypes: boolean;
+   125→   125→  showRefdes: boolean;
+   126→   126→  showValues: boolean;
+   127→   127→  showTitleBlock: boolean;
+   128→   128→  /** UI theme: 'dark' (default) or 'light' */
+   129→   129→  theme: 'dark' | 'light';
+   130→   130→  /** Customizable hotkeys (overrides defaults). Keys are hotkey names, values are key strings. */
+   131→   131→  customHotkeys: Record<string, string>;
+   132→   132→  activeTool: 'select' | 'wire' | 'bus' | 'label' | 'globalLabel' | 'hierLabel' | 'junction' | 'noConnect' | 'powerPort' | 'text' | 'line' | 'poly' | 'image';
+   133→   133→
+   134→   134→  // actions
+   135→   135→  addComponent: (type: string, position: { x: number; y: number }) => string;
+   136→   136→  moveComponent: (id: string, position: { x: number; y: number }) => void;
+   137→   137→  rotateComponent: (id: string) => void;
+   138→   138→  /** Free rotation: rotate by arbitrary degrees (snapped to 15° increments). Stored as degrees. */
+   139→   139→  rotateComponentFree: (id: string, degrees: number) => void;
+   140→   140→  mirrorComponent: (id: string, axis: 'x' | 'y') => void;
+   141→   141→  /** Toggle De Morgan alternate body style (convert 1 ↔ 2). No-op if plugin has no alternate body. */
+   142→   142→  toggleDeMorgan: (id: string) => void;
+   143→   143→  /** Swap two pins within a pin-swap group. Returns true if swap was legal. */
+   144→   144→  swapPins: (id: string, pinIdA: string, pinIdB: string) => boolean;
+   145→   145→  deleteComponent: (id: string) => void;
+   146→   146→  deleteWire: (id: string) => void;
+   147→   147→  setParameter: (id: string, key: string, value: number | string | boolean) => void;
+   148→   148→  setSelection: (sel: Selection) => void;
+   149→   149→  // multi-selection
+   150→   150→  toggleMultiSelect: (type: 'component' | 'wire', id: string) => void;
+   151→   151→  setMultiSelection: (sel: { components: Set<string>; wires: Set<string> }) => void;
+   152→   152→  clearMultiSelection: () => void;
+   153→   153→  moveSelectedComponents: (delta: { x: number; y: number }) => void;
+   154→   154→  deleteSelected: () => void;
+   155→   155→  mirrorSelected: (axis: 'x' | 'y') => void;
+   156→   156→  rotateSelected: () => void;
+   157→   157→  // copy/paste
+   158→   158→  copySelection: () => void;
+   159→   159→  paste: () => void;
+   160→   160→  duplicate: () => void;
+   161→   161→  // ERC
+   162→   162→  runERC: () => ERCResult;
+   163→   163→  runFullERCCheck: () => ERCResult;
+   164→   164→  // annotation
+   165→   165→  reannotate: () => void;
+   166→   166→  reannotateByPosition: () => void;
+   167→   167→  // fields
+   168→   168→  setField: (compId: string, key: string, name: string, value: string, visible?: boolean) => void;
+   169→   169→  removeField: (compId: string, key: string) => void;
+   170→   170→  // lock
+   171→   171→  toggleLock: (compId: string) => void;
+   172→   172→  lockSelected: () => void;
+   173→   173→  unlockSelected: () => void;
+   174→   174→  // multi-unit
+   175→   175→  setComponentUnit: (compId: string, unit: number) => void;
+   176→   176→  setComponentConvert: (compId: string, convert: 1 | 2) => void;
+   177→   177→  // net classes
+   178→   178→  addNetClass: (name: string, description?: string) => string;
+   179→   179→  updateNetClass: (id: string, patch: Partial<NetClass>) => void;
+   180→   180→  removeNetClass: (id: string) => void;
+   181→   181→  // drawings
+   182→   182→  addDrawing: (d: DrawingPrimitive) => void;
+   183→   183→  updateDrawing: (id: string, patch: Partial<DrawingPrimitive>) => void;
+   184→   184→  removeDrawing: (id: string) => void;
+   185→   185→  // no-connects
+   186→   186→  addNoConnect: (componentId: string, terminalId: string) => void;
+   187→   187→  removeNoConnect: (componentId: string, terminalId: string) => void;
+   188→   188→  // groups
+   189→   189→  createGroup: (name: string, componentIds: string[], wireIds?: string[], drawingIds?: string[]) => string;
+   190→   190→  ungroup: (groupId: string) => void;
+   191→   191→  // sheets
+   192→   192→  addSheet: (sheetName: string, fileName: string) => string;
+   193→   193→  removeSheet: (id: string) => void;
+   194→   194→  setActiveSheet: (fileName: string) => void;
+   195→   195→  /** Move a sheet box on the canvas (drag). Position is in grid coords. */
+   196→   196→  moveSheet: (id: string, position: { x: number; y: number }) => void;
+   197→   197→  /** Add a sheet pin to a sheet box. Auto-places on the right side if no side given. */
+   198→   198→  addSheetPin: (sheetId: string, name: string, side?: 'top' | 'bottom' | 'left' | 'right') => string;
+   199→   199→  /** Rename a sheet pin. */
+   200→   200→  renameSheetPin: (sheetId: string, pinId: string, name: string) => void;
+   201→   201→  /** Remove a sheet pin. */
+   202→   202→  removeSheetPin: (sheetId: string, pinId: string) => void;
+   203→   203→  /** Move a sheet pin to a new position (in grid coords, relative to sheet box). */
+   204→   204→  moveSheetPin: (sheetId: string, pinId: string, position: { x: number; y: number }) => void;
+   205→   205→  // saved views
+   206→   206→  saveView: (name: string, camera: { x: number; y: number; zoom: number }) => string;
+   207→   207→  loadView: (id: string) => SavedView | null;
+   208→   208→  removeSavedView: (id: string) => void;
+   209→   209→  // page setup
+   210→   210→  setPageSetup: (patch: Partial<PageSetup>) => void;
+   211→   211→  setMetadata: (patch: Partial<{ title: string; company: string; revision: string; date: string; author: string }>) => void;
+   212→   212→  // display settings
+   213→   213→  setUnits: (u: 'mm' | 'mil' | 'in' | 'grid') => void;
+   214→   214→  setGridSize: (s: number) => void;
+   215→   215→  setShowPinNumbers: (s: boolean) => void;
+   216→   216→  setShowPinNames: (s: boolean) => void;
+   217→   217→  setShowPinElecTypes: (s: boolean) => void;
+   218→   218→  setShowRefdes: (s: boolean) => void;
+   219→   219→  setShowValues: (s: boolean) => void;
+   220→   220→  setShowTitleBlock: (s: boolean) => void;
+   221→   221→  setTheme: (t: 'dark' | 'light') => void;
+   222→   222→  setHotkey: (name: string, key: string) => void;
+   223→   223→  resetHotkeys: () => void;
+   224→   224→  setActiveTool: (t: EditorState['activeTool']) => void;
+   225→   225→  // wire ops
+   226→   226→  startWire: (from: { componentId: string; terminalId: string }, cursor: { x: number; y: number }) => void;
+   227→   227→  updateWireCursor: (cursor: { x: number; y: number }) => void;
+   228→   228→  cancelWire: () => void;
+   229→   229→  completeWire: (to: { componentId: string; terminalId: string }) => void;
+   230→   230→  setWireWaypoints: (id: string, waypoints: { x: number; y: number }[]) => void;
+   231→   231→  toggleSwitch: (id: string) => void;
+   232→   232→  // find/replace
+   233→   233→  findComponents: (query: string, opts?: { searchRefdes?: boolean; searchValue?: boolean; searchFields?: boolean; caseSensitive?: boolean }) => CircuitComponent[];
+   234→   234→  replaceComponentParameter: (compId: string, key: string, newValue: string | number | boolean) => void;
+   235→   235→
+   236→   236→  undo: () => void;
+   237→   237→  redo: () => void;
+   238→   238→  pushHistory: () => void;
+   239→   239→  clear: () => void;
+   240→   240→  loadDocument: (doc: CircuitDocument) => void;
+   241→   241→  serialize: () => CircuitDocument;
+   242→   242→
+   243→   243→  setRunning: (running: boolean) => void;
+   244→   244→  setSpeed: (s: number) => void;
+   245→   245→  setDt: (dt: number) => void;
+   246→   246→  step: () => void;
+   247→   247→  reset: () => void;
+   248→   248→  setShowGrid: (s: boolean) => void;
+   249→   249→  setSnapToGrid: (s: boolean) => void;
+   250→   250→
+   251→   251→  // ── Advanced analysis (KiCad ngspice parity) ──────────────────────────────
+   252→   252→  /** last analysis result (AC/DC sweep/TF/etc.) — null if none yet */
+   253→   253→  lastAnalysisResult: AnalysisResult | null;
+   254→   254→  /** sim options — exposed to UI */
+   255→   255→  simOptions: SimOptions;
+   256→   256→  /** run an analysis (AC/DC/TF/etc.) and store result */
+   257→   257→  runAnalysis: (config: AnalysisConfig) => AnalysisResult;
+   258→   258→  /** run a batch sweep (.step / .mc / .worst) */
+   259→   259→  runBatch: (config: BatchConfig) => BatchResult;
+   260→   260→  /** run a .meas post-process on a trace */
+   261→   261→  runMeasurement: (cmd: MeasCommand, trace: MeasRealTrace) => MeasResult;
+   262→   262→  /** update sim options (reltol, gmin, method, temp, etc.) */
+   263→   263→  setSimOptions: (patch: Partial<SimOptions>) => void;
+   264→   264→  /** robust DC operating point using convergence aids */
+   265→   265→  solveDCRobust: () => { sim: SimContext | null; report: ConvergenceReport };
+   266→   266→}
+   267→   267→
+   268→   268→let idCounter = 0;
+   269→   269→function genId(prefix: string = 'c') {
+   270→   270→  idCounter++;
+   271→   271→  return `${prefix}_${Date.now().toString(36)}_${idCounter}`;
+   272→   272→}
+   273→   273→
+   274→   274→/** Get the reference designator prefix for a component type */
+   275→   275→function refdesPrefix(type: string): string {
+   276→   276→  switch (type) {
+   277→   277→    case 'resistor': return 'R';
+   278→   278→    case 'capacitor': return 'C';
+   279→   279→    case 'inductor': return 'L';
+   280→   280→    case 'led': return 'LED';
+   281→   281→    case 'diode': return 'D';
+   282→   282→    case 'zener': return 'DZ';
+   283→   283→    case 'schottky': return 'D';
+   284→   284→    case 'dcVoltage':
+   285→   285→    case 'acVoltage':
+   286→   286→    case 'pulseSource': return 'V';
+   287→   287→    case 'currentSource': return 'I';
+   288→   288→    case 'timer555':
+   289→   289→    case 'opamp':
+   290→   290→    case 'opampRails':
+   291→   291→    case 'voltageRegulator':
+   292→   292→    case 'vco': return 'U';
+   293→   293→    case 'npn':
+   294→   294→    case 'pnp':
+   295→   295→    case 'nmos':
+   296→   296→    case 'pmos': return 'Q';
+   297→   297→    case 'switch':
+   298→   298→    case 'pushButton': return 'SW';
+   299→   299→    case 'fuse': return 'F';
+   300→   300→    case 'crystal': return 'Y';
+   301→   301→    case 'transformer': return 'T';
+   302→   302→    case 'speaker':
+   303→   303→    case 'buzzer': return 'LS';
+   304→   304→    case 'dcMotor': return 'M';
+   305→   305→    case 'photoresistor': return 'LDR';
+   306→   306→    case 'sevenSegment': return 'DSP';
+   307→   307→    case 'ground':
+   308→   308→    case 'powerGND': return 'GND';
+   309→   309→    case 'junction': return 'J';
+   310→   310→    case 'oscilloscope':
+   311→   311→    case 'voltmeter':
+   312→   312→    case 'ammeter': return 'TP';
+   313→   313→    case 'arduino':
+   314→   314→    case 'arduinoReal':
+   315→   315→    case 'raspberryPi': return 'U';
+   316→   316→    case 'netLabel':
+   317→   317→    case 'busLabel': return 'NL';
+   318→   318→    case 'bus': return 'BUS';
+   319→   319→    default:
+   320→   320→      if (type.startsWith('7400_') || type.startsWith('7402_') || type.startsWith('7404_') ||
+   321→   321→          type.startsWith('7408_') || type.startsWith('7432_') || type.startsWith('7486_') ||
+   322→   322→          type.startsWith('7474_')) return 'U';
+   323→   323→      if (type.startsWith('custom_')) return 'U';
+   324→   324→      return 'U';
+   325→   325→  }
+   326→   326→}
+   327→   327→
+   328→   328→/** Generate the next refdes for a given type, based on existing components */
+   329→   329→function nextRefdes(type: string, components: CircuitComponent[]): string {
+   330→   330→  const prefix = refdesPrefix(type);
+   331→   331→  let maxNum = 0;
+   332→   332→  for (const c of components) {
+   333→   333→    if (refdesPrefix(c.type) === prefix) {
+   334→   334→      const ref = c.refdes ?? c.id;
+   335→   335→      const match = ref.match(/(\d+)$/);
+   336→   336→      if (match) {
+   337→   337→        const n = parseInt(match[1]);
+   338→   338→        if (n > maxNum) maxNum = n;
+   339→   339→      }
+   340→   340→    }
+   341→   341→  }
+   342→   342→  return `${prefix}${maxNum + 1}`;
+   343→   343→}
+   344→   344→
+   345→   345→function snapshot(s: {
+   346→   346→  components: CircuitComponent[];
+   347→   347→  wires: Wire[];
+   348→   348→  drawings?: DrawingPrimitive[];
+   349→   349→  noConnects?: NoConnectMarker[];
+   350→   350→  groups?: Group[];
+   351→   351→  sheets?: HierarchicalSheet[];
+   352→   352→  netClasses?: NetClass[];
+   353→   353→}) {
+   354→   354→  return {
+   355→   355→    components: s.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined, fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined })),
+   356→   356→    wires: s.wires.map((w) => ({ ...w })),
+   357→   357→    drawings: s.drawings ? s.drawings.map((d) => ({ ...d })) : [],
+   358→   358→    noConnects: s.noConnects ? s.noConnects.map((n) => ({ ...n })) : [],
+   359→   359→    groups: s.groups ? s.groups.map((g) => ({ ...g, componentIds: [...g.componentIds], wireIds: [...g.wireIds], drawingIds: [...g.drawingIds] })) : [],
+   360→   360→    sheets: s.sheets ? s.sheets.map((sh) => ({ ...sh, pins: sh.pins.map((p) => ({ ...p })) })) : [],
+   361→   361→    netClasses: s.netClasses ? s.netClasses.map((nc) => ({ ...nc, nets: [...nc.nets] })) : [],
+   362→   362→  };
+   363→   363→}
+   364→   364→
+   365→   365→const MAX_HISTORY = 100;
+   366→   366→
+   367→   367→// helper: get plugin defaults
+   368→   368→function defaultsFor(type: string): Record<string, number | string | boolean> {
+   369→   369→  const plugin = getPlugin(type);
+   370→   370→  if (!plugin) return {};
+   371→   371→  const defaults: Record<string, number | string | boolean> = {};
+   372→   372→  for (const p of plugin.parameters) defaults[p.key] = p.default;
+   373→   373→  return defaults;
+   374→   374→}
+   375→   375→
+   376→   376→export const useEditor = create<EditorState>((set, get) => ({
+   377→   377→  components: [],
+   378→   378→  wires: [],
+   379→   379→  selection: { type: null, id: null },
+   380→   380→  multiSelection: { components: new Set(), wires: new Set() },
+   381→   381→  clipboard: null,
+   382→   382→  ercErrors: [],
+   383→   383→  running: false,
+   384→   384→  speed: 1,
+   385→   385→  dt: 1e-4,
+   386→   386→  simContext: null,
+   387→   387→  physicsViolations: [],
+   388→   388→  traces: [],
+   389→   389→  maxTraceSamples: 500,
+   390→   390→  past: [],
+   391→   391→  future: [],
+   392→   392→  paused: true,
+   393→   393→  showGrid: true,
+   394→   394→  snapToGrid: true,
+   395→   395→  wireDraft: null,
+   396→   396→  // new doc state
+   397→   397→  sheets: [],
+   398→   398→  netClasses: [],
+   399→   399→  drawings: [],
+   400→   400→  noConnects: [],
+   401→   401→  groups: [],
+   402→   402→  pageSetup: { ...DEFAULT_PAGE_SETUP },
+   403→   403→  savedViews: [],
+   404→   404→  childSheets: {},
+   405→   405→  activeSheet: '',
+   406→   406→  metadata: { title: 'Untitled', revision: 'Rev 1', date: new Date().toISOString().slice(0, 10) },
+   407→   407→  // display
+   408→   408→  units: 'grid',
+   409→   409→  gridSize: 1,
+   410→   410→  showPinNumbers: false,
+   411→   411→  showPinNames: false,
+   412→   412→  showPinElecTypes: false,
+   413→   413→  showRefdes: true,
+   414→   414→  showValues: true,
+   415→   415→  showTitleBlock: false,
+   416→   416→  theme: 'dark',
+   417→   417→  customHotkeys: {},
+   418→   418→  activeTool: 'select',
+   419→   419→
+   420→   420→  addComponent: (type, position) => {
+   421→   421→    get().pushHistory();
+   422→   422→    const id = genId('comp');
+   423→   423→    const s = get();
+   424→   424→    const refdes = nextRefdes(type, s.components);
+   425→   425→    const comp: CircuitComponent = {
+   426→   426→      id,
+   427→   427→      type,
+   428→   428→      position: { ...position },
+   429→   429→      rotation: 0,
+   430→   430→      parameters: defaultsFor(type),
+   431→   431→      refdes,
+   432→   432→    };
+   433→   433→    set((s) => ({ components: [...s.components, comp], selection: { type: 'component', id } }));
+   434→   434→    return id;
+   435→   435→  },
+   436→   436→
+   437→   437→  moveComponent: (id, position) => {
+   438→   438→    set((s) => ({
+   439→   439→      components: s.components.map((c) =>
+   440→   440→        c.id === id ? { ...c, position: { ...position } } : c,
+   441→   441→      ),
+   442→   442→    }));
+   443→   443→  },
+   444→   444→
+   445→   445→  rotateComponent: (id) => {
+   446→   446→    get().pushHistory();
+   447→   447→    set((s) => ({
+   448→   448→      components: s.components.map((c) =>
+   449→   449→        c.id === id
+   450→   450→          ? { ...c, rotation: (((c.rotation + 1) % 4) as 0 | 1 | 2 | 3) }
+   451→   451→          : c,
+   452→   452→      ),
+   453→   453→    }));
+   454→   454→  },
+   455→   455→
+   456→   456→  mirrorComponent: (id, axis) => {
+   457→   457→    get().pushHistory();
+   458→   458→    set((s) => ({
+   459→   459→      components: s.components.map((c) =>
+   460→   460→        c.id === id
+   461→   461→          ? { ...c, [axis === 'x' ? 'mirrorX' : 'mirrorY']: !c[axis === 'x' ? 'mirrorX' : 'mirrorY'] }
+   462→   462→          : c,
+   463→   463→      ),
+   464→   464→    }));
+   465→   465→  },
+   466→   466→
+   467→   467→  rotateComponentFree: (id, degrees) => {
+   468→   468→    // Snap to 15° increments (24 distinct angles). Stored in `rotationDeg`.
+   469→   469→    // The canvas's render loop should use rotationDeg if present, otherwise fall back to rotation*90.
+   470→   470→    get().pushHistory();
+   471→   471→    const snapped = Math.round(degrees / 15) * 15;
+   472→   472→    set((s) => ({
+   473→   473→      components: s.components.map((c) =>
+   474→   474→        c.id === id ? { ...c, rotationDeg: snapped } : c,
+   475→   475→      ),
+   476→   476→    }));
+   477→   477→  },
+   478→   478→
+   479→   479→  toggleDeMorgan: (id) => {
+   480→   480→    const comp = get().components.find((c) => c.id === id);
+   481→   481→    if (!comp) return;
+   482→   482→    const plugin = getPlugin(comp.type);
+   483→   483→    if (!plugin?.hasAlternateBody) return;
+   484→   484→    get().pushHistory();
+   485→   485→    set((s) => ({
+   486→   486→      components: s.components.map((c) =>
+   487→   487→        c.id === id ? { ...c, convert: c.convert === 2 ? 1 : 2 } : c,
+   488→   488→      ),
+   489→   489→    }));
+   490→   490→  },
+   491→   491→
+   492→   492→  swapPins: (id, pinIdA, pinIdB) => {
+   493→   493→    const comp = get().components.find((c) => c.id === id);
+   494→   494→    if (!comp) return false;
+   495→   495→    const plugin = getPlugin(comp.type);
+   496→   496→    if (!plugin?.pinSwapGroups) return false;
+   497→   497→    // Check if both pins are in the same swap group
+   498→   498→    const inSameGroup = plugin.pinSwapGroups.some((group) =>
+   499→   499→      group.includes(pinIdA) && group.includes(pinIdB),
+   500→   500→    );
+   501→   501→    if (!inSameGroup) return false;
+   502→   502→    // Swap: we re-emit all wires that referenced pinIdA to pinIdB and vice versa.
+   503→   503→    // This requires walking the wires array and swapping terminal IDs.
+   504→   504→    get().pushHistory();
+   505→   505→    set((s) => ({
+   506→   506→      wires: s.wires.map((w) => {
+   507→   507→        if (w.from.componentId === id && w.from.terminalId === pinIdA) {
+   508→   508→          return { ...w, from: { ...w.from, terminalId: pinIdB } };
+   509→   509→        }
+   510→   510→        if (w.from.componentId === id && w.from.terminalId === pinIdB) {
+   511→   511→          return { ...w, from: { ...w.from, terminalId: pinIdA } };
+   512→   512→        }
+   513→   513→        if (w.to.componentId === id && w.to.terminalId === pinIdA) {
+   514→   514→          return { ...w, to: { ...w.to, terminalId: pinIdB } };
+   515→   515→        }
+   516→   516→        if (w.to.componentId === id && w.to.terminalId === pinIdB) {
+   517→   517→          return { ...w, to: { ...w.to, terminalId: pinIdA } };
+   518→   518→        }
+   519→   519→        return w;
+   520→   520→      }),
+   521→   521→    }));
+   522→   522→    return true;
+   523→   523→  },
+   524→   524→
+   525→   525→  deleteComponent: (id) => {
+   526→   526→    get().pushHistory();
+   527→   527→    set((s) => ({
+   528→   528→      components: s.components.filter((c) => c.id !== id),
+   529→   529→      wires: s.wires.filter((w) => w.from.componentId !== id && w.to.componentId !== id),
+   530→   530→      selection: { type: null, id: null },
+   531→   531→      traces: s.traces.filter((t) => t.componentId !== id),
+   532→   532→    }));
+   533→   533→  },
+   534→   534→
+   535→   535→  deleteWire: (id) => {
+   536→   536→    get().pushHistory();
+   537→   537→    set((s) => ({
+   538→   538→      wires: s.wires.filter((w) => w.id !== id),
+   539→   539→      selection: { type: null, id: null },
+   540→   540→    }));
+   541→   541→  },
+   542→   542→
+   543→   543→  setParameter: (id, key, value) => {
+   544→   544→    // KiCad parity: parameter edits must be undoable. Coalesce rapid edits into a single history entry.
+   545→   545→    const s = get();
+   546→   546→    const last = s.past[s.past.length - 1];
+   547→   547→    const isCoalescing = last &&
+   548→   548→      (last as any).__paramEdit?.id === id &&
+   549→   549→      (last as any).__paramEdit?.key === key &&
+   550→   550→      Date.now() - ((last as any).__paramEdit?.ts ?? 0) < 1500;
+   551→   551→    if (!isCoalescing) {
+   552→   552→      get().pushHistory();
+   553→   553→      // mark the snapshot as a param-edit so subsequent edits to same param can coalesce
+   554→   554→      const cur = get();
+   555→   555→      if (cur.past.length > 0) {
+   556→   556→        (cur.past[cur.past.length - 1] as any).__paramEdit = { id, key, ts: Date.now() };
+   557→   557→      }
+   558→   558→    }
+   559→   559→    set((s) => ({
+   560→   560→      components: s.components.map((c) =>
+   561→   561→        c.id === id ? { ...c, parameters: { ...c.parameters, [key]: value } } : c,
+   562→   562→      ),
+   563→   563→    }));
+   564→   564→  },
+   565→   565→
+   566→   566→  setSelection: (sel) => set({ selection: sel, multiSelection: { components: new Set(), wires: new Set() } }),
+   567→   567→
+   568→   568→  // ===== Multi-selection =====
+   569→   569→  toggleMultiSelect: (type, id) => {
+   570→   570→    set((s) => {
+   571→   571→      const ms = {
+   572→   572→        components: new Set(s.multiSelection.components),
+   573→   573→        wires: new Set(s.multiSelection.wires),
+   574→   574→      };
+   575→   575→      if (type === 'component') {
+   576→   576→        if (ms.components.has(id)) ms.components.delete(id);
+   577→   577→        else ms.components.add(id);
+   578→   578→      } else {
+   579→   579→        if (ms.wires.has(id)) ms.wires.delete(id);
+   580→   580→        else ms.wires.add(id);
+   581→   581→      }
+   582→   582→      return { multiSelection: ms };
+   583→   583→    });
+   584→   584→  },
+   585→   585→  setMultiSelection: (sel) => set({ multiSelection: sel, selection: { type: null, id: null } }),
+   586→   586→  clearMultiSelection: () => set({ multiSelection: { components: new Set(), wires: new Set() } }),
+   587→   587→
+   588→   588→  moveSelectedComponents: (delta) => {
+   589→   589→    set((s) => {
+   590→   590→      const ids = new Set(s.multiSelection.components);
+   591→   591→      if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+   592→   592→      if (ids.size === 0) return {};
+   593→   593→      return {
+   594→   594→        components: s.components.map((c) =>
+   595→   595→          ids.has(c.id) ? { ...c, position: { x: c.position.x + delta.x, y: c.position.y + delta.y } } : c,
+   596→   596→        ),
+   597→   597→      };
+   598→   598→    });
+   599→   599→  },
+   600→   600→
+   601→   601→  deleteSelected: () => {
+   602→   602→    get().pushHistory();
+   603→   603→    set((s) => {
+   604→   604→      const idsToDelete = new Set(s.multiSelection.components);
+   605→   605→      if (s.selection.type === 'component' && s.selection.id) idsToDelete.add(s.selection.id);
+   606→   606→      const wiresToDelete = new Set(s.multiSelection.wires);
+   607→   607→      if (s.selection.type === 'wire' && s.selection.id) wiresToDelete.add(s.selection.id);
+   608→   608→      return {
+   609→   609→        components: s.components.filter((c) => !idsToDelete.has(c.id)),
+   610→   610→        wires: s.wires.filter((w) => !wiresToDelete.has(w.id) &&
+   611→   611→          !idsToDelete.has(w.from.componentId) && !idsToDelete.has(w.to.componentId)),
+   612→   612→        selection: { type: null, id: null },
+   613→   613→        multiSelection: { components: new Set(), wires: new Set() },
+   614→   614→      };
+   615→   615→    });
+   616→   616→  },
+   617→   617→
+   618→   618→  // ===== Copy/Paste =====
+   619→   619→  copySelection: () => {
+   620→   620→    const s = get();
+   621→   621→    const idsToCopy = new Set(s.multiSelection.components);
+   622→   622→    if (s.selection.type === 'component' && s.selection.id) idsToCopy.add(s.selection.id);
+   623→   623→    if (idsToCopy.size === 0) return;
+   624→   624→    const copiedComponents = s.components
+   625→   625→      .filter((c) => idsToCopy.has(c.id))
+   626→   626→      .map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined }));
+   627→   627→    const copiedWires = s.wires
+   628→   628→      .filter((w) => idsToCopy.has(w.from.componentId) && idsToCopy.has(w.to.componentId))
+   629→   629→      .map((w) => ({ ...w }));
+   630→   630→    set({ clipboard: { components: copiedComponents, wires: copiedWires } });
+   631→   631→  },
+   632→   632→
+   633→   633→  paste: () => {
+   634→   634→    const s = get();
+   635→   635→    if (!s.clipboard || s.clipboard.components.length === 0) return;
+   636→   636→    get().pushHistory();
+   637→   637→    const idMap = new Map<string, string>();
+   638→   638→    const newComponents = s.clipboard.components.map((c) => {
+   639→   639→      const newId = genId('comp');
+   640→   640→      idMap.set(c.id, newId);
+   641→   641→      return { ...c, id: newId, position: { x: c.position.x + 2, y: c.position.y + 2 }, parameters: { ...c.parameters }, simState: undefined };
+   642→   642→    });
+   643→   643→    const newWires = s.clipboard.wires.map((w) => ({
+   644→   644→      id: genId('wire'),
+   645→   645→      from: { componentId: idMap.get(w.from.componentId) ?? w.from.componentId, terminalId: w.from.terminalId },
+   646→   646→      to: { componentId: idMap.get(w.to.componentId) ?? w.to.componentId, terminalId: w.to.terminalId },
+   647→   647→    }));
+   648→   648→    set((st) => ({
+   649→   649→      components: [...st.components, ...newComponents],
+   650→   650→      wires: [...st.wires, ...newWires],
+   651→   651→      selection: { type: null, id: null },
+   652→   652→      multiSelection: {
+   653→   653→        components: new Set(newComponents.map((c) => c.id)),
+   654→   654→        wires: new Set(newWires.map((w) => w.id)),
+   655→   655→      },
+   656→   656→    }));
+   657→   657→  },
+   658→   658→
+   659→   659→  duplicate: () => { get().copySelection(); get().paste(); },
+   660→   660→
+   661→   661→  // ===== ERC =====
+   662→   662→  runERC: () => {
+   663→   663→    const s = get();
+   664→   664→    const result = runERC(s.components, s.wires);
+   665→   665→    set({ ercErrors: result.errors });
+   666→   666→    return result;
+   667→   667→  },
+   668→   668→
+   669→   669→  runFullERCCheck: () => {
+   670→   670→    const s = get();
+   671→   671→    // Run ERC across the flattened hierarchy so cross-sheet errors are caught
+   672→   672→    let ercComponents = s.components;
+   673→   673→    let ercWires = s.wires;
+   674→   674→    if (s.activeSheet || s.sheets.length > 0) {
+   675→   675→      let childSheets = s.childSheets;
+   676→   676→      if (s.activeSheet) {
+   677→   677→        childSheets = {
+   678→   678→          ...childSheets,
+   679→   679→          [s.activeSheet]: snapshotSheet(s.components, s.wires, s.sheets),
+   680→   680→        };
+   681→   681→      }
+   682→   682→      const rootDoc = s.activeSheet
+   683→   683→        ? (childSheets as any).__root__ ?? { version: 1 as const, components: [], wires: [], sheets: [] }
+   684→   684→        : { version: 1 as const, components: s.components, wires: s.wires, sheets: s.sheets };
+   685→   685→      const flat = flattenHierarchy(rootDoc as any, childSheets as any);
+   686→   686→      ercComponents = flat.components;
+   687→   687→      ercWires = flat.wires;
+   688→   688→    }
+   689→   689→    const result = runFullERC(ercComponents, ercWires, s.noConnects);
+   690→   690→    set({ ercErrors: result.errors });
+   691→   691→    return result;
+   692→   692→  },
+   693→   693→
+   694→   694→  reannotate: () => {
+   695→   695→    get().pushHistory();
+   696→   696→    const s = get();
+   697→   697→    const counters: Record<string, number> = {};
+   698→   698→    const newComponents = s.components.map((c) => {
+   699→   699→      const prefix = refdesPrefix(c.type);
+   700→   700→      counters[prefix] = (counters[prefix] ?? 0) + 1;
+   701→   701→      return { ...c, refdes: `${prefix}${counters[prefix]}` };
+   702→   702→    });
+   703→   703→    set({ components: newComponents });
+   704→   704→  },
+   705→   705→
+   706→   706→  // KiCad parity: annotate by X-then-Y position (left-to-right, top-to-bottom)
+   707→   707→  reannotateByPosition: () => {
+   708→   708→    get().pushHistory();
+   709→   709→    const s = get();
+   710→   710→    // stable sort: y asc (top first), then x asc (left first)
+   711→   711→    const sorted = [...s.components].sort((a, b) => {
+   712→   712→      if (Math.abs(a.position.y - b.position.y) > 0.5) return a.position.y - b.position.y;
+   713→   713→      return a.position.x - b.position.x;
+   714→   714→    });
+   715→   715→    const counters: Record<string, number> = {};
+   716→   716→    const updates = new Map<string, string>();
+   717→   717→    for (const c of sorted) {
+   718→   718→      const prefix = refdesPrefix(c.type);
+   719→   719→      counters[prefix] = (counters[prefix] ?? 0) + 1;
+   720→   720→      updates.set(c.id, `${prefix}${counters[prefix]}`);
+   721→   721→    }
+   722→   722→    set({
+   723→   723→      components: s.components.map((c) => updates.has(c.id) ? { ...c, refdes: updates.get(c.id)! } : c),
+   724→   724→    });
+   725→   725→  },
+   726→   726→
+   727→   727→  // ===== Component fields (KiCad "Fields" tab) =====
+   728→   728→  setField: (compId, key, name, value, visible = true) => {
+   729→   729→    get().pushHistory();
+   730→   730→    set((s) => ({
+   731→   731→      components: s.components.map((c) => {
+   732→   732→        if (c.id !== compId) return c;
+   733→   733→        const fields = c.fields ? [...c.fields] : [];
+   734→   734→        const idx = fields.findIndex((f) => f.key === key);
+   735→   735→        if (idx >= 0) fields[idx] = { ...fields[idx], name, value, visible };
+   736→   736→        else fields.push({ key, name, value, visible });
+   737→   737→        return { ...c, fields };
+   738→   738→      }),
+   739→   739→    }));
+   740→   740→  },
+   741→   741→  removeField: (compId, key) => {
+   742→   742→    get().pushHistory();
+   743→   743→    set((s) => ({
+   744→   744→      components: s.components.map((c) => {
+   745→   745→        if (c.id !== compId || !c.fields) return c;
+   746→   746→        return { ...c, fields: c.fields.filter((f) => f.key !== key) };
+   747→   747→      }),
+   748→   748→    }));
+   749→   749→  },
+   750→   750→
+   751→   751→  // ===== Lock =====
+   752→   752→  toggleLock: (compId) => {
+   753→   753→    get().pushHistory();
+   754→   754→    set((s) => ({
+   755→   755→      components: s.components.map((c) =>
+   756→   756→        c.id === compId ? { ...c, locked: !c.locked } : c,
+   757→   757→      ),
+   758→   758→    }));
+   759→   759→  },
+   760→   760→  lockSelected: () => {
+   761→   761→    get().pushHistory();
+   762→   762→    set((s) => {
+   763→   763→      const ids = new Set(s.multiSelection.components);
+   764→   764→      if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+   765→   765→      return {
+   766→   766→        components: s.components.map((c) => ids.has(c.id) ? { ...c, locked: true } : c),
+   767→   767→      };
+   768→   768→    });
+   769→   769→  },
+   770→   770→  unlockSelected: () => {
+   771→   771→    get().pushHistory();
+   772→   772→    set((s) => {
+   773→   773→      const ids = new Set(s.multiSelection.components);
+   774→   774→      if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+   775→   775→      return {
+   776→   776→        components: s.components.map((c) => ids.has(c.id) ? { ...c, locked: false } : c),
+   777→   777→      };
+   778→   778→    });
+   779→   779→  },
+   780→   780→
+   781→   781→  // ===== Multi-unit components =====
+   782→   782→  setComponentUnit: (compId, unit) => {
+   783→   783→    get().pushHistory();
+   784→   784→    set((s) => ({
+   785→   785→      components: s.components.map((c) =>
+   786→   786→        c.id === compId ? { ...c, unit } : c,
+   787→   787→      ),
+   788→   788→    }));
+   789→   789→  },
+   790→   790→  setComponentConvert: (compId, convert) => {
+   791→   791→    get().pushHistory();
+   792→   792→    set((s) => ({
+   793→   793→      components: s.components.map((c) =>
+   794→   794→        c.id === compId ? { ...c, convert } : c,
+   795→   795→      ),
+   796→   796→    }));
+   797→   797→  },
+   798→   798→
+   799→   799→  // ===== Mirror/Rotate selection =====
+   800→   800→  mirrorSelected: (axis) => {
+   801→   801→    get().pushHistory();
+   802→   802→    set((s) => {
+   803→   803→      const ids = new Set(s.multiSelection.components);
+   804→   804→      if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+   805→   805→      const field = axis === 'x' ? 'mirrorX' : 'mirrorY';
+   806→   806→      return {
+   807→   807→        components: s.components.map((c) =>
+   808→   808→          ids.has(c.id) ? { ...c, [field]: !c[field] } : c,
+   809→   809→        ),
+   810→   810→      };
+   811→   811→    });
+   812→   812→  },
+   813→   813→  rotateSelected: () => {
+   814→   814→    get().pushHistory();
+   815→   815→    set((s) => {
+   816→   816→      const ids = new Set(s.multiSelection.components);
+   817→   817→      if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+   818→   818→      return {
+   819→   819→        components: s.components.map((c) =>
+   820→   820→          ids.has(c.id) ? { ...c, rotation: (((c.rotation + 1) % 4) as 0 | 1 | 2 | 3) } : c,
+   821→   821→        ),
+   822→   822→      };
+   823→   823→    });
+   824→   824→  },
+   825→   825→
+   826→   826→  // ===== Net classes =====
+   827→   827→  addNetClass: (name, description) => {
+   828→   828→    const id = genId('nc');
+   829→   829→    set((s) => ({
+   830→   830→      netClasses: [...s.netClasses, { id, name, description: description ?? '', nets: [], color: '#22d3ee' }],
+   831→   831→    }));
+   832→   832→    return id;
+   833→   833→  },
+   834→   834→  updateNetClass: (id, patch) => {
+   835→   835→    get().pushHistory();
+   836→   836→    set((s) => ({
+   837→   837→      netClasses: s.netClasses.map((nc) => nc.id === id ? { ...nc, ...patch } : nc),
+   838→   838→    }));
+   839→   839→  },
+   840→   840→  removeNetClass: (id) => {
+   841→   841→    get().pushHistory();
+   842→   842→    set((s) => ({
+   843→   843→      netClasses: s.netClasses.filter((nc) => nc.id !== id),
+   844→   844→      components: s.components.map((c) => c.netClassId === id ? { ...c, netClassId: undefined } : c),
+   845→   845→    }));
+   846→   846→  },
+   847→   847→
+   848→   848→  // ===== Drawings =====
+   849→   849→  addDrawing: (d) => {
+   850→   850→    get().pushHistory();
+   851→   851→    set((s) => ({ drawings: [...s.drawings, d] }));
+   852→   852→  },
+   853→   853→  updateDrawing: (id, patch) => {
+   854→   854→    set((s) => ({
+   855→   855→      drawings: s.drawings.map((d) => d.id === id ? { ...d, ...patch } as DrawingPrimitive : d),
+   856→   856→    }));
+   857→   857→  },
+   858→   858→  removeDrawing: (id) => {
+   859→   859→    get().pushHistory();
+   860→   860→    set((s) => ({ drawings: s.drawings.filter((d) => d.id !== id) }));
+   861→   861→  },
+   862→   862→
+   863→   863→  // ===== No-Connect markers =====
+   864→   864→  addNoConnect: (componentId, terminalId) => {
+   865→   865→    get().pushHistory();
+   866→   866→    set((s) => ({
+   867→   867→      noConnects: s.noConnects.filter((n) => !(n.componentId === componentId && n.terminalId === terminalId)),
+   868→   868→    }));
+   869→   869→    set((s) => ({
+   870→   870→      noConnects: [...s.noConnects, { id: genId('nc'), componentId, terminalId }],
+   871→   871→    }));
+   872→   872→  },
+   873→   873→  removeNoConnect: (componentId, terminalId) => {
+   874→   874→    get().pushHistory();
+   875→   875→    set((s) => ({
+   876→   876→      noConnects: s.noConnects.filter((n) => !(n.componentId === componentId && n.terminalId === terminalId)),
+   877→   877→    }));
+   878→   878→  },
+   879→   879→
+   880→   880→  // ===== Groups =====
+   881→   881→  createGroup: (name, componentIds, wireIds = [], drawingIds = []) => {
+   882→   882→    const id = genId('grp');
+   883→   883→    get().pushHistory();
+   884→   884→    set((s) => ({
+   885→   885→      groups: [...s.groups, { id, name, componentIds: [...componentIds], wireIds: [...wireIds], drawingIds: [...drawingIds] }],
+   886→   886→    }));
+   887→   887→    return id;
+   888→   888→  },
+   889→   889→  ungroup: (groupId) => {
+   890→   890→    get().pushHistory();
+   891→   891→    set((s) => ({ groups: s.groups.filter((g) => g.id !== groupId) }));
+   892→   892→  },
+   893→   893→
+   894→   894→  // ===== Hierarchical sheets =====
+   895→   895→  addSheet: (sheetName, fileName) => {
+   896→   896→    const id = genId('sheet');
+   897→   897→    get().pushHistory();
+   898→   898→    set((s) => ({
+   899→   899→      sheets: [...s.sheets, {
+   900→   900→        id, sheetName, fileName,
+   901→   901→        position: { x: 20, y: 10 },
+   902→   902→        size: { width: 10, height: 6 },
+   903→   903→        pins: [],
+   904→   904→      }],
+   905→   905→      childSheets: { ...s.childSheets, [fileName]: { version: 1, components: [], wires: [] } },
+   906→   906→    }));
+   907→   907→    return id;
+   908→   908→  },
+   909→   909→  removeSheet: (id) => {
+   910→   910→    get().pushHistory();
+   911→   911→    set((s) => {
+   912→   912→      const sheet = s.sheets.find((sh) => sh.id === id);
+   913→   913→      const newChild = { ...s.childSheets };
+   914→   914→      if (sheet) delete newChild[sheet.fileName];
+   915→   915→      return {
+   916→   916→        sheets: s.sheets.filter((sh) => sh.id !== id),
+   917→   917→        childSheets: newChild,
+   918→   918→      };
+   919→   919→    });
+   920→   920→  },
+   921→   921→  setActiveSheet: (fileName) => {
+   922→   922→    const s = get();
+   923→   923→    // Snapshot the current sheet into childSheets (or root, kept implicitly as the
+   924→   924→    // active components/wires when activeSheet === '').
+   925→   925→    const currentSheetFileName = s.activeSheet;
+   926→   926→    if (currentSheetFileName) {
+   927→   927→      // Save the current sheet's contents back to childSheets[currentSheetFileName]
+   928→   928→      const snap = snapshotSheet(s.components, s.wires, s.sheets);
+   929→   929→      set((st) => ({
+   930→   930→        childSheets: {
+   931→   931→          ...st.childSheets,
+   932→   932→          [currentSheetFileName]: snap,
+   933→   933→        },
+   934→   934→      }));
+   935→   935→    } else {
+   936→   936→      // We were on root — root's components/wires stay in place (no swap needed
+   937→   937→      // when navigating back to root, just restore the saved snapshot below
+   938→   938→      // when going elsewhere).
+   939→   939→    }
+   940→   940→
+   941→   941→    if (!fileName) {
+   942→   942→      // Navigating back to root — restore root's saved snapshot if we have one.
+   943→   943→      // Root's components/wires are kept as the "current" state when on root,
+   944→   944→      // so if we're already on root there's nothing to do. If we're returning
+   945→   945→      // from a sub-sheet, the root snapshot is in `childSheets['__root__']`
+   946→   946→      // (a special key we use to preserve root state across sub-sheet edits).
+   947→   947→      const rootSnap = (s.childSheets as any)['__root__'];
+   948→   948→      if (rootSnap) {
+   949→   949→        set({
+   950→   950→          activeSheet: '',
+   951→   951→          components: rootSnap.components,
+   952→   952→          wires: rootSnap.wires,
+   953→   953→          sheets: rootSnap.sheets ?? [],
+   954→   954→        });
+   955→   955→        // Remove the temporary __root__ key
+   956→   956→        const newChild = { ...get().childSheets };
+   957→   957→        delete (newChild as any)['__root__'];
+   958→   958→        set({ childSheets: newChild });
+   959→   959→      } else {
+   960→   960→        set({ activeSheet: '' });
+   961→   961→      }
+   962→   962→      return;
+   963→   963→    }
+   964→   964→
+   965→   965→    // Save current root state into __root__ if we're leaving root
+   966→   966→    if (!currentSheetFileName) {
+   967→   967→      const rootSnap = snapshotSheet(s.components, s.wires, s.sheets);
+   968→   968→      set((st) => ({
+   969→   969→        childSheets: {
+   970→   970→          ...st.childSheets,
+   971→   971→          __root__: rootSnap as any,
+   972→   972→        },
+   973→   973→      }));
+   974→   974→    }
+   975→   975→
+   976→   976→    // Switch to the target sub-sheet
+   977→   977→    const targetDoc = get().childSheets[fileName];
+   978→   978→    if (targetDoc) {
+   979→   979→      set({
+   980→   980→        activeSheet: fileName,
+   981→   981→        components: targetDoc.components ?? [],
+   982→   982→        wires: targetDoc.wires ?? [],
+   983→   983→        sheets: (targetDoc as any).sheets ?? [],
+   984→   984→      });
+   985→   985→    } else {
+   986→   986→      // Sub-sheet doesn't exist yet — create an empty one
+   987→   987→      set({
+   988→   988→        activeSheet: fileName,
+   989→   989→        components: [],
+   990→   990→        wires: [],
+   991→   991→        sheets: [],
+   992→   992→      });
+   993→   993→    }
+   994→   994→  },
+   995→   995→
+   996→   996→  moveSheet: (id, position) => {
+   997→   997→    get().pushHistory();
+   998→   998→    set((s) => ({
+   999→   999→      sheets: s.sheets.map((sh) => sh.id === id ? { ...sh, position } : sh),
+  1000→  1000→    }));
+  1001→  1001→  },
+  1002→  1002→
+  1003→  1003→  addSheetPin: (sheetId, name, side = 'right') => {
+  1004→  1004→    const id = genId('pin');
+  1005→  1005→    get().pushHistory();
+  1006→  1006→    set((s) => ({
+  1007→  1007→      sheets: s.sheets.map((sh) => {
+  1008→  1008→        if (sh.id !== sheetId) return sh;
+  1009→  1009→        // Auto-place on the chosen side
+  1010→  1010→        const pinsOnSide = sh.pins.filter((p) => p.side === side);
+  1011→  1011→        const idx = pinsOnSide.length + 1;
+  1012→  1012→        let position: { x: number; y: number };
+  1013→  1013→        switch (side) {
+  1014→  1014→          case 'left':   position = { x: 0, y: idx }; break;
+  1015→  1015→          case 'right':  position = { x: sh.size.width, y: idx }; break;
+  1016→  1016→          case 'top':    position = { x: idx, y: 0 }; break;
+  1017→  1017→          case 'bottom': position = { x: idx, y: sh.size.height }; break;
+  1018→  1018→        }
+  1019→  1019→        return {
+  1020→  1020→          ...sh,
+  1021→  1021→          pins: [...sh.pins, {
+  1022→  1022→            id, name, electricalType: 'passive' as const,
+  1023→  1023→            position, side,
+  1024→  1024→          }],
+  1025→  1025→        };
+  1026→  1026→      }),
+  1027→  1027→    }));
+  1028→  1028→    return id;
+  1029→  1029→  },
+  1030→  1030→
+  1031→  1031→  renameSheetPin: (sheetId, pinId, name) => {
+  1032→  1032→    get().pushHistory();
+  1033→  1033→    set((s) => ({
+  1034→  1034→      sheets: s.sheets.map((sh) => sh.id !== sheetId ? sh : {
+  1035→  1035→        ...sh,
+  1036→  1036→        pins: sh.pins.map((p) => p.id === pinId ? { ...p, name } : p),
+  1037→  1037→      }),
+  1038→  1038→    }));
+  1039→  1039→  },
+  1040→  1040→
+  1041→  1041→  removeSheetPin: (sheetId, pinId) => {
+  1042→  1042→    get().pushHistory();
+  1043→  1043→    set((s) => ({
+  1044→  1044→      sheets: s.sheets.map((sh) => sh.id !== sheetId ? sh : {
+  1045→  1045→        ...sh,
+  1046→  1046→        pins: sh.pins.filter((p) => p.id !== pinId),
+  1047→  1047→      }),
+  1048→  1048→    }));
+  1049→  1049→  },
+  1050→  1050→
+  1051→  1051→  moveSheetPin: (sheetId, pinId, position) => {
+  1052→  1052→    get().pushHistory();
+  1053→  1053→    set((s) => ({
+  1054→  1054→      sheets: s.sheets.map((sh) => sh.id !== sheetId ? sh : {
+  1055→  1055→        ...sh,
+  1056→  1056→        pins: sh.pins.map((p) => p.id === pinId ? { ...p, position } : p),
+  1057→  1057→      }),
+  1058→  1058→    }));
+  1059→  1059→  },
+  1060→  1060→
+  1061→  1061→  // ===== Saved views =====
+  1062→  1062→  saveView: (name, camera) => {
+  1063→  1063→    const id = genId('view');
+  1064→  1064→    set((s) => ({ savedViews: [...s.savedViews, { id, name, camera }] }));
+  1065→  1065→    return id;
+  1066→  1066→  },
+  1067→  1067→  loadView: (id) => {
+  1068→  1068→    const s = get();
+  1069→  1069→    return s.savedViews.find((v) => v.id === id) ?? null;
+  1070→  1070→  },
+  1071→  1071→  removeSavedView: (id) => {
+  1072→  1072→    set((s) => ({ savedViews: s.savedViews.filter((v) => v.id !== id) }));
+  1073→  1073→  },
+  1074→  1074→
+  1075→  1075→  // ===== Page setup & metadata =====
+  1076→  1076→  setPageSetup: (patch) => {
+  1077→  1077→    get().pushHistory();
+  1078→  1078→    set((s) => ({ pageSetup: { ...s.pageSetup, ...patch } }));
+  1079→  1079→  },
+  1080→  1080→  setMetadata: (patch) => {
+  1081→  1081→    get().pushHistory();
+  1082→  1082→    set((s) => ({ metadata: { ...s.metadata, ...patch } }));
+  1083→  1083→  },
+  1084→  1084→
+  1085→  1085→  // ===== Display =====
+  1086→  1086→  setUnits: (u) => set({ units: u }),
+  1087→  1087→  setGridSize: (s) => set({ gridSize: s }),
+  1088→  1088→  setShowPinNumbers: (s) => set({ showPinNumbers: s }),
+  1089→  1089→  setShowPinNames: (s) => set({ showPinNames: s }),
+  1090→  1090→  setShowPinElecTypes: (s) => set({ showPinElecTypes: s }),
+  1091→  1091→  setShowRefdes: (s) => set({ showRefdes: s }),
+  1092→  1092→  setShowValues: (s) => set({ showValues: s }),
+  1093→  1093→  setShowTitleBlock: (s) => set({ showTitleBlock: s }),
+  1094→  1094→  setTheme: (t) => set({ theme: t }),
+  1095→  1095→  setHotkey: (name, key) => set((s) => ({ customHotkeys: { ...s.customHotkeys, [name]: key } })),
+  1096→  1096→  resetHotkeys: () => set({ customHotkeys: {} }),
+  1097→  1097→  setActiveTool: (t) => set({ activeTool: t }),
+  1098→  1098→
+  1099→  1099→  // ===== Find / Replace =====
+  1100→  1100→  findComponents: (query, opts = {}) => {
+  1101→  1101→    const s = get();
+  1102→  1102→    if (!query) return [];
+  1103→  1103→    const { searchRefdes = true, searchValue = true, searchFields = true, caseSensitive = false } = opts;
+  1104→  1104→    const q = caseSensitive ? query : query.toLowerCase();
+  1105→  1105→    return s.components.filter((c) => {
+  1106→  1106→      if (searchRefdes) {
+  1107→  1107→        const r = c.refdes ?? c.id;
+  1108→  1108→        if ((caseSensitive ? r : r.toLowerCase()).includes(q)) return true;
+  1109→  1109→      }
+  1110→  1110→      if (searchValue) {
+  1111→  1111→        for (const v of Object.values(c.parameters)) {
+  1112→  1112→          const s = String(v);
+  1113→  1113→          if ((caseSensitive ? s : s.toLowerCase()).includes(q)) return true;
+  1114→  1114→        }
+  1115→  1115→      }
+  1116→  1116→      if (searchFields && c.fields) {
+  1117→  1117→        for (const f of c.fields) {
+  1118→  1118→          const combined = `${f.name}=${f.value}`;
+  1119→  1119→          if ((caseSensitive ? combined : combined.toLowerCase()).includes(q)) return true;
+  1120→  1120→        }
+  1121→  1121→      }
+  1122→  1122→      return false;
+  1123→  1123→    });
+  1124→  1124→  },
+  1125→  1125→  replaceComponentParameter: (compId, key, newValue) => {
+  1126→  1126→    get().pushHistory();
+  1127→  1127→    set((s) => ({
+  1128→  1128→      components: s.components.map((c) => {
+  1129→  1129→        if (c.id !== compId) return c;
+  1130→  1130→        const params = { ...c.parameters };
+  1131→  1131→        // try to preserve type: if old was number, coerce newValue to number
+  1132→  1132→        const old = params[key];
+  1133→  1133→        if (typeof old === 'number') {
+  1134→  1134→          const n = parseFloat(newValue as string);
+  1135→  1135→          params[key] = isNaN(n) ? newValue : n;
+  1136→  1136→        } else if (typeof old === 'boolean') {
+  1137→  1137→          params[key] = (newValue === 'true' || newValue === true || newValue === '1');
+  1138→  1138→        } else {
+  1139→  1139→          params[key] = newValue;
+  1140→  1140→        }
+  1141→  1141→        return { ...c, parameters: params };
+  1142→  1142→      }),
+  1143→  1143→    }));
+  1144→  1144→  },
+  1145→  1145→
+  1146→  1146→  startWire: (from, cursor) => set({ wireDraft: { from, cursor } }),
+  1147→  1147→  updateWireCursor: (cursor) => set((s) => (s.wireDraft ? { wireDraft: { ...s.wireDraft, cursor } } : {})),
+  1148→  1148→  cancelWire: () => set({ wireDraft: null }),
+  1149→  1149→  completeWire: (to) => {
+  1150→  1150→    const draft = get().wireDraft;
+  1151→  1151→    if (!draft) return;
+  1152→  1152→    if (draft.from.componentId === to.componentId && draft.from.terminalId === to.terminalId) {
+  1153→  1153→      set({ wireDraft: null });
+  1154→  1154→      return;
+  1155→  1155→    }
+  1156→  1156→    get().pushHistory();
+  1157→  1157→    const id = genId('wire');
+  1158→  1158→    const wire: Wire = { id, from: draft.from, to };
+  1159→  1159→    set((s) => ({ wires: [...s.wires, wire], wireDraft: null }));
+  1160→  1160→  },
+  1161→  1161→
+  1162→  1162→  setWireWaypoints: (id, waypoints) => {
+  1163→  1163→    set((s) => ({
+  1164→  1164→      wires: s.wires.map((w) => (w.id === id ? { ...w, waypoints: waypoints.length > 0 ? waypoints : undefined } : w)),
+  1165→  1165→    }));
+  1166→  1166→  },
+  1167→  1167→
+  1168→  1168→  toggleSwitch: (id) => {
+  1169→  1169→    set((s) => ({
+  1170→  1170→      components: s.components.map((c) => {
+  1171→  1171→        if (c.id !== id) return c;
+  1172→  1172→        if (c.type === 'switch') return { ...c, parameters: { ...c.parameters, closed: !c.parameters.closed } };
+  1173→  1173→        if (c.type === 'pushButton') return { ...c, parameters: { ...c.parameters, pressed: !c.parameters.pressed } };
+  1174→  1174→        return c;
+  1175→  1175→      }),
+  1176→  1176→    }));
+  1177→  1177→  },
+  1178→  1178→
+  1179→  1179→  pushHistory: () => {
+  1180→  1180→    set((s) => {
+  1181→  1181→      const snap = snapshot(s);
+  1182→  1182→      const past = [...s.past, snap].slice(-MAX_HISTORY);
+  1183→  1183→      return { past, future: [] };
+  1184→  1184→    });
+  1185→  1185→  },
+  1186→  1186→
+  1187→  1187→  undo: () => {
+  1188→  1188→    set((s) => {
+  1189→  1189→      if (s.past.length === 0) return {};
+  1190→  1190→      const prev = s.past[s.past.length - 1];
+  1191→  1191→      const current = snapshot(s);
+  1192→  1192→      return {
+  1193→  1193→        past: s.past.slice(0, -1),
+  1194→  1194→        future: [current, ...s.future].slice(0, MAX_HISTORY),
+  1195→  1195→        components: prev.components,
+  1196→  1196→        wires: prev.wires,
+  1197→  1197→        selection: { type: null, id: null },
+  1198→  1198→      };
+  1199→  1199→    });
+  1200→  1200→  },
+  1201→  1201→
+  1202→  1202→  redo: () => {
+  1203→  1203→    set((s) => {
+  1204→  1204→      if (s.future.length === 0) return {};
+  1205→  1205→      const next = s.future[0];
+  1206→  1206→      const current = snapshot(s);
+  1207→  1207→      return {
+  1208→  1208→        past: [...s.past, current].slice(-MAX_HISTORY),
+  1209→  1209→        future: s.future.slice(1),
+  1210→  1210→        components: next.components,
+  1211→  1211→        wires: next.wires,
+  1212→  1212→        selection: { type: null, id: null },
+  1213→  1213→      };
+  1214→  1214→    });
+  1215→  1215→  },
+  1216→  1216→
+  1217→  1217→  clear: () => {
+  1218→  1218→    get().pushHistory();
+  1219→  1219→    set({
+  1220→  1220→      components: [],
+  1221→  1221→      wires: [],
+  1222→  1222→      drawings: [],
+  1223→  1223→      noConnects: [],
+  1224→  1224→      groups: [],
+  1225→  1225→      sheets: [],
+  1226→  1226→      netClasses: [],
+  1227→  1227→      savedViews: [],
+  1228→  1228→      childSheets: {},
+  1229→  1229→      activeSheet: '',
+  1230→  1230→      selection: { type: null, id: null },
+  1231→  1231→      multiSelection: { components: new Set(), wires: new Set() },
+  1232→  1232→      traces: [],
+  1233→  1233→      simContext: null,
+  1234→  1234→    });
+  1235→  1235→  },
+  1236→  1236→
+  1237→  1237→  loadDocument: (doc) => {
+  1238→  1238→    set({
+  1239→  1239→      components: doc.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined, fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined })),
+  1240→  1240→      wires: doc.wires.map((w) => ({ ...w })),
+  1241→  1241→      drawings: doc.drawings ?? [],
+  1242→  1242→      noConnects: doc.noConnects ?? [],
+  1243→  1243→      groups: doc.groups ?? [],
+  1244→  1244→      sheets: doc.sheets ?? [],
+  1245→  1245→      netClasses: doc.netClasses ?? [],
+  1246→  1246→      savedViews: doc.savedViews ?? [],
+  1247→  1247→      childSheets: doc.childSheets ?? {},
+  1248→  1248→      activeSheet: doc.activeSheet ?? '',
+  1249→  1249→      pageSetup: doc.pageSetup ?? { ...DEFAULT_PAGE_SETUP },
+  1250→  1250→      metadata: doc.metadata ?? { title: 'Untitled', revision: 'Rev 1', date: new Date().toISOString().slice(0, 10) },
+  1251→  1251→      selection: { type: null, id: null },
+  1252→  1252→      multiSelection: { components: new Set(), wires: new Set() },
+  1253→  1253→      traces: [],
+  1254→  1254→      simContext: null,
+  1255→  1255→      past: [],
+  1256→  1256→      future: [],
+  1257→  1257→    });
+  1258→  1258→  },
+  1259→  1259→
+  1260→  1260→  serialize: () => {
+  1261→  1261→    const s = get();
+  1262→  1262→    return {
+  1263→  1263→      version: 1 as const,
+  1264→  1264→      components: s.components.map((c) => ({ ...c, simState: undefined })),
+  1265→  1265→      wires: s.wires.map((w) => ({ ...w })),
+  1266→  1266→      drawings: s.drawings,
+  1267→  1267→      noConnects: s.noConnects,
+  1268→  1268→      groups: s.groups,
+  1269→  1269→      sheets: s.sheets,
+  1270→  1270→      netClasses: s.netClasses,
+  1271→  1271→      savedViews: s.savedViews,
+  1272→  1272→      childSheets: s.childSheets,
+  1273→  1273→      activeSheet: s.activeSheet,
+  1274→  1274→      pageSetup: s.pageSetup,
+  1275→  1275→      metadata: s.metadata,
+  1276→  1276→    };
+  1277→  1277→  },
+  1278→  1278→
+  1279→  1279→  setRunning: (running) => set({ running, paused: !running }),
+  1280→  1280→  setSpeed: (speed) => set({ speed }),
+  1281→  1281→  setDt: (dt) => set({ dt }),
+  1282→  1282→
+  1283→  1283→  step: () => {
+  1284→  1284→    const s = get();
+  1285→  1285→    if (s.components.length === 0 && s.sheets.length === 0) return;
+  1286→  1286→
+  1287→  1287→    // ── Cross-sheet simulation ────────────────────────────────────────────
+  1288→  1288→    // If we're inside a sub-sheet OR the root has sub-sheets, we need to
+  1289→  1289→    // flatten the hierarchy into a single (components, wires) pair before
+  1290→  1290→    // simulating. We do this on every step so sub-sheet edits are picked up
+  1291→  1291→    // immediately. The flattened components have prefixed IDs (e.g. "amp.R1")
+  1292→  1292→    // so they don't collide with the active sheet's IDs.
+  1293→  1293→    let simComponents = s.components;
+  1294→  1294→    let simWires = s.wires;
+  1295→  1295→    let usingHierarchy = false;
+  1296→  1296→    if (s.activeSheet || s.sheets.length > 0) {
+  1297→  1297→      usingHierarchy = true;
+  1298→  1298→      // Save the current sheet back into childSheets so flattenHierarchy sees it
+  1299→  1299→      let childSheets = s.childSheets;
+  1300→  1300→      if (s.activeSheet) {
+  1301→  1301→        childSheets = {
+  1302→  1302→          ...childSheets,
+  1303→  1303→          [s.activeSheet]: snapshotSheet(s.components, s.wires, s.sheets),
+  1304→  1304→        };
+  1305→  1305→      }
+  1306→  1306→      // Build root document from either the active root state or the saved __root__
+  1307→  1307→      const rootDoc = s.activeSheet
+  1308→  1308→        ? (childSheets as any).__root__ ?? { version: 1 as const, components: [], wires: [], sheets: [] }
+  1309→  1309→        : { version: 1 as const, components: s.components, wires: s.wires, sheets: s.sheets };
+  1310→  1310→      const flat = flattenHierarchy(rootDoc as any, childSheets as any);
+  1311→  1311→      simComponents = flat.components;
+  1312→  1312→      simWires = flat.wires;
+  1313→  1313→    }
+  1314→  1314→
+  1315→  1315→    const plugins = new Map<string, any>();
+  1316→  1316→    for (const c of simComponents) {
+  1317→  1317→      const p = getPlugin(c.type);
+  1318→  1318→      if (p) plugins.set(c.type, p);
+  1319→  1319→    }
+  1320→  1320→    // Keep a persistent state map across steps so capacitors/inductors/555 remember their state
+  1321→  1321→    const persistentState = s.simContext?.state ?? {};
+  1322→  1322→    const prev = s.simContext
+  1323→  1323→      ? {
+  1324→  1324→          nodeVoltage: s.simContext.nodeVoltage,
+  1325→  1325→          branchCurrent: s.simContext.branchCurrent,
+  1326→  1326→          time: s.simContext.time,
+  1327→  1327→          state: persistentState,
+  1328→  1328→        }
+  1329→  1329→      : { nodeVoltage: new Float64Array(0), branchCurrent: new Float64Array(0), time: 0, state: persistentState };
+  1330→  1330→    // run sub-steps based on speed
+  1331→  1331→    const subSteps = Math.max(1, Math.floor(s.speed));
+  1332→  1332→    const dt = s.dt;
+  1333→  1333→    // Build simOptions from the editor's settings (temperature, .IC, .NODESET)
+  1334→  1334→    const simOpts = {
+  1335→  1335→      initialConditions: s.simOptions?.initialConditions,
+  1336→  1336→      nodeSets: s.simOptions?.nodeSets,
+  1337→  1337→    };
+  1338→  1338→    let result: { sim: SimContext; branchCurrentSize: number; nodeMap: any } | null = null;
+  1339→  1339→    for (let i = 0; i < subSteps; i++) {
+  1340→  1340→      result = simulateStep(simComponents, simWires, plugins, prev, dt, simOpts);
+  1341→  1341→      if (!result) break;
+  1342→  1342→      prev.nodeVoltage = result.sim.nodeVoltage;
+  1343→  1343→      prev.branchCurrent = result.sim.branchCurrent;
+  1344→  1344→      prev.time = result.sim.time;
+  1345→  1345→      prev.state = result.sim.state;
+  1346→  1346→
+  1347→  1347→      // Digital fast-forward: advance sim.time toward the next clock edge.
+  1348→  1348→      // Handles two types of clock sources:
+  1349→  1349→      //   1. pulseSource (crystal) — when no capacitors/inductors present
+  1350→  1350→      //   2. timer555 in astable mode — computes output from sim.time + R/C params
+  1351→  1351→      // Without fast-forward, a 1Hz clock would take ~10000 steps per cycle.
+  1352→  1352→      const hasCapacitor = simComponents.some(c => c.type === 'capacitor' || c.type === 'inductor');
+  1353→  1353→      const hasPulseSource = simComponents.some(c => c.type === 'pulseSource');
+  1354→  1354→      const hasArduino = simComponents.some(c => c.type === 'arduinoReal' || c.type === 'arduino');
+  1355→  1355→      const hasAstable555 = simComponents.some(c =>
+  1356→  1356→        c.type === 'timer555' && (c.parameters.astable as boolean) === true);
+  1357→  1357→
+  1358→  1358→      // Compute the minimum clock frequency across all digital clock sources
+  1359→  1359→      let minFreq = Infinity;
+  1360→  1360→
+  1361→  1361→      // Pulse sources
+  1362→  1362→      if (hasPulseSource && !hasCapacitor && !hasArduino) {
+  1363→  1363→        for (const c of simComponents) {
+  1364→  1364→          if (c.type === 'pulseSource') {
+  1365→  1365→            const f = c.parameters.frequency as number;
+  1366→  1366→            if (f > 0 && f < minFreq) minFreq = f;
+  1367→  1367→          }
+  1368→  1368→        }
+  1369→  1369→      }
+  1370→  1370→
+  1371→  1371→      // Astable 555 timers: frequency = 1 / (0.693 * (R1 + 2*R2) * C)
+  1372→  1372→      if (hasAstable555) {
+  1373→  1373→        for (const c of simComponents) {
+  1374→  1374→          if (c.type === 'timer555' && (c.parameters.astable as boolean) === true) {
+  1375→  1375→            const r1 = (c.parameters.r1 as number) || 47000;
+  1376→  1376→            const r2 = (c.parameters.r2 as number) || 47000;
+  1377→  1377→            const cap = (c.parameters.c as number) || 1e-5;
+  1378→  1378→            const period = 0.693 * (r1 + 2 * r2) * cap;
+  1379→  1379→            const f = 1 / period;
+  1380→  1380→            if (f > 0 && f < minFreq) minFreq = f;
+  1381→  1381→          }
+  1382→  1382→        }
+  1383→  1383→      }
+  1384→  1384→
+  1385→  1385→      if (minFreq !== Infinity && minFreq > 0) {
+  1386→  1386→        const currentTime = result.sim.time;
+  1387→  1387→        const phase = (currentTime * minFreq) % 1;
+  1388→  1388→        const timeToRisingEdge = (1.0 - phase) / minFreq;
+  1389→  1389→        const advance = Math.min(0.016, timeToRisingEdge + 0.001);
+  1390→  1390→        if (advance > dt) {
+  1391→  1391→          const newTime = currentTime + advance;
+  1392→  1392→          prev.time = newTime;
+  1393→  1393→          result.sim.time = newTime;
+  1394→  1394→        }
+  1395→  1395→      }
+  1396→  1396→    }
+  1397→  1397→    if (!result) {
+  1398→  1398→      set({ running: false, paused: true });
+  1399→  1399→      return;
+  1400→  1400→    }
+  1401→  1401→    // update traces for oscilloscope components — when using hierarchy, the
+  1402→  1402→    // active sheet's oscilloscope IDs match the flattened IDs (no prefix when
+  1403→  1403→    // on root). When inside a sub-sheet, oscilloscope IDs need prefix lookup.
+  1404→  1404→    const traces = [...s.traces];
+  1405→  1405→    for (const comp of simComponents) {
+  1406→  1406→      if (comp.type !== 'oscilloscope') continue;
+  1407→  1407→      const plugin = plugins.get('oscilloscope');
+  1408→  1408→      if (!plugin) continue;
+  1409→  1409→      const terminals = getTerminalsForComponent(comp, plugin, result.nodeMap);
+  1410→  1410→      const measurements = plugin.measure(comp.parameters, terminals, result.sim);
+  1411→  1411→      const v = parseFloat(measurements[0]?.value ?? '0');
+  1412→  1412→      // .PRINT directive: if printNodes is set, log matching node voltages to console
+  1413→  1413→      if (s.simOptions.printNodes && s.simOptions.printNodes.length > 0) {
+  1414→  1414→        for (const termKey of s.simOptions.printNodes) {
+  1415→  1415→          const nodeId = result.nodeMap.terminalNode.get(termKey);
+  1416→  1416→          if (nodeId != null && nodeId > 0) {
+  1417→  1417→            const nodeV = result.sim.nodeVoltage[nodeId - 1] ?? 0;
+  1418→  1418→            // eslint-disable-next-line no-console
+  1419→  1419→            console.log(`[.PRINT t=${result.sim.time.toFixed(6)}] V(${termKey}) = ${nodeV.toFixed(6)} V`);
+  1420→  1420→          }
+  1421→  1421→        }
+  1422→  1422→      }
+  1423→  1423→      // When using hierarchy, the trace's componentId is the active sheet's local ID
+  1424→  1424→      // (without prefix). Map back: if comp.id contains a '.', strip the prefix.
+  1425→  1425→      const traceKey = usingHierarchy && comp.id.includes('.') ? comp.id.split('.').slice(1).join('.') : comp.id;
+  1426→  1426→      let traceIdx = traces.findIndex((t) => t.componentId === traceKey);
+  1427→  1427→      if (traceIdx < 0) {
+  1428→  1428→        traces.push({
+  1429→  1429→          componentId: traceKey,
+  1430→  1430→          color: (comp.parameters.color as string) || '#22d3ee',
+  1431→  1431→          label: (comp.parameters.label as string) || 'CH',
+  1432→  1432→          samples: [],
+  1433→  1433→        });
+  1434→  1434→        traceIdx = traces.length - 1;
+  1435→  1435→      }
+  1436→  1436→      const trace = traces[traceIdx];
+  1437→  1437→      trace.samples.push({ time: result.sim.time, voltage: v });
+  1438→  1438→      if (trace.samples.length > s.maxTraceSamples) {
+  1439→  1439→        trace.samples = trace.samples.slice(-s.maxTraceSamples);
+  1440→  1440→      }
+  1441→  1441→      traces[traceIdx] = { ...trace };
+  1442→  1442→    }
+  1443→  1443→    // Run physics validation (debug — catches simulation bugs).
+  1444→  1444→    // Only runs when a special debug flag is set to avoid perf overhead in production.
+  1445→  1445→    let physicsViolations: PhysicsViolation[] = s.physicsViolations;
+  1446→  1446→    if (typeof window !== 'undefined' && (window as any).__PHYSICS_DEBUG__) {
+  1447→  1447→      try {
+  1448→  1448→        const validation = validatePhysics(simComponents, simWires, plugins, result.sim);
+  1449→  1449→        physicsViolations = validation.violations;
+  1450→  1450→        if (!validation.passed) {
+  1451→  1451→          // eslint-disable-next-line no-console
+  1452→  1452→          console.warn('[Physics] Violations detected:', validation.violations.length);
+  1453→  1453→        }
+  1454→  1454→      } catch (e) {
+  1455→  1455→        // validation errors should never break the simulation
+  1456→  1456→      }
+  1457→  1457→    }
+  1458→  1458→    set({ simContext: result.sim, traces, physicsViolations });
+  1459→  1459→  },
+  1460→  1460→
+  1461→  1461→  reset: () => {
+  1462→  1462→    set((s) => ({
+  1463→  1463→      components: s.components.map((c) => ({ ...c, simState: undefined })),
+  1464→  1464→      simContext: null,
+  1465→  1465→      physicsViolations: [],
+  1466→  1466→      traces: [],
+  1467→  1467→    }));
+  1468→  1468→  },
+  1469→  1469→
+  1470→  1470→  setShowGrid: (showGrid) => set({ showGrid }),
+  1471→  1471→  setSnapToGrid: (snapToGrid) => set({ snapToGrid }),
+  1472→  1472→
+  1473→  1473→  // ── Advanced analysis ──────────────────────────────────────────────────────
+  1474→  1474→  lastAnalysisResult: null,
+  1475→  1475→  simOptions: { ...DEFAULT_OPTIONS },
+  1476→  1476→
+  1477→  1477→  runAnalysis: (config) => {
+  1478→  1478→    const s = get();
+  1479→  1479→    const plugins = new Map<string, any>();
+  1480→  1480→    for (const c of s.components) {
+  1481→  1481→      const p = getPlugin(c.type);
+  1482→  1482→      if (p) plugins.set(c.type, p);
+  1483→  1483→    }
+  1484→  1484→    const result = runAnalysisEngine(s.components, s.wires, plugins, config, s.simOptions);
+  1485→  1485→    set({ lastAnalysisResult: result });
+  1486→  1486→    return result;
+  1487→  1487→  },
+  1488→  1488→
+  1489→  1489→  runBatch: (config) => {
+  1490→  1490→    const s = get();
+  1491→  1491→    const plugins = new Map<string, any>();
+  1492→  1492→    for (const c of s.components) {
+  1493→  1493→      const p = getPlugin(c.type);
+  1494→  1494→      if (p) plugins.set(c.type, p);
+  1495→  1495→    }
+  1496→  1496→    return runBatchEngine(s.components, s.wires, plugins, config, s.simOptions);
+  1497→  1497→  },
+  1498→  1498→
+  1499→  1499→  runMeasurement: (cmd, trace) => {
+  1500→  1500→    return execMeas(cmd, trace);
+  1501→  1501→  },
+  1502→  1502→
+  1503→  1503→  setSimOptions: (patch) => {
+  1504→  1504→    set((s) => ({ simOptions: { ...s.simOptions, ...patch } }));
+  1505→  1505→  },
+  1506→  1506→
+  1507→  1507→  solveDCRobust: () => {
+  1508→  1508→    const s = get();
+  1509→  1509→    const plugins = new Map<string, any>();
+  1510→  1510→    for (const c of s.components) {
+  1511→  1511→      const p = getPlugin(c.type);
+  1512→  1512→      if (p) plugins.set(c.type, p);
+  1513→  1513→    }
+  1514→  1514→    return solveDCRobustEngine(s.components, s.wires, plugins, s.simOptions);
+  1515→  1515→  },
+  1516→  1516→}));
+  1517→  1517→

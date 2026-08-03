@@ -364,7 +364,15 @@ export function CircuitCanvas() {
       flowPhaseRef.current += 0.012 * Math.max(0.5, Math.min(4, simSpeed));
       // Run simulation step at fixed interval
       if (now - lastSimTime >= SIM_INTERVAL) {
-        step();
+        try {
+          step();
+        } catch (err) {
+          // If step() throws (e.g., a plugin crashes), stop the loop
+          // to prevent silent freeze. The store's try/catch should handle
+          // most errors, but this is a safety net.
+          console.error('[Simulation] step() threw:', err);
+          useEditor.getState().setRunning(false);
+        }
         lastSimTime = now;
       }
       // Single re-render per frame — covers both sim state and animation
@@ -701,7 +709,7 @@ export function CircuitCanvas() {
       if (isAnimating) {
         const current = wireCurrents.get(wire.id) ?? 0;
         const absCurrent = Math.abs(current);
-        if (absCurrent > 1e-9) {
+        if (absCurrent > 1e-12) {  // 1pA threshold — shows flow even in high-impedance circuits
           const dir = current >= 0 ? 1 : -1;
           // Physics-based flow speed:
           // The drift velocity of charge carriers is proportional to current.
@@ -905,7 +913,7 @@ export function CircuitCanvas() {
       if (isAnimating && plugin.getFlowPath) {
         const current = componentCurrents.get(comp.id) ?? 0;
         const absCurrent = Math.abs(current);
-        if (absCurrent > 1e-9) {
+        if (absCurrent > 1e-12) {  // 1pA threshold — shows flow even in high-impedance circuits
           const dir = current >= 0 ? 1 : -1;
           // Physics-based flow speed (same formula as wire dots):
           //   1µA → 0.15, 1mA → 0.4, 10mA → 0.6, 100mA → 0.8, 1A → 1.0

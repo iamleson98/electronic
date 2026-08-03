@@ -83,6 +83,8 @@ interface EditorState {
   dt: number;             // timestep in seconds
   // current sim context (read-only mirror)
   simContext: SimContext | null;
+  // simulation error message (null = no error). Set when solver fails.
+  simError: string | null;
   // physics validation results (debug — catches simulation bugs)
   physicsViolations: PhysicsViolation[];
   // probe traces (per oscilloscope)
@@ -384,6 +386,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   speed: 1,
   dt: 1e-4,
   simContext: null,
+  simError: null,
   physicsViolations: [],
   traces: [],
   maxTraceSamples: 500,
@@ -1276,13 +1279,28 @@ export const useEditor = create<EditorState>((set, get) => ({
     };
   },
 
-  setRunning: (running) => set({ running, paused: !running }),
+  setRunning: (running) => {
+    if (running) {
+      // Guard: refuse to start on empty circuit
+      const s = get();
+      if (s.components.length === 0 && s.sheets.length === 0) {
+        set({ simError: 'Cannot start: circuit is empty. Add components first.' });
+        return;
+      }
+      // Clear any previous error
+      set({ running: true, paused: false, simError: null });
+    } else {
+      set({ running: false, paused: true });
+    }
+  },
   setSpeed: (speed) => set({ speed }),
   setDt: (dt) => set({ dt }),
 
   step: () => {
     const s = get();
     if (s.components.length === 0 && s.sheets.length === 0) return;
+
+    try {
 
     // ── Cross-sheet simulation ────────────────────────────────────────────
     // If we're inside a sub-sheet OR the root has sub-sheets, we need to
@@ -1328,7 +1346,23 @@ export const useEditor = create<EditorState>((set, get) => ({
         }
       : { nodeVoltage: new Float64Array(0), branchCurrent: new Float64Array(0), time: 0, state: persistentState };
     // run sub-steps based on speed
-    const subSteps = Math.max(1, Math.floor(s.speed));
+    // For speed >= 1: run floor(speed) sub-steps per frame (e.g., 4x = 4 steps)
+    // For speed < 1: run 1 step every Nth frame, where N = ceil(1/speed)
+    //   This is tracked via simStepCounter in the store state
+    const speed = s.speed;
+    let subSteps: number;
+    if (speed >= 1) {
+      subSteps = Math.max(1, Math.floor(speed));
+    } else {
+      // Sub-real-time: skip steps to slow down the simulation
+      const skipInterval = Math.ceil(1 / speed); // e.g., 0.5x → skip every 2nd frame
+      const stepCount = (s as any).__stepCount ?? 0;
+      (s as any).__stepCount = stepCount + 1;
+      if (stepCount % skipInterval !== 0) {
+        return; // skip this frame to slow down
+      }
+      subSteps = 1;
+    }
     const dt = s.dt;
     // Build simOptions from the editor's settings (temperature, .IC, .NODESET)
     const simOpts = {
@@ -1395,7 +1429,12 @@ export const useEditor = create<EditorState>((set, get) => ({
       }
     }
     if (!result) {
-      set({ running: false, paused: true });
+      // Solver failed — likely singular matrix (no ground, or conflicting voltage sources)
+      const hasGround = simComponents.some(c => c.type === 'ground');
+      const errorMsg = !hasGround
+        ? 'Simulation failed: No ground reference found. Add a Ground component to your circuit.'
+        : 'Simulation failed: Singular matrix. Check for conflicting voltage sources or short circuits.';
+      set({ running: false, paused: true, simError: errorMsg });
       return;
     }
     // update traces for oscilloscope components — when using hierarchy, the
@@ -1456,14 +1495,25 @@ export const useEditor = create<EditorState>((set, get) => ({
       }
     }
     set({ simContext: result.sim, traces, physicsViolations });
+    } catch (err) {
+      // Catch any unexpected errors from the simulation engine, plugins, or
+      // hierarchy flattening. Prevents a single throwing plugin from killing
+      // the RAF loop silently.
+      const errorMsg = `Simulation error: ${(err as Error).message || 'Unknown error'}`;
+      set({ running: false, paused: true, simError: errorMsg });
+    }
   },
 
   reset: () => {
     set((s) => ({
+      running: false,
+      paused: true,
       components: s.components.map((c) => ({ ...c, simState: undefined })),
       simContext: null,
+      simError: null,
       physicsViolations: [],
       traces: [],
+      wireDraft: null,
     }));
   },
 
