@@ -5,7 +5,7 @@ import { getPlugin } from '../src/lib/circuit/registry';
 import { validatePhysics, formatValidationResult } from '../src/lib/circuit/physics-validator';
 import {
   exampleLed, example555, exampleRC, exampleTransistor, exampleArduino,
-  exampleOpamp, exampleNmos, exampleSevenSeg, exampleClock
+  exampleOpamp, exampleNmos, exampleSevenSeg, exampleSimpleClock, exampleClock
 } from '../src/lib/circuit/examples';
 import type { ComponentPlugin, SimContext } from '../src/lib/circuit/types';
 
@@ -77,6 +77,7 @@ async function main() {
     { name: 'Op-Amp Inverting Amp', doc: exampleOpamp, steps: 30 },
     { name: 'NMOS Switch', doc: exampleNmos, steps: 30 },
     { name: '7-Segment Counter', doc: exampleSevenSeg, steps: 50 },
+    { name: 'Simple Seconds Counter', doc: exampleSimpleClock, steps: 100 },
     { name: 'Digital Clock', doc: exampleClock, steps: 100 },
   ];
 

@@ -564,6 +564,57 @@ export const exampleClock: CircuitDocument = {
   ],
 };
 
+// ----- Example 10: Simple Seconds Counter (0-59) -----
+// A minimalist 2-digit clock using only 2 CD4026 chips (vs 6 in the full clock).
+// Architecture:
+//   1Hz crystal → CD4026 ones (0-9) → CO → CD4026 tens (0-5) → 7-seg displays
+//
+// The ones counter increments on each clock pulse. When it wraps from 9→0,
+// its CO output produces a rising edge that clocks the tens counter. The tens
+// counter uses maxCount=6 so it wraps at 5→0, giving a 00-59 range.
+//
+// Total: 7 components, ~25 wires (vs 15 components, 74 wires for the 6-digit clock).
+export const exampleSimpleClock: CircuitDocument = {
+  version: 1,
+  components: [
+    // 1Hz crystal oscillator — drives the ones counter
+    comp('pulseSource', 'xtal', [32, 2], 0, { high: 5, low: 0, frequency: 1, duty: 50 }),
+    // 5V power supply
+    comp('dcVoltage', 'vcc1', [32, 8], 0, { voltage: 5 }),
+    comp('ground', 'gnd1', [16, 18], 0, {}),
+    // CD4026 #1 — seconds ones (counts 0-9)
+    comp('cd4026', 'ic_so', [10, 2], 0, { maxCount: 10, vcc: 5 }),
+    // CD4026 #2 — seconds tens (counts 0-5, carries from ones)
+    comp('cd4026', 'ic_st', [22, 2], 0, { maxCount: 6, vcc: 5 }),
+    // 7-segment displays (green) — offset by 1 from CD4026 to center segments
+    comp('sevenSegment', 'seg_so', [11, 8], 0, { color: 'green', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_st', [23, 8], 0, { color: 'green', threshold: 2.0 }),
+  ],
+  wires: [
+    // Crystal → ones counter CLK
+    wire('clk_xtal_so', 'xtal', 'p', 'ic_so', 'clk', [[33, 1], [10, 1]]),
+    wire('xtal_gnd', 'xtal', 'n', 'gnd1', 'g', [[33, 18]]),
+    // Carry chain: ones CO → tens CLK
+    wire('co_so_st', 'ic_so', 'co', 'ic_st', 'clk', [[16, 1], [22, 1]]),
+    // VCC for both CD4026s
+    wire('vcc_so', 'vcc1', 'p', 'ic_so', 'vcc', [[33, 3], [11, 3]]),
+    wire('vcc_st', 'vcc1', 'p', 'ic_st', 'vcc', [[33, 3], [23, 3]]),
+    wire('vcc_gnd', 'vcc1', 'n', 'gnd1', 'g', [[33, 18]]),
+    // GND for both CD4026s
+    wire('gnd_so', 'ic_so', 'gnd', 'gnd1', 'g', [[15, 18]]),
+    wire('gnd_st', 'ic_st', 'gnd', 'gnd1', 'g', [[27, 18]]),
+    // RST for both CD4026s (tied to ground — no reset)
+    wire('rst_so', 'ic_so', 'rst', 'gnd1', 'g', [[10, 18]]),
+    wire('rst_st', 'ic_st', 'rst', 'gnd1', 'g', [[22, 18]]),
+    // 7-seg COM → ground (com terminal at x=segCx+4, y=11)
+    wire('com_so', 'seg_so', 'com', 'gnd1', 'g', [[15, 11], [15, 18]]),
+    wire('com_st', 'seg_st', 'com', 'gnd1', 'g', [[27, 11], [27, 18]]),
+    // Segment wires (7 per digit × 2 digits = 14 wires)
+    ...digitSegWires('so', 10, 'seg_so', 11),
+    ...digitSegWires('st', 22, 'seg_st', 23),
+  ],
+};
+
 export const examples: { name: string; description: string; doc: CircuitDocument }[] = [
   { name: 'LED + Resistor', description: 'Simple DC circuit: 5V → R → LED → GND', doc: exampleLed },
   { name: '555 Astable Blink', description: 'Classic 555 timer in astable mode driving an LED', doc: example555 },
@@ -573,5 +624,6 @@ export const examples: { name: string; description: string; doc: CircuitDocument
   { name: 'Op-Amp Inverting Amp', description: 'Op-amp with gain -10 (Rf/Rin = 10k/1k)', doc: exampleOpamp },
   { name: 'NMOS Switch', description: 'NMOS transistor switching an LED, push-button on gate', doc: exampleNmos },
   { name: '7-Segment Counter', description: 'Arduino drives 7-segment display counting 0-9 with BCD decoder', doc: exampleSevenSeg },
+  { name: 'Simple Seconds Counter', description: 'Minimalist 2-digit (0-59) seconds counter using only 2 CD4026 chips', doc: exampleSimpleClock },
   { name: 'Digital Clock', description: 'HH:MM:SS digital clock using CD4026 counters and 1Hz crystal', doc: exampleClock },
 ];

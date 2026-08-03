@@ -988,3 +988,42 @@ Stage Summary:
 - DB schema pushed fresh (empty, ready for use).
 - Demo server running on port 3000 via node (bun crashes with better-sqlite3).
 - Note: background processes don't persist between tool calls in this sandbox — the server starts correctly but needs to be restarted. The preview link below will start a fresh server.
+
+---
+Task ID: cleanup-and-simple-clock
+Agent: main
+Task: Clean up project source code, remove debug pictures. Design a simpler clock circuit using fewer chips. Verify simulation correctness and wire connections.
+
+Work Log:
+- Cleanup:
+  - Removed 20+ debug screenshots from /home/z/my-project/upload/
+  - Removed 18 obsolete one-off test scripts from scripts/ (kept 5 essential validation tests)
+  - Removed dev.log
+  - Verified: no stray images in project root or download folder
+  - scripts/ now contains only: test-all-examples-physics.ts, test-api-routes.ts, test-components-physics.ts, test-drizzle-db.ts, test-physics-validator.ts
+
+- New circuit: "Simple Seconds Counter" (exampleSimpleClock)
+  - Design: 2-digit (0-59) seconds counter using only 2 CD4026 chips
+  - Architecture: 1Hz crystal → CD4026 ones (maxCount=10) → CO → CD4026 tens (maxCount=6) → 7-seg displays
+  - Components: 7 (vs 15 for the 6-digit clock) — 53% fewer
+  - Wires: 26 (vs 74 for the 6-digit clock) — 65% fewer
+  - Chips: 2 CD4026 (vs 6 CD4026 for the 6-digit clock) — 3x fewer
+  - Layout: ones counter at (10,2) + display at (11,8), tens counter at (22,2) + display at (23,8), crystal at (32,2), power at (32,8), ground at (16,18)
+
+- Verification (scripts/test-simple-clock.ts):
+  - Test 1: All 26 wires connect to existing terminals ✓
+  - Test 2: Counter starts at 00, counts to 01 at t≈1.0s, sequence is correct (0→1→2→...→59→0) ✓
+  - Test 3: Physics validation passes (0 errors, 1 minor warning about unconnected CO on tens stage) ✓
+
+- Full physics validation (scripts/test-all-examples-physics.ts):
+  - All 10 example circuits pass with 0 errors ✓
+  - Only 2 minor warnings (unconnected CO on last stage of both clock circuits)
+
+- Typecheck: no src errors. Build: succeeds.
+- Server: running on port 3000, responding HTTP 200.
+
+Stage Summary:
+- Project cleaned: removed 20+ debug images, 18 obsolete test scripts, log files.
+- New "Simple Seconds Counter" circuit added — uses 3x fewer chips than the 6-digit clock.
+- All wires correctly connected, simulation counts 0-59 properly, physics laws satisfied.
+- Added to examples list as "Simple Seconds Counter".
