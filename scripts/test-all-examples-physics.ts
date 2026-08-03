@@ -5,7 +5,11 @@ import { getPlugin } from '../src/lib/circuit/registry';
 import { validatePhysics, formatValidationResult } from '../src/lib/circuit/physics-validator';
 import {
   exampleLed, example555, exampleRC, exampleTransistor, exampleArduino,
-  exampleOpamp, exampleNmos, exampleSevenSeg, exampleSimpleClock, exampleClock
+  exampleOpamp, exampleNmos, exampleSevenSeg, exampleSimpleClock, exampleClock,
+  exampleRLHighPass, exampleDiodeRectifier, exampleVoltageDivider,
+  examplePnpSwitch, exampleCurrentSource, exampleSpeaker,
+  examplePhotoresistor, exampleLogicGates, exampleOpampNonInverting, exampleVCO,
+  exampleArduinoClockHHMMSS, example555Clock,
 } from '../src/lib/circuit/examples';
 import type { ComponentPlugin, SimContext } from '../src/lib/circuit/types';
 
@@ -79,6 +83,19 @@ async function main() {
     { name: '7-Segment Counter', doc: exampleSevenSeg, steps: 50 },
     { name: 'Simple Seconds Counter', doc: exampleSimpleClock, steps: 100 },
     { name: 'Digital Clock', doc: exampleClock, steps: 100 },
+    { name: 'Arduino Clock (HH:MM:SS)', doc: exampleArduinoClockHHMMSS, steps: 100 },
+    { name: '555 Timer Clock', doc: example555Clock, steps: 100 },
+    // New examples
+    { name: 'RL High-pass Filter', doc: exampleRLHighPass, steps: 30 },
+    { name: 'Diode Rectifier', doc: exampleDiodeRectifier, steps: 30 },
+    { name: 'Voltage Divider', doc: exampleVoltageDivider, steps: 30 },
+    { name: 'PNP Switch', doc: examplePnpSwitch, steps: 30 },
+    { name: 'Current Source', doc: exampleCurrentSource, steps: 30 },
+    { name: 'Speaker Driver', doc: exampleSpeaker, steps: 30 },
+    { name: 'Photoresistor Light Sensor', doc: examplePhotoresistor, steps: 30 },
+    { name: 'AND Gate', doc: exampleLogicGates, steps: 30 },
+    { name: 'Op-Amp Non-inverting Amp', doc: exampleOpampNonInverting, steps: 30 },
+    { name: 'VCO Frequency Sweep', doc: exampleVCO, steps: 50 },
   ];
 
   console.log('=== Physics Validation — ALL Example Circuits ===\n');

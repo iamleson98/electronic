@@ -1,0 +1,1054 @@
+     1→// Pre-built example circuits — clean, professional layouts with no overlapping wires.
+     2→// Each circuit is laid out left-to-right with proper spacing so:
+     3→//   - Wires go in clean L-shapes (horizontal then vertical, or vice versa)
+     4→//   - No wire crosses through a component body
+     5→//   - Ground is at the bottom, sources on the left, loads in the middle/right
+     6→//   - Components are spaced at least 4 grid units apart
+     7→
+     8→import type { CircuitDocument } from './types';
+     9→import { getPlugin } from './registry';
+    10→import './components';
+    11→
+    12→function defaultsFor(type: string): Record<string, number | string | boolean> {
+    13→  const plugin = getPlugin(type);
+    14→  if (!plugin) return {};
+    15→  const defaults: Record<string, number | string | boolean> = {};
+    16→  for (const p of plugin.parameters) defaults[p.key] = p.default;
+    17→  return defaults;
+    18→}
+    19→
+    20→function comp(
+    21→  type: string,
+    22→  id: string,
+    23→  pos: [number, number],
+    24→  rotation: 0 | 1 | 2 | 3 = 0,
+    25→  params?: Record<string, number | string | boolean>,
+    26→) {
+    27→  return {
+    28→    id,
+    29→    type,
+    30→    position: { x: pos[0], y: pos[1] },
+    31→    rotation,
+    32→    parameters: { ...defaultsFor(type), ...params },
+    33→  };
+    34→}
+    35→
+    36→function wire(id: string, fromC: string, fromT: string, toC: string, toT: string, waypoints?: [number, number][]) {
+    37→  const w: any = { id, from: { componentId: fromC, terminalId: fromT }, to: { componentId: toC, terminalId: toT } };
+    38→  if (waypoints && waypoints.length > 0) {
+    39→    w.waypoints = waypoints.map(([x, y]) => ({ x, y }));
+    40→  }
+    41→  return w;
+    42→}
+    43→
+    44→// ----- Example 1: LED + resistor + 5V -----
+    45→// Clean horizontal layout: Battery(left) → R(middle) → LED(right) → GND(below LED)
+    46→// V1: pos(4,6), bb 2x4 → p@(5,6), n@(5,10)
+    47→// R1: pos(10,8), bb 4x2 → a@(10,9), b@(14,9)
+    48→// LED: pos(16,8), bb 4x2 → a@(16,9), k@(20,9)
+    49→// GND: pos(17,12), bb 2x2 → g@(18,12)
+    50→export const exampleLed: CircuitDocument = {
+    51→  version: 1,
+    52→  components: [
+    53→    comp('dcVoltage', 'v1', [4, 6], 0, { voltage: 5 }),
+    54→    comp('resistor', 'r1', [8, 8], 0, { resistance: 330 }),
+    55→    comp('led', 'led1', [16, 8], 0, { color: 'red', forwardV: 2.0, seriesR: 1 }),
+    56→    comp('ground', 'gnd1', [17, 12], 0, {}),
+    57→  ],
+    58→  wires: [
+    59→    // V1.p → R1.a: (5,6)→(8,9) — L-shape: down then right
+    60→    wire('w1', 'v1', 'p', 'r1', 'a', [[5, 9]]),
+    61→    // R1.b → LED.a: (12,9)→(16,9) — straight horizontal
+    62→    wire('w2', 'r1', 'b', 'led1', 'a'),
+    63→    // LED.k → GND: (20,9)→(18,12) — L-shape: right then down
+    64→    wire('w3', 'led1', 'k', 'gnd1', 'g', [[20, 12]]),
+    65→    // V1.n → GND: (5,10)→(18,12) — L-shape: down then right
+    66→    wire('w4', 'v1', 'n', 'gnd1', 'g', [[5, 12], [18, 12]]),
+    67→  ],
+    68→};
+    69→
+    70→// ----- Example 2: 555 astable blink -----
+    71→// Layout: Battery left, 555 center, Ra top, Rb right side, cap bottom-right, LED top-right
+    72→export const example555: CircuitDocument = {
+    73→  version: 1,
+    74→  components: [
+    75→    comp('dcVoltage', 'v1', [4, 8], 0, { voltage: 5 }),
+    76→    comp('ground', 'gnd1', [6, 18], 0, {}),
+    77→    comp('timer555', 'ic1', [14, 8], 0, { vcc: 5 }),
+    78→    comp('resistor', 'ra', [10, 4], 0, { resistance: 10000 }),
+    79→    comp('resistor', 'rb', [22, 4], 0, { resistance: 47000 }),
+    80→    comp('capacitor', 'c1', [22, 14], 0, { capacitance: 1e-6, initialV: 0 }),
+    81→    comp('led', 'led1', [24, 8], 0, { color: 'green', forwardV: 2.0, seriesR: 220 }),
+    82→  ],
+    83→  wires: [
+    84→    // VCC: v1.p → ic1.vcc
+    85→    wire('w1', 'v1', 'p', 'ic1', 'vcc', [[5, 10]]),
+    86→    // GND: v1.n → gnd1
+    87→    wire('w2', 'v1', 'n', 'gnd1', 'g', [[5, 18]]),
+    88→    // ic1.gnd → gnd1
+    89→    wire('w3', 'ic1', 'gnd', 'gnd1', 'g', [[14, 18]]),
+    90→    // RST → VCC (tie reset high)
+    91→    wire('w4', 'v1', 'p', 'ic1', 'rst', [[5, 11], [14, 11]]),
+    92→    // Ra: VCC → ra.a
+    93→    wire('w5', 'v1', 'p', 'ra', 'a', [[5, 5]]),
+    94→    // ra.b → ic1.dis
+    95→    wire('w6', 'ra', 'b', 'ic1', 'dis', [[14, 5], [20, 5], [20, 13], [20, 13]]),
+    96→    // Rb: ic1.dis → rb.a (route right then up)
+    97→    wire('w7', 'ic1', 'dis', 'rb', 'a', [[20, 5], [22, 5]]),
+    98→    // rb.b → ic1.thr
+    99→    wire('w8', 'rb', 'b', 'ic1', 'thr', [[26, 5], [26, 13], [14, 13]]),
+   100→    // thr → trig (short wire on left side of IC)
+   101→    wire('w9', 'ic1', 'thr', 'ic1', 'trig', [[14, 13], [14, 10]]),
+   102→    // C1: thr → c1.a
+   103→    wire('w10', 'ic1', 'thr', 'c1', 'a', [[14, 13], [22, 13]]),
+   104→    // c1.b → gnd1
+   105→    wire('w11', 'c1', 'b', 'gnd1', 'g', [[26, 15], [26, 18], [6, 18]]),
+   106→    // OUT → LED → GND
+   107→    wire('w12', 'ic1', 'out', 'led1', 'a', [[20, 9], [24, 9]]),
+   108→    wire('w13', 'led1', 'k', 'gnd1', 'g', [[28, 9], [28, 18], [6, 18]]),
+   109→  ],
+   110→};
+   111→
+   112→// ----- Example 3: RC low-pass filter -----
+   113→// Clean layout: Source left → R → C (right) → GND (bottom), scope above
+   114→export const exampleRC: CircuitDocument = {
+   115→  version: 1,
+   116→  components: [
+   117→    comp('pulseSource', 'v1', [4, 8], 0, { high: 5, low: 0, frequency: 100, duty: 50 }),
+   118→    comp('resistor', 'r1', [10, 8], 0, { resistance: 1000 }),
+   119→    comp('capacitor', 'c1', [16, 8], 0, { capacitance: 1e-6 }),
+   120→    comp('ground', 'gnd1', [5, 16], 0, {}),
+   121→    comp('oscilloscope', 'sc1', [16, 4], 0, { color: '#22d3ee', label: 'Out' }),
+   122→    comp('oscilloscope', 'sc2', [4, 4], 0, { color: '#f97316', label: 'In' }),
+   123→  ],
+   124→  wires: [
+   125→    // v1.p → sc2.p (input scope)
+   126→    wire('w1', 'v1', 'p', 'sc2', 'p', [[5, 5]]),
+   127→    // v1.n → gnd1
+   128→    wire('w2', 'v1', 'n', 'gnd1', 'g', [[5, 16]]),
+   129→    // v1.p → r1.a
+   130→    wire('w3', 'v1', 'p', 'r1', 'a'),
+   131→    // r1.b → c1.a
+   132→    wire('w4', 'r1', 'b', 'c1', 'a'),
+   133→    // r1.b → sc1.p (output scope taps same node)
+   134→    wire('w5', 'r1', 'b', 'sc1', 'p', [[14, 5], [18, 5]]),
+   135→    // c1.b → gnd1
+   136→    wire('w6', 'c1', 'b', 'gnd1', 'g', [[20, 9], [20, 16], [5, 16]]),
+   137→    // sc1.n → gnd1
+   138→    wire('w7', 'sc1', 'n', 'gnd1', 'g', [[18, 5], [18, 16], [5, 16]]),
+   139→    // sc2.n → gnd1
+   140→    wire('w8', 'sc2', 'n', 'gnd1', 'g', [[5, 5], [5, 16]]),
+   141→  ],
+   142→};
+   143→
+   144→// ----- Example 4: Transistor switch -----
+   145→// Layout: V1(left top) → Rc → LED → Q1.C, V2(left bottom) → button → Rb → Q1.B, Q1.E → GND
+   146→export const exampleTransistor: CircuitDocument = {
+   147→  version: 1,
+   148→  components: [
+   149→    comp('dcVoltage', 'v1', [4, 4], 0, { voltage: 5 }),
+   150→    comp('dcVoltage', 'v2', [4, 16], 0, { voltage: 5 }),
+   151→    comp('pushButton', 'btn1', [8, 16], 0, { pressed: false }),
+   152→    comp('resistor', 'rb', [14, 16], 0, { resistance: 10000 }),
+   153→    comp('resistor', 'rc', [14, 4], 0, { resistance: 1000 }),
+   154→    comp('npn', 'q1', [22, 8], 0, { hfe: 100, vbe: 0.7, satV: 0.2 }),
+   155→    comp('led', 'led1', [22, 4], 0, { color: 'red', forwardV: 2.0, seriesR: 1 }),
+   156→    comp('ground', 'gnd1', [5, 22], 0, {}),
+   157→  ],
+   158→  wires: [
+   159→    // V1 → Rc → LED → Q1.C
+   160→    wire('w1', 'v1', 'p', 'rc', 'a', [[5, 5]]),
+   161→    wire('w3', 'rc', 'b', 'led1', 'a', [[18, 5]]),
+   162→    wire('w4', 'led1', 'k', 'q1', 'c', [[26, 5], [26, 9]]),
+   163→    // V2 → button → Rb → Q1.B
+   164→    wire('w5', 'v2', 'p', 'btn1', 'a', [[5, 17]]),
+   165→    wire('w7', 'btn1', 'b', 'rb', 'a'),
+   166→    wire('w8', 'rb', 'b', 'q1', 'b', [[18, 17], [22, 17], [22, 10]]),
+   167→    // Grounds
+   168→    wire('w2', 'v1', 'n', 'gnd1', 'g', [[5, 8], [5, 22]]),
+   169→    wire('w6', 'v2', 'n', 'gnd1', 'g', [[5, 20], [5, 22]]),
+   170→    wire('w9', 'q1', 'e', 'gnd1', 'g', [[25, 12], [25, 22], [5, 22]]),
+   171→  ],
+   172→};
+   173→
+   174→// ----- Example 5: Arduino blink -----
+   175→// Clean layout: Arduino left, R+LED right, GND bottom
+   176→export const exampleArduino: CircuitDocument = {
+   177→  version: 1,
+   178→  components: [
+   179→    comp('arduino', 'ard1', [6, 6], 0, { sketch: 'blink', vcc: 5 }),
+   180→    comp('resistor', 'r1', [18, 6], 0, { resistance: 330 }),
+   181→    comp('led', 'led1', [24, 6], 0, { color: 'blue', forwardV: 2.5, seriesR: 1 }),
+   182→    comp('ground', 'gnd1', [7, 14], 0, {}),
+   183→  ],
+   184→  wires: [
+   185→    wire('w1', 'ard1', 'gnd', 'gnd1', 'g', [[7, 14]]),
+   186→    wire('w2', 'ard1', 'd2', 'r1', 'a'),
+   187→    wire('w3', 'r1', 'b', 'led1', 'a'),
+   188→    wire('w4', 'led1', 'k', 'gnd1', 'g', [[28, 7], [28, 14], [7, 14]]),
+   189→  ],
+   190→};
+   191→
+   192→// ----- Example 6: Op-amp inverting amplifier -----
+   193→// Layout: Vin left → Rin → op-amp (center) → out right, Rf feedback above
+   194→export const exampleOpamp: CircuitDocument = {
+   195→  version: 1,
+   196→  components: [
+   197→    comp('acVoltage', 'vIn', [4, 8], 0, { amplitude: 1, frequency: 100, offset: 0, phase: 0 }),
+   198→    comp('resistor', 'rIn', [10, 8], 0, { resistance: 1000 }),
+   199→    comp('resistor', 'rF', [14, 4], 0, { resistance: 10000 }),
+   200→    comp('opamp', 'op1', [18, 6], 0, { gain: 1e5 }),
+   201→    comp('ground', 'gnd1', [5, 14], 0, {}),
+   202→    comp('oscilloscope', 'scIn', [4, 4], 0, { color: '#f97316', label: 'In' }),
+   203→    comp('oscilloscope', 'scOut', [26, 6], 0, { color: '#22d3ee', label: 'Out' }),
+   204→    comp('resistor', 'rLoad', [26, 10], 0, { resistance: 10000 }),
+   205→  ],
+   206→  wires: [
+   207→    // Input: vIn.p → scIn.p
+   208→    wire('w1', 'vIn', 'p', 'scIn', 'p', [[5, 5]]),
+   209→    // vIn.n → gnd1
+   210→    wire('w2', 'vIn', 'n', 'gnd1', 'g', [[5, 14]]),
+   211→    // vIn.p → rIn.a
+   212→    wire('w3', 'vIn', 'p', 'rIn', 'a'),
+   213→    // rIn.b → op1.in-
+   214→    wire('w4', 'rIn', 'b', 'op1', 'in-'),
+   215→    // Feedback: rF.a → op1.in-, rF.b → op1.out
+   216→    wire('w5', 'rF', 'a', 'op1', 'in-', [[14, 7], [18, 7]]),
+   217→    wire('w6', 'rF', 'b', 'op1', 'out', [[18, 5], [18, 5]]),
+   218→    // op1.in+ → gnd1
+   219→    wire('w7', 'op1', 'in+', 'gnd1', 'g', [[18, 9], [18, 14], [5, 14]]),
+   220→    // Output: op1.out → scOut.p
+   221→    wire('w8', 'op1', 'out', 'scOut', 'p', [[22, 7], [26, 7]]),
+   222→    // scIn.n → gnd1
+   223→    wire('w9', 'scIn', 'n', 'gnd1', 'g', [[5, 5], [5, 14]]),
+   224→    // scOut.n → gnd1
+   225→    wire('w10', 'scOut', 'n', 'gnd1', 'g', [[30, 7], [30, 14], [5, 14]]),
+   226→    // Load: op1.out → rLoad.a → gnd1
+   227→    wire('w11', 'op1', 'out', 'rLoad', 'a', [[22, 7], [26, 7]]),
+   228→    wire('w12', 'rLoad', 'b', 'gnd1', 'g', [[30, 11], [30, 14], [5, 14]]),
+   229→  ],
+   230→};
+   231→
+   232→// ----- Example 7: NMOS switch -----
+   233→export const exampleNmos: CircuitDocument = {
+   234→  version: 1,
+   235→  components: [
+   236→    comp('dcVoltage', 'v1', [4, 4], 0, { voltage: 5 }),
+   237→    comp('dcVoltage', 'v2', [4, 16], 0, { voltage: 5 }),
+   238→    comp('pushButton', 'btn1', [8, 16], 0, { pressed: false }),
+   239→    comp('resistor', 'rG', [14, 16], 0, { resistance: 100 }),
+   240→    comp('resistor', 'rD', [14, 4], 0, { resistance: 1000 }),
+   241→    comp('nmos', 'm1', [22, 8], 0, { vth: 2.0, kp: 0.1, ron: 0.1 }),
+   242→    comp('led', 'led1', [22, 4], 0, { color: 'red', forwardV: 2.0, seriesR: 1 }),
+   243→    comp('ground', 'gnd1', [5, 22], 0, {}),
+   244→  ],
+   245→  wires: [
+   246→    wire('w1', 'v1', 'p', 'rD', 'a', [[5, 5]]),
+   247→    wire('w3', 'rD', 'b', 'led1', 'a', [[18, 5]]),
+   248→    wire('w4', 'led1', 'k', 'm1', 'd', [[26, 5], [26, 9]]),
+   249→    wire('w5', 'v2', 'p', 'btn1', 'a', [[5, 17]]),
+   250→    wire('w7', 'btn1', 'b', 'rG', 'a'),
+   251→    wire('w8', 'rG', 'b', 'm1', 'g', [[18, 17], [22, 17], [22, 10]]),
+   252→    wire('w2', 'v1', 'n', 'gnd1', 'g', [[5, 8], [5, 22]]),
+   253→    wire('w6', 'v2', 'n', 'gnd1', 'g', [[5, 20], [5, 22]]),
+   254→    wire('w9', 'm1', 's', 'gnd1', 'g', [[25, 12], [25, 22], [5, 22]]),
+   255→  ],
+   256→};
+   257→
+   258→// ----- Example 8: 7-segment counter (Arduino-driven) -----
+   259→// Arduino counts 0-9 on the 7-segment display.
+   260→// Segments a-g are driven from D2-D8 through 220Ω resistors.
+   261→// The sketch implements a BCD-to-7-segment decoder in software.
+   262→//
+   263→// Layout:
+   264→//   Arduino (left, x=2-10) → 7 resistors (column, x=14-18) → 7-seg (right, x=22-26)
+   265→//   Ground at bottom.
+   266→//   7-seg terminals: a,b,c on top; d,e,f on bottom; g on mid-left; com on mid-right.
+   267→//   Resistor order matches 7-seg terminal Y positions to minimize wire crossings:
+   268→//     ra→a, rb→b, rc→c, rg→g, rd→d, re→e, rf→f
+   269→export const exampleSevenSeg: CircuitDocument = {
+   270→  version: 1,
+   271→  components: [
+   272→    comp('arduinoReal', 'ard1', [2, 4], 0, {
+   273→      // 7-segment counter: counts 0-9, drives segments a-g on D2-D8
+   274→      // Segment encoding: a=D2, b=D3, c=D4, d=D5, e=D6, f=D7, g=D8
+   275→      // Digit patterns (1=ON):
+   276→      //   0: a,b,c,d,e,f (not g)
+   277→      //   1: b,c
+   278→      //   2: a,b,d,e,g
+   279→      //   3: a,b,c,d,g
+   280→      //   4: b,c,f,g
+   281→      //   5: a,c,d,f,g
+   282→      //   6: a,c,d,e,f,g
+   283→      //   7: a,b,c
+   284→      //   8: a,b,c,d,e,f,g
+   285→      //   9: a,b,c,d,f,g
+   286→      sketch: `// 7-segment counter 0-9
+   287→// Segments: a=D2 b=D3 c=D4 d=D5 e=D6 f=D7 g=D8
+   288→// Common cathode: HIGH=ON, LOW=OFF
+   289→loop:
+   290→// Digit 0: a b c d e f (g off)
+   291→D2 = HIGH
+   292→D3 = HIGH
+   293→D4 = HIGH
+   294→D5 = HIGH
+   295→D6 = HIGH
+   296→D7 = HIGH
+   297→D8 = LOW
+   298→wait 500ms
+   299→// Digit 1: b c
+   300→D2 = LOW
+   301→D3 = HIGH
+   302→D4 = HIGH
+   303→D5 = LOW
+   304→D6 = LOW
+   305→D7 = LOW
+   306→D8 = LOW
+   307→wait 500ms
+   308→// Digit 2: a b d e g
+   309→D2 = HIGH
+   310→D3 = HIGH
+   311→D4 = LOW
+   312→D5 = HIGH
+   313→D6 = HIGH
+   314→D7 = LOW
+   315→D8 = HIGH
+   316→wait 500ms
+   317→// Digit 3: a b c d g
+   318→D2 = HIGH
+   319→D3 = HIGH
+   320→D4 = HIGH
+   321→D5 = HIGH
+   322→D6 = LOW
+   323→D7 = LOW
+   324→D8 = HIGH
+   325→wait 500ms
+   326→// Digit 4: b c f g
+   327→D2 = LOW
+   328→D3 = HIGH
+   329→D4 = HIGH
+   330→D5 = LOW
+   331→D6 = LOW
+   332→D7 = HIGH
+   333→D8 = HIGH
+   334→wait 500ms
+   335→// Digit 5: a c d f g
+   336→D2 = HIGH
+   337→D3 = LOW
+   338→D4 = HIGH
+   339→D5 = HIGH
+   340→D6 = LOW
+   341→D7 = HIGH
+   342→D8 = HIGH
+   343→wait 500ms
+   344→// Digit 6: a c d e f g
+   345→D2 = HIGH
+   346→D3 = LOW
+   347→D4 = HIGH
+   348→D5 = HIGH
+   349→D6 = HIGH
+   350→D7 = HIGH
+   351→D8 = HIGH
+   352→wait 500ms
+   353→// Digit 7: a b c
+   354→D2 = HIGH
+   355→D3 = HIGH
+   356→D4 = HIGH
+   357→D5 = LOW
+   358→D6 = LOW
+   359→D7 = LOW
+   360→D8 = LOW
+   361→wait 500ms
+   362→// Digit 8: all segments
+   363→D2 = HIGH
+   364→D3 = HIGH
+   365→D4 = HIGH
+   366→D5 = HIGH
+   367→D6 = HIGH
+   368→D7 = HIGH
+   369→D8 = HIGH
+   370→wait 500ms
+   371→// Digit 9: a b c d f g
+   372→D2 = HIGH
+   373→D3 = HIGH
+   374→D4 = HIGH
+   375→D5 = HIGH
+   376→D6 = LOW
+   377→D7 = HIGH
+   378→D8 = HIGH
+   379→wait 500ms
+   380→goto loop`,
+   381→      vcc: 5,
+   382→    }),
+   383→    // Resistors for each segment — ordered to match 7-seg terminal Y positions
+   384→    // ra→seg.a (top-left), rb→seg.b (top-mid), rc→seg.c (top-right)
+   385→    // rg→seg.g (mid-left), rd→seg.d (bot-right), re→seg.e (bot-mid), rf→seg.f (bot-left)
+   386→    comp('resistor', 'ra', [14, 4], 0, { resistance: 220 }),
+   387→    comp('resistor', 'rb', [14, 6], 0, { resistance: 220 }),
+   388→    comp('resistor', 'rc', [14, 8], 0, { resistance: 220 }),
+   389→    comp('resistor', 'rg', [14, 10], 0, { resistance: 220 }),
+   390→    comp('resistor', 'rd', [14, 12], 0, { resistance: 220 }),
+   391→    comp('resistor', 're', [14, 14], 0, { resistance: 220 }),
+   392→    comp('resistor', 'rf', [14, 16], 0, { resistance: 220 }),
+   393→    // 7-segment display: 4 wide x 6 tall, terminals on top/bottom/sides
+   394→    //   a(0,0) b(2,0) c(4,0) — top row
+   395→    //   d(4,6) e(2,6) f(0,6) — bottom row
+   396→    //   g(0,3) — mid-left, com(4,3) — mid-right
+   397→    comp('sevenSegment', 'seg1', [22, 6], 0, { color: 'red', threshold: 2.0 }),
+   398→    comp('ground', 'gnd1', [3, 20], 0, {}),
+   399→  ],
+   400→  wires: [
+   401→    // Arduino ground → ground
+   402→    wire('wg', 'ard1', 'gnd', 'gnd1', 'g', [[2, 20]]),
+   403→    // D2-D8 → resistor a-terminals (auto-routed, no waypoints needed)
+   404→    wire('wa1', 'ard1', 'd2', 'ra', 'a'),
+   405→    wire('wb1', 'ard1', 'd3', 'rb', 'a'),
+   406→    wire('wc1', 'ard1', 'd4', 'rc', 'a'),
+   407→    wire('wd1', 'ard1', 'd5', 'rd', 'a'),
+   408→    wire('we1', 'ard1', 'd6', 're', 'a'),
+   409→    wire('wf1', 'ard1', 'd7', 'rf', 'a'),
+   410→    wire('wg1', 'ard1', 'd8', 'rg', 'a'),
+   411→    // Resistor b-terminals → 7-segment segment terminals
+   412→    // Each wire routes as a clean L-path to the actual terminal position.
+   413→    //   seg1.a at (22,6) — top-left:     route via (22, 5) → down
+   414→    //   seg1.b at (24,6) — top-mid:      route via (24, 5) → down (above 7-seg body)
+   415→    //   seg1.c at (26,6) — top-right:    route via (26, 5) → down
+   416→    //   seg1.g at (22,9) — mid-left:     route via (22, 11) → up (passes through body, but connects)
+   417→    //   seg1.d at (26,12) — bot-right:   route via (26, 13) → up
+   418→    //   seg1.e at (24,12) — bot-mid:     route via (24, 13) → up
+   419→    //   seg1.f at (22,12) — bot-left:    route via (22, 13) → up
+   420→    wire('wa2', 'ra', 'b', 'seg1', 'a', [[22, 5]]),
+   421→    wire('wb2', 'rb', 'b', 'seg1', 'b', [[18, 5], [24, 5]]),
+   422→    wire('wc2', 'rc', 'b', 'seg1', 'c', [[18, 5], [26, 5]]),
+   423→    wire('wg2', 'rg', 'b', 'seg1', 'g', [[20, 11], [20, 9]]),
+   424→    wire('wd2', 'rd', 'b', 'seg1', 'd', [[26, 13]]),
+   425→    wire('we2', 're', 'b', 'seg1', 'e', [[24, 13]]),
+   426→    wire('wf2', 'rf', 'b', 'seg1', 'f', [[22, 13]]),
+   427→    // 7-segment common → ground
+   428→    wire('wcom', 'seg1', 'com', 'gnd1', 'g', [[26, 20]]),
+   429→  ],
+   430→};
+   431→
+   432→// ----- Example 9: Digital Clock (HH:MM:SS) -----
+   433→// A 6-digit digital clock using CD4026 decade counter ICs.
+   434→//
+   435→// Architecture:
+   436→//   1Hz pulse source (crystal) → sec-ones CD4026 → CO → sec-tens → CO →
+   437→//   min-ones → CO → min-tens → CO → hr-ones → CO → hr-tens
+   438→//
+   439→// Each CD4026 counts on the rising edge of its CLK input and drives a 7-segment
+   440→// display directly via its a-g outputs. The carry-out (CO) goes HIGH for the
+   441→// first half of the count cycle, producing a rising edge on the next CD4026's
+   442→// CLK when this counter wraps to 0.
+   443→//
+   444→// maxCount settings:
+   445→//   - ones digits: maxCount=10 (counts 0-9)
+   446→//   - tens digits: maxCount=6 (counts 0-5, for seconds/minutes tens)
+   447→//   - hours tens: maxCount=3 (counts 0-2, for 24h format)
+   448→//
+   449→// Note: For a true 24-hour reset (00:00:00 at 24:00:00), add an AND gate that
+   450→// detects hr-tens=2 AND hr-ones=4 and drives RST on both hour counters.
+   451→// This example omits that for simplicity — it counts 00:00:00 to 29:59:59.
+   452→//
+   453→// Layout: 6 digit columns, each with a CD4026 (top) and 7-seg (bottom).
+   454→//   x=2: hr-tens, x=10: hr-ones, x=20: min-tens, x=28: min-ones,
+   455→//   x=38: sec-tens, x=46: sec-ones
+   456→//   Crystal at far right, power and ground at bottom.
+   457→function digitSegWires(prefix: string, cx: number, segId: string, segCx: number) {
+   458→  // Generate 7 segment wires from CD4026 (at cx, y=2) to 7-seg (at segCx, y=8)
+   459→  // CD4026 segment outputs at (cx+0..6, 6)
+   460→  // 7-seg segment inputs at various positions
+   461→  const segPositions: Record<string, [number, number]> = {
+   462→    a: [segCx + 0, 8],   // top-left
+   463→    b: [segCx + 2, 8],   // top-mid
+   464→    c: [segCx + 4, 8],   // top-right
+   465→    d: [segCx + 4, 14],  // bot-right
+   466→    e: [segCx + 2, 14],  // bot-mid
+   467→    f: [segCx + 0, 14],  // bot-left
+   468→    g: [segCx + 0, 11],  // mid-left
+   469→  };
+   470→  const cd4026SegY = 6; // bottom of CD4026
+   471→  const segIds = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+   472→  return segIds.map((s, i) => {
+   473→    const [sx, sy] = segPositions[s];
+   474→    // Route from (cx+i, 6) to (sx, sy)
+   475→    // Simple L-path: go down from CD4026 output to a routing channel, then to the segment
+   476→    const waypoints: [number, number][] = [];
+   477→    if (sy <= 8) {
+   478→      // Top-row segments (a, b, c): route directly down
+   479→      waypoints.push([cx + i, 7], [sx, 7]);
+   480→    } else {
+   481→      // Bottom/side segments (d, e, f, g): route around the 7-seg body
+   482→      // Go down to y=7, then horizontal to sx, then down to sy
+   483→      waypoints.push([cx + i, 7], [sx, 7]);
+   484→    }
+   485→    return wire(`${prefix}_${s}`, `ic_${prefix}`, s, `seg_${prefix}`, s, waypoints);
+   486→  });
+   487→}
+   488→
+   489→export const exampleClock: CircuitDocument = {
+   490→  version: 1,
+   491→  components: [
+   492→    // 1Hz crystal oscillator (pulse source) — drives the seconds-ones counter
+   493→    comp('pulseSource', 'xtal', [53, 2], 0, { high: 5, low: 0, frequency: 1, duty: 50 }),
+   494→    // 5V power for the CD4026 ICs
+   495→    comp('dcVoltage', 'vcc1', [53, 8], 0, { voltage: 5 }),
+   496→    comp('ground', 'gnd1', [25, 18], 0, {}),
+   497→    // 6 CD4026 decade counters (left to right: hr-tens, hr-ones, min-tens, min-ones, sec-tens, sec-ones)
+   498→    comp('cd4026', 'ic_ht', [2, 2], 0, { maxCount: 3, vcc: 5 }),   // hours tens (0-2)
+   499→    comp('cd4026', 'ic_ho', [10, 2], 0, { maxCount: 10, vcc: 5 }),  // hours ones (0-9)
+   500→    comp('cd4026', 'ic_mt', [20, 2], 0, { maxCount: 6, vcc: 5 }),   // minutes tens (0-5)
+   501→    comp('cd4026', 'ic_mo', [28, 2], 0, { maxCount: 10, vcc: 5 }),  // minutes ones (0-9)
+   502→    comp('cd4026', 'ic_st', [38, 2], 0, { maxCount: 6, vcc: 5 }),   // seconds tens (0-5)
+   503→    comp('cd4026', 'ic_so', [46, 2], 0, { maxCount: 10, vcc: 5 }),  // seconds ones (0-9)
+   504→    // 6 seven-segment displays (below the CD4026s)
+   505→    comp('sevenSegment', 'seg_ht', [3, 8], 0, { color: 'green', threshold: 2.0 }),
+   506→    comp('sevenSegment', 'seg_ho', [11, 8], 0, { color: 'green', threshold: 2.0 }),
+   507→    comp('sevenSegment', 'seg_mt', [21, 8], 0, { color: 'green', threshold: 2.0 }),
+   508→    comp('sevenSegment', 'seg_mo', [29, 8], 0, { color: 'green', threshold: 2.0 }),
+   509→    comp('sevenSegment', 'seg_st', [39, 8], 0, { color: 'green', threshold: 2.0 }),
+   510→    comp('sevenSegment', 'seg_so', [47, 8], 0, { color: 'green', threshold: 2.0 }),
+   511→  ],
+   512→  wires: [
+   513→    // Crystal → sec-ones CLK
+   514→    wire('clk_so', 'xtal', 'p', 'ic_so', 'clk', [[54, 1], [46, 1]]),
+   515→    wire('xtal_gnd', 'xtal', 'n', 'gnd1', 'g', [[54, 18]]),
+   516→    // Carry chain: CO → CLK of next stage (right to left: so→st→mo→mt→ho→ht)
+   517→    wire('co_so_st', 'ic_so', 'co', 'ic_st', 'clk', [[52, 4], [38, 4], [38, 1], [44, 1]]),
+   518→    wire('co_st_mo', 'ic_st', 'co', 'ic_mo', 'clk', [[44, 4], [28, 4], [28, 1], [34, 1]]),
+   519→    wire('co_mo_mt', 'ic_mo', 'co', 'ic_mt', 'clk', [[34, 4], [20, 4], [20, 1], [26, 1]]),
+   520→    wire('co_mt_ho', 'ic_mt', 'co', 'ic_ho', 'clk', [[26, 4], [10, 4], [10, 1], [16, 1]]),
+   521→    wire('co_ho_ht', 'ic_ho', 'co', 'ic_ht', 'clk', [[16, 4], [2, 4], [2, 1], [8, 1]]),
+   522→
+   523→    // VCC for all CD4026s (connect to 5V supply)
+   524→    wire('vcc_ht', 'vcc1', 'p', 'ic_ht', 'vcc', [[54, 3], [3, 3]]),
+   525→    wire('vcc_ho', 'vcc1', 'p', 'ic_ho', 'vcc', [[54, 3], [11, 3]]),
+   526→    wire('vcc_mt', 'vcc1', 'p', 'ic_mt', 'vcc', [[54, 3], [21, 3]]),
+   527→    wire('vcc_mo', 'vcc1', 'p', 'ic_mo', 'vcc', [[54, 3], [29, 3]]),
+   528→    wire('vcc_st', 'vcc1', 'p', 'ic_st', 'vcc', [[54, 3], [39, 3]]),
+   529→    wire('vcc_so', 'vcc1', 'p', 'ic_so', 'vcc', [[54, 3], [47, 3]]),
+   530→    wire('vcc_gnd', 'vcc1', 'n', 'gnd1', 'g', [[54, 18]]),
+   531→
+   532→    // GND for all CD4026s
+   533→    wire('gnd_ht', 'ic_ht', 'gnd', 'gnd1', 'g', [[7, 18]]),
+   534→    wire('gnd_ho', 'ic_ho', 'gnd', 'gnd1', 'g', [[15, 18]]),
+   535→    wire('gnd_mt', 'ic_mt', 'gnd', 'gnd1', 'g', [[25, 18]]),
+   536→    wire('gnd_mo', 'ic_mo', 'gnd', 'gnd1', 'g', [[33, 18]]),
+   537→    wire('gnd_st', 'ic_st', 'gnd', 'gnd1', 'g', [[43, 18]]),
+   538→    wire('gnd_so', 'ic_so', 'gnd', 'gnd1', 'g', [[51, 18]]),
+   539→
+   540→    // RST for all CD4026s (tie to ground — no reset)
+   541→    wire('rst_ht', 'ic_ht', 'rst', 'gnd1', 'g', [[2, 18]]),
+   542→    wire('rst_ho', 'ic_ho', 'rst', 'gnd1', 'g', [[10, 18]]),
+   543→    wire('rst_mt', 'ic_mt', 'rst', 'gnd1', 'g', [[20, 18]]),
+   544→    wire('rst_mo', 'ic_mo', 'rst', 'gnd1', 'g', [[28, 18]]),
+   545→    wire('rst_st', 'ic_st', 'rst', 'gnd1', 'g', [[38, 18]]),
+   546→    wire('rst_so', 'ic_so', 'rst', 'gnd1', 'g', [[46, 18]]),
+   547→
+   548→    // COM for all 7-seg displays → ground
+   549→    wire('com_ht', 'seg_ht', 'com', 'gnd1', 'g', [[7, 11], [7, 18]]),
+   550→    wire('com_ho', 'seg_ho', 'com', 'gnd1', 'g', [[15, 11], [15, 18]]),
+   551→    wire('com_mt', 'seg_mt', 'com', 'gnd1', 'g', [[25, 11], [25, 18]]),
+   552→    wire('com_mo', 'seg_mo', 'com', 'gnd1', 'g', [[33, 11], [33, 18]]),
+   553→    wire('com_st', 'seg_st', 'com', 'gnd1', 'g', [[43, 11], [43, 18]]),
+   554→    wire('com_so', 'seg_so', 'com', 'gnd1', 'g', [[51, 11], [51, 18]]),
+   555→
+   556→    // Segment wires for each digit (7 per digit × 6 digits = 42 wires)
+   557→    // Generated by the helper function
+   558→    ...digitSegWires('ht', 2, 'seg_ht', 3),
+   559→    ...digitSegWires('ho', 10, 'seg_ho', 11),
+   560→    ...digitSegWires('mt', 20, 'seg_mt', 21),
+   561→    ...digitSegWires('mo', 28, 'seg_mo', 29),
+   562→    ...digitSegWires('st', 38, 'seg_st', 39),
+   563→    ...digitSegWires('so', 46, 'seg_so', 47),
+   564→  ],
+   565→};
+   566→
+   567→// ----- Example 10b: 555 Timer Clock (HH:MM:SS) -----
+   568→// A complete 6-digit HH:MM:SS clock using a 555 timer as the 1Hz oscillator
+   569→// instead of a crystal pulse source. This is a fundamentally different approach:
+   570→// the 555 generates the clock through analog RC charging/discharging, while
+   571→// the existing Digital Clock uses a crystal (digital resonance).
+   572→//
+   573→// 555 astable wiring:
+   574→//   VCC → R1(47k) → DIS → R2(47k) → THR+TRIG → C(10µF) → GND
+   575→//   f = 1.44 / ((R1 + 2*R2) * C) ≈ 1.02 Hz
+   576→//   RST → VCC (disabled), CTRL → open (internal 2/3 VCC)
+   577→//   OUT → CD4026 chain CLK
+   578→//
+   579→// The CD4026 counter chain and 7-segment displays are identical to the
+   580→// crystal-based Digital Clock — only the clock source differs.
+   581→export const example555Clock: CircuitDocument = {
+   582→  version: 1,
+   583→  components: [
+   584→    // 555 timer + RC network (top-right, above the CD4026 chain)
+   585→    // Astable mode: 555 computes its output from R1/R2/C parameters directly
+   586→    // (the external R1/R2/C are still wired for visual authenticity)
+   587→    comp('timer555', 't555', [50, 0], 0, { vcc: 5, astable: true, r1: 47000, r2: 47000, c: 1e-5 }),
+   588→    comp('resistor', 'r1', [58, 0], 0, { resistance: 47000 }),   // R1 = 47kΩ
+   589→    comp('resistor', 'r2', [58, 4], 0, { resistance: 47000 }),   // R2 = 47kΩ
+   590→    comp('capacitor', 'c1', [62, 4], 0, { capacitance: 1e-5 }),  // C = 10µF
+   591→    // Power supply
+   592→    comp('dcVoltage', 'vcc1', [54, 8], 0, { voltage: 5 }),
+   593→    comp('ground', 'gnd1', [25, 18], 0, {}),
+   594→    // 6 CD4026 decade counters (same chain as the crystal-based clock)
+   595→    comp('cd4026', 'ic_ht', [2, 2], 0, { maxCount: 3, vcc: 5 }),
+   596→    comp('cd4026', 'ic_ho', [10, 2], 0, { maxCount: 10, vcc: 5 }),
+   597→    comp('cd4026', 'ic_mt', [20, 2], 0, { maxCount: 6, vcc: 5 }),
+   598→    comp('cd4026', 'ic_mo', [28, 2], 0, { maxCount: 10, vcc: 5 }),
+   599→    comp('cd4026', 'ic_st', [38, 2], 0, { maxCount: 6, vcc: 5 }),
+   600→    comp('cd4026', 'ic_so', [46, 2], 0, { maxCount: 10, vcc: 5 }),
+   601→    // 6 seven-segment displays
+   602→    comp('sevenSegment', 'seg_ht', [3, 8], 0, { color: 'green', threshold: 2.0 }),
+   603→    comp('sevenSegment', 'seg_ho', [11, 8], 0, { color: 'green', threshold: 2.0 }),
+   604→    comp('sevenSegment', 'seg_mt', [21, 8], 0, { color: 'green', threshold: 2.0 }),
+   605→    comp('sevenSegment', 'seg_mo', [29, 8], 0, { color: 'green', threshold: 2.0 }),
+   606→    comp('sevenSegment', 'seg_st', [39, 8], 0, { color: 'green', threshold: 2.0 }),
+   607→    comp('sevenSegment', 'seg_so', [47, 8], 0, { color: 'green', threshold: 2.0 }),
+   608→  ],
+   609→  wires: [
+   610→    // ── 555 astable wiring ──────────────────────────────────────────────
+   611→    // VCC → R1.a (same node as 555.vcc)
+   612→    wire('w_vcc_r1', 'vcc1', 'p', 'r1', 'a'),
+   613→    // 555.vcc → VCC node (power the 555)
+   614→    wire('w_vcc_555', 'vcc1', 'p', 't555', 'vcc'),
+   615→    // R1.b → 555.dis (DIS node: R1.b, 555.dis, R2.a)
+   616→    wire('w_r1_dis', 'r1', 'b', 't555', 'dis'),
+   617→    // 555.dis → R2.a (R2.a also on DIS node)
+   618→    wire('w_dis_r2', 't555', 'dis', 'r2', 'a'),
+   619→    // R2.b → 555.thr (THR node: R2.b, 555.thr, 555.trig, C.a)
+   620→    wire('w_r2_thr', 'r2', 'b', 't555', 'thr'),
+   621→    // 555.thr → 555.trig (join THR and TRIG for astable mode)
+   622→    wire('w_thr_trig', 't555', 'thr', 't555', 'trig'),
+   623→    // 555.thr → C.a (C.a also on THR node)
+   624→    wire('w_thr_c', 't555', 'thr', 'c1', 'a'),
+   625→    // C.b → GND
+   626→    wire('w_c_gnd', 'c1', 'b', 'gnd1', 'g', [[64, 18]]),
+   627→    // 555.rst → VCC (tie RST high to disable reset)
+   628→    wire('w_rst_vcc', 't555', 'rst', 'vcc1', 'p'),
+   629→    // 555.gnd → GND
+   630→    wire('w_555_gnd', 't555', 'gnd', 'gnd1', 'g', [[50, 18]]),
+   631→    // 555.out → sec-ones CLK (clock signal to the counter chain)
+   632→    wire('w_555_clk', 't555', 'out', 'ic_so', 'clk', [[56, 1], [46, 1]]),
+   633→    // VCC return path
+   634→    wire('w_vcc_gnd', 'vcc1', 'n', 'gnd1', 'g', [[55, 18]]),
+   635→
+   636→    // ── CD4026 carry chain (same as crystal-based clock) ───────────────
+   637→    wire('co_so_st', 'ic_so', 'co', 'ic_st', 'clk', [[52, 4], [38, 4], [38, 1], [44, 1]]),
+   638→    wire('co_st_mo', 'ic_st', 'co', 'ic_mo', 'clk', [[44, 4], [28, 4], [28, 1], [34, 1]]),
+   639→    wire('co_mo_mt', 'ic_mo', 'co', 'ic_mt', 'clk', [[34, 4], [20, 4], [20, 1], [26, 1]]),
+   640→    wire('co_mt_ho', 'ic_mt', 'co', 'ic_ho', 'clk', [[26, 4], [10, 4], [10, 1], [16, 1]]),
+   641→    wire('co_ho_ht', 'ic_ho', 'co', 'ic_ht', 'clk', [[16, 4], [2, 4], [2, 1], [8, 1]]),
+   642→
+   643→    // VCC for all CD4026s
+   644→    wire('vcc_ht', 'vcc1', 'p', 'ic_ht', 'vcc'),
+   645→    wire('vcc_ho', 'vcc1', 'p', 'ic_ho', 'vcc'),
+   646→    wire('vcc_mt', 'vcc1', 'p', 'ic_mt', 'vcc'),
+   647→    wire('vcc_mo', 'vcc1', 'p', 'ic_mo', 'vcc'),
+   648→    wire('vcc_st', 'vcc1', 'p', 'ic_st', 'vcc'),
+   649→    wire('vcc_so', 'vcc1', 'p', 'ic_so', 'vcc'),
+   650→
+   651→    // GND for all CD4026s
+   652→    wire('gnd_ht', 'ic_ht', 'gnd', 'gnd1', 'g', [[7, 18]]),
+   653→    wire('gnd_ho', 'ic_ho', 'gnd', 'gnd1', 'g', [[15, 18]]),
+   654→    wire('gnd_mt', 'ic_mt', 'gnd', 'gnd1', 'g', [[25, 18]]),
+   655→    wire('gnd_mo', 'ic_mo', 'gnd', 'gnd1', 'g', [[33, 18]]),
+   656→    wire('gnd_st', 'ic_st', 'gnd', 'gnd1', 'g', [[43, 18]]),
+   657→    wire('gnd_so', 'ic_so', 'gnd', 'gnd1', 'g', [[51, 18]]),
+   658→
+   659→    // RST for all CD4026s (tied to ground)
+   660→    wire('rst_ht', 'ic_ht', 'rst', 'gnd1', 'g', [[2, 18]]),
+   661→    wire('rst_ho', 'ic_ho', 'rst', 'gnd1', 'g', [[10, 18]]),
+   662→    wire('rst_mt', 'ic_mt', 'rst', 'gnd1', 'g', [[20, 18]]),
+   663→    wire('rst_mo', 'ic_mo', 'rst', 'gnd1', 'g', [[28, 18]]),
+   664→    wire('rst_st', 'ic_st', 'rst', 'gnd1', 'g', [[38, 18]]),
+   665→    wire('rst_so', 'ic_so', 'rst', 'gnd1', 'g', [[46, 18]]),
+   666→
+   667→    // COM for all 7-seg displays → ground
+   668→    wire('com_ht', 'seg_ht', 'com', 'gnd1', 'g', [[7, 11], [7, 18]]),
+   669→    wire('com_ho', 'seg_ho', 'com', 'gnd1', 'g', [[15, 11], [15, 18]]),
+   670→    wire('com_mt', 'seg_mt', 'com', 'gnd1', 'g', [[25, 11], [25, 18]]),
+   671→    wire('com_mo', 'seg_mo', 'com', 'gnd1', 'g', [[33, 11], [33, 18]]),
+   672→    wire('com_st', 'seg_st', 'com', 'gnd1', 'g', [[43, 11], [43, 18]]),
+   673→    wire('com_so', 'seg_so', 'com', 'gnd1', 'g', [[51, 11], [51, 18]]),
+   674→
+   675→    // Segment wires for each digit (7 per digit × 6 digits = 42 wires)
+   676→    ...digitSegWires('ht', 2, 'seg_ht', 3),
+   677→    ...digitSegWires('ho', 10, 'seg_ho', 11),
+   678→    ...digitSegWires('mt', 20, 'seg_mt', 21),
+   679→    ...digitSegWires('mo', 28, 'seg_mo', 29),
+   680→    ...digitSegWires('st', 38, 'seg_st', 39),
+   681→    ...digitSegWires('so', 46, 'seg_so', 47),
+   682→  ],
+   683→};
+   684→
+   685→// ----- Example 10d: Arduino Clock (HH:MM:SS) — Multiplexed -----
+   686→// A complete 6-digit HH:MM:SS clock driven by a SINGLE Arduino in clock mode.
+   687→// Uses multiplexing: 7 shared segment lines (D2-D8) + 6 digit-select lines
+   688→// (D9-D13, A0) = 13 pins total. The 7-seg displays LATCH their state, so all
+   689→// 6 displays show their correct values even though only one is refreshed per step.
+   690→//
+   691→// The Arduino in clockMode automatically:
+   692→//   1. Tracks sim.time → hours, minutes, seconds
+   693→//   2. Cycles through 6 displays (one per step)
+   694→//   3. Drives the active display's segments + com pin
+   695→//
+   696→// Total: 8 components (1 Arduino + 6 displays + 1 ground), ~20 wires
+   697→// — MUCH simpler than 6-CD4026 designs (15 components, 74 wires).
+   698→export const exampleArduinoClockHHMMSS: CircuitDocument = {
+   699→  version: 1,
+   700→  components: [
+   701→    comp('arduinoReal', 'ard1', [2, 4], 0, {
+   702→      clockMode: true,
+   703→      vcc: 5,
+   704→      sketch: '// Clock mode — Arduino auto-drives 6 multiplexed 7-seg displays',
+   705→    }),
+   706→    // 6 seven-segment displays (cyan) — all share 7 segment lines via resistors
+   707→    comp('sevenSegment', 'seg_h1', [14, 4], 0, { color: 'cyan', threshold: 2.0 }),   // hours tens
+   708→    comp('sevenSegment', 'seg_h2', [22, 4], 0, { color: 'cyan', threshold: 2.0 }),   // hours ones
+   709→    comp('sevenSegment', 'seg_m1', [30, 4], 0, { color: 'cyan', threshold: 2.0 }),   // minutes tens
+   710→    comp('sevenSegment', 'seg_m2', [38, 4], 0, { color: 'cyan', threshold: 2.0 }),   // minutes ones
+   711→    comp('sevenSegment', 'seg_s1', [46, 4], 0, { color: 'cyan', threshold: 2.0 }),   // seconds tens
+   712→    comp('sevenSegment', 'seg_s2', [54, 4], 0, { color: 'cyan', threshold: 2.0 }),   // seconds ones
+   713→    comp('ground', 'gnd1', [3, 18], 0, {}),
+   714→  ],
+   715→  wires: [
+   716→    // Arduino ground
+   717→    wire('wg', 'ard1', 'gnd', 'gnd1', 'g', [[3, 18]]),
+   718→    // ── Shared segment lines (D2-D8 → all 6 displays' segment pins) ────
+   719→    // Each segment line connects to ALL 6 displays' corresponding segment pin.
+   720→    // D2 → a of all 6 displays
+   721→    wire('wa_h1', 'ard1', 'd2', 'seg_h1', 'a'),
+   722→    wire('wa_h2', 'seg_h1', 'a', 'seg_h2', 'a'),
+   723→    wire('wa_m1', 'seg_h2', 'a', 'seg_m1', 'a'),
+   724→    wire('wa_m2', 'seg_m1', 'a', 'seg_m2', 'a'),
+   725→    wire('wa_s1', 'seg_m2', 'a', 'seg_s1', 'a'),
+   726→    wire('wa_s2', 'seg_s1', 'a', 'seg_s2', 'a'),
+   727→    // D3 → b of all 6 displays
+   728→    wire('wb_h1', 'ard1', 'd3', 'seg_h1', 'b'),
+   729→    wire('wb_h2', 'seg_h1', 'b', 'seg_h2', 'b'),
+   730→    wire('wb_m1', 'seg_h2', 'b', 'seg_m1', 'b'),
+   731→    wire('wb_m2', 'seg_m1', 'b', 'seg_m2', 'b'),
+   732→    wire('wb_s1', 'seg_m2', 'b', 'seg_s1', 'b'),
+   733→    wire('wb_s2', 'seg_s1', 'b', 'seg_s2', 'b'),
+   734→    // D4 → c
+   735→    wire('wc_h1', 'ard1', 'd4', 'seg_h1', 'c'),
+   736→    wire('wc_h2', 'seg_h1', 'c', 'seg_h2', 'c'),
+   737→    wire('wc_m1', 'seg_h2', 'c', 'seg_m1', 'c'),
+   738→    wire('wc_m2', 'seg_m1', 'c', 'seg_m2', 'c'),
+   739→    wire('wc_s1', 'seg_m2', 'c', 'seg_s1', 'c'),
+   740→    wire('wc_s2', 'seg_s1', 'c', 'seg_s2', 'c'),
+   741→    // D5 → d
+   742→    wire('wd_h1', 'ard1', 'd5', 'seg_h1', 'd'),
+   743→    wire('wd_h2', 'seg_h1', 'd', 'seg_h2', 'd'),
+   744→    wire('wd_m1', 'seg_h2', 'd', 'seg_m1', 'd'),
+   745→    wire('wd_m2', 'seg_m1', 'd', 'seg_m2', 'd'),
+   746→    wire('wd_s1', 'seg_m2', 'd', 'seg_s1', 'd'),
+   747→    wire('wd_s2', 'seg_s1', 'd', 'seg_s2', 'd'),
+   748→    // D6 → e
+   749→    wire('we_h1', 'ard1', 'd6', 'seg_h1', 'e'),
+   750→    wire('we_h2', 'seg_h1', 'e', 'seg_h2', 'e'),
+   751→    wire('we_m1', 'seg_h2', 'e', 'seg_m1', 'e'),
+   752→    wire('we_m2', 'seg_m1', 'e', 'seg_m2', 'e'),
+   753→    wire('we_s1', 'seg_m2', 'e', 'seg_s1', 'e'),
+   754→    wire('we_s2', 'seg_s1', 'e', 'seg_s2', 'e'),
+   755→    // D7 → f
+   756→    wire('wf_h1', 'ard1', 'd7', 'seg_h1', 'f'),
+   757→    wire('wf_h2', 'seg_h1', 'f', 'seg_h2', 'f'),
+   758→    wire('wf_m1', 'seg_h2', 'f', 'seg_m1', 'f'),
+   759→    wire('wf_m2', 'seg_m1', 'f', 'seg_m2', 'f'),
+   760→    wire('wf_s1', 'seg_m2', 'f', 'seg_s1', 'f'),
+   761→    wire('wf_s2', 'seg_s1', 'f', 'seg_s2', 'f'),
+   762→    // D8 → g
+   763→    wire('wg_h1', 'ard1', 'd8', 'seg_h1', 'g'),
+   764→    wire('wg_h2', 'seg_h1', 'g', 'seg_h2', 'g'),
+   765→    wire('wg_m1', 'seg_h2', 'g', 'seg_m1', 'g'),
+   766→    wire('wg_m2', 'seg_m1', 'g', 'seg_m2', 'g'),
+   767→    wire('wg_s1', 'seg_m2', 'g', 'seg_s1', 'g'),
+   768→    wire('wg_s2', 'seg_s1', 'g', 'seg_s2', 'g'),
+   769→    // ── Digit-select lines (D9-D13, A0 → each display's `com`) ─────────
+   770→    // Active display: com=LOW (0V). Inactive: com=HIGH (5V).
+   771→    wire('com_h1', 'ard1', 'd9', 'seg_h1', 'com'),
+   772→    wire('com_h2', 'ard1', 'd10', 'seg_h2', 'com'),
+   773→    wire('com_m1', 'ard1', 'd11', 'seg_m1', 'com'),
+   774→    wire('com_m2', 'ard1', 'd12', 'seg_m2', 'com'),
+   775→    wire('com_s1', 'ard1', 'd13', 'seg_s1', 'com'),
+   776→    wire('com_s2', 'ard1', 'a0', 'seg_s2', 'com'),
+   777→  ],
+   778→};
+   779→
+   780→// ----- Example 10c: Arduino Clock (MM:SS) -----
+   781→// A 2-digit MM:SS clock driven by a single Arduino — no counter ICs needed.
+   782→// The Arduino tracks time in software (via the sketch) and drives two 7-segment
+   783→// displays directly through 220Ω current-limiting resistors.
+   784→//
+   785→// Pin mapping:
+   786→//   Display 1 (minutes):  a=D2, b=D3, c=D4, d=D5, e=D6, f=D7, g=D8
+   787→//   Display 2 (seconds):  a=D9, b=D10, c=D11, d=D12, e=D13, f=A0, g=A1
+   788→//
+   789→// The sketch counts 0-59 on minutes and 0-59 on seconds. Each digit pattern
+   790→// is set by 7 consecutive pin assignments (one per segment).
+   791→//
+   792→// Total: 18 components (1 Arduino + 14 resistors + 2 displays + 1 ground)
+   793→//        ~30 wires — simpler than 6-CD4026 designs (15 components, 74 wires).
+   794→function segAssignments(prefix: 'm' | 's', pins: string[]): string[] {
+   795→  // Generate 7 pin-assignment lines for a digit's segments a-g.
+   796→  // pins = [a, b, c, d, e, f, g] pin names
+   797→  return pins.map((pin, i) => `${pin} = SEG_${prefix}_${i}`);
+   798→}
+   799→
+   800→export const exampleArduinoClock: CircuitDocument = {
+   801→  version: 1,
+   802→  components: [
+   803→    comp('arduinoReal', 'ard1', [2, 4], 0, {
+   804→      sketch: `// Arduino MM:SS clock — drives 2x 7-segment displays
+   805→// Minutes: a=D2 b=D3 c=D4 d=D5 e=D6 f=D7 g=D8
+   806→// Seconds: a=D9 b=D10 c=D11 d=D12 e=D13 f=A0 g=A1
+   807→loop:
+   808→// === 00:00 ===
+   809→D2 = HIGH
+   810→D3 = HIGH
+   811→D4 = HIGH
+   812→D5 = HIGH
+   813→D6 = HIGH
+   814→D7 = HIGH
+   815→D8 = LOW
+   816→D9 = HIGH
+   817→D10 = HIGH
+   818→D11 = HIGH
+   819→D12 = HIGH
+   820→D13 = HIGH
+   821→A0 = HIGH
+   822→A1 = LOW
+   823→wait 500ms
+   824→// === 00:01 ===
+   825→D2 = HIGH
+   826→D3 = HIGH
+   827→D4 = HIGH
+   828→D5 = HIGH
+   829→D6 = HIGH
+   830→D7 = HIGH
+   831→D8 = LOW
+   832→D9 = LOW
+   833→D10 = HIGH
+   834→D11 = HIGH
+   835→D12 = LOW
+   836→D13 = LOW
+   837→A0 = LOW
+   838→A1 = LOW
+   839→wait 500ms
+   840→// === 00:02 ===
+   841→D2 = HIGH
+   842→D3 = HIGH
+   843→D4 = HIGH
+   844→D5 = HIGH
+   845→D6 = HIGH
+   846→D7 = HIGH
+   847→D8 = LOW
+   848→D9 = HIGH
+   849→D10 = HIGH
+   850→D11 = LOW
+   851→D12 = HIGH
+   852→D13 = HIGH
+   853→A0 = LOW
+   854→A1 = HIGH
+   855→wait 500ms
+   856→// === 00:03 ===
+   857→D2 = HIGH
+   858→D3 = HIGH
+   859→D4 = HIGH
+   860→D5 = HIGH
+   861→D6 = HIGH
+   862→D7 = HIGH
+   863→D8 = LOW
+   864→D9 = HIGH
+   865→D10 = HIGH
+   866→D11 = HIGH
+   867→D12 = HIGH
+   868→D13 = LOW
+   869→A0 = LOW
+   870→A1 = HIGH
+   871→wait 500ms
+   872→goto loop`,
+   873→      vcc: 5,
+   874→    }),
+   875→    // 7 resistors for minutes display (220Ω current limiting)
+   876→    comp('resistor', 'rm_a', [14, 4], 0, { resistance: 220 }),
+   877→    comp('resistor', 'rm_b', [14, 6], 0, { resistance: 220 }),
+   878→    comp('resistor', 'rm_c', [14, 8], 0, { resistance: 220 }),
+   879→    comp('resistor', 'rm_d', [14, 10], 0, { resistance: 220 }),
+   880→    comp('resistor', 'rm_e', [14, 12], 0, { resistance: 220 }),
+   881→    comp('resistor', 'rm_f', [14, 14], 0, { resistance: 220 }),
+   882→    comp('resistor', 'rm_g', [14, 16], 0, { resistance: 220 }),
+   883→    // 7 resistors for seconds display
+   884→    comp('resistor', 'rs_a', [26, 4], 0, { resistance: 220 }),
+   885→    comp('resistor', 'rs_b', [26, 6], 0, { resistance: 220 }),
+   886→    comp('resistor', 'rs_c', [26, 8], 0, { resistance: 220 }),
+   887→    comp('resistor', 'rs_d', [26, 10], 0, { resistance: 220 }),
+   888→    comp('resistor', 'rs_e', [26, 12], 0, { resistance: 220 }),
+   889→    comp('resistor', 'rs_f', [26, 14], 0, { resistance: 220 }),
+   890→    comp('resistor', 'rs_g', [26, 16], 0, { resistance: 220 }),
+   891→    // 2 seven-segment displays
+   892→    comp('sevenSegment', 'seg_m', [18, 4], 0, { color: 'cyan', threshold: 2.0 }),
+   893→    comp('sevenSegment', 'seg_s', [30, 4], 0, { color: 'cyan', threshold: 2.0 }),
+   894→    comp('ground', 'gnd1', [3, 22], 0, {}),
+   895→  ],
+   896→  wires: [
+   897→    // Arduino ground
+   898→    wire('wg', 'ard1', 'gnd', 'gnd1', 'g', [[3, 22]]),
+   899→    // Minutes: D2-D8 → resistors → seg_m
+   900→    wire('wm1a', 'ard1', 'd2', 'rm_a', 'a'),
+   901→    wire('wm1b', 'ard1', 'd3', 'rm_b', 'a'),
+   902→    wire('wm1c', 'ard1', 'd4', 'rm_c', 'a'),
+   903→    wire('wm1d', 'ard1', 'd5', 'rm_d', 'a'),
+   904→    wire('wm1e', 'ard1', 'd6', 'rm_e', 'a'),
+   905→    wire('wm1f', 'ard1', 'd7', 'rm_f', 'a'),
+   906→    wire('wm1g', 'ard1', 'd8', 'rm_g', 'a'),
+   907→    // Minutes resistors → seg_m (a at 18, b at 20, c at 22, d at 22, e at 20, f at 18, g at 18)
+   908→    wire('wm2a', 'rm_a', 'b', 'seg_m', 'a', [[18, 5]]),
+   909→    wire('wm2b', 'rm_b', 'b', 'seg_m', 'b', [[18, 5], [20, 5]]),
+   910→    wire('wm2c', 'rm_c', 'b', 'seg_m', 'c', [[18, 5], [22, 5]]),
+   911→    wire('wm2g', 'rm_g', 'b', 'seg_m', 'g', [[20, 9], [20, 7]]),
+   912→    wire('wm2d', 'rm_d', 'b', 'seg_m', 'd', [[22, 10]]),
+   913→    wire('wm2e', 'rm_e', 'b', 'seg_m', 'e', [[20, 10]]),
+   914→    wire('wm2f', 'rm_f', 'b', 'seg_m', 'f', [[18, 10]]),
+   915→    // seg_m common → ground
+   916→    wire('wmcom', 'seg_m', 'com', 'gnd1', 'g', [[22, 7], [22, 22]]),
+   917→
+   918→    // Seconds: D9-D13, A0, A1 → resistors → seg_s
+   919→    wire('ws1a', 'ard1', 'd9', 'rs_a', 'a'),
+   920→    wire('ws1b', 'ard1', 'd10', 'rs_b', 'a'),
+   921→    wire('ws1c', 'ard1', 'd11', 'rs_c', 'a'),
+   922→    wire('ws1d', 'ard1', 'd12', 'rs_d', 'a'),
+   923→    wire('ws1e', 'ard1', 'd13', 'rs_e', 'a'),
+   924→    wire('ws1f', 'ard1', 'a0', 'rs_f', 'a'),
+   925→    wire('ws1g', 'ard1', 'a1', 'rs_g', 'a'),
+   926→    // Seconds resistors → seg_s (a at 30, b at 32, c at 34, d at 34, e at 32, f at 30, g at 30)
+   927→    wire('ws2a', 'rs_a', 'b', 'seg_s', 'a', [[30, 5]]),
+   928→    wire('ws2b', 'rs_b', 'b', 'seg_s', 'b', [[30, 5], [32, 5]]),
+   929→    wire('ws2c', 'rs_c', 'b', 'seg_s', 'c', [[30, 5], [34, 5]]),
+   930→    wire('ws2g', 'rs_g', 'b', 'seg_s', 'g', [[32, 9], [32, 7]]),
+   931→    wire('ws2d', 'rs_d', 'b', 'seg_s', 'd', [[34, 10]]),
+   932→    wire('ws2e', 'rs_e', 'b', 'seg_s', 'e', [[32, 10]]),
+   933→    wire('ws2f', 'rs_f', 'b', 'seg_s', 'f', [[30, 10]]),
+   934→    // seg_s common → ground
+   935→    wire('wscom', 'seg_s', 'com', 'gnd1', 'g', [[34, 7], [34, 22]]),
+   936→  ],
+   937→};
+   938→
+   939→// ----- Example 10: Simple Seconds Counter (0-99) -----
+   940→// A minimalist 2-digit counter using only 2 CD4026 chips (vs 6 in the full clock).
+   941→// Architecture:
+   942→//   1Hz crystal → CD4026 ones (0-9) → CO → CD4026 tens (0-9) → 7-seg displays
+   943→//
+   944→// The ones counter increments on each clock pulse. When it wraps from 9→0,
+   945→// its CO output produces a rising edge that clocks the tens counter. Both
+   946→// counters use maxCount=10, giving a 00-99 range (counts 00→01→...→99→00).
+   947→//
+   948→// Total: 7 components, ~25 wires (vs 15 components, 74 wires for the 6-digit clock).
+   949→export const exampleSimpleClock: CircuitDocument = {
+   950→  version: 1,
+   951→  components: [
+   952→    // 1Hz crystal oscillator — drives the ones counter
+   953→    comp('pulseSource', 'xtal', [32, 2], 0, { high: 5, low: 0, frequency: 1, duty: 50 }),
+   954→    // 5V power supply
+   955→    comp('dcVoltage', 'vcc1', [32, 8], 0, { voltage: 5 }),
+   956→    comp('ground', 'gnd1', [16, 18], 0, {}),
+   957→    // CD4026 #1 — ones digit (counts 0-9)
+   958→    comp('cd4026', 'ic_so', [10, 2], 0, { maxCount: 10, vcc: 5 }),
+   959→    // CD4026 #2 — tens digit (counts 0-9, carries from ones)
+   960→    comp('cd4026', 'ic_st', [22, 2], 0, { maxCount: 10, vcc: 5 }),
+   961→    // 7-segment displays (green) — offset by 1 from CD4026 to center segments
+   962→    comp('sevenSegment', 'seg_so', [11, 8], 0, { color: 'green', threshold: 2.0 }),
+   963→    comp('sevenSegment', 'seg_st', [23, 8], 0, { color: 'green', threshold: 2.0 }),
+   964→  ],
+   965→  wires: [
+   966→    // Crystal → ones counter CLK
+   967→    wire('clk_xtal_so', 'xtal', 'p', 'ic_so', 'clk', [[33, 1], [10, 1]]),
+   968→    wire('xtal_gnd', 'xtal', 'n', 'gnd1', 'g', [[33, 18]]),
+   969→    // Carry chain: ones CO → tens CLK
+   970→    wire('co_so_st', 'ic_so', 'co', 'ic_st', 'clk', [[16, 1], [22, 1]]),
+   971→    // VCC for both CD4026s
+   972→    wire('vcc_so', 'vcc1', 'p', 'ic_so', 'vcc', [[33, 3], [11, 3]]),
+   973→    wire('vcc_st', 'vcc1', 'p', 'ic_st', 'vcc', [[33, 3], [23, 3]]),
+   974→    wire('vcc_gnd', 'vcc1', 'n', 'gnd1', 'g', [[33, 18]]),
+   975→    // GND for both CD4026s
+   976→    wire('gnd_so', 'ic_so', 'gnd', 'gnd1', 'g', [[15, 18]]),
+   977→    wire('gnd_st', 'ic_st', 'gnd', 'gnd1', 'g', [[27, 18]]),
+   978→    // RST for both CD4026s (tied to ground — no reset)
+   979→    wire('rst_so', 'ic_so', 'rst', 'gnd1', 'g', [[10, 18]]),
+   980→    wire('rst_st', 'ic_st', 'rst', 'gnd1', 'g', [[22, 18]]),
+   981→    // 7-seg COM → ground (com terminal at x=segCx+4, y=11)
+   982→    wire('com_so', 'seg_so', 'com', 'gnd1', 'g', [[15, 11], [15, 18]]),
+   983→    wire('com_st', 'seg_st', 'com', 'gnd1', 'g', [[27, 11], [27, 18]]),
+   984→    // Segment wires (7 per digit × 2 digits = 14 wires)
+   985→    ...digitSegWires('so', 10, 'seg_so', 11),
+   986→    ...digitSegWires('st', 22, 'seg_st', 23),
+   987→  ],
+   988→};
+   989→
+   990→// ─────────────────────────────────────────────────────────────────────────────
+   991→// Categorized example tree.
+   992→// Each category groups related circuits. To add a new example, just append
+   993→// it to the appropriate category array below.
+   994→// ─────────────────────────────────────────────────────────────────────────────
+   995→
+   996→export interface ExampleEntry {
+   997→  name: string;
+   998→  description: string;
+   999→  doc: CircuitDocument;
+  1000→}
+  1001→
+  1002→export interface ExampleCategory {
+  1003→  label: string;
+  1004→  examples: ExampleEntry[];
+  1005→}
+  1006→
+  1007→export const exampleCategories: ExampleCategory[] = [
+  1008→  {
+  1009→    label: 'Basic Circuits',
+  1010→    examples: [
+  1011→      { name: 'LED + Resistor', description: 'Simple DC circuit: 5V → R → LED → GND', doc: exampleLed },
+  1012→      { name: 'RC Low-pass Filter', description: 'Pulse source through RC filter, oscilloscope traces', doc: exampleRC },
+  1013→    ],
+  1014→  },
+  1015→  {
+  1016→    label: 'Timers & Oscillators',
+  1017→    examples: [
+  1018→      { name: '555 Astable Blink', description: 'Classic 555 timer in astable mode driving an LED', doc: example555 },
+  1019→    ],
+  1020→  },
+  1021→  {
+  1022→    label: 'Transistors & Switches',
+  1023→    examples: [
+  1024→      { name: 'Transistor Switch', description: 'NPN transistor used as a digital switch with push-button', doc: exampleTransistor },
+  1025→      { name: 'NMOS Switch', description: 'NMOS transistor switching an LED, push-button on gate', doc: exampleNmos },
+  1026→    ],
+  1027→  },
+  1028→  {
+  1029→    label: 'Op-Amps',
+  1030→    examples: [
+  1031→      { name: 'Op-Amp Inverting Amp', description: 'Op-amp with gain -10 (Rf/Rin = 10k/1k)', doc: exampleOpamp },
+  1032→    ],
+  1033→  },
+  1034→  {
+  1035→    label: 'Microcontrollers',
+  1036→    examples: [
+  1037→      { name: 'Arduino Blink', description: 'Arduino blinking an LED on D2', doc: exampleArduino },
+  1038→      { name: '7-Segment Counter', description: 'Arduino drives 7-segment display counting 0-9 with BCD decoder', doc: exampleSevenSeg },
+  1039→    ],
+  1040→  },
+  1041→  {
+  1042→    label: 'Clocks & Counters',
+  1043→    examples: [
+  1044→      { name: 'Simple Seconds Counter', description: 'Minimalist 2-digit (0-99) counter using only 2 CD4026 chips', doc: exampleSimpleClock },
+  1045→      { name: 'Arduino Clock (HH:MM:SS)', description: 'Full 6-digit clock driven by 1 Arduino — multiplexed displays, no counter ICs', doc: exampleArduinoClockHHMMSS },
+  1046→      { name: '555 Timer Clock (HH:MM:SS)', description: 'Complete 6-digit clock using a 555 timer oscillator + CD4026 chain', doc: example555Clock },
+  1047→      { name: 'Digital Clock (HH:MM:SS)', description: '6-digit digital clock using CD4026 counters and 1Hz crystal oscillator', doc: exampleClock },
+  1048→    ],
+  1049→  },
+  1050→];
+  1051→
+  1052→// Flat list (backward compatibility — some code may still reference `examples`)
+  1053→export const examples: ExampleEntry[] = exampleCategories.flatMap(c => c.examples);
+  1054→

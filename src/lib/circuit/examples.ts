@@ -988,6 +988,269 @@ export const exampleSimpleClock: CircuitDocument = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// NEW EXAMPLES — covering more components
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ----- RL High-pass Filter -----
+// Inductor in series with signal, resistor to ground. High frequencies pass
+// through the inductor (low impedance), low frequencies are blocked.
+// Components: acVoltage, inductor, resistor, oscilloscope ×2, ground
+export const exampleRLHighPass: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('acVoltage', 'v1', [4, 6], 0, { amplitude: 5, frequency: 1000, offset: 0, phase: 0 }),
+    comp('inductor', 'l1', [10, 6], 0, { inductance: 0.01 }),
+    comp('resistor', 'r1', [16, 6], 0, { resistance: 100 }),
+    comp('oscilloscope', 'scIn', [4, 2], 0, { color: '#f97316', label: 'In' }),
+    comp('oscilloscope', 'scOut', [18, 2], 0, { color: '#22d3ee', label: 'Out' }),
+    comp('ground', 'gnd1', [5, 12], 0, {}),
+  ],
+  wires: [
+    wire('w1', 'v1', 'p', 'l1', 'a', [[5, 7]]),
+    wire('w2', 'v1', 'p', 'scIn', 'p', [[5, 3]]),
+    wire('w3', 'scIn', 'n', 'gnd1', 'g', [[5, 3], [5, 12]]),
+    wire('w4', 'l1', 'b', 'r1', 'a'),
+    wire('w5', 'r1', 'b', 'gnd1', 'g', [[20, 7], [20, 12], [5, 12]]),
+    wire('w6', 'r1', 'a', 'scOut', 'p', [[18, 3]]),
+    wire('w7', 'scOut', 'n', 'gnd1', 'g', [[19, 3], [19, 12], [5, 12]]),
+    wire('w8', 'v1', 'n', 'gnd1', 'g', [[5, 12]]),
+  ],
+};
+
+// ----- Diode Half-wave Rectifier -----
+// AC source → diode → resistor → ground. Only positive half-cycles pass.
+// Components: acVoltage, diode, resistor, oscilloscope ×2, ground
+export const exampleDiodeRectifier: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('acVoltage', 'v1', [4, 6], 0, { amplitude: 5, frequency: 100, offset: 0, phase: 0 }),
+    comp('diode', 'd1', [10, 6], 0, { forwardV: 0.7, onR: 1, offR: 1e7 }),
+    comp('resistor', 'r1', [16, 6], 0, { resistance: 1000 }),
+    comp('oscilloscope', 'scIn', [4, 2], 0, { color: '#f97316', label: 'In' }),
+    comp('oscilloscope', 'scOut', [18, 2], 0, { color: '#22d3ee', label: 'Out' }),
+    comp('ground', 'gnd1', [5, 12], 0, {}),
+  ],
+  wires: [
+    wire('w1', 'v1', 'p', 'd1', 'a', [[5, 7]]),
+    wire('w2', 'v1', 'p', 'scIn', 'p', [[5, 3]]),
+    wire('w3', 'scIn', 'n', 'gnd1', 'g', [[5, 3], [5, 12]]),
+    wire('w4', 'd1', 'k', 'r1', 'a'),
+    wire('w5', 'r1', 'b', 'gnd1', 'g', [[20, 7], [20, 12], [5, 12]]),
+    wire('w6', 'r1', 'a', 'scOut', 'p', [[18, 3]]),
+    wire('w7', 'scOut', 'n', 'gnd1', 'g', [[19, 3], [19, 12], [5, 12]]),
+    wire('w8', 'v1', 'n', 'gnd1', 'g', [[5, 12]]),
+  ],
+};
+
+// ----- Voltage Divider with Potentiometer -----
+// Uses a potentiometer as a variable voltage divider. Voltmeter reads the
+// wiper voltage. Adjust the `wiper` parameter to change the output.
+// Components: dcVoltage, potentiometer, voltmeter, ground
+export const exampleVoltageDivider: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('dcVoltage', 'v1', [4, 6], 0, { voltage: 5 }),
+    comp('potentiometer', 'pot1', [10, 6], 0, { resistance: 10000, wiper: 50 }),
+    comp('voltmeter', 'vm1', [16, 4], 0, {}),
+    comp('ground', 'gnd1', [5, 12], 0, {}),
+  ],
+  wires: [
+    wire('w1', 'v1', 'p', 'pot1', 'a', [[5, 7], [10, 7]]),
+    wire('w2', 'v1', 'n', 'gnd1', 'g', [[5, 12]]),
+    wire('w3', 'pot1', 'b', 'gnd1', 'g', [[14, 7], [14, 12], [5, 12]]),
+    wire('w4', 'pot1', 'w', 'vm1', 'p', [[12, 5], [12, 5], [16, 5]]),
+    wire('w5', 'vm1', 'n', 'gnd1', 'g', [[18, 5], [18, 12], [5, 12]]),
+  ],
+};
+
+// ----- PNP Transistor Switch -----
+// PNP high-side switch. When the button is pressed, base goes LOW and the
+// PNP turns ON, lighting the LED.
+// Components: dcVoltage ×2, pushButton, resistor ×2, pnp, led, ground
+export const examplePnpSwitch: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('dcVoltage', 'v1', [4, 4], 0, { voltage: 5 }),
+    comp('dcVoltage', 'v2', [4, 16], 0, { voltage: 5 }),
+    comp('pushButton', 'btn1', [8, 16], 0, { pressed: true }),
+    comp('resistor', 'rb', [14, 16], 0, { resistance: 10000 }),
+    comp('resistor', 'rc', [14, 4], 0, { resistance: 1000 }),
+    comp('pnp', 'q1', [22, 8], 0, { hfe: 100, veb: 0.7, satV: 0.2 }),
+    comp('led', 'led1', [22, 4], 0, { color: 'blue', forwardV: 2.0, seriesR: 1 }),
+    comp('ground', 'gnd1', [5, 22], 0, {}),
+  ],
+  wires: [
+    wire('w1', 'v1', 'p', 'rc', 'a', [[5, 5]]),
+    wire('w3', 'rc', 'b', 'led1', 'a', [[18, 5]]),
+    wire('w4', 'led1', 'k', 'q1', 'c', [[26, 5], [26, 9]]),
+    wire('w5', 'v2', 'p', 'btn1', 'a', [[5, 17]]),
+    wire('w7', 'btn1', 'b', 'rb', 'a'),
+    wire('w8', 'rb', 'b', 'q1', 'b', [[18, 17], [22, 17], [22, 10]]),
+    wire('w2', 'v1', 'n', 'gnd1', 'g', [[5, 8], [5, 22]]),
+    wire('w6', 'v2', 'n', 'gnd1', 'g', [[5, 20], [5, 22]]),
+    wire('w9', 'q1', 'e', 'v1', 'p', [[25, 12], [25, 5], [5, 5]]),
+  ],
+};
+
+// ----- Current Source Circuit -----
+// Demonstrates a current source driving a resistor. Ammeter measures the
+// current through the resistor.
+// Components: currentSource, resistor, ammeter, ground
+export const exampleCurrentSource: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('currentSource', 'i1', [4, 6], 0, { current: 0.01 }),
+    comp('ammeter', 'am1', [10, 6], 0, {}),
+    comp('resistor', 'r1', [14, 6], 0, { resistance: 500 }),
+    comp('ground', 'gnd1', [5, 12], 0, {}),
+  ],
+  wires: [
+    wire('w1', 'i1', 'p', 'am1', 'p'),
+    wire('w2', 'am1', 'n', 'r1', 'a'),
+    wire('w3', 'r1', 'b', 'gnd1', 'g', [[18, 7], [18, 12], [5, 12]]),
+    wire('w4', 'i1', 'n', 'gnd1', 'g', [[5, 12]]),
+  ],
+};
+
+// ----- Speaker Audio Indicator -----
+// Op-amp drives a speaker when the input goes high.
+// Components: dcVoltage, opamp, resistor, speaker, ground
+export const exampleSpeaker: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('dcVoltage', 'v1', [4, 6], 0, { voltage: 5 }),
+    comp('opamp', 'op1', [12, 6], 0, { gain: 100 }),
+    comp('resistor', 'rf', [16, 2], 0, { resistance: 10000 }),
+    comp('resistor', 'rin', [8, 10], 0, { resistance: 1000 }),
+    comp('speaker', 'spk1', [20, 6], 0, { impedance: 8 }),
+    comp('ground', 'gnd1', [5, 14], 0, {}),
+  ],
+  wires: [
+    wire('w1', 'v1', 'p', 'rin', 'a', [[5, 7], [5, 11], [8, 11]]),
+    wire('w2', 'rin', 'b', 'op1', 'in-', [[12, 11]]),
+    wire('w3', 'op1', 'in+', 'gnd1', 'g', [[12, 9], [12, 14], [5, 14]]),
+    wire('w4', 'op1', 'out', 'spk1', 'a'),
+    wire('w5', 'spk1', 'b', 'gnd1', 'g', [[23, 7], [23, 14], [5, 14]]),
+    wire('w6', 'v1', 'n', 'gnd1', 'g', [[5, 14]]),
+    // Feedback resistor
+    wire('w7', 'op1', 'out', 'rf', 'a', [[16, 5], [16, 3]]),
+    wire('w8', 'rf', 'b', 'op1', 'in-', [[16, 3], [12, 3], [12, 7]]),
+  ],
+};
+
+// ----- Photoresistor Light Sensor -----
+// Photoresistor + fixed resistor form a voltage divider. As light increases,
+// photoresistor resistance drops, changing the output voltage.
+// Components: dcVoltage, photoresistor, resistor, voltmeter, ground
+export const examplePhotoresistor: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('dcVoltage', 'v1', [4, 6], 0, { voltage: 5 }),
+    comp('photoresistor', 'ldr1', [10, 6], 0, { darkR: 1000000, lightR: 1000, light: 0.5 }),
+    comp('resistor', 'r1', [16, 6], 0, { resistance: 10000 }),
+    comp('voltmeter', 'vm1', [16, 2], 0, {}),
+    comp('ground', 'gnd1', [5, 12], 0, {}),
+  ],
+  wires: [
+    wire('w1', 'v1', 'p', 'ldr1', 'a', [[5, 7], [10, 7]]),
+    wire('w2', 'v1', 'n', 'gnd1', 'g', [[5, 12]]),
+    wire('w3', 'ldr1', 'b', 'r1', 'a'),
+    wire('w4', 'r1', 'b', 'gnd1', 'g', [[20, 7], [20, 12], [5, 12]]),
+    wire('w5', 'ldr1', 'b', 'vm1', 'p', [[14, 5], [14, 3], [16, 3]]),
+    wire('w6', 'vm1', 'n', 'gnd1', 'g', [[18, 3], [18, 12], [5, 12]]),
+  ],
+};
+
+// ----- Logic Gates Demo -----
+// AND gate: output HIGH only when both inputs are HIGH. Two buttons drive
+// the inputs; LED shows the output.
+// Components: dcVoltage ×2, pushButton ×2, AND gate, resistor, LED, ground
+export const exampleLogicGates: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('dcVoltage', 'vA', [4, 4], 0, { voltage: 5 }),
+    comp('dcVoltage', 'vB', [4, 10], 0, { voltage: 5 }),
+    comp('pushButton', 'btnA', [8, 4], 0, { pressed: true }),
+    comp('pushButton', 'btnB', [8, 10], 0, { pressed: true }),
+    comp('and', 'g1', [14, 6], 0, { vcc: 5, threshold: 2.5 }),
+    comp('resistor', 'r1', [20, 6], 0, { resistance: 330 }),
+    comp('led', 'led1', [26, 6], 0, { color: 'green', forwardV: 2.0, seriesR: 1 }),
+    comp('ground', 'gnd1', [5, 16], 0, {}),
+  ],
+  wires: [
+    wire('w1', 'vA', 'p', 'btnA', 'a', [[5, 5]]),
+    wire('w2', 'btnA', 'b', 'g1', 'a', [[12, 5]]),
+    wire('w3', 'vB', 'p', 'btnB', 'a', [[5, 11]]),
+    wire('w4', 'btnB', 'b', 'g1', 'b', [[12, 8], [12, 8]]),
+    wire('w5', 'g1', 'y', 'r1', 'a'),
+    wire('w6', 'r1', 'b', 'led1', 'a'),
+    wire('w7', 'led1', 'k', 'gnd1', 'g', [[30, 7], [30, 16], [5, 16]]),
+    wire('w8', 'vA', 'n', 'gnd1', 'g', [[5, 5], [5, 16]]),
+    wire('w9', 'vB', 'n', 'gnd1', 'g', [[5, 11], [5, 16]]),
+    wire('w10', 'g1', 'gnd', 'gnd1', 'g', [[16, 9], [16, 16], [5, 16]]),
+  ],
+};
+
+// ----- Op-Amp Non-inverting Amplifier -----
+// Non-inverting amplifier with gain = 1 + Rf/Rg. Uses opampRails with
+// explicit V+/V- power connections.
+// Components: dcVoltage ×2, acVoltage, opampRails, resistor ×2, voltmeter, ground
+export const exampleOpampNonInverting: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('dcVoltage', 'vcc', [4, 2], 0, { voltage: 12 }),
+    comp('dcVoltage', 'vee', [4, 10], 0, { voltage: -12 }),
+    comp('acVoltage', 'vin', [10, 6], 0, { amplitude: 0.5, frequency: 100, offset: 0, phase: 0 }),
+    comp('opampRails', 'op1', [16, 6], 0, { gain: 1e5 }),
+    comp('resistor', 'rf', [22, 2], 0, { resistance: 10000 }),
+    comp('resistor', 'rg', [22, 10], 0, { resistance: 1000 }),
+    comp('voltmeter', 'vm1', [26, 6], 0, {}),
+    comp('ground', 'gnd1', [5, 16], 0, {}),
+  ],
+  wires: [
+    // Power rails
+    wire('w1', 'vcc', 'p', 'op1', 'v+', [[5, 3], [18, 3], [18, 6]]),
+    wire('w2', 'vcc', 'n', 'gnd1', 'g', [[5, 4], [5, 16]]),
+    wire('w3', 'vee', 'p', 'op1', 'v-', [[5, 11], [18, 11], [18, 10]]),
+    wire('w4', 'vee', 'n', 'gnd1', 'g', [[5, 12], [5, 16]]),
+    // Input
+    wire('w5', 'vin', 'p', 'op1', 'in+', [[11, 7], [16, 7]]),
+    wire('w6', 'vin', 'n', 'gnd1', 'g', [[11, 8], [11, 16], [5, 16]]),
+    // Feedback network
+    wire('w7', 'op1', 'out', 'rf', 'a', [[20, 7], [22, 3]]),
+    wire('w8', 'rf', 'b', 'rg', 'a', [[22, 3], [22, 11]]),
+    wire('w9', 'rg', 'b', 'gnd1', 'g', [[26, 11], [26, 16], [5, 16]]),
+    wire('w10', 'rg', 'a', 'op1', 'in-', [[22, 11], [14, 11], [14, 8], [16, 8]]),
+    // Output
+    wire('w11', 'op1', 'out', 'vm1', 'p', [[20, 7], [26, 7]]),
+    wire('w12', 'vm1', 'n', 'gnd1', 'g', [[28, 7], [28, 16], [5, 16]]),
+  ],
+};
+
+// ----- VCO Frequency Sweep -----
+// Voltage-controlled oscillator. DC voltage controls the output frequency.
+// Components: dcVoltage, vco, oscilloscope, ground
+export const exampleVCO: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('dcVoltage', 'v1', [4, 6], 0, { voltage: 2.5 }),
+    comp('vco', 'vco1', [10, 6], 0, { baseFreq: 100, sensitivity: 1000, vcc: 5 }),
+    comp('dcVoltage', 'vcc', [4, 2], 0, { voltage: 5 }),
+    comp('oscilloscope', 'sc1', [18, 6], 0, { color: '#22d3ee', label: 'Out' }),
+    comp('ground', 'gnd1', [5, 12], 0, {}),
+  ],
+  wires: [
+    wire('w1', 'v1', 'p', 'vco1', 'in', [[5, 7], [10, 7]]),
+    wire('w2', 'v1', 'n', 'gnd1', 'g', [[5, 12]]),
+    wire('w3', 'vcc', 'p', 'vco1', 'vcc', [[5, 3], [12, 3], [12, 6]]),
+    wire('w4', 'vcc', 'n', 'gnd1', 'g', [[5, 4], [5, 12]]),
+    wire('w5', 'vco1', 'gnd', 'gnd1', 'g', [[12, 9], [12, 12], [5, 12]]),
+    wire('w6', 'vco1', 'out', 'sc1', 'p'),
+    wire('w7', 'sc1', 'n', 'gnd1', 'g', [[19, 7], [19, 12], [5, 12]]),
+  ],
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Categorized example tree.
 // Each category groups related circuits. To add a new example, just append
 // it to the appropriate category array below.
@@ -1010,25 +1273,45 @@ export const exampleCategories: ExampleCategory[] = [
     examples: [
       { name: 'LED + Resistor', description: 'Simple DC circuit: 5V → R → LED → GND', doc: exampleLed },
       { name: 'RC Low-pass Filter', description: 'Pulse source through RC filter, oscilloscope traces', doc: exampleRC },
+      { name: 'RL High-pass Filter', description: 'Inductor + resistor: high frequencies pass, low blocked', doc: exampleRLHighPass },
+      { name: 'Diode Rectifier', description: 'Half-wave rectifier: AC → diode → DC (positive only)', doc: exampleDiodeRectifier },
+      { name: 'Voltage Divider', description: 'Potentiometer as variable voltage divider + voltmeter', doc: exampleVoltageDivider },
+      { name: 'Current Source', description: 'Current source drives resistor, ammeter measures current', doc: exampleCurrentSource },
     ],
   },
   {
     label: 'Timers & Oscillators',
     examples: [
       { name: '555 Astable Blink', description: 'Classic 555 timer in astable mode driving an LED', doc: example555 },
+      { name: 'VCO Frequency Sweep', description: 'Voltage-controlled oscillator, DC input controls frequency', doc: exampleVCO },
     ],
   },
   {
     label: 'Transistors & Switches',
     examples: [
-      { name: 'Transistor Switch', description: 'NPN transistor used as a digital switch with push-button', doc: exampleTransistor },
+      { name: 'Transistor Switch (NPN)', description: 'NPN transistor used as a digital switch with push-button', doc: exampleTransistor },
       { name: 'NMOS Switch', description: 'NMOS transistor switching an LED, push-button on gate', doc: exampleNmos },
+      { name: 'PNP Switch', description: 'PNP high-side switch — base LOW turns it ON', doc: examplePnpSwitch },
     ],
   },
   {
     label: 'Op-Amps',
     examples: [
       { name: 'Op-Amp Inverting Amp', description: 'Op-amp with gain -10 (Rf/Rin = 10k/1k)', doc: exampleOpamp },
+      { name: 'Op-Amp Non-inverting Amp', description: 'Real op-amp with rails, gain = 1 + Rf/Rg = 11', doc: exampleOpampNonInverting },
+    ],
+  },
+  {
+    label: 'Sensors & Indicators',
+    examples: [
+      { name: 'Photoresistor Light Sensor', description: 'LDR + resistor divider, voltage changes with light', doc: examplePhotoresistor },
+      { name: 'Speaker Driver', description: 'Op-amp drives an 8Ω speaker', doc: exampleSpeaker },
+    ],
+  },
+  {
+    label: 'Logic Gates',
+    examples: [
+      { name: 'AND Gate', description: 'Two buttons → AND gate → LED (HIGH only when both pressed)', doc: exampleLogicGates },
     ],
   },
   {

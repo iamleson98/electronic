@@ -1173,3 +1173,67 @@ Stage Summary:
 - 7-seg displays LATCH their state (no flicker, all displays show correct values)
 - 8 components, ~48 wires — simplest HH:MM:SS clock design yet
 - No counter ICs, no resistors, no crystal needed
+
+---
+Task ID: add-more-examples
+Agent: main
+Task: Add more example circuits covering as many components as possible, from simple to complex.
+
+Work Log:
+- Surveyed all 81 available component types. Found 17 already covered by examples, 64 uncovered.
+- Added 10 new example circuits covering 12+ new component types:
+
+1. **RL High-pass Filter** — acVoltage, inductor, resistor, oscilloscope ×2
+   - Demonstrates high-pass filtering with L+R (complements the existing RC low-pass)
+
+2. **Diode Half-wave Rectifier** — acVoltage, diode, resistor, oscilloscope ×2
+   - Shows AC→DC conversion (only positive half-cycles pass through the diode)
+
+3. **Voltage Divider (Potentiometer)** — dcVoltage, potentiometer, voltmeter
+   - Uses potentiometer as variable voltage divider, voltmeter reads wiper voltage
+
+4. **PNP Transistor Switch** — dcVoltage ×2, pushButton, resistor ×2, pnp, led
+   - High-side PNP switch (complements the existing NPN low-side switch)
+
+5. **Current Source Circuit** — currentSource, ammeter, resistor
+   - Demonstrates ideal current source driving a resistor, ammeter measures current
+
+6. **Speaker Driver** — dcVoltage, opamp, resistor ×2, speaker
+   - Op-amp with feedback drives an 8Ω speaker
+
+7. **Photoresistor Light Sensor** — dcVoltage, photoresistor, resistor, voltmeter
+   - LDR + resistor voltage divider, output changes with light level parameter
+
+8. **AND Gate Demo** — dcVoltage ×2, pushButton ×2, AND gate, resistor, LED
+   - Two buttons drive AND gate inputs, LED lights only when both are pressed
+
+9. **Op-Amp Non-inverting Amplifier** — dcVoltage ×2, acVoltage, opampRails, resistor ×2, voltmeter
+   - Real op-amp with V+/V- power rails, gain = 1 + Rf/Rg = 11
+
+10. **VCO Frequency Sweep** — dcVoltage ×2, vco, oscilloscope
+    - Voltage-controlled oscillator, DC input voltage controls output frequency
+
+- New component types now covered (12): inductor, diode, potentiometer, voltmeter, ammeter, pnp, opampRails, vco, speaker, photoresistor, and (logic gate), acVoltage (in more circuits)
+
+- Reorganized examples into 8 categories:
+  - Basic Circuits (6 examples)
+  - Timers & Oscillators (2)
+  - Transistors & Switches (3)
+  - Op-Amps (2)
+  - Sensors & Indicators (2) — NEW category
+  - Logic Gates (1) — NEW category
+  - Microcontrollers (2)
+  - Clocks & Counters (4)
+
+- Verification:
+  - All 10 new examples have correct wire connectivity (77 wires total, all connected)
+  - All 22 example circuits pass physics validation (0 errors, minor warnings only)
+  - Typecheck: no src errors
+  - Build: succeeds
+  - Server: running on port 3000
+
+Stage Summary:
+- Added 10 new example circuits covering 12+ previously uncovered component types
+- Examples now span 8 categories from basic to advanced
+- Total: 22 example circuits, all wires connected, all physics laws satisfied
+- Component coverage increased from 17 to 29+ types
