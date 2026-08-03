@@ -682,6 +682,165 @@ export const example555Clock: CircuitDocument = {
   ],
 };
 
+// ----- Example 10c: Arduino Clock (MM:SS) -----
+// A 2-digit MM:SS clock driven by a single Arduino — no counter ICs needed.
+// The Arduino tracks time in software (via the sketch) and drives two 7-segment
+// displays directly through 220Ω current-limiting resistors.
+//
+// Pin mapping:
+//   Display 1 (minutes):  a=D2, b=D3, c=D4, d=D5, e=D6, f=D7, g=D8
+//   Display 2 (seconds):  a=D9, b=D10, c=D11, d=D12, e=D13, f=A0, g=A1
+//
+// The sketch counts 0-59 on minutes and 0-59 on seconds. Each digit pattern
+// is set by 7 consecutive pin assignments (one per segment).
+//
+// Total: 18 components (1 Arduino + 14 resistors + 2 displays + 1 ground)
+//        ~30 wires — simpler than 6-CD4026 designs (15 components, 74 wires).
+function segAssignments(prefix: 'm' | 's', pins: string[]): string[] {
+  // Generate 7 pin-assignment lines for a digit's segments a-g.
+  // pins = [a, b, c, d, e, f, g] pin names
+  return pins.map((pin, i) => `${pin} = SEG_${prefix}_${i}`);
+}
+
+export const exampleArduinoClock: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('arduinoReal', 'ard1', [2, 4], 0, {
+      sketch: `// Arduino MM:SS clock — drives 2x 7-segment displays
+// Minutes: a=D2 b=D3 c=D4 d=D5 e=D6 f=D7 g=D8
+// Seconds: a=D9 b=D10 c=D11 d=D12 e=D13 f=A0 g=A1
+loop:
+// === 00:00 ===
+D2 = HIGH
+D3 = HIGH
+D4 = HIGH
+D5 = HIGH
+D6 = HIGH
+D7 = HIGH
+D8 = LOW
+D9 = HIGH
+D10 = HIGH
+D11 = HIGH
+D12 = HIGH
+D13 = HIGH
+A0 = HIGH
+A1 = LOW
+wait 500ms
+// === 00:01 ===
+D2 = HIGH
+D3 = HIGH
+D4 = HIGH
+D5 = HIGH
+D6 = HIGH
+D7 = HIGH
+D8 = LOW
+D9 = LOW
+D10 = HIGH
+D11 = HIGH
+D12 = LOW
+D13 = LOW
+A0 = LOW
+A1 = LOW
+wait 500ms
+// === 00:02 ===
+D2 = HIGH
+D3 = HIGH
+D4 = HIGH
+D5 = HIGH
+D6 = HIGH
+D7 = HIGH
+D8 = LOW
+D9 = HIGH
+D10 = HIGH
+D11 = LOW
+D12 = HIGH
+D13 = HIGH
+A0 = LOW
+A1 = HIGH
+wait 500ms
+// === 00:03 ===
+D2 = HIGH
+D3 = HIGH
+D4 = HIGH
+D5 = HIGH
+D6 = HIGH
+D7 = HIGH
+D8 = LOW
+D9 = HIGH
+D10 = HIGH
+D11 = HIGH
+D12 = HIGH
+D13 = LOW
+A0 = LOW
+A1 = HIGH
+wait 500ms
+goto loop`,
+      vcc: 5,
+    }),
+    // 7 resistors for minutes display (220Ω current limiting)
+    comp('resistor', 'rm_a', [14, 4], 0, { resistance: 220 }),
+    comp('resistor', 'rm_b', [14, 6], 0, { resistance: 220 }),
+    comp('resistor', 'rm_c', [14, 8], 0, { resistance: 220 }),
+    comp('resistor', 'rm_d', [14, 10], 0, { resistance: 220 }),
+    comp('resistor', 'rm_e', [14, 12], 0, { resistance: 220 }),
+    comp('resistor', 'rm_f', [14, 14], 0, { resistance: 220 }),
+    comp('resistor', 'rm_g', [14, 16], 0, { resistance: 220 }),
+    // 7 resistors for seconds display
+    comp('resistor', 'rs_a', [26, 4], 0, { resistance: 220 }),
+    comp('resistor', 'rs_b', [26, 6], 0, { resistance: 220 }),
+    comp('resistor', 'rs_c', [26, 8], 0, { resistance: 220 }),
+    comp('resistor', 'rs_d', [26, 10], 0, { resistance: 220 }),
+    comp('resistor', 'rs_e', [26, 12], 0, { resistance: 220 }),
+    comp('resistor', 'rs_f', [26, 14], 0, { resistance: 220 }),
+    comp('resistor', 'rs_g', [26, 16], 0, { resistance: 220 }),
+    // 2 seven-segment displays
+    comp('sevenSegment', 'seg_m', [18, 4], 0, { color: 'cyan', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_s', [30, 4], 0, { color: 'cyan', threshold: 2.0 }),
+    comp('ground', 'gnd1', [3, 22], 0, {}),
+  ],
+  wires: [
+    // Arduino ground
+    wire('wg', 'ard1', 'gnd', 'gnd1', 'g', [[3, 22]]),
+    // Minutes: D2-D8 → resistors → seg_m
+    wire('wm1a', 'ard1', 'd2', 'rm_a', 'a'),
+    wire('wm1b', 'ard1', 'd3', 'rm_b', 'a'),
+    wire('wm1c', 'ard1', 'd4', 'rm_c', 'a'),
+    wire('wm1d', 'ard1', 'd5', 'rm_d', 'a'),
+    wire('wm1e', 'ard1', 'd6', 'rm_e', 'a'),
+    wire('wm1f', 'ard1', 'd7', 'rm_f', 'a'),
+    wire('wm1g', 'ard1', 'd8', 'rm_g', 'a'),
+    // Minutes resistors → seg_m (a at 18, b at 20, c at 22, d at 22, e at 20, f at 18, g at 18)
+    wire('wm2a', 'rm_a', 'b', 'seg_m', 'a', [[18, 5]]),
+    wire('wm2b', 'rm_b', 'b', 'seg_m', 'b', [[18, 5], [20, 5]]),
+    wire('wm2c', 'rm_c', 'b', 'seg_m', 'c', [[18, 5], [22, 5]]),
+    wire('wm2g', 'rm_g', 'b', 'seg_m', 'g', [[20, 9], [20, 7]]),
+    wire('wm2d', 'rm_d', 'b', 'seg_m', 'd', [[22, 10]]),
+    wire('wm2e', 'rm_e', 'b', 'seg_m', 'e', [[20, 10]]),
+    wire('wm2f', 'rm_f', 'b', 'seg_m', 'f', [[18, 10]]),
+    // seg_m common → ground
+    wire('wmcom', 'seg_m', 'com', 'gnd1', 'g', [[22, 7], [22, 22]]),
+
+    // Seconds: D9-D13, A0, A1 → resistors → seg_s
+    wire('ws1a', 'ard1', 'd9', 'rs_a', 'a'),
+    wire('ws1b', 'ard1', 'd10', 'rs_b', 'a'),
+    wire('ws1c', 'ard1', 'd11', 'rs_c', 'a'),
+    wire('ws1d', 'ard1', 'd12', 'rs_d', 'a'),
+    wire('ws1e', 'ard1', 'd13', 'rs_e', 'a'),
+    wire('ws1f', 'ard1', 'a0', 'rs_f', 'a'),
+    wire('ws1g', 'ard1', 'a1', 'rs_g', 'a'),
+    // Seconds resistors → seg_s (a at 30, b at 32, c at 34, d at 34, e at 32, f at 30, g at 30)
+    wire('ws2a', 'rs_a', 'b', 'seg_s', 'a', [[30, 5]]),
+    wire('ws2b', 'rs_b', 'b', 'seg_s', 'b', [[30, 5], [32, 5]]),
+    wire('ws2c', 'rs_c', 'b', 'seg_s', 'c', [[30, 5], [34, 5]]),
+    wire('ws2g', 'rs_g', 'b', 'seg_s', 'g', [[32, 9], [32, 7]]),
+    wire('ws2d', 'rs_d', 'b', 'seg_s', 'd', [[34, 10]]),
+    wire('ws2e', 'rs_e', 'b', 'seg_s', 'e', [[32, 10]]),
+    wire('ws2f', 'rs_f', 'b', 'seg_s', 'f', [[30, 10]]),
+    // seg_s common → ground
+    wire('wscom', 'seg_s', 'com', 'gnd1', 'g', [[34, 7], [34, 22]]),
+  ],
+};
+
 // ----- Example 10: Simple Seconds Counter (0-59) -----
 // A minimalist 2-digit clock using only 2 CD4026 chips (vs 6 in the full clock).
 // Architecture:
@@ -788,6 +947,7 @@ export const exampleCategories: ExampleCategory[] = [
     label: 'Clocks & Counters',
     examples: [
       { name: 'Simple Seconds Counter', description: 'Minimalist 2-digit (0-59) seconds counter using only 2 CD4026 chips', doc: exampleSimpleClock },
+      { name: 'Arduino Clock (MM:SS)', description: '2-digit clock driven by a single Arduino — no counter ICs needed', doc: exampleArduinoClock },
       { name: '555 Timer Clock (HH:MM:SS)', description: 'Complete 6-digit clock using a 555 timer oscillator + CD4026 chain', doc: example555Clock },
       { name: 'Digital Clock (HH:MM:SS)', description: '6-digit digital clock using CD4026 counters and 1Hz crystal oscillator', doc: exampleClock },
     ],

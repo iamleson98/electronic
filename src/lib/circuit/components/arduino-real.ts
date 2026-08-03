@@ -241,7 +241,7 @@ const arduinoReal: ComponentPlugin = {
   category: 'mcu',
   description: 'Arduino-compatible MCU with user-programmable firmware. Write a tiny sketch with pin/wait/goto/if.',
   symbol: 'ARD',
-  boundingBox: { width: 8, height: 8 },
+  boundingBox: { width: 8, height: 13 },
   terminals: [
     { id: '5v', label: '5V', position: { x: 0, y: 1 } },
     { id: 'gnd', label: 'GND', position: { x: 0, y: 2 } },
@@ -255,6 +255,11 @@ const arduinoReal: ComponentPlugin = {
     { id: 'd6', label: 'D6', position: { x: 8, y: 5 } },
     { id: 'd7', label: 'D7', position: { x: 8, y: 6 } },
     { id: 'd8', label: 'D8', position: { x: 8, y: 7 } },
+    { id: 'd9', label: 'D9', position: { x: 8, y: 8 } },
+    { id: 'd10', label: 'D10', position: { x: 8, y: 9 } },
+    { id: 'd11', label: 'D11', position: { x: 8, y: 10 } },
+    { id: 'd12', label: 'D12', position: { x: 8, y: 11 } },
+    { id: 'd13', label: 'D13', position: { x: 8, y: 12 } },
   ],
   parameters: [
     { key: 'sketch', label: 'Sketch Source', type: 'string', default: sampleSketches.blink },
@@ -262,7 +267,7 @@ const arduinoReal: ComponentPlugin = {
   ],
   render(ctx, params, cellSize) {
     const w = 8 * cellSize;
-    const h = 8 * cellSize;
+    const h = 13 * cellSize;
     ctx.fillStyle = '#16a34a';
     ctx.strokeStyle = '#064e3b';
     ctx.lineWidth = 1.5;
@@ -277,22 +282,23 @@ const arduinoReal: ComponentPlugin = {
     ctx.fillText('ARDUINO', 4 * cellSize, 3 * cellSize);
     ctx.font = `${Math.floor(cellSize * 0.55)}px ui-monospace, monospace`;
     ctx.fillText('programmable', 4 * cellSize, 4 * cellSize);
-    // pin labels
+    // pin labels — left side (power + analog)
     ctx.textAlign = 'left';
     ctx.font = `${Math.floor(cellSize * 0.5)}px ui-monospace, monospace`;
     ['5V', 'GND', 'A0', 'A1', 'A2'].forEach((p, i) => {
       const y = [1, 2, 5, 6, 7][i];
       ctx.fillText(p, cellSize * 0.3, y * cellSize);
     });
+    // pin labels — right side (digital D2-D13)
     ctx.textAlign = 'right';
-    ['D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8'].forEach((p, i) => {
+    ['D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12', 'D13'].forEach((p, i) => {
       const y = i + 1;
       ctx.fillText(p, w - cellSize * 0.3, y * cellSize);
     });
     // status indicator
     ctx.fillStyle = '#fbbf24';
     ctx.beginPath();
-    ctx.arc(4 * cellSize, 6 * cellSize, 3, 0, Math.PI * 2);
+    ctx.arc(4 * cellSize, 10 * cellSize, 3, 0, Math.PI * 2);
     ctx.fill();
   },
   stamp(params, terminals, sys, sim) {
