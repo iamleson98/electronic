@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
-import { examples } from '@/lib/circuit/examples';
+import { examples, exampleCategories } from '@/lib/circuit/examples';
 import { toast } from 'sonner';
 import {
   Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Square, Gauge, Zap,
@@ -13,6 +13,7 @@ import {
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
   DropdownMenuSeparator, DropdownMenuTrigger, DropdownMenuCheckboxItem,
+  DropdownMenuGroup,
 } from '@/components/ui/dropdown-menu';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
@@ -369,18 +370,25 @@ export function Toolbar() {
               <ChevronDown size={12} className="ml-1" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-72 bg-slate-900 border-slate-700">
+          <DropdownMenuContent align="start" className="w-72 bg-slate-900 border-slate-700 max-h-[70vh] overflow-y-auto">
             <DropdownMenuLabel className="text-slate-300">Load Example Circuit</DropdownMenuLabel>
             <DropdownMenuSeparator className="bg-slate-700" />
-            {examples.map((ex) => (
-              <DropdownMenuItem
-                key={ex.name}
-                onClick={() => loadDocument(ex.doc)}
-                className="flex flex-col items-start gap-1 py-2 text-slate-200 hover:bg-slate-800"
-              >
-                <span className="text-sm font-medium">{ex.name}</span>
-                <span className="text-xs text-slate-400">{ex.description}</span>
-              </DropdownMenuItem>
+            {exampleCategories.map((cat) => (
+              <DropdownMenuGroup key={cat.label}>
+                <DropdownMenuLabel className="text-xs text-cyan-400 font-semibold uppercase tracking-wide px-2 pt-3 pb-1">
+                  {cat.label}
+                </DropdownMenuLabel>
+                {cat.examples.map((ex) => (
+                  <DropdownMenuItem
+                    key={ex.name}
+                    onClick={() => loadDocument(ex.doc)}
+                    className="flex flex-col items-start gap-1 py-2 text-slate-200 hover:bg-slate-800"
+                  >
+                    <span className="text-sm font-medium">{ex.name}</span>
+                    <span className="text-xs text-slate-400">{ex.description}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuGroup>
             ))}
           </DropdownMenuContent>
         </DropdownMenu>

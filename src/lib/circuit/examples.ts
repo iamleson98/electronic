@@ -564,6 +564,124 @@ export const exampleClock: CircuitDocument = {
   ],
 };
 
+// ----- Example 10b: 555 Timer Clock (HH:MM:SS) -----
+// A complete 6-digit HH:MM:SS clock using a 555 timer as the 1Hz oscillator
+// instead of a crystal pulse source. This is a fundamentally different approach:
+// the 555 generates the clock through analog RC charging/discharging, while
+// the existing Digital Clock uses a crystal (digital resonance).
+//
+// 555 astable wiring:
+//   VCC → R1(47k) → DIS → R2(47k) → THR+TRIG → C(10µF) → GND
+//   f = 1.44 / ((R1 + 2*R2) * C) ≈ 1.02 Hz
+//   RST → VCC (disabled), CTRL → open (internal 2/3 VCC)
+//   OUT → CD4026 chain CLK
+//
+// The CD4026 counter chain and 7-segment displays are identical to the
+// crystal-based Digital Clock — only the clock source differs.
+export const example555Clock: CircuitDocument = {
+  version: 1,
+  components: [
+    // 555 timer + RC network (top-right, above the CD4026 chain)
+    // Astable mode: 555 computes its output from R1/R2/C parameters directly
+    // (the external R1/R2/C are still wired for visual authenticity)
+    comp('timer555', 't555', [50, 0], 0, { vcc: 5, astable: true, r1: 47000, r2: 47000, c: 1e-5 }),
+    comp('resistor', 'r1', [58, 0], 0, { resistance: 47000 }),   // R1 = 47kΩ
+    comp('resistor', 'r2', [58, 4], 0, { resistance: 47000 }),   // R2 = 47kΩ
+    comp('capacitor', 'c1', [62, 4], 0, { capacitance: 1e-5 }),  // C = 10µF
+    // Power supply
+    comp('dcVoltage', 'vcc1', [54, 8], 0, { voltage: 5 }),
+    comp('ground', 'gnd1', [25, 18], 0, {}),
+    // 6 CD4026 decade counters (same chain as the crystal-based clock)
+    comp('cd4026', 'ic_ht', [2, 2], 0, { maxCount: 3, vcc: 5 }),
+    comp('cd4026', 'ic_ho', [10, 2], 0, { maxCount: 10, vcc: 5 }),
+    comp('cd4026', 'ic_mt', [20, 2], 0, { maxCount: 6, vcc: 5 }),
+    comp('cd4026', 'ic_mo', [28, 2], 0, { maxCount: 10, vcc: 5 }),
+    comp('cd4026', 'ic_st', [38, 2], 0, { maxCount: 6, vcc: 5 }),
+    comp('cd4026', 'ic_so', [46, 2], 0, { maxCount: 10, vcc: 5 }),
+    // 6 seven-segment displays
+    comp('sevenSegment', 'seg_ht', [3, 8], 0, { color: 'green', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_ho', [11, 8], 0, { color: 'green', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_mt', [21, 8], 0, { color: 'green', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_mo', [29, 8], 0, { color: 'green', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_st', [39, 8], 0, { color: 'green', threshold: 2.0 }),
+    comp('sevenSegment', 'seg_so', [47, 8], 0, { color: 'green', threshold: 2.0 }),
+  ],
+  wires: [
+    // ── 555 astable wiring ──────────────────────────────────────────────
+    // VCC → R1.a (same node as 555.vcc)
+    wire('w_vcc_r1', 'vcc1', 'p', 'r1', 'a'),
+    // 555.vcc → VCC node (power the 555)
+    wire('w_vcc_555', 'vcc1', 'p', 't555', 'vcc'),
+    // R1.b → 555.dis (DIS node: R1.b, 555.dis, R2.a)
+    wire('w_r1_dis', 'r1', 'b', 't555', 'dis'),
+    // 555.dis → R2.a (R2.a also on DIS node)
+    wire('w_dis_r2', 't555', 'dis', 'r2', 'a'),
+    // R2.b → 555.thr (THR node: R2.b, 555.thr, 555.trig, C.a)
+    wire('w_r2_thr', 'r2', 'b', 't555', 'thr'),
+    // 555.thr → 555.trig (join THR and TRIG for astable mode)
+    wire('w_thr_trig', 't555', 'thr', 't555', 'trig'),
+    // 555.thr → C.a (C.a also on THR node)
+    wire('w_thr_c', 't555', 'thr', 'c1', 'a'),
+    // C.b → GND
+    wire('w_c_gnd', 'c1', 'b', 'gnd1', 'g', [[64, 18]]),
+    // 555.rst → VCC (tie RST high to disable reset)
+    wire('w_rst_vcc', 't555', 'rst', 'vcc1', 'p'),
+    // 555.gnd → GND
+    wire('w_555_gnd', 't555', 'gnd', 'gnd1', 'g', [[50, 18]]),
+    // 555.out → sec-ones CLK (clock signal to the counter chain)
+    wire('w_555_clk', 't555', 'out', 'ic_so', 'clk', [[56, 1], [46, 1]]),
+    // VCC return path
+    wire('w_vcc_gnd', 'vcc1', 'n', 'gnd1', 'g', [[55, 18]]),
+
+    // ── CD4026 carry chain (same as crystal-based clock) ───────────────
+    wire('co_so_st', 'ic_so', 'co', 'ic_st', 'clk', [[52, 4], [38, 4], [38, 1], [44, 1]]),
+    wire('co_st_mo', 'ic_st', 'co', 'ic_mo', 'clk', [[44, 4], [28, 4], [28, 1], [34, 1]]),
+    wire('co_mo_mt', 'ic_mo', 'co', 'ic_mt', 'clk', [[34, 4], [20, 4], [20, 1], [26, 1]]),
+    wire('co_mt_ho', 'ic_mt', 'co', 'ic_ho', 'clk', [[26, 4], [10, 4], [10, 1], [16, 1]]),
+    wire('co_ho_ht', 'ic_ho', 'co', 'ic_ht', 'clk', [[16, 4], [2, 4], [2, 1], [8, 1]]),
+
+    // VCC for all CD4026s
+    wire('vcc_ht', 'vcc1', 'p', 'ic_ht', 'vcc'),
+    wire('vcc_ho', 'vcc1', 'p', 'ic_ho', 'vcc'),
+    wire('vcc_mt', 'vcc1', 'p', 'ic_mt', 'vcc'),
+    wire('vcc_mo', 'vcc1', 'p', 'ic_mo', 'vcc'),
+    wire('vcc_st', 'vcc1', 'p', 'ic_st', 'vcc'),
+    wire('vcc_so', 'vcc1', 'p', 'ic_so', 'vcc'),
+
+    // GND for all CD4026s
+    wire('gnd_ht', 'ic_ht', 'gnd', 'gnd1', 'g', [[7, 18]]),
+    wire('gnd_ho', 'ic_ho', 'gnd', 'gnd1', 'g', [[15, 18]]),
+    wire('gnd_mt', 'ic_mt', 'gnd', 'gnd1', 'g', [[25, 18]]),
+    wire('gnd_mo', 'ic_mo', 'gnd', 'gnd1', 'g', [[33, 18]]),
+    wire('gnd_st', 'ic_st', 'gnd', 'gnd1', 'g', [[43, 18]]),
+    wire('gnd_so', 'ic_so', 'gnd', 'gnd1', 'g', [[51, 18]]),
+
+    // RST for all CD4026s (tied to ground)
+    wire('rst_ht', 'ic_ht', 'rst', 'gnd1', 'g', [[2, 18]]),
+    wire('rst_ho', 'ic_ho', 'rst', 'gnd1', 'g', [[10, 18]]),
+    wire('rst_mt', 'ic_mt', 'rst', 'gnd1', 'g', [[20, 18]]),
+    wire('rst_mo', 'ic_mo', 'rst', 'gnd1', 'g', [[28, 18]]),
+    wire('rst_st', 'ic_st', 'rst', 'gnd1', 'g', [[38, 18]]),
+    wire('rst_so', 'ic_so', 'rst', 'gnd1', 'g', [[46, 18]]),
+
+    // COM for all 7-seg displays → ground
+    wire('com_ht', 'seg_ht', 'com', 'gnd1', 'g', [[7, 11], [7, 18]]),
+    wire('com_ho', 'seg_ho', 'com', 'gnd1', 'g', [[15, 11], [15, 18]]),
+    wire('com_mt', 'seg_mt', 'com', 'gnd1', 'g', [[25, 11], [25, 18]]),
+    wire('com_mo', 'seg_mo', 'com', 'gnd1', 'g', [[33, 11], [33, 18]]),
+    wire('com_st', 'seg_st', 'com', 'gnd1', 'g', [[43, 11], [43, 18]]),
+    wire('com_so', 'seg_so', 'com', 'gnd1', 'g', [[51, 11], [51, 18]]),
+
+    // Segment wires for each digit (7 per digit × 6 digits = 42 wires)
+    ...digitSegWires('ht', 2, 'seg_ht', 3),
+    ...digitSegWires('ho', 10, 'seg_ho', 11),
+    ...digitSegWires('mt', 20, 'seg_mt', 21),
+    ...digitSegWires('mo', 28, 'seg_mo', 29),
+    ...digitSegWires('st', 38, 'seg_st', 39),
+    ...digitSegWires('so', 46, 'seg_so', 47),
+  ],
+};
+
 // ----- Example 10: Simple Seconds Counter (0-59) -----
 // A minimalist 2-digit clock using only 2 CD4026 chips (vs 6 in the full clock).
 // Architecture:
@@ -615,15 +733,66 @@ export const exampleSimpleClock: CircuitDocument = {
   ],
 };
 
-export const examples: { name: string; description: string; doc: CircuitDocument }[] = [
-  { name: 'LED + Resistor', description: 'Simple DC circuit: 5V → R → LED → GND', doc: exampleLed },
-  { name: '555 Astable Blink', description: 'Classic 555 timer in astable mode driving an LED', doc: example555 },
-  { name: 'RC Low-pass Filter', description: 'Pulse source through RC filter, oscilloscope traces', doc: exampleRC },
-  { name: 'Transistor Switch', description: 'NPN transistor used as a digital switch with push-button', doc: exampleTransistor },
-  { name: 'Arduino Blink', description: 'Arduino blinking an LED on D2', doc: exampleArduino },
-  { name: 'Op-Amp Inverting Amp', description: 'Op-amp with gain -10 (Rf/Rin = 10k/1k)', doc: exampleOpamp },
-  { name: 'NMOS Switch', description: 'NMOS transistor switching an LED, push-button on gate', doc: exampleNmos },
-  { name: '7-Segment Counter', description: 'Arduino drives 7-segment display counting 0-9 with BCD decoder', doc: exampleSevenSeg },
-  { name: 'Simple Seconds Counter', description: 'Minimalist 2-digit (0-59) seconds counter using only 2 CD4026 chips', doc: exampleSimpleClock },
-  { name: 'Digital Clock', description: 'HH:MM:SS digital clock using CD4026 counters and 1Hz crystal', doc: exampleClock },
+// ─────────────────────────────────────────────────────────────────────────────
+// Categorized example tree.
+// Each category groups related circuits. To add a new example, just append
+// it to the appropriate category array below.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ExampleEntry {
+  name: string;
+  description: string;
+  doc: CircuitDocument;
+}
+
+export interface ExampleCategory {
+  label: string;
+  examples: ExampleEntry[];
+}
+
+export const exampleCategories: ExampleCategory[] = [
+  {
+    label: 'Basic Circuits',
+    examples: [
+      { name: 'LED + Resistor', description: 'Simple DC circuit: 5V → R → LED → GND', doc: exampleLed },
+      { name: 'RC Low-pass Filter', description: 'Pulse source through RC filter, oscilloscope traces', doc: exampleRC },
+    ],
+  },
+  {
+    label: 'Timers & Oscillators',
+    examples: [
+      { name: '555 Astable Blink', description: 'Classic 555 timer in astable mode driving an LED', doc: example555 },
+    ],
+  },
+  {
+    label: 'Transistors & Switches',
+    examples: [
+      { name: 'Transistor Switch', description: 'NPN transistor used as a digital switch with push-button', doc: exampleTransistor },
+      { name: 'NMOS Switch', description: 'NMOS transistor switching an LED, push-button on gate', doc: exampleNmos },
+    ],
+  },
+  {
+    label: 'Op-Amps',
+    examples: [
+      { name: 'Op-Amp Inverting Amp', description: 'Op-amp with gain -10 (Rf/Rin = 10k/1k)', doc: exampleOpamp },
+    ],
+  },
+  {
+    label: 'Microcontrollers',
+    examples: [
+      { name: 'Arduino Blink', description: 'Arduino blinking an LED on D2', doc: exampleArduino },
+      { name: '7-Segment Counter', description: 'Arduino drives 7-segment display counting 0-9 with BCD decoder', doc: exampleSevenSeg },
+    ],
+  },
+  {
+    label: 'Clocks & Counters',
+    examples: [
+      { name: 'Simple Seconds Counter', description: 'Minimalist 2-digit (0-59) seconds counter using only 2 CD4026 chips', doc: exampleSimpleClock },
+      { name: '555 Timer Clock (HH:MM:SS)', description: 'Complete 6-digit clock using a 555 timer oscillator + CD4026 chain', doc: example555Clock },
+      { name: 'Digital Clock (HH:MM:SS)', description: '6-digit digital clock using CD4026 counters and 1Hz crystal oscillator', doc: exampleClock },
+    ],
+  },
 ];
+
+// Flat list (backward compatibility — some code may still reference `examples`)
+export const examples: ExampleEntry[] = exampleCategories.flatMap(c => c.examples);

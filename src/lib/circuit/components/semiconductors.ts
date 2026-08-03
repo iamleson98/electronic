@@ -358,6 +358,10 @@ const timer555: ComponentPlugin = {
   ],
   parameters: [
     { key: 'vcc', label: 'VCC', type: 'number', default: 5, unit: 'V', min: 1, max: 18, step: 0.1 },
+    { key: 'astable', label: 'Astable Mode', type: 'boolean', default: false },
+    { key: 'r1', label: 'R1 (Ω)', type: 'number', default: 47000, unit: 'Ω', min: 1, max: 1e9, step: 1000 },
+    { key: 'r2', label: 'R2 (Ω)', type: 'number', default: 47000, unit: 'Ω', min: 1, max: 1e9, step: 1000 },
+    { key: 'c', label: 'C (F)', type: 'number', default: 1e-5, unit: 'F', min: 1e-12, max: 1, step: 1e-6 },
   ],
   render(ctx, params, cellSize) {
     const w = 6 * cellSize;
@@ -401,6 +405,16 @@ const timer555: ComponentPlugin = {
   },
   // 555 timer: state-aware stamp and step using sim.state keyed by terminal topology.
   // The state (flip-flop, outHigh) persists across steps via sim.state[key].
+  //
+  // Two modes:
+  //   1. Normal mode (astable=false): uses external RC network, reads THR/TRIG
+  //      voltages. Includes fast-forward to advance sim.time toward threshold
+  //      crossings.
+  //   2. Astable mode (astable=true): computes output directly from sim.time
+  //      using R1/R2/C parameters. Bypasses the slow RC simulation so the
+  //      555 oscillates at visible speed. The external RC components are
+  //      still wired (for visual authenticity) but the 555 uses its internal
+  //      timing model.
   stamp(params, terminals, sys, sim) {
     const vcc = params.vcc as number;
     const vccNode = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
@@ -416,9 +430,65 @@ const timer555: ComponentPlugin = {
     }
 
     const key = stateKey555(terminals);
-    const st = sim.state[key] ?? (sim.state[key] = { ff: false, outHigh: false });
+    const st = sim.state[key] ?? (sim.state[key] = { ff: false, outHigh: false, prevV: 0, prevT: -1 });
     const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
     const dis = terminals.find((t) => t.terminalId === 'dis')!.nodeId;
+
+    // ── Astable mode: compute output directly from sim.time ────────────
+    if (params.astable) {
+      const r1 = (params.r1 as number) || 47000;
+      const r2 = (params.r2 as number) || 47000;
+      const c = (params.c as number) || 1e-5;
+      // 555 astable formula:
+      //   t_high = 0.693 * (R1 + R2) * C
+      //   t_low  = 0.693 * R2 * C
+      //   period = t_high + t_low = 0.693 * (R1 + 2*R2) * C
+      const tHigh = 0.693 * (r1 + r2) * c;
+      const tLow = 0.693 * r2 * c;
+      const period = tHigh + tLow;
+      const phase = (sim.time % period);
+      st.outHigh = phase < tHigh;
+      st.ff = st.outHigh;
+
+      if (out !== gndNode) sys.stampVoltageSource(out, gndNode, st.outHigh ? vcc : 0);
+      // DIS pin: conducts to GND when output is LOW (ff=false)
+      if (!st.ff) {
+        if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1 / 50);
+      } else {
+        if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1e-9);
+      }
+      return;
+    }
+
+    // ── Normal mode: use external RC, with fast-forward ────────────────
+    const thrNode = terminals.find((t) => t.terminalId === 'thr')!.nodeId;
+    const vThr = sim.nodeVoltage[thrNode] ?? 0;
+    const ctrlV = ctrlNode !== gndNode && ctrlNode !== vccNode ? sim.nodeVoltage[ctrlNode] ?? 0 : 0;
+    const vThresh = ctrlV > 0.1 ? ctrlV : (2 / 3) * vcc;
+    const vTrigThresh = ctrlV > 0.1 ? ctrlV / 2 : (1 / 3) * vcc;
+    const prevV = st.prevV ?? 0;
+    const prevT = st.prevT ?? -1;
+    const elapsed = sim.time - prevT;
+    if (elapsed > 0 && Math.abs(vThr - prevV) > 1e-6) {
+      const dVdt = (vThr - prevV) / elapsed;
+      if (Math.abs(dVdt) > 0.01) {
+        let timeToCross = Infinity;
+        if (st.ff && vThr < vThresh) {
+          timeToCross = (vThresh - vThr) / dVdt;
+        } else if (!st.ff && vThr > vTrigThresh) {
+          timeToCross = (vTrigThresh - vThr) / dVdt;
+        }
+        if (timeToCross > 0 && timeToCross < 2) {
+          const advance = Math.min(0.016, timeToCross * 0.9);
+          if (advance > sim.dt) {
+            sim.time = sim.time + advance;
+          }
+        }
+      }
+    }
+    st.prevV = vThr;
+    st.prevT = sim.time;
+
     if (out !== gndNode) sys.stampVoltageSource(out, gndNode, st.outHigh ? vcc : 0);
     if (!st.ff) {
       if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1 / 50);
