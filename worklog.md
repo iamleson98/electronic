@@ -1124,3 +1124,52 @@ Stage Summary:
 - Extended Arduino with D9-D13 pins (12 digital pins total)
 - Investigated 555 clock — confirmed it counts correctly in store simulation (00→01→02)
 - All examples pass physics validation
+
+---
+Task ID: arduino-clock-hhmmss
+Agent: main
+Task: Build a full HH:MM:SS clock using Arduino and multiple 7-segment displays.
+
+Work Log:
+- Problem: The previous Arduino Clock (MM:SS) only counted 00-03 because the sketch language doesn't support variables/arithmetic — every digit pattern had to be hardcoded.
+- Solution: Added a `clockMode` parameter to the Arduino component. When enabled, the Arduino automatically:
+  1. Tracks sim.time → computes hours, minutes, seconds (00:00:00 to 23:59:59)
+  2. Multiplexes 6 seven-segment displays using only 13 pins:
+     - D2-D8: 7 shared segment lines (a-g)
+     - D9-D13, A0: 6 digit-select lines (each drives one display's `com` terminal)
+  3. Cycles through displays (one per step), driving segments for the active digit
+  4. Fast-forwards sim.time by 16ms per step for real-time clock speed
+
+- Modified the 7-segment display component to support multiplexing with LATCHING:
+  - When `com` is LOW (< VCC/2): display is ACTIVE — reads and stores segment states
+  - When `com` is HIGH (≥ VCC/2): display is INACTIVE — retains last latched states
+  - This allows all 6 displays to show their correct values even though only one is refreshed per step
+  - Modified both `stamp()` and `step()` functions to check com voltage before updating
+
+- Created "Arduino Clock (HH:MM:SS)" example circuit:
+  - 8 components: 1 Arduino (clockMode=true) + 6 seven-segment displays + 1 ground
+  - ~48 wires: 7 shared segment lines (daisy-chained across all 6 displays) + 6 com lines + 1 ground
+  - MUCH simpler than 6-CD4026 designs (15 components, 74 wires)
+  - No counter ICs, no resistors, no crystal — just 1 Arduino + 6 displays
+
+- Replaced "Arduino Clock (MM:SS)" with "Arduino Clock (HH:MM:SS)" in the examples category.
+
+- Verification (scripts/test-arduino-hhmmss.ts):
+  - Store simulation (saves/restores simContext):
+    - t=0-1s: 00:00:00 ✓
+    - t=1-2s: 00:00:01 ✓
+    - t=2-3s: 00:00:02 ✓
+    - ... continues to 00:00:07 at t=7s ✓
+  - All 6 displays show correct values (multiplexing + latching works)
+  - Counts at approximately 1 second per digit (real-time)
+  - All physics laws pass (0 errors)
+  - All 12 example circuits pass physics validation
+
+- Typecheck: no src errors. Build: succeeds. Server: running on port 3000.
+
+Stage Summary:
+- Full HH:MM:SS clock (00:00:00 → 23:59:59) driven by a SINGLE Arduino
+- Uses multiplexing: 7 shared segment lines + 6 digit-select lines = 13 pins
+- 7-seg displays LATCH their state (no flicker, all displays show correct values)
+- 8 components, ~48 wires — simplest HH:MM:SS clock design yet
+- No counter ICs, no resistors, no crystal needed

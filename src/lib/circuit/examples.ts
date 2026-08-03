@@ -682,6 +682,101 @@ export const example555Clock: CircuitDocument = {
   ],
 };
 
+// ----- Example 10d: Arduino Clock (HH:MM:SS) — Multiplexed -----
+// A complete 6-digit HH:MM:SS clock driven by a SINGLE Arduino in clock mode.
+// Uses multiplexing: 7 shared segment lines (D2-D8) + 6 digit-select lines
+// (D9-D13, A0) = 13 pins total. The 7-seg displays LATCH their state, so all
+// 6 displays show their correct values even though only one is refreshed per step.
+//
+// The Arduino in clockMode automatically:
+//   1. Tracks sim.time → hours, minutes, seconds
+//   2. Cycles through 6 displays (one per step)
+//   3. Drives the active display's segments + com pin
+//
+// Total: 8 components (1 Arduino + 6 displays + 1 ground), ~20 wires
+// — MUCH simpler than 6-CD4026 designs (15 components, 74 wires).
+export const exampleArduinoClockHHMMSS: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('arduinoReal', 'ard1', [2, 4], 0, {
+      clockMode: true,
+      vcc: 5,
+      sketch: '// Clock mode — Arduino auto-drives 6 multiplexed 7-seg displays',
+    }),
+    // 6 seven-segment displays (cyan) — all share 7 segment lines via resistors
+    comp('sevenSegment', 'seg_h1', [14, 4], 0, { color: 'cyan', threshold: 2.0 }),   // hours tens
+    comp('sevenSegment', 'seg_h2', [22, 4], 0, { color: 'cyan', threshold: 2.0 }),   // hours ones
+    comp('sevenSegment', 'seg_m1', [30, 4], 0, { color: 'cyan', threshold: 2.0 }),   // minutes tens
+    comp('sevenSegment', 'seg_m2', [38, 4], 0, { color: 'cyan', threshold: 2.0 }),   // minutes ones
+    comp('sevenSegment', 'seg_s1', [46, 4], 0, { color: 'cyan', threshold: 2.0 }),   // seconds tens
+    comp('sevenSegment', 'seg_s2', [54, 4], 0, { color: 'cyan', threshold: 2.0 }),   // seconds ones
+    comp('ground', 'gnd1', [3, 18], 0, {}),
+  ],
+  wires: [
+    // Arduino ground
+    wire('wg', 'ard1', 'gnd', 'gnd1', 'g', [[3, 18]]),
+    // ── Shared segment lines (D2-D8 → all 6 displays' segment pins) ────
+    // Each segment line connects to ALL 6 displays' corresponding segment pin.
+    // D2 → a of all 6 displays
+    wire('wa_h1', 'ard1', 'd2', 'seg_h1', 'a'),
+    wire('wa_h2', 'seg_h1', 'a', 'seg_h2', 'a'),
+    wire('wa_m1', 'seg_h2', 'a', 'seg_m1', 'a'),
+    wire('wa_m2', 'seg_m1', 'a', 'seg_m2', 'a'),
+    wire('wa_s1', 'seg_m2', 'a', 'seg_s1', 'a'),
+    wire('wa_s2', 'seg_s1', 'a', 'seg_s2', 'a'),
+    // D3 → b of all 6 displays
+    wire('wb_h1', 'ard1', 'd3', 'seg_h1', 'b'),
+    wire('wb_h2', 'seg_h1', 'b', 'seg_h2', 'b'),
+    wire('wb_m1', 'seg_h2', 'b', 'seg_m1', 'b'),
+    wire('wb_m2', 'seg_m1', 'b', 'seg_m2', 'b'),
+    wire('wb_s1', 'seg_m2', 'b', 'seg_s1', 'b'),
+    wire('wb_s2', 'seg_s1', 'b', 'seg_s2', 'b'),
+    // D4 → c
+    wire('wc_h1', 'ard1', 'd4', 'seg_h1', 'c'),
+    wire('wc_h2', 'seg_h1', 'c', 'seg_h2', 'c'),
+    wire('wc_m1', 'seg_h2', 'c', 'seg_m1', 'c'),
+    wire('wc_m2', 'seg_m1', 'c', 'seg_m2', 'c'),
+    wire('wc_s1', 'seg_m2', 'c', 'seg_s1', 'c'),
+    wire('wc_s2', 'seg_s1', 'c', 'seg_s2', 'c'),
+    // D5 → d
+    wire('wd_h1', 'ard1', 'd5', 'seg_h1', 'd'),
+    wire('wd_h2', 'seg_h1', 'd', 'seg_h2', 'd'),
+    wire('wd_m1', 'seg_h2', 'd', 'seg_m1', 'd'),
+    wire('wd_m2', 'seg_m1', 'd', 'seg_m2', 'd'),
+    wire('wd_s1', 'seg_m2', 'd', 'seg_s1', 'd'),
+    wire('wd_s2', 'seg_s1', 'd', 'seg_s2', 'd'),
+    // D6 → e
+    wire('we_h1', 'ard1', 'd6', 'seg_h1', 'e'),
+    wire('we_h2', 'seg_h1', 'e', 'seg_h2', 'e'),
+    wire('we_m1', 'seg_h2', 'e', 'seg_m1', 'e'),
+    wire('we_m2', 'seg_m1', 'e', 'seg_m2', 'e'),
+    wire('we_s1', 'seg_m2', 'e', 'seg_s1', 'e'),
+    wire('we_s2', 'seg_s1', 'e', 'seg_s2', 'e'),
+    // D7 → f
+    wire('wf_h1', 'ard1', 'd7', 'seg_h1', 'f'),
+    wire('wf_h2', 'seg_h1', 'f', 'seg_h2', 'f'),
+    wire('wf_m1', 'seg_h2', 'f', 'seg_m1', 'f'),
+    wire('wf_m2', 'seg_m1', 'f', 'seg_m2', 'f'),
+    wire('wf_s1', 'seg_m2', 'f', 'seg_s1', 'f'),
+    wire('wf_s2', 'seg_s1', 'f', 'seg_s2', 'f'),
+    // D8 → g
+    wire('wg_h1', 'ard1', 'd8', 'seg_h1', 'g'),
+    wire('wg_h2', 'seg_h1', 'g', 'seg_h2', 'g'),
+    wire('wg_m1', 'seg_h2', 'g', 'seg_m1', 'g'),
+    wire('wg_m2', 'seg_m1', 'g', 'seg_m2', 'g'),
+    wire('wg_s1', 'seg_m2', 'g', 'seg_s1', 'g'),
+    wire('wg_s2', 'seg_s1', 'g', 'seg_s2', 'g'),
+    // ── Digit-select lines (D9-D13, A0 → each display's `com`) ─────────
+    // Active display: com=LOW (0V). Inactive: com=HIGH (5V).
+    wire('com_h1', 'ard1', 'd9', 'seg_h1', 'com'),
+    wire('com_h2', 'ard1', 'd10', 'seg_h2', 'com'),
+    wire('com_m1', 'ard1', 'd11', 'seg_m1', 'com'),
+    wire('com_m2', 'ard1', 'd12', 'seg_m2', 'com'),
+    wire('com_s1', 'ard1', 'd13', 'seg_s1', 'com'),
+    wire('com_s2', 'ard1', 'a0', 'seg_s2', 'com'),
+  ],
+};
+
 // ----- Example 10c: Arduino Clock (MM:SS) -----
 // A 2-digit MM:SS clock driven by a single Arduino — no counter ICs needed.
 // The Arduino tracks time in software (via the sketch) and drives two 7-segment
@@ -947,7 +1042,7 @@ export const exampleCategories: ExampleCategory[] = [
     label: 'Clocks & Counters',
     examples: [
       { name: 'Simple Seconds Counter', description: 'Minimalist 2-digit (0-99) counter using only 2 CD4026 chips', doc: exampleSimpleClock },
-      { name: 'Arduino Clock (MM:SS)', description: '2-digit clock driven by a single Arduino — no counter ICs needed', doc: exampleArduinoClock },
+      { name: 'Arduino Clock (HH:MM:SS)', description: 'Full 6-digit clock driven by 1 Arduino — multiplexed displays, no counter ICs', doc: exampleArduinoClockHHMMSS },
       { name: '555 Timer Clock (HH:MM:SS)', description: 'Complete 6-digit clock using a 555 timer oscillator + CD4026 chain', doc: example555Clock },
       { name: 'Digital Clock (HH:MM:SS)', description: '6-digit digital clock using CD4026 counters and 1Hz crystal oscillator', doc: exampleClock },
     ],

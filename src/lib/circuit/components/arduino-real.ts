@@ -264,6 +264,7 @@ const arduinoReal: ComponentPlugin = {
   parameters: [
     { key: 'sketch', label: 'Sketch Source', type: 'string', default: sampleSketches.blink },
     { key: 'vcc', label: 'VCC', type: 'number', default: 5, unit: 'V', min: 1, max: 12, step: 0.1 },
+    { key: 'clockMode', label: 'Clock Mode (HH:MM:SS)', type: 'boolean', default: false },
   ],
   render(ctx, params, cellSize) {
     const w = 8 * cellSize;
@@ -304,6 +305,7 @@ const arduinoReal: ComponentPlugin = {
   stamp(params, terminals, sys, sim) {
     const vccV = params.vcc as number;
     const sketchSrc = params.sketch as string;
+    const clockMode = (params.clockMode as boolean) ?? false;
     const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
     const five = terminals.find((t) => t.terminalId === '5v')!.nodeId;
     if (five !== gnd) sys.stampVoltageSource(five, gnd, vccV);
@@ -312,7 +314,76 @@ const arduinoReal: ComponentPlugin = {
     const pinToNode: Record<string, number> = {};
     for (const t of terminals) pinToNode[t.terminalId] = t.nodeId;
 
-    // Get or initialize firmware state (per-instance, keyed by component position hash)
+    // ── Clock Mode: drive 6 multiplexed 7-segment displays ───────────────
+    // Pin mapping:
+    //   D2-D8: 7 shared segment lines (a-g) — via 220Ω resistors
+    //   D9-D13, A0: 6 digit-select lines (drive each display's `com` terminal)
+    //
+    // The Arduino computes hours:minutes:seconds from sim.time, then
+    // activates ONE display per step (drives its `com` LOW, others HIGH)
+    // and sets the 7 segment lines for that display's digit. The 7-seg
+    // displays LATCH their state (see extra.ts), so all 6 displays show
+    // their correct values even though only one is refreshed per step.
+    if (clockMode) {
+      const segPins = ['d2', 'd3', 'd4', 'd5', 'd6', 'd7', 'd8'];
+      const digitSelectPins = ['d9', 'd10', 'd11', 'd12', 'd13', 'a0'];
+
+      // Compute time from sim.time
+      const totalSec = Math.floor(sim.time);
+      const hours = Math.floor(totalSec / 3600) % 24;
+      const minutes = Math.floor(totalSec / 60) % 60;
+      const seconds = totalSec % 60;
+      const digits = [
+        Math.floor(hours / 10), hours % 10,
+        Math.floor(minutes / 10), minutes % 10,
+        Math.floor(seconds / 10), seconds % 10,
+      ];
+
+      // 7-segment patterns (a, b, c, d, e, f, g)
+      const SEG_PATTERNS: Record<number, number[]> = {
+        0: [1,1,1,1,1,1,0], 1: [0,1,1,0,0,0,0], 2: [1,1,0,1,1,0,1],
+        3: [1,1,1,1,0,0,1], 4: [0,1,1,0,0,1,1], 5: [1,0,1,1,0,1,1],
+        6: [1,0,1,1,1,1,1], 7: [1,1,1,0,0,0,0], 8: [1,1,1,1,1,1,1],
+        9: [1,1,1,1,0,1,1],
+      };
+
+      // Cycle through 6 displays, one per step
+      const activeDigit = Math.floor(sim.time * 60) % 6; // change display every ~16ms
+
+      // Drive all digit-select pins: active=LOW (0V), inactive=HIGH (VCC)
+      for (let i = 0; i < 6; i++) {
+        const pin = digitSelectPins[i];
+        const node = pinToNode[pin];
+        if (node && node !== gnd) {
+          sys.stampVoltageSource(node, gnd, i === activeDigit ? 0 : vccV);
+        }
+      }
+
+      // Drive segment lines for the active display's digit
+      const digitValue = digits[activeDigit];
+      const pattern = SEG_PATTERNS[digitValue] ?? [0,0,0,0,0,0,0];
+      for (let i = 0; i < 7; i++) {
+        const pin = segPins[i];
+        const node = pinToNode[pin];
+        if (node && node !== gnd) {
+          sys.stampVoltageSource(node, gnd, pattern[i] ? vccV : 0);
+        }
+      }
+
+      // Fast-forward: advance sim.time by 16ms so the clock ticks at real-time
+      if (sim.dt < 0.016) {
+        sim.time = sim.time + 0.016 - sim.dt;
+      }
+
+      // Inputs (A1, A2): high-Z with weak pull-down
+      ['a1', 'a2'].forEach((tid) => {
+        const t = terminals.find((tt) => tt.terminalId === tid);
+        if (t && t.nodeId !== gnd) sys.stampConductance(t.nodeId, gnd, 1e-9);
+      });
+      return;
+    }
+
+    // ── Normal sketch mode ──────────────────────────────────────────────
     const key = `arduinoReal_${terminals.map(t => `${t.terminalId}=${t.nodeId}`).join('_')}`;
     let st = sim.state[key] as ArduinoFirmwareState | undefined;
     if (!st) {
