@@ -713,18 +713,24 @@ export function computeComponentCurrents(
       const cNode = terms.find((t) => t.terminalId === 'c')?.nodeId ?? 0;
       const eNode = terms.find((t) => t.terminalId === 'e')?.nodeId ?? 0;
       if (isNpn) {
+        // NPN: current flows C→E. Collector is connected through load to VCC.
         current = -(nodeCurrentOut.get(cNode) ?? 0);
       } else {
-        current = -(nodeCurrentOut.get(eNode) ?? 0);
+        // PNP: current flows E→C. Collector is connected through load to GND.
+        // Use collector node (connected to load) not emitter (connected to VCC directly).
+        current = nodeCurrentOut.get(cNode) ?? 0;
       }
     } else if (comp.type === 'nmos' || comp.type === 'pmos') {
       const isNmos = comp.type === 'nmos';
       const dNode = terms.find((t) => t.terminalId === 'd')?.nodeId ?? 0;
       const sNode = terms.find((t) => t.terminalId === 's')?.nodeId ?? 0;
       if (isNmos) {
+        // NMOS: current flows D→S. Current leaving drain node through load = device current.
         current = -(nodeCurrentOut.get(dNode) ?? 0);
       } else {
-        current = -(nodeCurrentOut.get(sNode) ?? 0);
+        // PMOS: current flows S→D. Current leaving drain node through load = device current.
+        // Use drain node (connected to load) not source (connected to VCC directly).
+        current = nodeCurrentOut.get(dNode) ?? 0;
       }
     } else if (comp.type === 'timer555') {
       const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;

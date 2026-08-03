@@ -1334,3 +1334,61 @@ Stage Summary:
 - 186 comprehensive tests covering: solver, components, physics validator, examples, API routes, database, edge cases
 - Test infrastructure: vitest with path aliases, node environment, 30s timeout
 - Run with: `npm test` (or `npm run test:watch` for watch mode, `npm run test:ui` for UI)
+
+---
+Task ID: comprehensive-tests-round-2
+Agent: main
+Task: Write more tests for everything, fix every bug found.
+
+Work Log:
+- Added 5 new test files with 65 additional tests (186 → 251 total):
+
+1. tests/wire-current.test.ts (9 tests)
+   - Series circuits: all wires carry same |current|
+   - Wire current sign conventions (direction)
+   - Parallel circuits: current splits across branches
+   - Node map: ground assignment, connected terminals share node, unconnected terminals
+   - Component current sign conventions (resistor, voltage source)
+
+2. tests/more-components.test.ts (15 tests)
+   - PNP transistor: turns ON when base LOW, OFF when base HIGH
+   - PMOS transistor: turns ON when gate LOW, OFF when gate HIGH
+   - Logic gates: OR, NAND, NOR, XOR (all 4 input combinations each)
+   - Junction: connects terminals electrically
+   - Ammeter: measures current, near-zero impedance
+   - Op-Amp Rails: amplifies signal, clamps to power rails
+   - VCO: produces output signal
+   - Crystal oscillator: produces oscillating output
+
+3. tests/arduino-firmware.test.ts (7 tests)
+   - Blink: D2 goes HIGH/LOW on first tick
+   - Wait instruction: pauses execution
+   - Goto loop: creates infinite loop
+   - Clock mode: drives segment outputs
+   - Pin assignments: D2-D13, A0 analog input
+
+4. tests/circuit-input.test.ts (21 tests)
+   - LIMITS: correct max lengths
+   - toCreateValues: clamping, defaults, document normalization, nullish handling
+   - toUpdateValues: partial updates, only included fields, document normalization, boolean conversion
+
+5. tests/physics-violations.test.ts (13 tests)
+   - Voltage Source Law: passes for DC/AC/pulse sources
+   - Switch Off Law: passes for open/closed switches
+   - Returns correct structure (violations array, passed, checkedAt, etc.)
+   - Voltage Sanity: passes for normal and high voltages
+   - KCL: passes for simple and parallel circuits
+   - Power Conservation: passes for resistor circuit
+
+- Bugs found and fixed:
+  1. PMOS current computation bug: used source node (connected to VCC, no passive contribution → 0 current) instead of drain node (connected to load, has passive contribution). Fixed in engine.ts computeComponentCurrents.
+  2. PNP current computation bug: same issue — used emitter node (connected to VCC) instead of collector node (connected to load). Fixed in engine.ts computeComponentCurrents.
+
+- Final result: 251 tests, 12 test files, ALL PASSING
+- Physics validation: all 22 example circuits pass with 0 errors
+- Typecheck: clean. Build: succeeds.
+
+Stage Summary:
+- 251 comprehensive tests across 12 test files — all passing
+- Found and fixed 2 bugs (PNP and PMOS current computation used wrong node)
+- Test coverage: solver, all component types, physics validator, examples, API routes, database, edge cases, wire currents, node map, Arduino firmware, input sanitization, physics violations
