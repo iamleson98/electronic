@@ -1229,14 +1229,16 @@ export const exampleOpampNonInverting: CircuitDocument = {
 
 // ----- VCO Frequency Sweep -----
 // Voltage-controlled oscillator. DC voltage controls the output frequency.
-// Components: dcVoltage, vco, oscilloscope, ground
+// A load resistor draws current so flow dots are visible.
+// Components: dcVoltage ×2, vco, resistor, oscilloscope, ground
 export const exampleVCO: CircuitDocument = {
   version: 1,
   components: [
     comp('dcVoltage', 'v1', [4, 6], 0, { voltage: 2.5 }),
     comp('vco', 'vco1', [10, 6], 0, { baseFreq: 100, sensitivity: 1000, vcc: 5 }),
     comp('dcVoltage', 'vcc', [4, 2], 0, { voltage: 5 }),
-    comp('oscilloscope', 'sc1', [18, 6], 0, { color: '#22d3ee', label: 'Out' }),
+    comp('resistor', 'r1', [18, 6], 0, { resistance: 1000 }),  // load resistor
+    comp('oscilloscope', 'sc1', [24, 6], 0, { color: '#22d3ee', label: 'Out' }),
     comp('ground', 'gnd1', [5, 12], 0, {}),
   ],
   wires: [
@@ -1245,8 +1247,10 @@ export const exampleVCO: CircuitDocument = {
     wire('w3', 'vcc', 'p', 'vco1', 'vcc', [[5, 3], [12, 3], [12, 6]]),
     wire('w4', 'vcc', 'n', 'gnd1', 'g', [[5, 4], [5, 12]]),
     wire('w5', 'vco1', 'gnd', 'gnd1', 'g', [[12, 9], [12, 12], [5, 12]]),
-    wire('w6', 'vco1', 'out', 'sc1', 'p'),
-    wire('w7', 'sc1', 'n', 'gnd1', 'g', [[19, 7], [19, 12], [5, 12]]),
+    // VCO output → load resistor → oscilloscope → ground
+    wire('w6', 'vco1', 'out', 'r1', 'a'),
+    wire('w7', 'r1', 'b', 'sc1', 'p'),
+    wire('w8', 'sc1', 'n', 'gnd1', 'g', [[25, 7], [25, 12], [5, 12]]),
   ],
 };
 

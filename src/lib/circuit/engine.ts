@@ -331,6 +331,20 @@ export function computeWireCurrents(
     }
   }
 
+  // Second pass (computeWireCurrents): VCO — sources current from VCC.
+  for (const comp of components) {
+    if (comp.type !== 'vco') continue;
+    const plugin = plugins.get(comp.type);
+    if (!plugin) continue;
+    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+    const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
+    const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+    const outI = Math.abs(nodeCurrentOut.get(outNode) ?? 0);
+    if (vccNode > 0) {
+      nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) + outI);
+    }
+  }
+
   for (const wire of wires) {
     // For each wire, compute current from BOTH the from and to components.
     //
@@ -503,6 +517,17 @@ function computeTerminalCurrent(
       return Math.abs(nodeCurrentOut.get(coNode) ?? 0);
     }
     return 0;
+  } else if (comp.type === 'vco') {
+    // VCO: output pin sources current, VCC pin draws current.
+    const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+    if (terminalId === 'out') {
+      return Math.abs(nodeCurrentOut.get(outNode) ?? 0);
+    }
+    if (terminalId === 'vcc') {
+      const outI = Math.abs(nodeCurrentOut.get(outNode) ?? 0);
+      return -outI; // current enters VCC pin from supply
+    }
+    return 0;
   }
   return 0;
 }
@@ -654,6 +679,20 @@ export function computeComponentCurrents(
     }
     if (vccNode > 0) {
       nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) + totalSegI);
+    }
+  }
+
+  // Second pass: VCO — sources current from VCC equal to output load current.
+  for (const comp of components) {
+    if (comp.type !== 'vco') continue;
+    const plugin = plugins.get(comp.type);
+    if (!plugin) continue;
+    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+    const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
+    const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+    const outI = Math.abs(nodeCurrentOut.get(outNode) ?? 0);
+    if (vccNode > 0) {
+      nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) + outI);
     }
   }
 
