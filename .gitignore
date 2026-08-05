@@ -52,3 +52,11 @@ prompt
 server.log
 # Skills directory
 /skills/
+
+# Database files — never commit SQLite databases or WAL files
+/db/*.db
+/db/*.db-shm
+/db/*.db-wal
+
+# Allow .env.example but ignore actual .env
+!.env.example

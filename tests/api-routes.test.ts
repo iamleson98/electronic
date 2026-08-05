@@ -63,7 +63,7 @@ describe('API: POST /api/circuits', () => {
       isExample: false,
     });
     const res = await POST(req);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);
     const data = await res.json();
     expect(data.circuit).toBeDefined();
     expect(data.circuit.id).toBeDefined();
@@ -95,23 +95,21 @@ describe('API: POST /api/circuits', () => {
       document: { version: 1, components: [{ id: 'r1', type: 'resistor' }] },
     });
     const res = await POST(req);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);
     const data = await res.json();
     expect(typeof data.circuit.document).toBe('string');
     const parsed = JSON.parse(data.circuit.document);
     expect(parsed.version).toBe(1);
   });
 
-  it('clamps name to 200 chars', async () => {
+  it('rejects name over 200 chars', async () => {
     const longName = 'A'.repeat(300);
     const req = makeReq('http://localhost/api/circuits', 'POST', {
       name: longName,
       document: '{}',
     });
     const res = await POST(req);
-    expect(res.status).toBe(200);
-    const data = await res.json();
-    expect(data.circuit.name.length).toBe(200);
+    expect(res.status).toBe(400); // Zod rejects names over 200 chars
   });
 });
 
@@ -182,14 +180,12 @@ describe('API: DELETE /api/circuits/[id]', () => {
     });
     const created = (await (await POST(createReq)).json()).circuit;
 
-    // Delete
+    // Delete — returns 204 No Content
     const res = await DELETE(
       makeReq('http://localhost/api/circuits/' + created.id, 'DELETE'),
       { params: Promise.resolve({ id: created.id }) }
     );
-    expect(res.status).toBe(200);
-    const data = await res.json();
-    expect(data.ok).toBe(true);
+    expect(res.status).toBe(204);
 
     // Verify it's gone
     const getRes = await GET_ID(
