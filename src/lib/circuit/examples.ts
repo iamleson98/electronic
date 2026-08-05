@@ -1043,52 +1043,59 @@ export const exampleDiodeRectifier: CircuitDocument = {
 };
 
 // ----- Voltage Divider with Potentiometer -----
-// Uses a potentiometer as a variable voltage divider. Voltmeter reads the
-// wiper voltage. Adjust the `wiper` parameter to change the output.
-// Components: dcVoltage, potentiometer, voltmeter, ground
+// Uses a potentiometer as a variable voltage divider. A load resistor draws
+// current so flow dots are visible. Voltmeter reads the wiper voltage.
+// Components: dcVoltage, potentiometer, resistor, voltmeter, ground
 export const exampleVoltageDivider: CircuitDocument = {
   version: 1,
   components: [
     comp('dcVoltage', 'v1', [4, 6], 0, { voltage: 5 }),
     comp('potentiometer', 'pot1', [10, 6], 0, { resistance: 10000, wiper: 50 }),
-    comp('voltmeter', 'vm1', [16, 4], 0, {}),
+    comp('resistor', 'r1', [16, 6], 0, { resistance: 10000 }),  // load resistor
+    comp('voltmeter', 'vm1', [22, 4], 0, {}),
     comp('ground', 'gnd1', [5, 12], 0, {}),
   ],
   wires: [
     wire('w1', 'v1', 'p', 'pot1', 'a', [[5, 7], [10, 7]]),
     wire('w2', 'v1', 'n', 'gnd1', 'g', [[5, 12]]),
     wire('w3', 'pot1', 'b', 'gnd1', 'g', [[14, 7], [14, 12], [5, 12]]),
-    wire('w4', 'pot1', 'w', 'vm1', 'p', [[12, 5], [12, 5], [16, 5]]),
-    wire('w5', 'vm1', 'n', 'gnd1', 'g', [[18, 5], [18, 12], [5, 12]]),
+    // Wiper → load resistor → ground (draws current)
+    wire('w4', 'pot1', 'w', 'r1', 'a', [[12, 5], [12, 5], [16, 5]]),
+    wire('w5', 'r1', 'b', 'gnd1', 'g', [[20, 7], [20, 12], [5, 12]]),
+    // Voltmeter measures across the load (parallel, high impedance)
+    wire('w6', 'r1', 'a', 'vm1', 'p', [[16, 3], [22, 3]]),
+    wire('w7', 'vm1', 'n', 'gnd1', 'g', [[24, 5], [24, 12], [5, 12]]),
   ],
 };
 
 // ----- PNP Transistor Switch -----
-// PNP high-side switch. When the button is pressed, base goes LOW and the
-// PNP turns ON, lighting the LED.
-// Components: dcVoltage ×2, pushButton, resistor ×2, pnp, led, ground
+// PNP high-side switch. Emitter at VCC, collector → load → GND.
+// When button is pressed, base is pulled LOW, turning the PNP ON.
+// Components: dcVoltage, pushButton, resistor ×2, pnp, led, ground
 export const examplePnpSwitch: CircuitDocument = {
   version: 1,
   components: [
     comp('dcVoltage', 'v1', [4, 4], 0, { voltage: 5 }),
-    comp('dcVoltage', 'v2', [4, 16], 0, { voltage: 5 }),
-    comp('pushButton', 'btn1', [8, 16], 0, { pressed: true }),
-    comp('resistor', 'rb', [14, 16], 0, { resistance: 10000 }),
-    comp('resistor', 'rc', [14, 4], 0, { resistance: 1000 }),
-    comp('pnp', 'q1', [22, 8], 0, { hfe: 100, veb: 0.7, satV: 0.2 }),
-    comp('led', 'led1', [22, 4], 0, { color: 'blue', forwardV: 2.0, seriesR: 1 }),
+    comp('pushButton', 'btn1', [4, 16], 0, { pressed: true }),
+    comp('resistor', 'rb', [10, 16], 0, { resistance: 10000 }),
+    comp('resistor', 'rc', [22, 8], 0, { resistance: 1000 }),
+    comp('pnp', 'q1', [16, 8], 0, { hfe: 100, veb: 0.7, satV: 0.2 }),
+    comp('led', 'led1', [28, 8], 0, { color: 'blue', forwardV: 2.0, seriesR: 1 }),
     comp('ground', 'gnd1', [5, 22], 0, {}),
   ],
   wires: [
-    wire('w1', 'v1', 'p', 'rc', 'a', [[5, 5]]),
-    wire('w3', 'rc', 'b', 'led1', 'a', [[18, 5]]),
-    wire('w4', 'led1', 'k', 'q1', 'c', [[26, 5], [26, 9]]),
-    wire('w5', 'v2', 'p', 'btn1', 'a', [[5, 17]]),
+    // Emitter → VCC (PNP high-side: emitter at top, connected to V+)
+    wire('w1', 'v1', 'p', 'q1', 'e', [[5, 5], [16, 5]]),
+    // Collector → load resistor → LED → GND
+    wire('w3', 'q1', 'c', 'rc', 'a'),
+    wire('w4', 'rc', 'b', 'led1', 'a'),
+    wire('w5', 'led1', 'k', 'gnd1', 'g', [[32, 9], [32, 22], [5, 22]]),
+    // Base: button → Rb → base. When button pressed, base → GND (LOW) → PNP ON
+    wire('w6', 'btn1', 'a', 'gnd1', 'g', [[5, 17], [5, 22]]),
     wire('w7', 'btn1', 'b', 'rb', 'a'),
-    wire('w8', 'rb', 'b', 'q1', 'b', [[18, 17], [22, 17], [22, 10]]),
+    wire('w8', 'rb', 'b', 'q1', 'b', [[14, 17], [16, 17], [16, 10]]),
+    // V1 negative → ground
     wire('w2', 'v1', 'n', 'gnd1', 'g', [[5, 8], [5, 22]]),
-    wire('w6', 'v2', 'n', 'gnd1', 'g', [[5, 20], [5, 22]]),
-    wire('w9', 'q1', 'e', 'v1', 'p', [[25, 12], [25, 5], [5, 5]]),
   ],
 };
 
@@ -1235,10 +1242,10 @@ export const exampleVCO: CircuitDocument = {
   version: 1,
   components: [
     comp('dcVoltage', 'v1', [4, 6], 0, { voltage: 2.5 }),
-    comp('vco', 'vco1', [10, 6], 0, { baseFreq: 100, sensitivity: 1000, vcc: 5 }),
+    comp('vco', 'vco1', [10, 6], 0, { baseFreq: 10, sensitivity: 100, vcc: 5 }),
     comp('dcVoltage', 'vcc', [4, 2], 0, { voltage: 5 }),
-    comp('resistor', 'r1', [18, 6], 0, { resistance: 1000 }),  // load resistor
-    comp('oscilloscope', 'sc1', [24, 6], 0, { color: '#22d3ee', label: 'Out' }),
+    comp('resistor', 'r1', [18, 6], 0, { resistance: 1000 }),  // load resistor (to ground)
+    comp('oscilloscope', 'sc1', [24, 2], 0, { color: '#22d3ee', label: 'Out' }),  // probe only
     comp('ground', 'gnd1', [5, 12], 0, {}),
   ],
   wires: [
@@ -1247,10 +1254,12 @@ export const exampleVCO: CircuitDocument = {
     wire('w3', 'vcc', 'p', 'vco1', 'vcc', [[5, 3], [12, 3], [12, 6]]),
     wire('w4', 'vcc', 'n', 'gnd1', 'g', [[5, 4], [5, 12]]),
     wire('w5', 'vco1', 'gnd', 'gnd1', 'g', [[12, 9], [12, 12], [5, 12]]),
-    // VCO output → load resistor → oscilloscope → ground
+    // VCO output → load resistor → ground (main current path)
     wire('w6', 'vco1', 'out', 'r1', 'a'),
-    wire('w7', 'r1', 'b', 'sc1', 'p'),
-    wire('w8', 'sc1', 'n', 'gnd1', 'g', [[25, 7], [25, 12], [5, 12]]),
+    wire('w7', 'r1', 'b', 'gnd1', 'g', [[22, 7], [22, 12], [5, 12]]),
+    // Oscilloscope probes the VCO output (high impedance, parallel to R1)
+    wire('w8', 'vco1', 'out', 'sc1', 'p', [[16, 5], [16, 3], [24, 3]]),
+    wire('w9', 'sc1', 'n', 'gnd1', 'g', [[26, 3], [26, 12], [5, 12]]),
   ],
 };
 
