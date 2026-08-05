@@ -547,7 +547,7 @@ export function computeComponentCurrents(
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
       const st = sim.state.__global ?? {};
-      const vPrev = st[`cap_${a}_${b}`] ?? 0;
+      const vPrev = st[`cap_${comp.id}`] ?? 0;
       const i = (C / Math.max(sim.dt, 1e-12)) * ((sim.nodeVoltage[a] - sim.nodeVoltage[b]) - vPrev);
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
@@ -556,7 +556,7 @@ export function computeComponentCurrents(
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
       const st = sim.state.__global ?? {};
-      const iPrev = st[`ind_${a}_${b}`] ?? 0;
+      const iPrev = st[`ind_${comp.id}`] ?? 0;
       const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
       const dt = Math.max(sim.dt, 1e-12);
       const i = iPrev + (v / L) * dt;
@@ -568,8 +568,8 @@ export function computeComponentCurrents(
       const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
       const vf = (comp.parameters.forwardV as number) || 0.7;
       const r = comp.type === 'led'
-        ? Math.max(0.01, comp.parameters.seriesR as number)
-        : Math.max(0.001, comp.parameters.onR as number);
+        ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
+        : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
       const st = sim.state.__global ?? {};
       const on = st[`${comp.type}_${a}_${k}`] ?? false;
       const i = on ? Math.max(0, (v - vf) / r) : 0;
@@ -674,14 +674,14 @@ export function computeComponentCurrents(
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
       const st = sim.state.__global ?? {};
-      const vPrev = st[`cap_${a}_${b}`] ?? 0;
+      const vPrev = st[`cap_${comp.id}`] ?? 0;
       current = (C / Math.max(sim.dt, 1e-12)) * ((sim.nodeVoltage[a] - sim.nodeVoltage[b]) - vPrev);
     } else if (comp.type === 'inductor') {
       const L = Math.max(1e-12, comp.parameters.inductance as number);
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
       const st = sim.state.__global ?? {};
-      const iPrev = st[`ind_${a}_${b}`] ?? 0;
+      const iPrev = st[`ind_${comp.id}`] ?? 0;
       const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
       const dt = Math.max(sim.dt, 1e-12);
       current = iPrev + (v / L) * dt;
@@ -691,8 +691,8 @@ export function computeComponentCurrents(
       const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
       const vf = (comp.parameters.forwardV as number) || 0.7;
       const r = comp.type === 'led'
-        ? Math.max(0.01, comp.parameters.seriesR as number)
-        : Math.max(0.001, comp.parameters.onR as number);
+        ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
+        : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
       const st = sim.state.__global ?? {};
       const on = st[`${comp.type}_${a}_${k}`] ?? false;
       current = on ? Math.max(0, (v - vf) / r) : 0;
@@ -913,7 +913,7 @@ export function simulateStep(
     if (!plugin || !plugin.stamp) continue;
     const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
     try {
-      plugin.stamp(comp.parameters, terminals, sys, sim);
+      (plugin.stamp as any)(comp.parameters, terminals, sys, sim, comp);
     } catch (e) {
       console.error(`stamp error in ${comp.type} (${comp.id}):`, e);
     }

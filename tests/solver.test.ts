@@ -243,8 +243,9 @@ describe('MNA Solver — transient analysis', () => {
     const nodeMap = buildNodeMap(components, wires, plugins);
     const c1a = getTerminals(components, wires, 'c1', 'a', nodeMap);
     const vCap = sim.nodeVoltage[c1a];
-    // After several steps, capacitor should be partially charged
-    expect(vCap).toBeGreaterThan(1.0); // at least some charging has occurred
+    // After 500 steps with dt=1ms, capacitor should be almost fully charged
+    // RC = 1ms, so 500 steps = 500ms = 500*RC → capacitor should be > 4.9V
+    expect(vCap).toBeGreaterThan(4.9);
   });
 
   it('inductor builds up current over time', () => {

@@ -96,19 +96,22 @@ const capacitor: ComponentPlugin = {
     drawCapacitor(ctx, 6, 18);
     drawLabel(ctx, `${formatC(params.capacitance as number)}`, 0, -16);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const C = Math.max(1e-15, params.capacitance as number);
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `cap_${a}_${b}`;
+    const key = `cap_${comp?.id ?? `${a}_${b}`}`;
     const vPrev = st[key] ?? (params.initialV as number);
     // companion model (backward Euler): G_eq = C/dt, I_eq = C/dt * vPrev
+    // The Norton current source I_eq flows INTO node a (the positive plate),
+    // representing the capacitor's stored charge pushing current out.
+    // stampCurrentSource(b, a, iEq) injects into a and extracts from b.
     const dt = Math.max(sim.dt, 1e-12);
     const g = C / dt;
     const iEq = (C / dt) * vPrev;
     sys.stampConductance(a, b, g);
-    sys.stampCurrentSource(a, b, iEq);
+    sys.stampCurrentSource(b, a, iEq);  // FIXED: was (a, b) — wrong direction
   },
   getFlowPath() {
     // Straight through the capacitor plates
@@ -117,11 +120,11 @@ const capacitor: ComponentPlugin = {
       { x: 4, y: 1 },
     ];
   },
-  step(params, terminals, sim) {
+  step(params, terminals, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `cap_${a}_${b}`;
+    const key = `cap_${comp?.id ?? `${a}_${b}`}`;
     st[key] = sim.nodeVoltage[a] - sim.nodeVoltage[b];
   },
   measure(params, terminals, sim) {
@@ -167,12 +170,14 @@ const inductor: ComponentPlugin = {
     drawInductor(ctx, 2 * cellSize, 4);
     drawLabel(ctx, `${formatL(params.inductance as number)}`, 0, -16);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const L = Math.max(1e-12, params.inductance as number);
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `ind_${a}_${b}`;
+    // Use component ID for unique key — parallel inductors between the same
+    // node pair must have independent state (different currents).
+    const key = `ind_${comp?.id ?? `${a}_${b}`}`;
     const iPrev = st[key] ?? (params.initialI as number);
     // companion model (backward Euler):
     //   V = L * (I - iPrev) / dt   ->   V = (L/dt) * I - (L/dt) * iPrev
@@ -191,12 +196,12 @@ const inductor: ComponentPlugin = {
       { x: 4, y: 1 },
     ];
   },
-  step(params, terminals, sim) {
+  step(params, terminals, sim, comp) {
     const L = Math.max(1e-12, params.inductance as number);
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `ind_${a}_${b}`;
+    const key = `ind_${comp?.id ?? `${a}_${b}`}`;
     const iPrev = st[key] ?? (params.initialI as number);
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
     const dt = Math.max(sim.dt, 1e-12);

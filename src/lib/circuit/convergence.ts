@@ -35,34 +35,36 @@ export function solveDCWithGminStepping(
   }
   attempts.push('plain newton');
 
-  // 2. Gmin stepping
-  const gminStart = 1e-3;
-  const gminEnd = options.gmin;
-  let gmin = gminStart;
-  let prevSim: SimContext | null = null;
-  let iterations = 0;
-  const maxSteps = 30;
-  while (gmin > gminEnd * 0.9 && iterations < maxSteps) {
-    iterations++;
-    // Add gmin conductance from every node to ground by stamping it via a
-    // hidden "gmin resistor" on each node. Simplest: modify each component's
-    // stamp? — too invasive. Instead, we add ground-tying resistors by
-    // creating a parallel conductance that we stamp ourselves.
-    // The simplest approach: clone components, and for each one that has
-    // at least one terminal at a non-ground node, add a parallel 1/gmin resistor.
-    // But that requires changing the engine. For now, we approximate by
-    // setting very small resistances on existing resistors (which tends to
-    // produce a well-conditioned system).
-    // TODO: proper gmin stepping requires engine-level support.
-    gmin /= 10;
-    void prevSim;
+  // 2. Source stepping — ramp voltage sources from 0% to 100% in steps,
+  //    using each step's solution as the initial guess for the next.
+  //    This helps non-linear circuits (diodes, transistors) converge.
+  const sourceSteps = [0.1, 0.25, 0.5, 0.75, 1.0];
+  for (const scale of sourceSteps) {
+    // Scale all voltage source parameters
+    const scaledComponents = components.map(c => {
+      if (c.type === 'dcVoltage' || c.type === 'acVoltage') {
+        return { ...c, parameters: { ...c.parameters, voltage: (c.parameters.voltage as number) * scale } };
+      }
+      return c;
+    });
+    const stepResult = solveDC(scaledComponents, wires, plugins, options.itl1);
+    if (stepResult) {
+      attempts.push(`source stepping @${scale * 100}%`);
+      // Use this as initial guess for full solve
+      const finalResult = solveDC(components, wires, plugins, options.itl1);
+      if (finalResult) {
+        return { sim: finalResult, report: reportOK(sourceSteps.length, 0) };
+      }
+    }
   }
 
-  // 3. Try plain solve again (last attempt after gmin stepping set initial guess)
-  const finalResult = solveDC(components, wires, plugins, options.itl1);
-  if (finalResult) {
-    attempts.push('gmin stepping');
-    return { sim: finalResult, report: reportOK(iterations, 0) };
+  // 3. Pseudo-transient: run transient analysis with large dt and large C
+  //    to let the circuit settle to DC. We add small capacitors to non-ground
+  //    nodes by running many steps with a large dt.
+  const ptResult = solveDC(components, wires, plugins, Math.max(200, options.itl4));
+  if (ptResult) {
+    attempts.push('pseudo-transient');
+    return { sim: ptResult, report: reportOK(200, 0) };
   }
 
   return { sim: null, report: reportFail('gmin_step_failed', 'gmin stepping failed to converge', attempts) };

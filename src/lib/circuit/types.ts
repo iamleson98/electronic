@@ -451,6 +451,7 @@ export interface ComponentPlugin {
     terminals: { terminalId: string; nodeId: number }[],
     system: MnaSystem,
     sim: SimContext,
+    comp?: CircuitComponent,
   ) => void;
 
   /**
