@@ -734,16 +734,10 @@ export function CircuitCanvas() {
           }
           if (totalLen > 0) {
             const numDots = Math.max(2, Math.floor(totalLen / dotSpacing));
-            // Dot speed must be in PIXELS PER FRAME, not fraction-of-wire per
-            // frame. The old formula (fracPhase * totalLen) made dots on longer
-            // wires move faster (pixels/sec ∝ totalLen) even when current was
-            // identical — visually broken for series circuits where all wires
-            // carry the same current but have different lengths.
-            //
-            // Fix: advance dots by a fixed number of pixels per frame, scaled
-            // only by `speed` (current magnitude). flowPhaseRef increments by
-            // ~0.012 per frame; multiply by PIXELS_PER_PHASE so a speed=1 wire
-            // moves dots at ~0.012*60 = 0.72 px/frame * 60 = 43 px/sec.
+            // Evenly distribute dots around the wire: spacing = totalLen / numDots
+            // This ensures the gap between the last dot and the first (wrapping)
+            // is the same as all other gaps.
+            const evenSpacing = totalLen / numDots;
             const PIXELS_PER_PHASE = 60;
             const rawOffset = flowPhaseRef.current * speed * dir * PIXELS_PER_PHASE;
             const dotOffset = ((rawOffset % totalLen) + totalLen) % totalLen;
@@ -751,7 +745,7 @@ export function CircuitCanvas() {
             ctx.shadowColor = '#fde047';
             ctx.shadowBlur = 6;
             for (let n = 0; n < numDots; n++) {
-              let distAlong = (n * dotSpacing + dotOffset);
+              let distAlong = (n * evenSpacing + dotOffset);
               // Smooth wrap: mod by totalLen (handles negative and > totalLen)
               distAlong = ((distAlong % totalLen) + totalLen) % totalLen;
               let acc = 0;
