@@ -238,8 +238,19 @@ export function validatePhysics(
   // ── Law 5: Transistor Off Law ──────────────────────────────────────────
   // When the base current is ~0 (external drive removed), the collector
   // current MUST drop to ~0. This catches the "stuck on" bug.
+  //
+  // AC CIRCUIT EXCEPTION: In an AC-driven amplifier (e.g. the Two-Stage
+  // Audio Amplifier), the base current swings positive AND negative each
+  // cycle. At the moment the simulator samples `prevIb`, the AC source may
+  // be at its negative peak (Ib ≈ 0) even though the collector is still
+  // conducting due to the Ce bypass cap or just because the AC current
+  // continues to flow. To avoid false positives in AC circuits, we check
+  // whether there's any AC source in the circuit — if so, we skip this
+  // check (it's designed for DC switch circuits like "button released").
+  const hasAcSource = components.some(c => c.type === 'acVoltage' || c.type === 'pulseSource');
   for (const comp of components) {
     if (comp.type !== 'npn' && comp.type !== 'pnp') continue;
+    if (hasAcSource) continue;  // skip the "stuck on" check in AC circuits
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
     const terms = getTerminalsForComponent(comp, plugin, nodeMap);

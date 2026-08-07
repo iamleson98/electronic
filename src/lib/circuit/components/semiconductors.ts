@@ -218,6 +218,19 @@ const npn: ComponentPlugin = {
       // source — that would create a singular matrix with the CCCS).
       sys.stampConductance(c, e, 100);
     }
+    // Reverse-Vce protection: if Vce goes negative (collector below emitter),
+    // the B-C junction becomes forward-biased and the transistor enters
+    // reverse-active mode. In a real BJT this would still conduct (with lower
+    // hfe_reverse), but in our simplified model we just clamp Vce ≥ -vceSat
+    // so the collector node can't run away to -700V when the AC signal drives
+    // the base hard. Without this clamp, the simulator can produce insane
+    // voltages like Vc = -705V on a 9V supply — see "Stage 1 amplified" test.
+    if (vce < -vceSat) {
+      // Add a small reverse conductance so Vce can't drop below ~-vceSat.
+      // 10S is enough to absorb the CCCS's reverse current without making
+      // the matrix ill-conditioned.
+      sys.stampConductance(e, c, 10);
+    }
   },
   step(params, terminals, sim) {
     const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;

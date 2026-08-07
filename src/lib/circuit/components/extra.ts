@@ -123,6 +123,12 @@ const pnp: ComponentPlugin = {
     if (prevIc > 1e-9 && vec < vecSat) {
       sys.stampConductance(e, c, 100);
     }
+    // Reverse-Vec protection (mirror of NPN fix): if Vec goes negative
+    // (collector above emitter — PNP reverse-active region), clamp so the
+    // collector node can't run away to hundreds of volts.
+    if (vec < -vecSat) {
+      sys.stampConductance(c, e, 10);
+    }
   },
   step(params, terminals, sim) {
     const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
