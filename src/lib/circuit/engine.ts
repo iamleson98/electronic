@@ -568,23 +568,22 @@ export function computeComponentCurrents(
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
     } else if (comp.type === 'capacitor') {
-      const C = Math.max(1e-15, comp.parameters.capacitance as number);
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
       const st = sim.state.__global ?? {};
-      const vPrev = st[`cap_${comp.id}`] ?? 0;
-      const i = (C / Math.max(sim.dt, 1e-12)) * ((sim.nodeVoltage[a] - sim.nodeVoltage[b]) - vPrev);
+      // Use the current computed in step() (stored as '_i' suffix).
+      // This is the ACTUAL current that flowed during the step, computed
+      // BEFORE vPrev was updated. Computing it here from vPrev would give 0
+      // because step() already updated vPrev to the current voltage.
+      const i = st[`cap_${comp.id}_i`] ?? 0;
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
     } else if (comp.type === 'inductor') {
-      const L = Math.max(1e-12, comp.parameters.inductance as number);
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
       const st = sim.state.__global ?? {};
-      const iPrev = st[`ind_${comp.id}`] ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
-      const dt = Math.max(sim.dt, 1e-12);
-      const i = iPrev + (v / L) * dt;
+      // Use the current computed in step() (stored as '_i' suffix).
+      const i = st[`ind_${comp.id}_i`] ?? 0;
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
     } else if (comp.type === 'led' || comp.type === 'diode') {

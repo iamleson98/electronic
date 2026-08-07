@@ -121,11 +121,21 @@ const capacitor: ComponentPlugin = {
     ];
   },
   step(params, terminals, sim, comp) {
+    const C = Math.max(1e-15, params.capacitance as number);
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `cap_${comp?.id ?? `${a}_${b}`}`;
-    st[key] = sim.nodeVoltage[a] - sim.nodeVoltage[b];
+    const dt = Math.max(sim.dt, 1e-12);
+    const vPrev = st[key] ?? (params.initialV as number);
+    const vCurr = sim.nodeVoltage[a] - sim.nodeVoltage[b];
+    // Compute and store the current BEFORE updating vPrev.
+    // I = C × dV/dt = (C/dt) × (V_curr - V_prev)
+    // This must be done HERE because after we update st[key], the old vPrev
+    // is lost and computeComponentCurrents would compute I = (C/dt) × 0 = 0.
+    st[key + '_i'] = (C / dt) * (vCurr - vPrev);
+    // Now update vPrev for the next step's stamp()
+    st[key] = vCurr;
   },
   measure(params, terminals, sim) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
@@ -202,10 +212,17 @@ const inductor: ComponentPlugin = {
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `ind_${comp?.id ?? `${a}_${b}`}`;
+    const dt = Math.max(sim.dt, 1e-12);
     const iPrev = st[key] ?? (params.initialI as number);
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
-    const dt = Math.max(sim.dt, 1e-12);
-    st[key] = iPrev + (v / L) * dt;
+    const iCurr = iPrev + (v / L) * dt;
+    // Store the current BEFORE updating iPrev.
+    // I = iCurr (the inductor's state variable IS its current)
+    // This must be done HERE because after we update st[key], the old iPrev
+    // is lost and computeComponentCurrents would compute a stale current.
+    st[key + '_i'] = iCurr;
+    // Now update iPrev for the next step's stamp()
+    st[key] = iCurr;
   },
   measure(params, terminals, sim) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;

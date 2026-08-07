@@ -1821,3 +1821,50 @@ Stage Summary:
 - Fixed physics validator: skip "transistor stuck on" check in AC circuits
 - All 444 tests pass (287 existing + 157 new)
 - Type-check clean
+
+---
+Task ID: comprehensive-physics-law-audit
+Agent: main
+Task: Verify every example circuit follows fundamental physics laws (Ohm's law, KCL, KVL, energy conservation, etc.).
+
+Work Log:
+- Created tests/physics-laws.test.ts (243 tests) — comprehensive physics law verification across ALL example circuits. Checks:
+  - Ohm's Law: V = IR for every resistor (with actual current measurement)
+  - Voltage Source Law: V(p) - V(n) = rated voltage for all DC/AC sources
+  - AC Source Law: output swings within ±amplitude (no over-amplification)
+  - Capacitor Energy: E = 0.5*C*V² ≥ 0
+  - Inductor Energy: E = 0.5*L*I² ≥ 0
+  - Power Conservation: total power is finite (no infinite sources/loads)
+  - Op-amp Output Within Rails: Vout ≤ V+ and Vout ≥ V-
+  - Transistor Vce: Vce ≥ -2V (no reverse breakdown)
+  - Rail Bound: no node exceeds largest supply rail by more than 5V
+  - Diode Forward Voltage: Vf < 10V (no breakdown)
+  - Physics Validator: no error-severity violations from existing validator
+  - Finite Voltages: all node voltages are finite (no NaN/Infinity)
+  - KCL at every node: sum of currents = 0
+  - Power Conservation: P_supplied = P_consumed
+  - Capacitor I = C × dV/dt (backward Euler verification)
+  - Transistor Ic > 0 when ON
+  - Potentiometer wiper voltage between 0 and Vin
+  - Q1/Q2 Vbe in [0, 0.8V] (forward-active or off)
+
+- FOUND AND FIXED A REAL PHYSICS BUG — Capacitor/Inductor current was always reported as 0:
+  - Root cause: The cap/inductor `step()` function updates `vPrev`/`iPrev` to the CURRENT step's voltage/current AFTER the matrix solve. When `computeComponentCurrents` later runs (to compute wire currents for KCL and power conservation), it reads the ALREADY-UPDATED `vPrev`, which equals `V_curr`. This gives `I = (C/dt) × (V_curr - V_curr) = 0`.
+  - Impact: ALL capacitor and inductor currents were reported as 0. This means:
+    - KCL checks passed trivially (no current to check at cap/inductor nodes)
+    - Power conservation checks passed trivially (cap/inductor power = V × 0 = 0)
+    - Wire current visualization for caps/inductors was wrong
+    - The physics validator was giving false confidence — it was "passing" because it wasn't actually checking anything for caps/inductors
+  - FIX: Modified the cap/inductor `step()` functions to compute and store the current BEFORE updating `vPrev`/`iPrev`. The current is stored with an `_i` suffix (e.g., `cap_<id>_i`). `computeComponentCurrents` now reads the stored current instead of recomputing it from the (already-overwritten) `vPrev`.
+  - Verification: The "Capacitor current matches C × dV/dt" test now passes with relErr = 0.0000 (exact match). Previously it failed with relErr = 1.0 (100% error — actual current was 0).
+
+- Also added a reverse-Vce clamp to the NPN and PNP transistor models (already done in the previous task) — prevents Vce from going to -705V on a 9V supply.
+
+- Also fixed the physics validator's "Transistor Off Law" check (already done in the previous task) — skips the "stuck on" check in AC circuits where base current naturally swings to 0 during the AC cycle.
+
+Stage Summary:
+- 243 new physics law tests added (tests/physics-laws.test.ts)
+- Fixed capacitor/inductor current computation bug — was always 0, now correctly computed
+- All 687 tests pass (444 existing + 243 new physics law tests)
+- Type-check clean
+- Every example circuit now verified to follow: Ohm's Law, KCL, voltage source law, AC source amplitude bounds, capacitor I=C×dV/dt, energy non-negativity, op-amp rail bounds, transistor Vce bounds, rail bounds, diode forward voltage bounds, power conservation, and finite voltages.
