@@ -339,14 +339,19 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
   }, [isLoading, components, wires, messages, autoApply, applyCircuitUpdate, handleClientSideAction]);
 
   const applyPendingDiff = useCallback((msgId: string) => {
-    setMessages(prev => prev.map(m => {
-      if (m.id === msgId && m.pendingDiff) {
-        applyCircuitUpdate(m.pendingDiff.components, m.pendingDiff.wires, true);
-        return { ...m, pendingDiff: undefined };
-      }
-      return m;
-    }));
-  }, [applyCircuitUpdate]);
+    // Find the message FIRST (outside the setMessages updater — React updaters
+    // must be pure, no side effects like pushHistory/loadDocument).
+    const msg = messages.find(m => m.id === msgId);
+    if (!msg || !msg.pendingDiff) return;
+
+    // Apply the circuit update (side effect — pushHistory + loadDocument)
+    applyCircuitUpdate(msg.pendingDiff.components, msg.pendingDiff.wires, true);
+
+    // Then update the message state (pure updater — no side effects)
+    setMessages(prev => prev.map(m =>
+      m.id === msgId ? { ...m, pendingDiff: undefined } : m
+    ));
+  }, [messages, applyCircuitUpdate]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
