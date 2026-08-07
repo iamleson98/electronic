@@ -19,9 +19,11 @@ import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
-import {
-  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
-} from '@/components/ui/tooltip';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+// Extracted toolbar sub-components
+import { ExamplesDropdown } from './toolbar/ExamplesDropdown';
+import { SimulationControls } from './toolbar/SimulationControls';
+import { FileOperations } from './toolbar/FileOperations';
 import { MyCircuitsDialog } from './MyCircuitsDialog';
 import { SpiceImportDialog } from './SpiceImportDialog';
 import { SubCircuitDialog } from './SubCircuitDialog';

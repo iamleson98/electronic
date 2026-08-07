@@ -22,226 +22,22 @@ import {
   getSheetPinAbsPos,
 } from '@/lib/circuit/sheet-render';
 import type { HierarchicalSheet } from '@/lib/circuit/types';
-
-const CELL_SIZE = 24;
-
-interface DragState {
-  componentId: string;
-  offset: Vec2;
-  isGroupDrag?: boolean;
-  lastGrid?: Vec2;
-}
-
-interface WireDragState {
-  wireId: string;
-  /** the segment being dragged (index into path) */
-  segIndex: number;
-  /** starting cursor position (grid) for delta calc */
-  startGrid: Vec2;
-  /** original waypoints snapshot */
-  originalWaypoints: Vec2[];
-}
-
-interface RotateDragState {
-  componentId: string;
-  /** center of the component in screen coords */
-  center: Vec2;
-  /** initial angle from center to cursor at drag start (radians) */
-  startAngle: number;
-  /** initial rotation (0-3) */
-  startRotation: 0 | 1 | 2 | 3;
-}
-
-interface HoverState {
-  componentId: string | null;
-  terminal: { componentId: string; terminalId: string; pos: Vec2 } | null;
-  wireId: string | null;
-  /** midpoint handle on a wire segment that can be dragged */
-  wireHandle: { wireId: string; segIndex: number; pos: Vec2 } | null;
-  rotateHandle: string | null; // componentId
-}
-
-/** types of components that can be toggled by clicking during simulation */
-const TOGGLEABLE_TYPES = new Set(['switch', 'pushButton']);
-
-/** Get the orthogonal path points for a wire.
- *  fromPos and toPos are in SCREEN coords. Waypoints are in GRID coords and
- *  are converted to screen coords using the provided converter. */
-function getWirePath(
-  wire: Wire,
-  fromPos: Vec2,
-  toPos: Vec2,
-  gridToScreenFn: (gx: number, gy: number) => Vec2,
-  use45: boolean = false,
-): Vec2[] {
-  const points: Vec2[] = [fromPos];
-  if (wire.waypoints && wire.waypoints.length > 0) {
-    // User-defined waypoints: convert each to screen coords
-    for (const wp of wire.waypoints) {
-      points.push(gridToScreenFn(wp.x, wp.y));
-    }
-  } else {
-    // Auto-route: clean orthogonal L-shape routing
-    // Strategy: go horizontal first to the target's X, then vertical to target's Y
-    // This avoids the midpoint approach which creates long vertical segments
-    // that can cross through components.
-    const dx = toPos.x - fromPos.x;
-    const dy = toPos.y - fromPos.y;
-
-    if (Math.abs(dx) < 2) {
-      // Nearly vertical — direct line
-    } else if (Math.abs(dy) < 2) {
-      // Nearly horizontal — direct line
-    } else {
-      // L-shape: go horizontal first, then vertical
-      // Choose direction based on which way produces shorter overall path
-      // and avoids crossing through component bodies.
-      // Horizontal-first is generally cleaner for left-to-right layouts.
-      points.push({ x: toPos.x, y: fromPos.y });
-    }
-  }
-  points.push(toPos);
-  return points;
-}
-
-/** Compute the midpoint of a segment for drag handle detection */
-function segmentMidpoint(a: Vec2, b: Vec2): Vec2 {
-  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-}
-
-/** Angle (in degrees, 0-360) from a center point to a target point */
-function angleFromCenter(cx: number, cy: number, x: number, y: number): number {
-  const angle = Math.atan2(y - cy, x - cx) * 180 / Math.PI;
-  return (angle + 360) % 360;
-}
-
-/**
- * Re-route a wire so a dragged segment follows the cursor freely in 2D.
- *
- * The wire is ALWAYS kept orthogonal (only horizontal/vertical segments).
- * Terminal positions (fromPos, toPos) are NEVER moved — they're fixed to
- * component terminals. Only waypoints change.
- *
- * Path layout: [fromPos, wp1, wp2, ..., toPos]
- *   segIndex 0 = fromPos→wp1, segIndex 1 = wp1→wp2, ..., last = wpN→toPos
- *
- * When the user drags a segment handle, we move that segment to the cursor
- * position. The dragged segment stays horizontal or vertical (whichever it
- * was), and its perpendicular axis snaps to the cursor. The parallel axis
- * also follows the cursor when possible (for interior segments with waypoints
- * on both ends). Adjacent segments naturally stretch/shrink to stay connected.
- */
-function rerouteWireForDrag(
-  fromPos: Vec2,
-  toPos: Vec2,
-  segIndex: number,
-  cursorGrid: Vec2,
-  existingWaypoints: Vec2[],
-): Vec2[] {
-  // Build waypoint copy (never touch fromPos/toPos)
-  const wps: Vec2[] = existingWaypoints.length > 0
-    ? existingWaypoints.map((w) => ({ ...w }))
-    : [
-        { x: (fromPos.x + toPos.x) / 2, y: fromPos.y },
-        { x: (fromPos.x + toPos.x) / 2, y: toPos.y },
-      ];
-
-  // Helper: get path point by index (0=fromPos, 1..n=waypoints, n+1=toPos)
-  const getPt = (i: number): Vec2 => {
-    if (i === 0) return fromPos;
-    if (i === wps.length + 1) return toPos;
-    return wps[i - 1];
-  };
-  // Helper: set a waypoint by path index (only waypoints are settable)
-  const setPt = (i: number, val: Vec2) => {
-    if (i > 0 && i <= wps.length) wps[i - 1] = val;
-  };
-
-  const a = getPt(segIndex);
-  const b = getPt(segIndex + 1);
-  const isHorizontal = Math.abs(b.y - a.y) < Math.abs(b.x - a.x);
-
-  if (isHorizontal) {
-    // Horizontal segment: perpendicular axis = Y. Cursor Y becomes the new Y.
-    // Parallel axis = X: shift segment along X toward cursor (only waypoints move).
-    const newY = cursorGrid.y;
-    const midX = (a.x + b.x) / 2;
-    const deltaX = cursorGrid.x - midX;
-    const aIdx = segIndex;
-    const bIdx = segIndex + 1;
-    const aIsFixed = (aIdx === 0);           // fromPos can't move
-    const bIsFixed = (bIdx === wps.length + 1); // toPos can't move
-    // Set Y on both endpoints (waypoints only; fixed terminals keep their Y)
-    const newA = { ...getPt(aIdx) };
-    const newB = { ...getPt(bIdx) };
-    if (!aIsFixed) newA.y = newY;
-    if (!bIsFixed) newB.y = newY;
-    // Shift X: both endpoints if both are waypoints; only one if the other is fixed
-    if (!aIsFixed && !bIsFixed) {
-      newA.x += deltaX;
-      newB.x += deltaX;
-    } else if (aIsFixed && !bIsFixed) {
-      newB.x += deltaX;
-    } else if (!aIsFixed && bIsFixed) {
-      newA.x += deltaX;
-    }
-    setPt(aIdx, newA);
-    setPt(bIdx, newB);
-  } else {
-    // Vertical segment: perpendicular axis = X. Cursor X becomes the new X.
-    // Parallel axis = Y: shift segment along Y toward cursor.
-    const newX = cursorGrid.x;
-    const midY = (a.y + b.y) / 2;
-    const deltaY = cursorGrid.y - midY;
-    const aIdx = segIndex;
-    const bIdx = segIndex + 1;
-    const aIsFixed = (aIdx === 0);
-    const bIsFixed = (bIdx === wps.length + 1);
-    const newA = { ...getPt(aIdx) };
-    const newB = { ...getPt(bIdx) };
-    if (!aIsFixed) newA.x = newX;
-    if (!bIsFixed) newB.x = newX;
-    if (!aIsFixed && !bIsFixed) {
-      newA.y += deltaY;
-      newB.y += deltaY;
-    } else if (aIsFixed && !bIsFixed) {
-      newB.y += deltaY;
-    } else if (!aIsFixed && bIsFixed) {
-      newA.y += deltaY;
-    }
-    setPt(aIdx, newA);
-    setPt(bIdx, newB);
-  }
-
-  // After moving waypoints, the path may have diagonal segments adjacent to
-  // fixed terminals. Re-orthogonalize by inserting elbow waypoints.
-  return orthogonalizePath(fromPos, toPos, wps);
-}
-
-/**
- * Ensure a wire path is fully orthogonal (no diagonal segments).
- * If moving a waypoint created a diagonal segment adjacent to a fixed terminal,
- * insert an extra elbow waypoint to break it into two orthogonal segments.
- *
- * This is called after rerouteWireForDrag to clean up any diagonals.
- */
-function orthogonalizePath(fromPos: Vec2, toPos: Vec2, wps: Vec2[]): Vec2[] {
-  const result: Vec2[] = [];
-  const full: Vec2[] = [fromPos, ...wps, toPos];
-  for (let i = 0; i < full.length - 1; i++) {
-    const a = full[i];
-    const b = full[i + 1];
-    result.push({ ...a });
-    // If segment is diagonal, insert an elbow (go horizontal first, then vertical)
-    if (Math.abs(a.x - b.x) > 0.01 && Math.abs(a.y - b.y) > 0.01) {
-      // Insert elbow at (b.x, a.y) — horizontal first, then vertical
-      result.push({ x: b.x, y: a.y });
-    }
-  }
-  result.push({ ...toPos });
-  // Convert back to waypoints (exclude fromPos and toPos)
-  return result.slice(1, -1);
-}
+// Extracted types and utilities (previously inline)
+import {
+  CELL_SIZE,
+  DragState,
+  WireDragState,
+  RotateDragState,
+  HoverState,
+  TOGGLEABLE_TYPES,
+} from './canvas-types';
+import {
+  getWirePath,
+  segmentMidpoint,
+  angleFromCenter,
+  rerouteWireForDrag,
+  pointToSegmentDist,
+} from './canvas-wire-utils';
 
 export function CircuitCanvas() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1974,17 +1770,4 @@ export function CircuitCanvas() {
       </div>
     </div>
   );
-}
-
-/** Distance from point (px, py) to segment (ax,ay)-(bx,by) */
-function pointToSegmentDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const lenSq = dx * dx + dy * dy;
-  if (lenSq === 0) return Math.hypot(px - ax, py - ay);
-  let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
-  t = Math.max(0, Math.min(1, t));
-  const cx = ax + t * dx;
-  const cy = ay + t * dy;
-  return Math.hypot(px - cx, py - cy);
 }
