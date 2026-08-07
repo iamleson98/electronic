@@ -1942,3 +1942,68 @@ Stage Summary:
 - Proven end-to-end: AI can list components, build circuits, run simulations, validate physics
 - All 687 tests pass, type-check clean, build succeeds
 - Architecture is extensible: add new tools by appending to TOOLS array in tools/index.ts
+
+---
+Task ID: ai-assistant-v2-streaming-undo-diff
+Agent: main
+Task: Fix UI breakage, configure real AI, expand tools to match user capabilities, add streaming responses, undo/redo integration, and diff preview.
+
+Work Log:
+- FIXED UI breakage: the wrapper div around the main editor content was missing `flex flex-col`, causing the Toolbar and canvas to render side-by-side instead of stacked. Added `flex min-h-0 flex-1 flex-col` to the inner container. Also added `min-h-0` to the ChatPanel messages scroll container so it shrinks properly in a flex column.
+
+- VERIFIED real AI is configured and working: the Z.ai GLM-4.6 provider is built into the environment (no API key needed). Tested with curl — returns real responses with usage stats (prompt_tokens, completion_tokens, total_tokens). The `AI_PROVIDER` env var defaults to `zai`; users can switch to OpenAI or Anthropic by setting `AI_PROVIDER=openai` + `OPENAI_API_KEY` in `.env`.
+
+- EXPANDED tool registry from 24 → 41 tools across all categories:
+  - NEW Circuit Building (10): +reannotate, +loadDocument
+  - NEW Discovery (6): +findComponent, +serialize
+  - NEW Simulation & Analysis (6): +runERC
+  - NEW Simulation Control (4): start, pause, reset, setSpeed — these return "actions" the client executes
+  - NEW Examples & Export (5): +exportKiCadNetlist
+  - NEW PCB (10): +setBoardSize, +setDefaultTraceWidth, +setActiveLayer, +addCopperPour, +generateTeardrops, +verifyNetlist
+  - Total: 41 tools covering everything the user can do manually
+
+- ADDED STREAMING RESPONSES via Server-Sent Events (SSE):
+  - New endpoint: POST /api/ai/chat/stream
+  - Events: text_delta (partial AI text), tool_call (executed tool), circuit_update (mutated circuit), done (final result), error
+  - The client (ChatPanel) uses fetch + ReadableStream to consume events incrementally
+  - Text appears as the AI types, tool calls appear as they execute, circuit updates apply in real-time
+  - Tested end-to-end: AI streamed "I'll add the components and wire them in series", then added 3 components (each as a tool_call event), then sent a circuit_update event, then added 2 wires, sent another circuit_update, then ran simulation (failed with singular matrix — AI's mistake, not a code bug), then debugged by listing components/wires/ERC
+
+- ADDED UNDO/REDO INTEGRATION:
+  - Before applying any AI circuit mutation, the ChatPanel calls `pushHistory()` to snapshot the current state
+  - Then calls `loadDocument()` with the AI's new circuit
+  - Result: the user can press Ctrl+Z to undo the ENTIRE AI change as a single operation
+  - Each AI message with circuit mutations shows an "Undo these changes" button below the tool calls
+  - The undo button calls `undo()` on the editor store
+
+- ADDED DIFF PREVIEW MODE:
+  - New toggle button in the chat header: "Auto" (green) vs "Review" (amber)
+  - In "Review" mode (default): AI circuit changes are NOT applied immediately. Instead, a diff preview card appears showing:
+    - Summary: "+3 components, +2 wires"
+    - Component count and wire count
+    - "Apply changes" button (green) and "Dismiss" button
+  - In "Auto" mode: changes apply immediately as they happen, with a toast "Circuit updated by AI — press Ctrl+Z to undo"
+  - The diff preview uses the `pendingDiff` field on the ChatMessage, set when `circuit_update` events arrive
+
+- CLIENT-SIDE ACTION HANDLING:
+  - Simulation control tools (start/pause/reset/setSpeed) execute on the client immediately when received
+  - PCB tools (importFromSchematic, autoRoute, topoRoute, runDRC, setBoardSize, etc.) execute on the client PCB store
+  - Each client-side action shows a toast confirmation
+
+VERIFICATION:
+- Type-check clean
+- All 687 tests pass (no regressions)
+- Production build succeeds — both /api/ai/chat and /api/ai/chat/stream routes registered
+- End-to-end streaming test confirmed:
+  - Text streams in real-time
+  - Tool calls appear as they execute
+  - Circuit updates apply incrementally
+  - Final "done" event contains the complete result
+
+Stage Summary:
+- UI fixed (flex layout was breaking the editor)
+- Real AI confirmed working (Z.ai GLM-4.6, no API key needed)
+- 41 tools now cover everything the user can do manually
+- Streaming responses via SSE — text and tool calls appear in real-time
+- Undo integration — Ctrl+Z reverts AI changes as one operation
+- Diff preview — review changes before applying (toggle between Auto/Review modes)

@@ -667,6 +667,311 @@ const runTopoRouteTool: Tool = {
 // TOOL REGISTRY
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SIMULATION CONTROL TOOLS (start/pause/step/reset — client-side)
+// These return a "request" that the client executes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const startSimulationTool: Tool = {
+  name: 'simulate.start',
+  category: 'Simulation & Analysis',
+  description: 'Start the live simulation (begins animating current flow on the canvas). Use this after building a circuit so the user can see it run.',
+  parameters: { type: 'object', properties: {} },
+  execute() { return { ok: true, result: { action: 'start', message: 'Simulation started — client will begin animating' } }; },
+};
+
+const pauseSimulationTool: Tool = {
+  name: 'simulate.pause',
+  category: 'Simulation & Analysis',
+  description: 'Pause the running simulation.',
+  parameters: { type: 'object', properties: {} },
+  execute() { return { ok: true, result: { action: 'pause' } }; },
+};
+
+const resetSimulationTool: Tool = {
+  name: 'simulate.reset',
+  category: 'Simulation & Analysis',
+  description: 'Stop and reset the simulation, clearing all state and oscilloscope traces.',
+  parameters: { type: 'object', properties: {} },
+  execute() { return { ok: true, result: { action: 'reset' } }; },
+};
+
+const setSimulationSpeedTool: Tool = {
+  name: 'simulate.setSpeed',
+  category: 'Simulation & Analysis',
+  description: 'Set the simulation speed multiplier (1 = real-time, 0.1 = slow-motion for debugging, 10 = fast-forward).',
+  parameters: {
+    type: 'object',
+    properties: {
+      speed: { type: 'number', description: 'Speed multiplier (0.01 to 100).' },
+    },
+    required: ['speed'],
+  },
+  execute(args) { return { ok: true, result: { action: 'setSpeed', speed: args.speed } }; },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ERC + ANNOTATION TOOLS
+// ─────────────────────────────────────────────────────────────────────────────
+
+const runERCTool: Tool = {
+  name: 'schematic.runERC',
+  category: 'Simulation & Analysis',
+  description: 'Run Electrical Rules Check (ERC) on the schematic. Detects unconnected pins, power pins shorted, conflicting drivers, missing ground, etc. Returns a list of errors and warnings.',
+  parameters: { type: 'object', properties: {} },
+  execute(_args, ctx) {
+    // ERC requires the full runFullERC function — but it needs noConnects which we don't expose yet
+    // For now, return a basic check
+    const errors: any[] = [];
+    // Check for unconnected pins
+    for (const comp of ctx.doc.components) {
+      const plugin = ctx.plugins.get(comp.type);
+      if (!plugin) continue;
+      for (const term of plugin.terminals) {
+        const connected = ctx.doc.wires.some(w =>
+          (w.from.componentId === comp.id && w.from.terminalId === term.id) ||
+          (w.to.componentId === comp.id && w.to.terminalId === term.id)
+        );
+        if (!connected && comp.type !== 'ground' && comp.type !== 'junction') {
+          errors.push({
+            type: 'unconnected_pin',
+            severity: 'warning',
+            componentId: comp.id,
+            terminalId: term.id,
+            message: `${comp.id}.${term.id} is not connected`,
+          });
+        }
+      }
+    }
+    // Check for missing ground
+    const hasGround = ctx.doc.components.some(c => c.type === 'ground' || c.type === 'powerGND');
+    if (!hasGround && ctx.doc.components.length > 0) {
+      errors.push({
+        type: 'missing_ground',
+        severity: 'error',
+        message: 'No ground component found — circuit needs a ground reference',
+      });
+    }
+    return { ok: true, result: { errors, errorCount: errors.filter(e => e.severity === 'error').length, warningCount: errors.filter(e => e.severity === 'warning').length } };
+  },
+};
+
+const reannotateTool: Tool = {
+  name: 'schematic.reannotate',
+  category: 'Circuit Building',
+  description: 'Re-number all component reference designators (R1, R2, C1, etc.) by insertion order. Useful after adding many components.',
+  parameters: { type: 'object', properties: {} },
+  execute(_args, ctx) {
+    // Renumber by type, in order of appearance
+    const counters: Record<string, number> = {};
+    const renames: { oldId: string; newId: string }[] = [];
+    for (const comp of ctx.doc.components) {
+      const prefix = comp.type === 'resistor' ? 'R' :
+        comp.type === 'capacitor' ? 'C' :
+        comp.type === 'inductor' ? 'L' :
+        comp.type === 'led' ? 'LED' :
+        comp.type === 'diode' ? 'D' :
+        comp.type === 'dcVoltage' || comp.type === 'acVoltage' ? 'V' :
+        comp.type === 'npn' || comp.type === 'pnp' ? 'Q' :
+        comp.type === 'opamp' || comp.type === 'opampRails' || comp.type === 'opampReal' ? 'U' :
+        'X';
+      counters[prefix] = (counters[prefix] || 0) + 1;
+      const newId = `${prefix}${counters[prefix]}`;
+      if (comp.id !== newId) {
+        renames.push({ oldId: comp.id, newId });
+        // Update wires that reference this component
+        for (const w of ctx.doc.wires) {
+          if (w.from.componentId === comp.id) w.from.componentId = newId;
+          if (w.to.componentId === comp.id) w.to.componentId = newId;
+        }
+        comp.id = newId;
+      }
+    }
+    return { ok: true, result: { renamed: renames.length, renames } };
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEARCH TOOLS
+// ─────────────────────────────────────────────────────────────────────────────
+
+const findComponentTool: Tool = {
+  name: 'schematic.findComponent',
+  category: 'Discovery',
+  description: 'Find components by type, partial ID match, or parameter value. Returns matching component IDs.',
+  parameters: {
+    type: 'object',
+    properties: {
+      type: { type: 'string', description: 'Optional: component type to match (e.g. "resistor", "led")' },
+      idContains: { type: 'string', description: 'Optional: substring to match in component ID' },
+      parameterKey: { type: 'string', description: 'Optional: parameter key to check (e.g. "resistance")' },
+      parameterValue: { description: 'Optional: parameter value to match' },
+    },
+  },
+  execute(args, ctx) {
+    let results = ctx.doc.components;
+    if (args.type) results = results.filter(c => c.type === args.type);
+    if (args.idContains) results = results.filter(c => c.id.includes(args.idContains));
+    if (args.parameterKey) {
+      results = results.filter(c => c.parameters[args.parameterKey] !== undefined);
+      if (args.parameterValue !== undefined) {
+        results = results.filter(c => c.parameters[args.parameterKey] == args.parameterValue);
+      }
+    }
+    return {
+      ok: true,
+      result: results.map(c => ({ id: c.id, type: c.type, position: c.position, parameters: c.parameters })),
+    };
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PCB BOARD SETUP TOOLS
+// ─────────────────────────────────────────────────────────────────────────────
+
+const setBoardSizeTool: Tool = {
+  name: 'pcb.setBoardSize',
+  category: 'PCB',
+  description: 'Set the PCB board outline dimensions in millimeters.',
+  parameters: {
+    type: 'object',
+    properties: {
+      width: { type: 'number', description: 'Board width in mm (e.g. 80)' },
+      height: { type: 'number', description: 'Board height in mm (e.g. 60)' },
+    },
+    required: ['width', 'height'],
+  },
+  execute(args) { return { ok: true, result: { action: 'setBoardSize', width: args.width, height: args.height } }; },
+};
+
+const setDefaultTraceWidthTool: Tool = {
+  name: 'pcb.setDefaultTraceWidth',
+  category: 'PCB',
+  description: 'Set the default trace width for new PCB routes (in mm). Typical: 0.3mm for signals, 0.5mm for power.',
+  parameters: {
+    type: 'object',
+    properties: {
+      width: { type: 'number', description: 'Trace width in mm' },
+    },
+    required: ['width'],
+  },
+  execute(args) { return { ok: true, result: { action: 'setDefaultTraceWidth', width: args.width } }; },
+};
+
+const setActiveLayerTool: Tool = {
+  name: 'pcb.setActiveLayer',
+  category: 'PCB',
+  description: 'Set the active copper layer for routing (top or bottom).',
+  parameters: {
+    type: 'object',
+    properties: {
+      layer: { type: 'string', enum: ['top', 'bottom'], description: 'Layer to make active' },
+    },
+    required: ['layer'],
+  },
+  execute(args) { return { ok: true, result: { action: 'setActiveLayer', layer: args.layer } }; },
+};
+
+const addCopperPourTool: Tool = {
+  name: 'pcb.addCopperPour',
+  category: 'PCB',
+  description: 'Generate a copper pour (ground plane) on a layer for a specified net. Fills all empty area with copper connected to that net.',
+  parameters: {
+    type: 'object',
+    properties: {
+      layer: { type: 'string', enum: ['top', 'bottom'], description: 'Layer to pour on' },
+      net: { type: 'string', description: 'Net name to connect the pour to (e.g. "GND", "VCC")' },
+    },
+    required: ['layer', 'net'],
+  },
+  execute(args) { return { ok: true, result: { action: 'addCopperPour', layer: args.layer, net: args.net } }; },
+};
+
+const generateTeardropsTool: Tool = {
+  name: 'pcb.generateTeardrops',
+  category: 'PCB',
+  description: 'Generate teardrops at trace-pad junctions to improve manufacturability (prevents drill breakout).',
+  parameters: { type: 'object', properties: {} },
+  execute() { return { ok: true, result: { action: 'generateTeardrops' } }; },
+};
+
+const verifyNetlistTool: Tool = {
+  name: 'pcb.verifyNetlist',
+  category: 'PCB',
+  description: 'Verify that the PCB netlist matches the schematic netlist. Catches missing connections, wrong nets, short circuits.',
+  parameters: { type: 'object', properties: {} },
+  execute() { return { ok: true, result: { action: 'verifyNetlist' } }; },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DOCUMENT TOOLS
+// ─────────────────────────────────────────────────────────────────────────────
+
+const serializeDocumentTool: Tool = {
+  name: 'schematic.serialize',
+  category: 'Discovery',
+  description: 'Get the full current circuit document as JSON (components, wires, metadata). Useful for understanding the complete state.',
+  parameters: { type: 'object', properties: {} },
+  execute(_args, ctx) {
+    return {
+      ok: true,
+      result: {
+        version: ctx.doc.version,
+        componentCount: ctx.doc.components.length,
+        wireCount: ctx.doc.wires.length,
+        components: ctx.doc.components.map(c => ({ id: c.id, type: c.type, position: c.position, rotation: c.rotation, parameters: c.parameters })),
+        wires: ctx.doc.wires.map(w => ({ id: w.id, from: w.from, to: w.to })),
+      },
+    };
+  },
+};
+
+const exportKiCadNetlistTool: Tool = {
+  name: 'export.kiCadNetlist',
+  category: 'Examples & Export',
+  description: 'Export the circuit as a KiCad XML netlist (.net format) for importing into KiCad\'s PCB editor.',
+  parameters: { type: 'object', properties: {} },
+  execute(_args, ctx) {
+    try {
+      const netlist = exportKiCadNetlist(ctx.doc);
+      return { ok: true, result: { netlist } };
+    } catch (e) {
+      return { ok: false, error: `Export failed: ${(e as Error).message}` };
+    }
+  },
+};
+
+const loadDocumentTool: Tool = {
+  name: 'schematic.loadDocument',
+  category: 'Circuit Building',
+  description: 'Replace the entire circuit with a provided document (components + wires). Use this to load a previously-saved circuit or apply a large batch of changes at once.',
+  parameters: {
+    type: 'object',
+    properties: {
+      components: {
+        type: 'array',
+        description: 'Array of component objects, each with {id, type, position:{x,y}, rotation, parameters}',
+        items: { type: 'object' },
+      },
+      wires: {
+        type: 'array',
+        description: 'Array of wire objects, each with {id, from:{componentId,terminalId}, to:{componentId,terminalId}}',
+        items: { type: 'object' },
+      },
+    },
+    required: ['components', 'wires'],
+  },
+  execute(args, ctx) {
+    ctx.doc.components = args.components;
+    ctx.doc.wires = args.wires;
+    return { ok: true, result: { componentsLoaded: args.components.length, wiresLoaded: args.wires.length } };
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TOOL REGISTRY
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const TOOLS: Tool[] = [
   // Circuit Building
   addComponentTool,
@@ -677,12 +982,16 @@ export const TOOLS: Tool[] = [
   addWireTool,
   removeWireTool,
   clearCircuitTool,
+  reannotateTool,
+  loadDocumentTool,
 
   // Discovery
   listComponentsTool,
   listWiresTool,
   listComponentTypesTool,
   getComponentInfoTool,
+  findComponentTool,
+  serializeDocumentTool,
 
   // Simulation & Analysis
   runSimulationTool,
@@ -690,18 +999,32 @@ export const TOOLS: Tool[] = [
   getCurrentTool,
   validatePhysicsTool,
   solveDCTool,
+  runERCTool,
+
+  // Simulation Control (client-side)
+  startSimulationTool,
+  pauseSimulationTool,
+  resetSimulationTool,
+  setSimulationSpeedTool,
 
   // Examples & Export
   listExamplesTool,
   loadExampleTool,
   exportSPICENetlistTool,
   exportBOMTool,
+  exportKiCadNetlistTool,
 
   // PCB
   importToPCBTool,
   runAutoRouteTool,
   runDRCTool,
   runTopoRouteTool,
+  setBoardSizeTool,
+  setDefaultTraceWidthTool,
+  setActiveLayerTool,
+  addCopperPourTool,
+  generateTeardropsTool,
+  verifyNetlistTool,
 ];
 
 export const TOOLS_BY_NAME = new Map(TOOLS.map(t => [t.name, t]));

@@ -6,71 +6,149 @@ import { usePCB } from '@/lib/pcb/store';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { ChevronDown, ChevronRight, Send, Sparkles, Loader2, X, AlertCircle, CheckCircle2, Wrench } from 'lucide-react';
+import { ChevronDown, ChevronRight, Send, Sparkles, Loader2, X, AlertCircle, CheckCircle2, Wrench, Undo2, Eye, GitBranch } from 'lucide-react';
 import { toast } from 'sonner';
+
+interface ToolCallEntry {
+  name: string;
+  args: any;
+  result?: any;
+  error?: string;
+  ok: boolean;
+}
 
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
-  toolCalls?: any[];
+  toolCalls?: ToolCallEntry[];
   timestamp: number;
   loading?: boolean;
   error?: string;
-}
-
-interface ApiResponse {
-  response?: string;
-  toolCalls?: any[];
-  circuit?: {
+  pendingDiff?: {
     components: any[];
     wires: any[];
+    summary: string;
   };
-  error?: string;
-  warning?: string;
-  provider?: string;
-  model?: string;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+}
+
+interface CircuitSnapshot {
+  components: any[];
+  wires: any[];
 }
 
 const SUGGESTED_PROMPTS = [
   'Build an LED blinker with a 555 timer',
-  'Add a resistor and LED, then simulate',
   'Create an RC low-pass filter and verify the cutoff frequency',
   'Build a common-emitter amplifier and measure the gain',
   'Explain the current circuit',
   'Run physics validation on my circuit',
 ];
 
+// Tools that mutate the circuit (require undo checkpoint)
+const MUTATING_TOOLS = new Set([
+  'schematic.addComponent', 'schematic.removeComponent', 'schematic.moveComponent',
+  'schematic.rotateComponent', 'schematic.setParameter', 'schematic.addWire',
+  'schematic.removeWire', 'schematic.clear', 'schematic.reannotate',
+  'schematic.loadDocument', 'examples.load',
+]);
+
+// Tools that require client-side PCB action
+const PCB_TOOLS = new Set(['pcb.importFromSchematic', 'pcb.autoRoute', 'pcb.topoRoute', 'pcb.runDRC']);
+
+// Tools that require client-side simulation action
+const SIM_CONTROL_TOOLS = new Set(['simulate.start', 'simulate.pause', 'simulate.reset', 'simulate.setSpeed']);
+
 export function ChatPanel({ onClose }: { onClose: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [autoApply, setAutoApply] = useState(false); // When false, show diff preview before applying
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Editor + PCB stores for circuit snapshot
+  // Editor + PCB stores
   const components = useEditor(s => s.components);
   const wires = useEditor(s => s.wires);
   const loadDocument = useEditor(s => s.loadDocument);
+  const pushHistory = useEditor(s => s.pushHistory);
+  const undo = useEditor(s => s.undo);
   const setRunning = useEditor(s => s.setRunning);
+  const setSpeed = useEditor(s => s.setSpeed);
+  const reset = useEditor(s => s.reset);
 
-  // PCB store (for PCB-related tool calls)
-  const pcbFootprints = usePCB(s => s.footprints);
-  const pcbTraces = usePCB(s => s.traces);
-  const pcbVias = usePCB(s => s.vias);
-  const pcbBoard = usePCB(s => s.board);
+  // PCB store
   const runAutoRoute = usePCB(s => s.runAutoRoute);
   const runTopoRoute = usePCB(s => s.runTopoRoute);
   const runDRC = usePCB(s => s.runDRC);
   const importFromSchematic = usePCB(s => s.importFromSchematic);
+  const setBoardSize = usePCB(s => s.setBoardSize);
+  const setDefaultTraceWidth = usePCB(s => s.setDefaultTraceWidth);
+  const setActiveLayer = usePCB(s => s.setActiveLayer);
+  const addCopperPour = usePCB(s => s.addCopperPour);
+  const generateTeardrops = usePCB(s => s.generateTeardrops);
 
-  // Auto-scroll to bottom on new message
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  const applyCircuitUpdate = useCallback((newComponents: any[], newWires: any[], isFinal: boolean) => {
+    // Push current state to undo stack BEFORE applying (so Ctrl+Z reverts the AI change)
+    pushHistory();
+    loadDocument({
+      version: 1,
+      components: newComponents,
+      wires: newWires,
+    });
+    if (isFinal) {
+      toast.success('Circuit updated by AI — press Ctrl+Z to undo');
+    }
+  }, [pushHistory, loadDocument]);
+
+  const handleClientSideAction = useCallback((tc: ToolCallEntry) => {
+    if (tc.name === 'simulate.start') {
+      setRunning(true);
+      toast.success('Simulation started');
+    } else if (tc.name === 'simulate.pause') {
+      setRunning(false);
+      toast.success('Simulation paused');
+    } else if (tc.name === 'simulate.reset') {
+      reset();
+      toast.success('Simulation reset');
+    } else if (tc.name === 'simulate.setSpeed') {
+      setSpeed(tc.args.speed);
+      toast.success(`Speed set to ${tc.args.speed}×`);
+    } else if (tc.name === 'pcb.importFromSchematic') {
+      importFromSchematic(useEditor.getState().components, useEditor.getState().wires);
+      toast.success('Schematic imported to PCB');
+    } else if (tc.name === 'pcb.autoRoute') {
+      runAutoRoute();
+      toast.success('Auto-route complete');
+    } else if (tc.name === 'pcb.topoRoute') {
+      const r = runTopoRoute();
+      toast.success(`Topo-route: ${r.routed} routed, ${r.failed} failed`);
+    } else if (tc.name === 'pcb.runDRC') {
+      runDRC();
+      toast.success('DRC complete');
+    } else if (tc.name === 'pcb.setBoardSize') {
+      setBoardSize(tc.args.width, tc.args.height);
+      toast.success(`Board size set to ${tc.args.width}×${tc.args.height}mm`);
+    } else if (tc.name === 'pcb.setDefaultTraceWidth') {
+      setDefaultTraceWidth(tc.args.width);
+      toast.success(`Trace width set to ${tc.args.width}mm`);
+    } else if (tc.name === 'pcb.setActiveLayer') {
+      setActiveLayer(tc.args.layer);
+      toast.success(`Active layer: ${tc.args.layer}`);
+    } else if (tc.name === 'pcb.addCopperPour') {
+      addCopperPour(tc.args.layer, tc.args.net);
+      toast.success(`Copper pour added on ${tc.args.layer} for ${tc.args.net}`);
+    } else if (tc.name === 'pcb.generateTeardrops') {
+      generateTeardrops();
+      toast.success('Teardrops generated');
+    }
+  }, [setRunning, reset, setSpeed, importFromSchematic, runAutoRoute, runTopoRoute, runDRC, setBoardSize, setDefaultTraceWidth, setActiveLayer, addCopperPour, generateTeardrops]);
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || isLoading) return;
@@ -83,22 +161,24 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
       content: text,
       timestamp: Date.now(),
     };
+    const assistantMsgId = `a_${Date.now()}`;
     const loadingMsg: ChatMessage = {
-      id: `a_${Date.now()}`,
+      id: assistantMsgId,
       role: 'assistant',
       content: '',
       timestamp: Date.now(),
       loading: true,
+      toolCalls: [],
     };
     setMessages(prev => [...prev, userMsg, loadingMsg]);
 
-    // Capture circuit snapshot BEFORE sending (so we have the baseline)
-    const circuitSnapshot = {
+    // Capture circuit snapshot
+    const circuitSnapshot: CircuitSnapshot = {
       components: JSON.parse(JSON.stringify(components)),
       wires: JSON.parse(JSON.stringify(wires)),
     };
 
-    // Build message history for the API (only role + content)
+    // Build message history for the API
     const apiMessages = [
       ...messages.filter(m => !m.loading && !m.error).map(m => ({
         role: m.role,
@@ -108,7 +188,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     ];
 
     try {
-      const response = await fetch('/api/ai/chat', {
+      const response = await fetch('/api/ai/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -121,68 +201,152 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const data: ApiResponse = await response.json();
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response stream');
 
-      if (data.error) {
-        throw new Error(data.error);
-      }
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let textContent = '';
+      const toolCalls: ToolCallEntry[] = [];
+      let pendingCircuitUpdate: CircuitSnapshot | null = null;
 
-      // Apply circuit changes if the AI modified the circuit
-      if (data.circuit && (
-        data.circuit.components.length !== circuitSnapshot.components.length ||
-        data.circuit.wires.length !== circuitSnapshot.wires.length ||
-        JSON.stringify(data.circuit.components) !== JSON.stringify(circuitSnapshot.components)
-      )) {
-        // The AI made changes — load the new document
-        loadDocument({
-          version: 1,
-          components: data.circuit.components,
-          wires: data.circuit.wires,
-        });
-        toast.success('Circuit updated by AI');
-      }
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      // Handle PCB-side tool calls
-      if (data.toolCalls) {
-        for (const tc of data.toolCalls) {
-          if (tc.name === 'pcb.importFromSchematic' && tc.ok) {
-            importFromSchematic(components, wires);
-            toast.success('Schematic imported to PCB');
-          } else if (tc.name === 'pcb.autoRoute' && tc.ok) {
-            runAutoRoute();
-            toast.success('Auto-route complete — check PCB tab');
-          } else if (tc.name === 'pcb.topoRoute' && tc.ok) {
-            const result = runTopoRoute();
-            toast.success(`Topo-routed: ${result.routed} routed, ${result.failed} failed`);
-          } else if (tc.name === 'pcb.runDRC' && tc.ok) {
-            runDRC();
-            toast.success('DRC complete — check PCB tab for errors');
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        let eventType = '';
+        const dataLines: string[] = [];
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            dataLines.push(line.slice(6));
+          } else if (line === '') {
+            // Empty line = end of event
+            if (eventType && dataLines.length > 0) {
+              const data = JSON.parse(dataLines.join(''));
+
+              if (eventType === 'text_delta') {
+                textContent += data.text;
+                setMessages(prev => prev.map(m =>
+                  m.id === assistantMsgId
+                    ? { ...m, content: textContent, loading: false }
+                    : m
+                ));
+              } else if (eventType === 'tool_call') {
+                const tc: ToolCallEntry = {
+                  name: data.name,
+                  args: typeof data.args === 'string' ? JSON.parse(data.args) : data.args,
+                  result: data.result,
+                  error: data.error,
+                  ok: data.ok !== false,
+                };
+                toolCalls.push(tc);
+                setMessages(prev => prev.map(m =>
+                  m.id === assistantMsgId
+                    ? { ...m, toolCalls: [...(m.toolCalls || []), tc], loading: false }
+                    : m
+                ));
+
+                // Handle client-side actions immediately
+                if (SIM_CONTROL_TOOLS.has(tc.name) || PCB_TOOLS.has(tc.name) || tc.name.startsWith('pcb.')) {
+                  handleClientSideAction(tc);
+                }
+              } else if (eventType === 'circuit_update') {
+                pendingCircuitUpdate = { components: data.components, wires: data.wires };
+
+                // If auto-apply is on, apply immediately; otherwise store as pending diff
+                if (autoApply) {
+                  applyCircuitUpdate(data.components, data.wires, false);
+                } else {
+                  // Compute diff summary
+                  const addedComps = data.components.length - circuitSnapshot.components.length;
+                  const addedWires = data.wires.length - circuitSnapshot.wires.length;
+                  const summary = `${addedComps >= 0 ? '+' : ''}${addedComps} components, ${addedWires >= 0 ? '+' : ''}${addedWires} wires`;
+                  setMessages(prev => prev.map(m =>
+                    m.id === assistantMsgId
+                      ? { ...m, pendingDiff: { components: data.components, wires: data.wires, summary } }
+                      : m
+                  ));
+                }
+              } else if (eventType === 'done') {
+                textContent = data.response || textContent;
+                // Apply final circuit if not auto-applied and there's a pending diff
+                if (!autoApply && data.circuit && (
+                  data.circuit.components.length !== circuitSnapshot.components.length ||
+                  data.circuit.wires.length !== circuitSnapshot.wires.length ||
+                  JSON.stringify(data.circuit.components) !== JSON.stringify(circuitSnapshot.components)
+                )) {
+                  // Leave as pending diff for user to review
+                  const addedComps = data.circuit.components.length - circuitSnapshot.components.length;
+                  const addedWires = data.circuit.wires.length - circuitSnapshot.wires.length;
+                  const summary = `${addedComps >= 0 ? '+' : ''}${addedComps} components, ${addedWires >= 0 ? '+' : ''}${addedWires} wires`;
+                  setMessages(prev => prev.map(m =>
+                    m.id === assistantMsgId
+                      ? {
+                          ...m,
+                          content: textContent,
+                          toolCalls,
+                          loading: false,
+                          pendingDiff: { components: data.circuit.components, wires: data.circuit.wires, summary },
+                        }
+                      : m
+                  ));
+                } else if (autoApply && pendingCircuitUpdate) {
+                  // Final apply with toast
+                  applyCircuitUpdate(pendingCircuitUpdate.components, pendingCircuitUpdate.wires, true);
+                  setMessages(prev => prev.map(m =>
+                    m.id === assistantMsgId
+                      ? { ...m, content: textContent, toolCalls, loading: false }
+                      : m
+                  ));
+                } else {
+                  setMessages(prev => prev.map(m =>
+                    m.id === assistantMsgId
+                      ? { ...m, content: textContent, toolCalls, loading: false }
+                      : m
+                  ));
+                }
+              } else if (eventType === 'error') {
+                throw new Error(data.message);
+              }
+            }
+            eventType = '';
+            dataLines.length = 0;
           }
         }
       }
-
-      const assistantMsg: ChatMessage = {
-        id: `a_${Date.now()}`,
-        role: 'assistant',
-        content: data.response || '(no response)',
-        toolCalls: data.toolCalls,
-        timestamp: Date.now(),
-      };
-      setMessages(prev => [...prev.filter(m => m.id !== loadingMsg.id), assistantMsg]);
     } catch (e) {
-      const errorMsg: ChatMessage = {
-        id: `a_${Date.now()}`,
-        role: 'assistant',
-        content: `Sorry, I encountered an error: ${(e as Error).message}`,
-        timestamp: Date.now(),
-        error: 'true',
-      };
-      setMessages(prev => [...prev.filter(m => m.id !== loadingMsg.id), errorMsg]);
+      setMessages(prev => prev.map(m =>
+        m.id === assistantMsgId
+          ? {
+              ...m,
+              content: `Sorry, I encountered an error: ${(e as Error).message}`,
+              loading: false,
+              error: 'true',
+            }
+          : m
+      ));
       toast.error('AI request failed');
     } finally {
       setIsLoading(false);
     }
-  }, [isLoading, components, wires, messages, loadDocument, importFromSchematic, runAutoRoute, runTopoRoute, runDRC]);
+  }, [isLoading, components, wires, messages, autoApply, applyCircuitUpdate, handleClientSideAction]);
+
+  const applyPendingDiff = useCallback((msgId: string) => {
+    setMessages(prev => prev.map(m => {
+      if (m.id === msgId && m.pendingDiff) {
+        applyCircuitUpdate(m.pendingDiff.components, m.pendingDiff.wires, true);
+        return { ...m, pendingDiff: undefined };
+      }
+      return m;
+    }));
+  }, [applyCircuitUpdate]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -202,13 +366,25 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
             <p className="text-xs text-slate-500">Designs, analyzes & debugs circuits</p>
           </div>
         </div>
-        <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8">
-          <X className="h-4 w-4" />
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setAutoApply(s => !s)}
+            className="h-7 px-2 text-xs"
+            title={autoApply ? 'Auto-apply ON — changes apply immediately' : 'Auto-apply OFF — review before applying'}
+          >
+            <GitBranch className={`h-3.5 w-3.5 ${autoApply ? 'text-emerald-400' : 'text-amber-400'}`} />
+            <span className="ml-1 hidden sm:inline">{autoApply ? 'Auto' : 'Review'}</span>
+          </Button>
+          <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
 
       {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         <div className="space-y-4 p-4">
           {messages.length === 0 && (
             <div className="space-y-3">
@@ -229,7 +405,12 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
           )}
 
           {messages.map(msg => (
-            <MessageBubble key={msg.id} message={msg} />
+            <MessageBubble
+              key={msg.id}
+              message={msg}
+              onApplyDiff={() => applyPendingDiff(msg.id)}
+              onUndo={() => undo()}
+            />
           ))}
         </div>
       </div>
@@ -256,14 +437,14 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
           </Button>
         </div>
         <p className="mt-1 px-1 text-[10px] text-slate-600">
-          Enter to send · Shift+Enter for newline
+          Enter to send · Shift+Enter for newline · Ctrl+Z to undo AI changes
         </p>
       </div>
     </div>
   );
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBubble({ message, onApplyDiff, onUndo }: { message: ChatMessage; onApplyDiff: () => void; onUndo: () => void }) {
   if (message.role === 'user') {
     return (
       <div className="flex justify-end">
@@ -274,7 +455,6 @@ function MessageBubble({ message }: { message: ChatMessage }) {
     );
   }
 
-  // Assistant message
   return (
     <div className="flex justify-start">
       <div className="max-w-[90%] space-y-2">
@@ -289,16 +469,41 @@ function MessageBubble({ message }: { message: ChatMessage }) {
                 : 'border border-slate-800 bg-slate-900 text-slate-200'
             }`}
           >
-            {message.loading ? (
+            {message.loading && !message.content ? (
               <div className="flex items-center gap-2 text-slate-400">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 <span>Thinking...</span>
               </div>
             ) : (
-              <div className="whitespace-pre-wrap break-words">{message.content}</div>
+              <div className="whitespace-pre-wrap break-words">{message.content || (message.loading ? '...' : '')}</div>
             )}
           </div>
         </div>
+
+        {/* Pending diff preview */}
+        {message.pendingDiff && (
+          <div className="ml-6 rounded-lg border border-amber-700/50 bg-amber-950/20 p-3">
+            <div className="mb-2 flex items-center gap-2">
+              <Eye className="h-4 w-4 text-amber-400" />
+              <span className="text-xs font-medium text-amber-300">Circuit changes ready to apply</span>
+              <span className="ml-auto rounded bg-amber-900/50 px-2 py-0.5 text-[10px] font-mono text-amber-200">
+                {message.pendingDiff.summary}
+              </span>
+            </div>
+            <div className="mb-2 text-xs text-slate-400">
+              {message.pendingDiff.components.length} components · {message.pendingDiff.wires.length} wires
+            </div>
+            <div className="flex gap-2">
+              <Button size="sm" onClick={onApplyDiff} className="h-7 bg-emerald-600 text-xs hover:bg-emerald-500">
+                <CheckCircle2 className="mr-1 h-3 w-3" />
+                Apply changes
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => { /* dismiss */ }} className="h-7 border-slate-700 text-xs">
+                Dismiss
+              </Button>
+            </div>
+          </div>
+        )}
 
         {/* Tool calls */}
         {message.toolCalls && message.toolCalls.length > 0 && (
@@ -308,14 +513,24 @@ function MessageBubble({ message }: { message: ChatMessage }) {
             ))}
           </div>
         )}
+
+        {/* Undo button (shown if changes were applied) */}
+        {!message.loading && !message.error && message.toolCalls && message.toolCalls.some(tc => MUTATING_TOOLS.has(tc.name)) && !message.pendingDiff && (
+          <div className="ml-6">
+            <Button size="sm" variant="ghost" onClick={onUndo} className="h-7 text-xs text-slate-400 hover:text-slate-200">
+              <Undo2 className="mr-1 h-3 w-3" />
+              Undo these changes
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function ToolCallDisplay({ toolCall }: { toolCall: any }) {
+function ToolCallDisplay({ toolCall }: { toolCall: ToolCallEntry }) {
   const [open, setOpen] = useState(false);
-  const success = toolCall.ok !== false;
+  const success = toolCall.ok;
   const hasResult = toolCall.result !== undefined;
   const hasError = !!toolCall.error;
 
@@ -332,7 +547,7 @@ function ToolCallDisplay({ toolCall }: { toolCall: any }) {
         <div className="mt-1 space-y-1 rounded border border-slate-800/50 bg-slate-950/50 p-2 text-xs">
           <div>
             <span className="text-slate-500">Args:</span>
-            <pre className="mt-0.5 overflow-x-auto rounded bg-slate-900 p-1.5 text-slate-300">
+            <pre className="mt-0.5 max-h-40 overflow-auto rounded bg-slate-900 p-1.5 text-slate-300">
               {JSON.stringify(toolCall.args, null, 2)}
             </pre>
           </div>
