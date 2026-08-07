@@ -1682,3 +1682,55 @@ Stage Summary:
 - Type-check clean
 - Production build succeeds
 - ESLint: 0 errors, 24 warnings (all `any`-type warnings on Three.js internals — non-blocking)
+
+---
+Task ID: new-complex-example-audio-amplifier
+Agent: main
+Task: Add a new complex circuit example using existing components. Ensure wiring is correct and simulation works.
+
+Work Log:
+- Designed a meaningful complex circuit: "Two-Stage Audio Amplifier with Tone Control"
+  - Stage 1: NPN common-emitter pre-amplifier with bias divider (R1/R2), collector load (Rc1),
+    emitter degeneration (Re1 + Ce1 bypass cap)
+  - Tone control: passive RC low-pass (Rtone + Ctone, fc ≈ 1.6 kHz treble cut)
+  - Stage 2: op-amp non-inverting power amplifier (gain = 1 + Rf/Rg = 11)
+  - Output: coupling cap C3 → 8Ω speaker
+  - Power: +9V rail (transistor stage) and -9V rail (op-amp negative supply)
+  - Three oscilloscope probes: input, post-stage-1, output
+  - All grounds tie to a single ground node
+  - Total: 19 components, 35 wires
+
+- Component types used (all already registered):
+  - dcVoltage ×2, acVoltage, ground (sources)
+  - resistor ×6, capacitor ×5 (passives)
+  - npn (semiconductor)
+  - opampRails (IC with power rails)
+  - speaker (IO)
+  - oscilloscope ×3 (meters)
+
+- Validated by writing a temporary verification test BEFORE adding the example:
+  - Wire connectivity: all 35 wires connect to valid component/terminal pairs ✓
+  - Simulation runs: 100 steps without returning null ✓
+  - No NaN/Infinity voltages ✓
+  - No error-severity physics violations ✓
+  - +9V rail node is between 8V and 10V ✓
+  - -9V rail node is between -10V and -8V ✓
+  - Q1 base bias voltage between 3V and 6V (mid-supply) ✓
+  All 7 tests passed.
+
+- Added example to `src/lib/circuit/examples.ts`:
+  - Exported as `exampleAudioAmplifier`
+  - Added to the "Op-Amps" category in `exampleCategories` (fits well since op-amp is the central active component of stage 2)
+  - Existing `tests/examples.test.ts` automatically picks up the new example (it iterates `exampleCategories`) — runs all 4 standard checks (wires, sim, no-NaN, physics) on it.
+
+- Cleaned up: removed temporary verification files (`tests/audio-amp-verify.test.ts`, `tests/audio-amp-helpers.ts`, `scripts/audio-amplifier-*.ts`)
+
+- Verified the new example appears in the JS bundle (`/_next/static/chunks/src_lib_circuit_a903cdd6._.js`), confirming it will load in the Examples dropdown at runtime.
+
+Stage Summary:
+- New complex example: "Two-Stage Audio Amplifier with Tone Control" — 19 components, 35 wires
+- Exercises: AC+DC sources, capacitors, NPN transistor with bias network, op-amp with rails + feedback, speaker, oscilloscopes
+- All 287 tests pass (was 283 + 4 new tests for the new example: wires, sim, no-NaN, physics)
+- Type-check clean
+- Build succeeds
+- Example visible in the "Op-Amps" category in the Examples dropdown

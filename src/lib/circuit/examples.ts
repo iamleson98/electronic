@@ -1263,6 +1263,150 @@ export const exampleVCO: CircuitDocument = {
   ],
 };
 
+// ----- Two-Stage Audio Amplifier with Tone Control -----
+// A complete audio signal chain: pre-amp → tone control → power amp → speaker.
+//
+// Signal flow:
+//   vSig (AC, 1V @ 1kHz) → C1 (input coupling, blocks DC)
+//     → Q1 base, biased by R1/R2 divider (~4.5V mid-supply)
+//     → Q1 common-emitter amplifier (Rc1 collector load, Re1+Ce1 emitter)
+//     → Rtone + Ctone passive RC low-pass (treble cut, fc ≈ 1.6kHz)
+//     → C2 inter-stage coupling cap
+//     → op1 non-inverting amplifier (gain 1 + Rf/Rg = 11)
+//     → C3 output coupling cap
+//     → 8Ω speaker
+//
+// Power: +9V single supply for the transistor stage; op-amp gets ±9V rails
+// for output headroom. Three oscilloscopes probe the input, post-stage-1,
+// and the final output. All grounds tie to a single node for proper return.
+//
+// Components used: dcVoltage ×2, acVoltage, npn, opampRails, resistor ×6,
+//   capacitor ×5, speaker, oscilloscope ×3, ground
+//   (16 components, 35 wires — a meaningful integration test)
+export const exampleAudioAmplifier: CircuitDocument = {
+  version: 1,
+  components: [
+    // ── Power supplies ────────────────────────────────────────────────────
+    comp('dcVoltage', 'vPos', [4, 4], 0, { voltage: 9 }),
+    comp('dcVoltage', 'vNeg', [4, 14], 0, { voltage: -9 }),
+    comp('acVoltage', 'vSig', [6, 8], 0, { amplitude: 1, frequency: 1000, offset: 0, phase: 0 }),
+    comp('ground', 'gnd1', [5, 22], 0, {}),
+
+    // ── Stage 1: NPN common-emitter amplifier ─────────────────────────────
+    comp('capacitor', 'c1', [8, 8], 0, { capacitance: 1e-6, initialV: 0 }),
+    comp('resistor', 'r1', [11, 4], 0, { resistance: 100000 }),
+    comp('resistor', 'r2', [11, 12], 0, { resistance: 100000 }),
+    comp('npn', 'q1', [14, 8], 0, { hfe: 200, vbe: 0.7, satV: 0.2 }),
+    comp('resistor', 'rc1', [14, 4], 0, { resistance: 4700 }),
+    comp('resistor', 're1', [14, 12], 0, { resistance: 470 }),
+    comp('capacitor', 'ce1', [18, 12], 0, { capacitance: 100e-6, initialV: 0 }),
+
+    // ── Tone control: passive RC low-pass (treble cut) ────────────────────
+    comp('resistor', 'rtone', [19, 8], 0, { resistance: 10000 }),
+    comp('capacitor', 'ctone', [23, 12], 0, { capacitance: 10e-9, initialV: 0 }),
+
+    // ── Inter-stage coupling cap ─────────────────────────────────────────
+    comp('capacitor', 'c2', [23, 8], 0, { capacitance: 1e-6, initialV: 0 }),
+
+    // ── Stage 2: op-amp non-inverting amplifier (gain = 11) ──────────────
+    comp('opampRails', 'op1', [26, 8], 0, { gain: 1e5 }),
+    comp('resistor', 'rf', [30, 4], 0, { resistance: 100000 }),
+    comp('resistor', 'rg', [30, 12], 0, { resistance: 10000 }),
+
+    // ── Output coupling + speaker ────────────────────────────────────────
+    comp('capacitor', 'c3', [31, 8], 0, { capacitance: 100e-6, initialV: 0 }),
+    comp('speaker', 'spk1', [34, 8], 0, { impedance: 8 }),
+
+    // ── Oscilloscope probes ─────────────────────────────────────────────
+    comp('oscilloscope', 'scIn', [4, 2], 0, { color: '#f97316', label: 'Input' }),
+    comp('oscilloscope', 'scMid', [16, 2], 0, { color: '#fbbf24', label: 'Stage1' }),
+    comp('oscilloscope', 'scOut', [34, 2], 0, { color: '#22d3ee', label: 'Output' }),
+  ],
+  wires: [
+    // ── Power supply rails ────────────────────────────────────────────────
+    // +9V rail: vPos.p → op1.v+
+    wire('w1', 'vPos', 'p', 'op1', 'v+', [[28, 4], [28, 8]]),
+    // vPos.n → ground
+    wire('w2', 'vPos', 'n', 'gnd1', 'g', [[5, 8], [5, 22]]),
+    // -9V rail: vNeg.p → op1.v-
+    wire('w3', 'vNeg', 'p', 'op1', 'v-', [[28, 14], [28, 12]]),
+    wire('w4', 'vNeg', 'n', 'gnd1', 'g', [[5, 18], [5, 22]]),
+
+    // ── Audio signal input ───────────────────────────────────────────────
+    // vSig.p → scIn.p (probe the source)
+    wire('w5', 'vSig', 'p', 'scIn', 'p', [[7, 3], [4, 3]]),
+    // scIn.n → ground
+    wire('w6', 'scIn', 'n', 'gnd1', 'g', [[6, 3], [6, 22], [5, 22]]),
+    // vSig.n → ground
+    wire('w7', 'vSig', 'n', 'gnd1', 'g', [[7, 12], [7, 22], [5, 22]]),
+    // vSig.p → C1.a (signal into amplifier)
+    wire('w8', 'vSig', 'p', 'c1', 'a'),
+
+    // ── Stage 1: bias divider + transistor ──────────────────────────────
+    // C1.b → Q1.b (AC signal into base, on top of DC bias)
+    wire('w9', 'c1', 'b', 'q1', 'b', [[14, 9], [14, 10]]),
+    // R1.b → Q1.b (bias divider top half — same node)
+    wire('w10', 'r1', 'b', 'q1', 'b', [[15, 10], [14, 10]]),
+    // R1.a → V+ rail
+    wire('w11', 'r1', 'a', 'vPos', 'p', [[11, 4]]),
+    // R2.a → Q1.b (bias divider bottom half — same node)
+    wire('w12', 'r2', 'a', 'q1', 'b', [[14, 13], [14, 10]]),
+    // R2.b → ground
+    wire('w13', 'r2', 'b', 'gnd1', 'g', [[15, 22]]),
+
+    // ── Stage 1: collector & emitter ──────────────────────────────────────
+    // Q1.c → Rc1.b (collector up to Rc1)
+    wire('w14', 'q1', 'c', 'rc1', 'b', [[18, 8], [18, 5]]),
+    // Rc1.a → V+ rail (top of collector resistor to +9V)
+    wire('w15', 'rc1', 'a', 'vPos', 'p', [[14, 4]]),
+    // Q1.e → Re1.a (emitter to top of Re1)
+    wire('w16', 'q1', 'e', 're1', 'a', [[17, 13], [14, 13]]),
+    // Re1.b → ground
+    wire('w17', 're1', 'b', 'gnd1', 'g', [[18, 22]]),
+    // Ce1 bypasses Re1: Re1.a → Ce1.a, Ce1.b → ground
+    wire('w18', 're1', 'a', 'ce1', 'a', [[18, 13]]),
+    wire('w19', 'ce1', 'b', 'gnd1', 'g', [[22, 22]]),
+
+    // ── Stage 1 → tone control ───────────────────────────────────────────
+    // Q1.c → Rtone.a (signal tapped from collector)
+    wire('w20', 'q1', 'c', 'rtone', 'a', [[19, 8], [19, 9]]),
+    // Rtone.b → C2.a (signal continues to inter-stage cap)
+    wire('w21', 'rtone', 'b', 'c2', 'a'),
+    // Ctone.a → Rtone.b (treble bleeds to ground at this node)
+    wire('w22', 'ctone', 'a', 'rtone', 'b', [[23, 9]]),
+    // Ctone.b → ground
+    wire('w23', 'ctone', 'b', 'gnd1', 'g', [[27, 22]]),
+
+    // Probe the post-stage-1 signal (mid-amplifier node)
+    wire('w24', 'rtone', 'b', 'scMid', 'p', [[23, 3], [16, 3]]),
+    wire('w25', 'scMid', 'n', 'gnd1', 'g', [[18, 3], [18, 22], [5, 22]]),
+
+    // ── Stage 2: op-amp input ────────────────────────────────────────────
+    // C2.b → op1.in+ (non-inverting input)
+    wire('w26', 'c2', 'b', 'op1', 'in+', [[26, 9]]),
+    // op1.in- → Rg.a (inverting input → Rg → ground)
+    wire('w27', 'op1', 'in-', 'rg', 'a', [[30, 10], [30, 13]]),
+    // Rg.b → ground
+    wire('w28', 'rg', 'b', 'gnd1', 'g', [[34, 22]]),
+    // Rf: feedback from op1.out → Rf.b
+    wire('w29', 'op1', 'out', 'rf', 'b', [[34, 9.5], [34, 5]]),
+    // Rf.a → op1.in- (same node as Rg.a)
+    wire('w30', 'rf', 'a', 'op1', 'in-', [[30, 10], [26, 10]]),
+
+    // ── Output coupling → speaker ────────────────────────────────────────
+    // op1.out → C3.a (block DC offset before speaker)
+    wire('w31', 'op1', 'out', 'c3', 'a', [[31, 9.5], [31, 9]]),
+    // C3.b → speaker.a
+    wire('w32', 'c3', 'b', 'spk1', 'a', [[35, 9], [34, 9]]),
+    // Speaker.b → ground
+    wire('w33', 'spk1', 'b', 'gnd1', 'g', [[37, 22]]),
+
+    // ── Output oscilloscope probe ────────────────────────────────────────
+    wire('w34', 'spk1', 'a', 'scOut', 'p', [[34, 3]]),
+    wire('w35', 'scOut', 'n', 'gnd1', 'g', [[36, 3], [36, 22], [5, 22]]),
+  ],
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Categorized example tree.
 // Each category groups related circuits. To add a new example, just append
@@ -1312,6 +1456,7 @@ export const exampleCategories: ExampleCategory[] = [
     examples: [
       { name: 'Op-Amp Inverting Amp', description: 'Op-amp with gain -10 (Rf/Rin = 10k/1k)', doc: exampleOpamp },
       { name: 'Op-Amp Non-inverting Amp', description: 'Real op-amp with rails, gain = 1 + Rf/Rg = 11', doc: exampleOpampNonInverting },
+      { name: 'Two-Stage Audio Amplifier', description: 'Pre-amp + tone control + power amp driving a speaker (16 components, 35 wires)', doc: exampleAudioAmplifier },
     ],
   },
   {
