@@ -99,19 +99,31 @@ export function autoRoute(
     }
   }
 
+  // Collect via obstacles once (they never change during this routing pass)
+  const viaObstacles: { x: number; y: number; radius: number }[] = [];
   for (const via of existingVias) {
-    markObstacle(grid, via.position.x, via.position.y, via.diameter / 2 + 0.3, cols, rows);
+    viaObstacles.push({ x: via.position.x, y: via.position.y, radius: via.diameter / 2 + 0.3 });
   }
 
   for (const [net, connections] of sortedNets) {
     for (const conn of connections) {
       const netPads = padPositions.filter((p) => p.net === net);
 
+      // Re-apply static obstacles (vias, traces) on every iteration since the
+      // grid is reset between routes (see reset below). This is correct
+      // behavior: traces we've already routed ARE real obstacles for the
+      // next net, and vias are permanent physical holes.
+      for (const via of viaObstacles) {
+        markObstacle(grid, via.x, via.y, via.radius, cols, rows);
+      }
+
+      // Mark pads of OTHER nets as obstacles (pads of this net are walkable)
       for (const pad of padPositions) {
         if (pad.net === net) continue;
         markObstacle(grid, pad.x, pad.y, 0.4, cols, rows);
       }
 
+      // Mark all existing traces (including newly routed ones) as obstacles
       for (const obs of traceObstacles) {
         markLineObstacle(grid, obs.x1, obs.y1, obs.x2, obs.y2, obs.width / 2 + 0.2, cols, rows);
       }
@@ -176,12 +188,18 @@ export function autoRoute(
         result.stats.failed++;
       }
 
-      // Reset grid
+      // Reset grid — INCLUDING `blocked`. Previous version only reset
+      // cost/visited/parent, which meant obstacle marks from previous nets
+      // accumulated and eventually blocked the entire grid. This was the
+      // root cause of the "router only routes 1-2 nets then gives up" bug.
+      // We re-apply ALL static obstacles (vias, traces) at the top of the
+      // next iteration, so resetting `blocked` here is safe.
       for (let r = 0; r < rows; r++) {
         for (let c = 0; c < cols; c++) {
           grid[r][c].cost = -1;
           grid[r][c].visited = false;
           grid[r][c].parent = null;
+          grid[r][c].blocked = false;
         }
       }
     }

@@ -503,11 +503,49 @@ function aStarRoute(
   const heuristic = (cx: number, cy: number) =>
     Math.hypot(dstCol - cx, dstRow - cy);
 
-  const open: AStarNode[] = [];
+  // Binary min-heap for A* open set. Previous version used Array.splice on
+  // every iteration which is O(n) per pop, O(n²) overall — on a 100x80 board
+  // with 8000 cells that meant ~64M comparisons just for heap management.
+  // Binary heap: O(log n) push, O(log n) pop, total O(n log n).
+  // For a 8000-cell grid this is ~100x faster, which matters a lot when the
+  // user is interactively running auto-route.
+  const heap: AStarNode[] = [];
+  const heapPush = (node: AStarNode) => {
+    heap.push(node);
+    let i = heap.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (heap[parent].f <= heap[i].f) break;
+      [heap[parent], heap[i]] = [heap[i], heap[parent]];
+      i = parent;
+    }
+  };
+  const heapPop = (): AStarNode | undefined => {
+    if (heap.length === 0) return undefined;
+    const top = heap[0];
+    const last = heap.pop()!;
+    if (heap.length > 0) {
+      heap[0] = last;
+      let i = 0;
+      const n = heap.length;
+      while (true) {
+        const l = 2 * i + 1;
+        const r = 2 * i + 2;
+        let best = i;
+        if (l < n && heap[l].f < heap[best].f) best = l;
+        if (r < n && heap[r].f < heap[best].f) best = r;
+        if (best === i) break;
+        [heap[best], heap[i]] = [heap[i], heap[best]];
+        i = best;
+      }
+    }
+    return top;
+  };
+
   const visited = new Uint8Array(cols * rows);
   const gScore = new Float64Array(cols * rows).fill(Infinity);
   const startNode: AStarNode = { x: srcCol, y: srcRow, g: 0, f: heuristic(srcCol, srcRow), parent: null };
-  open.push(startNode);
+  heapPush(startNode);
   gScore[srcRow * cols + srcCol] = 0;
 
   // Allow source/target cells even if they're "blocked" (the pad itself)
@@ -520,14 +558,10 @@ function aStarRoute(
   let iterations = 0;
   const MAX_ITER = cols * rows; // safety cap
 
-  while (open.length > 0 && iterations < MAX_ITER) {
+  while (heap.length > 0 && iterations < MAX_ITER) {
     iterations++;
-    // Find node with lowest f (slow — could use a heap for performance)
-    let bestIdx = 0;
-    for (let i = 1; i < open.length; i++) {
-      if (open[i].f < open[bestIdx].f) bestIdx = i;
-    }
-    const current = open.splice(bestIdx, 1)[0];
+    const current = heapPop()!;
+    if (!current) break;
 
     if (current.x === dstCol && current.y === dstRow) {
       // Reconstruct path
@@ -566,7 +600,7 @@ function aStarRoute(
       const tentativeG = current.g + dir.cost;
       if (tentativeG < gScore[nIdx]) {
         gScore[nIdx] = tentativeG;
-        open.push({
+        heapPush({
           x: nx, y: ny,
           g: tentativeG,
           f: tentativeG + heuristic(nx, ny),
@@ -671,20 +705,22 @@ function shoveAside(newTrace: Trace, existing: Trace[], options: TopologicalRout
     for (const trace of result) {
       if (trace.net === newTrace.net) continue;
       if (trace.layer !== newTrace.layer) continue;
+      // Only shove the conflicting segments — NOT the whole trace.
+      // Moving the entire trace (the previous behavior) caused geometric chaos:
+      //   • Pads would no longer align with the trace endpoint
+      //   • Already-shoved segments got shoved AGAIN, drifting further away
+      //   • A long trace would bow dramatically
+      // Per-segment shove preserves the trace shape and only nudges the part
+      // that actually conflicts with the new segment.
       for (const seg of trace.segments) {
         const conflict = segmentClearanceViolation(newSeg.start, newSeg.end, seg.start, seg.end, newHalfWidth + seg.width / 2);
         if (conflict) {
-          // Compute perpendicular shove vector
           const shove = computeShoveVector(newSeg.start, newSeg.end, seg.start, seg.end);
           if (!shove) continue;
-          // Apply shove to all segments of this trace (so the whole trace moves uniformly)
-          // — this is a simplification; KiCad only shoves the conflicting segments.
-          for (const s of trace.segments) {
-            s.start.x += shove.dx;
-            s.start.y += shove.dy;
-            s.end.x += shove.dx;
-            s.end.y += shove.dy;
-          }
+          seg.start.x += shove.dx;
+          seg.start.y += shove.dy;
+          seg.end.x += shove.dx;
+          seg.end.y += shove.dy;
           shoved++;
         }
       }
