@@ -115,7 +115,7 @@ export default function Home() {
 
       <div className="flex min-h-0 flex-1">
         {/* Main editor area */}
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {mode === 'schematic' ? (
             <>
               <Toolbar />
@@ -174,7 +174,7 @@ export default function Home() {
 
         {/* AI Chat Panel (right side, collapsible) */}
         {showAI && (
-          <div className="w-[400px] min-w-[320px] max-w-[600px] shrink-0">
+          <div className="w-[400px] min-w-[320px] max-w-[600px] shrink-0 overflow-hidden">
             <ChatPanel onClose={() => setShowAI(false)} />
           </div>
         )}
