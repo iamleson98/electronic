@@ -1,0 +1,655 @@
+     1→'use client';
+     2→
+     3→import { useRef, useState } from 'react';
+     4→import { usePCB } from '@/lib/pcb/store';
+     5→import { useEditor } from '@/lib/circuit/store';
+     6→import { Button } from '@/components/ui/button';
+     7→import { Slider } from '@/components/ui/slider';
+     8→import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+     9→import {
+    10→  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
+    11→  DropdownMenuSeparator, DropdownMenuTrigger,
+    12→} from '@/components/ui/dropdown-menu';
+    13→import {
+    14→  Download, MousePointer2, Route, Plus, RotateCw, Trash2, Grid3x3, Eye, Zap,
+    15→  ShieldCheck, Layers, Layers3, FileDown, Wand2, GitCompare, Upload, GitBranch, Activity,
+    16→  ShieldOff, Droplet, AlignLeft, FlipHorizontal, ChevronDown, Frame, CircleDot, SlidersHorizontal,
+    17→} from 'lucide-react';
+    18→import { toast } from 'sonner';
+    19→import { exportBOM, exportIPC2581 } from '@/lib/pcb/additional-exports';
+    20→import { exportAllGerbersX2 } from '@/lib/pcb/gerber-export';
+    21→import { importKiCadFootprint, importKiCadFootprintsFromFile } from '@/lib/pcb/kicad-import';
+    22→import { footprintDefs } from '@/lib/pcb/footprints';
+    23→import { FootprintEditorDialog } from './FootprintEditorDialog';
+    24→import { LayerStackDialog, DRCSettingsDialog, LengthTuneDialog } from './PCBDialogs';
+    25→
+    26→export function PCBToolbar() {
+    27→  const tool = usePCB((s) => s.tool);
+    28→  const setTool = usePCB((s) => s.setTool);
+    29→  const activeLayer = usePCB((s) => s.activeLayer);
+    30→  const setActiveLayer = usePCB((s) => s.setActiveLayer);
+    31→  const defaultTraceWidth = usePCB((s) => s.defaultTraceWidth);
+    32→  const setDefaultTraceWidth = usePCB((s) => s.setDefaultTraceWidth);
+    33→  const showRatsnest = usePCB((s) => s.showRatsnest);
+    34→  const toggleRatsnest = usePCB((s) => s.toggleRatsnest);
+    35→  const showGrid = usePCB((s) => s.showGrid);
+    36→  const toggleGrid = usePCB((s) => s.toggleGrid);
+    37→  const showPadNets = usePCB((s) => s.showPadNets);
+    38→  const togglePadNets = usePCB((s) => s.togglePadNets);
+    39→  const selectedFootprintId = usePCB((s) => s.selectedFootprintId);
+    40→  const selectedTraceId = usePCB((s) => s.selectedTraceId);
+    41→  const rotateFootprint = usePCB((s) => s.rotateFootprint);
+    42→  const importFromSchematic = usePCB((s) => s.importFromSchematic);
+    43→  const serialize = usePCB((s) => s.serialize);
+    44→  const clearPCB = usePCB((s) => s.clearPCB);
+    45→  const runDRC = usePCB((s) => s.runDRC);
+    46→  const clearDRC = usePCB((s) => s.clearDRC);
+    47→  const drcErrors = usePCB((s) => s.drcErrors);
+    48→  const addCopperPour = usePCB((s) => s.addCopperPour);
+    49→  const removeCopperPour = usePCB((s) => s.removeCopperPour);
+    50→  const copperPours = usePCB((s) => s.copperPours);
+    51→  const exportGerbers = usePCB((s) => s.exportGerbers);
+    52→  const runAutoRoute = usePCB((s) => s.runAutoRoute);
+    53→  const runTopoRoute = usePCB((s) => s.runTopoRoute);
+    54→  const runNetlistVerify = usePCB((s) => s.runNetlistVerify);
+    55→
+    56→  const components = useEditor((s) => s.components);
+    57→  const wires = useEditor((s) => s.wires);
+    58→
+    59→  const [showFootprintEditor, setShowFootprintEditor] = useState(false);
+    60→  const [showLayerStack, setShowLayerStack] = useState(false);
+    61→  const [showDRCSettings, setShowDRCSettings] = useState(false);
+    62→  const [showLengthTune, setShowLengthTune] = useState(false);
+    63→
+    64→  const handleImport = () => {
+    65→    if (components.length === 0) {
+    66→      toast.error('No schematic components to import');
+    67→      return;
+    68→    }
+    69→    importFromSchematic(components, wires);
+    70→    toast.success(`Imported ${components.length} components from schematic`);
+    71→  };
+    72→
+    73→  const handleExportJSON = () => {
+    74→    const doc = serialize();
+    75→    const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
+    76→    const url = URL.createObjectURL(blob);
+    77→    const a = document.createElement('a');
+    78→    a.href = url;
+    79→    a.download = `pcb_${Date.now()}.json`;
+    80→    a.click();
+    81→    URL.revokeObjectURL(url);
+    82→    toast.success('PCB layout exported as JSON');
+    83→  };
+    84→
+    85→  const handleDRC = () => {
+    86→    runDRC();
+    87→    const errors = usePCB.getState().drcErrors;
+    88→    const errorCount = errors.filter((e) => e.severity === 'error').length;
+    89→    const warnCount = errors.filter((e) => e.severity === 'warning').length;
+    90→    if (errorCount === 0 && warnCount === 0) {
+    91→      toast.success('DRC passed — no errors found');
+    92→    } else {
+    93→      toast.warning(`DRC: ${errorCount} error(s), ${warnCount} warning(s)`);
+    94→    }
+    95→  };
+    96→
+    97→  const kicadFileInputRef = useRef<HTMLInputElement | null>(null);
+    98→  const handleKiCadImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    99→    const file = e.target.files?.[0];
+   100→    if (!file) return;
+   101→    const reader = new FileReader();
+   102→    reader.onload = () => {
+   103→      try {
+   104→        const content = reader.result as string;
+   105→        if (file.name.endsWith('.kicad_mod')) {
+   106→          const def = importKiCadFootprint(content);
+   107→          if (def) {
+   108→            footprintDefs[`kicad_${file.name.replace('.kicad_mod', '')}`] = def;
+   109→            toast.success(`Imported KiCad footprint: ${file.name}`);
+   110→          } else {
+   111→            toast.error('Failed to parse KiCad footprint');
+   112→          }
+   113→        } else if (file.name.endsWith('.kicad_pcb')) {
+   114→          const footprints = importKiCadFootprintsFromFile(content);
+   115→          for (const fp of footprints) {
+   116→            footprintDefs[`kicad_${fp.name}`] = fp.def;
+   117→          }
+   118→          toast.success(`Imported ${footprints.length} footprints from KiCad PCB`);
+   119→        } else {
+   120→          toast.error('Please select a .kicad_mod or .kicad_pcb file');
+   121→        }
+   122→      } catch (err) {
+   123→        toast.error('Import failed: ' + (err as Error).message);
+   124→      }
+   125→    };
+   126→    reader.readAsText(file);
+   127→    e.target.value = '';
+   128→  };
+   129→
+   130→  const handleGerberExport = () => {
+   131→    exportGerbers();
+   132→    toast.success('Gerber X1 + drill + PnP files exported');
+   133→  };
+   134→
+   135→  const handleGerberX2Export = () => {
+   136→    const s = usePCB.getState();
+   137→    const files = exportAllGerbersX2(s.footprints, s.traces, s.vias, s.board);
+   138→    for (const file of files) {
+   139→      const blob = new Blob([file.content], { type: 'text/plain' });
+   140→      const url = URL.createObjectURL(blob);
+   141→      const a = document.createElement('a');
+   142→      a.href = url;
+   143→      a.download = file.filename;
+   144→      a.click();
+   145→      URL.revokeObjectURL(url);
+   146→    }
+   147→    toast.success(`Gerber X2 + drill + PnP exported (${files.length} files)`);
+   148→  };
+   149→
+   150→  const handleAutoRoute = () => {
+   151→    if (usePCB.getState().footprints.length === 0) {
+   152→      toast.error('No footprints to route');
+   153→      return;
+   154→    }
+   155→    // Use the new topological push-and-shove router (A* + 45° + shove + rip-up).
+   156→    // Falls back to legacy BFS if it fails completely.
+   157→    const stats = runTopoRoute();
+   158→    const state = usePCB.getState();
+   159→    const topoCount = state.traces.filter(t => t.id.startsWith('topo_')).length;
+   160→    if (stats.routed === 0 && topoCount === 0) {
+   161→      // Topo router produced nothing — try legacy
+   162→      runAutoRoute();
+   163→      const legacyCount = usePCB.getState().traces.filter(t => t.id.startsWith('auto_')).length;
+   164→      toast.success(`Legacy BFS router: ${legacyCount} traces added`);
+   165→    } else {
+   166→      toast.success(
+   167→        `Topological router: ${stats.routed} routed` +
+   168→        (stats.failed ? ` · ${stats.failed} failed` : '') +
+   169→        (stats.shoved ? ` · ${stats.shoved} shoved` : '') +
+   170→        (stats.rippedUp ? ` · ${stats.rippedUp} ripped` : ''),
+   171→      );
+   172→    }
+   173→  };
+   174→
+   175→  const handleNetlistVerify = () => {
+   176→    const result = runNetlistVerify();
+   177→    if (!result) {
+   178→      toast.error('Could not verify netlist — no schematic loaded');
+   179→      return;
+   180→    }
+   181→    if (result.ok && result.errors.length === 0) {
+   182→      toast.success(`Netlist verified: ${result.stats.matchedNets}/${result.stats.schematicNets} nets match`);
+   183→    } else {
+   184→      const errors = result.errors.filter((e) => e.severity === 'error').length;
+   185→      const warnings = result.errors.filter((e) => e.severity === 'warning').length;
+   186→      toast.warning(`Netlist: ${errors} error(s), ${warnings} warning(s)`);
+   187→    }
+   188→  };
+   189→
+   190→  const handleLengthTune = () => {
+   191→    if (!selectedTraceId) {
+   192→      toast.error('Select a trace first, then click Length Tune');
+   193→      return;
+   194→    }
+   195→    setShowLengthTune(true);
+   196→  };
+   197→
+   198→  const handleRouteDiffPair = () => {
+   199→    // Use the active layer; for demo, route a diff pair on pads R1.1 ↔ R2.1
+   200→    // (in a real implementation the user would pick the pads via a tool)
+   201→    const footprints = usePCB.getState().footprints;
+   202→    if (footprints.length < 2) {
+   203→      toast.error('Need at least 2 footprints to route a diff pair');
+   204→      return;
+   205→    }
+   206→    const padA = footprints[0].pads[0];
+   207→    const padB = footprints[1].pads[0];
+   208→    if (!padA || !padB) {
+   209→      toast.error('Could not find pads on the first two footprints');
+   210→      return;
+   211→    }
+   212→    const result = usePCB.getState().routeDiffPair(padA.id, padB.id, `${padA.net ?? 'DATA'}_P`, `${padA.net ?? 'DATA'}_N`);
+   213→    if (result.routedP && result.routedN) {
+   214→      toast.success('Differential pair routed (P + N traces added)');
+   215→    } else {
+   216→      toast.error('Diff pair routing failed');
+   217→    }
+   218→  };
+   219→
+   220→  const handleAddBlindVia = () => {
+   221→    // Add a blind via at the center of the selected footprint (or board center)
+   222→    const fp = usePCB.getState().footprints.find((f) => f.id === selectedFootprintId);
+   223→    const pos = fp ? fp.position : { x: usePCB.getState().board.width / 2, y: usePCB.getState().board.height / 2 };
+   224→    usePCB.getState().addTypedVia(pos, 'unrouted', 'blind', 'top', 'inner1');
+   225→    toast.success('Blind via added (top → inner1)');
+   226→  };
+   227→
+   228→  const handleAddMicroVia = () => {
+   229→    const fp = usePCB.getState().footprints.find((f) => f.id === selectedFootprintId);
+   230→    const pos = fp ? fp.position : { x: usePCB.getState().board.width / 2, y: usePCB.getState().board.height / 2 };
+   231→    usePCB.getState().addTypedVia(pos, 'unrouted', 'micro', 'top', 'inner1');
+   232→    toast.success('Microvia added (top → inner1, laser-drilled)');
+   233→  };
+   234→
+   235→  const handleCopperPour = () => {
+   236→    const hasPour = copperPours.some((p) => p.layer === activeLayer);
+   237→    if (hasPour) {
+   238→      removeCopperPour(activeLayer);
+   239→      toast.info(`Copper pour removed from ${activeLayer} layer`);
+   240→    } else {
+   241→      addCopperPour(activeLayer, 'GND');
+   242→      toast.success(`GND copper pour added to ${activeLayer} layer`);
+   243→    }
+   244→  };
+   245→
+   246→  return (
+   247→    <TooltipProvider delayDuration={200}>
+   248→      <div className="flex items-center gap-1 border-b border-slate-800 bg-slate-900 px-3 py-2 flex-wrap">
+   249→        {/* Brand */}
+   250→        <div className="mr-2 flex items-center gap-2 pr-3">
+   251→          <div className="flex h-7 w-7 items-center justify-center rounded bg-gradient-to-br from-emerald-500 to-cyan-600 text-white">
+   252→            <Zap size={16} strokeWidth={2.5} />
+   253→          </div>
+   254→          <span className="hidden text-sm font-semibold text-slate-100 sm:inline">PCB Layout</span>
+   255→        </div>
+   256→
+   257→        {/* Import from schematic */}
+   258→        <Tooltip>
+   259→          <TooltipTrigger asChild>
+   260→            <Button size="sm" className="bg-emerald-500 text-slate-900 hover:bg-emerald-400" onClick={handleImport}>
+   261→              <Zap size={14} className="mr-1" />
+   262→              <span className="hidden md:inline">Import</span>
+   263→            </Button>
+   264→          </TooltipTrigger>
+   265→          <TooltipContent>Import components & netlist from the schematic</TooltipContent>
+   266→        </Tooltip>
+   267→
+   268→        {/* KiCad footprint/PCB import */}
+   269→        <input
+   270→          ref={kicadFileInputRef}
+   271→          type="file"
+   272→          accept=".kicad_mod,.kicad_pcb"
+   273→          onChange={handleKiCadImport}
+   274→          className="hidden"
+   275→        />
+   276→        <Tooltip>
+   277→          <TooltipTrigger asChild>
+   278→            <Button size="sm" variant="ghost" onClick={() => kicadFileInputRef.current?.click()}>
+   279→              <Upload size={14} />
+   280→              <span className="ml-1 hidden md:inline">KiCad</span>
+   281→            </Button>
+   282→          </TooltipTrigger>
+   283→          <TooltipContent>Import KiCad .kicad_mod or .kicad_pcb file</TooltipContent>
+   284→        </Tooltip>
+   285→
+   286→        {/* Footprint editor — opens the WYSIWYG canvas dialog */}
+   287→        <Tooltip>
+   288→          <TooltipTrigger asChild>
+   289→            <Button size="sm" variant="ghost" onClick={() => setShowFootprintEditor(true)}>
+   290→              <Frame size={14} />
+   291→              <span className="ml-1 hidden md:inline">Footprint Editor</span>
+   292→            </Button>
+   293→          </TooltipTrigger>
+   294→          <TooltipContent>Open the WYSIWYG footprint editor</TooltipContent>
+   295→        </Tooltip>
+   296→
+   297→        <div className="mx-1 h-5 w-px bg-slate-700" />
+   298→
+   299→        {/* Tools */}
+   300→        <Tooltip>
+   301→          <TooltipTrigger asChild>
+   302→            <Button size="sm" variant={tool === 'select' ? 'default' : 'ghost'} onClick={() => setTool('select')}>
+   303→              <MousePointer2 size={14} />
+   304→            </Button>
+   305→          </TooltipTrigger>
+   306→          <TooltipContent>Select/Move (1)</TooltipContent>
+   307→        </Tooltip>
+   308→        <Tooltip>
+   309→          <TooltipTrigger asChild>
+   310→            <Button size="sm" variant={tool === 'route' ? 'default' : 'ghost'} onClick={() => setTool('route')}>
+   311→              <Route size={14} />
+   312→            </Button>
+   313→          </TooltipTrigger>
+   314→          <TooltipContent>Route Trace — 90° (2)</TooltipContent>
+   315→        </Tooltip>
+   316→        <Tooltip>
+   317→          <TooltipTrigger asChild>
+   318→            <Button size="sm" variant={tool === 'route45' ? 'default' : 'ghost'} onClick={() => setTool('route45')}
+   319→              className={tool === 'route45' ? 'bg-cyan-600 text-white hover:bg-cyan-500' : ''}>
+   320→              <Route size={14} className="rotate-45" />
+   321→            </Button>
+   322→          </TooltipTrigger>
+   323→          <TooltipContent>Route Trace — 45° (Shift+2)</TooltipContent>
+   324→        </Tooltip>
+   325→        <Tooltip>
+   326→          <TooltipTrigger asChild>
+   327→            <Button size="sm" variant={tool === 'via' ? 'default' : 'ghost'} onClick={() => setTool('via')}>
+   328→              <Plus size={14} />
+   329→            </Button>
+   330→          </TooltipTrigger>
+   331→          <TooltipContent>Add Via (3)</TooltipContent>
+   332→        </Tooltip>
+   333→        <Tooltip>
+   334→          <TooltipTrigger asChild>
+   335→            <Button size="sm" variant={tool === 'keepout' ? 'default' : 'ghost'} onClick={() => setTool('keepout')}
+   336→              className={tool === 'keepout' ? 'bg-rose-600 text-white hover:bg-rose-500' : ''}>
+   337→              <ShieldOff size={14} />
+   338→            </Button>
+   339→          </TooltipTrigger>
+   340→          <TooltipContent>Add Keepout Area (4)</TooltipContent>
+   341→        </Tooltip>
+   342→        <Tooltip>
+   343→          <TooltipTrigger asChild>
+   344→            <Button size="sm" variant="ghost" onClick={() => { usePCB.getState().generateTeardrops(); toast.success('Teardrops generated'); }}>
+   345→              <Droplet size={14} />
+   346→            </Button>
+   347→          </TooltipTrigger>
+   348→          <TooltipContent>Generate Teardrops</TooltipContent>
+   349→        </Tooltip>
+   350→
+   351→        <div className="mx-1 h-5 w-px bg-slate-700" />
+   352→
+   353→        {/* Layer selector */}
+   354→        <div className="flex items-center gap-1">
+   355→          <Button size="sm" variant={activeLayer === 'top' ? 'default' : 'ghost'}
+   356→            className={activeLayer === 'top' ? 'bg-red-600 text-white hover:bg-red-500' : ''}
+   357→            onClick={() => setActiveLayer('top')}>Top</Button>
+   358→          <Button size="sm" variant={activeLayer === 'bottom' ? 'default' : 'ghost'}
+   359→            className={activeLayer === 'bottom' ? 'bg-blue-600 text-white hover:bg-blue-500' : ''}
+   360→            onClick={() => setActiveLayer('bottom')}>Bot</Button>
+   361→        </div>
+   362→
+   363→        <div className="mx-1 h-5 w-px bg-slate-700" />
+   364→
+   365→        {/* Trace width */}
+   366→        <div className="flex items-center gap-2 px-1">
+   367→          <span className="hidden text-xs text-slate-400 lg:inline">Width</span>
+   368→          <Slider value={[defaultTraceWidth * 10]} min={2} max={30} step={1}
+   369→            onValueChange={(v) => setDefaultTraceWidth(v[0] / 10)} className="w-20" />
+   370→          <span className="w-10 text-right font-mono text-xs text-slate-300">{defaultTraceWidth.toFixed(1)}mm</span>
+   371→        </div>
+   372→
+   373→        <div className="mx-1 h-5 w-px bg-slate-700" />
+   374→
+   375→        {/* Rotate / Delete */}
+   376→        <Tooltip>
+   377→          <TooltipTrigger asChild>
+   378→            <Button size="sm" variant="ghost" onClick={() => selectedFootprintId && rotateFootprint(selectedFootprintId)} disabled={!selectedFootprintId}>
+   379→              <RotateCw size={14} />
+   380→            </Button>
+   381→          </TooltipTrigger>
+   382→          <TooltipContent>Rotate Footprint (R)</TooltipContent>
+   383→        </Tooltip>
+   384→        <Tooltip>
+   385→          <TooltipTrigger asChild>
+   386→            <Button size="sm" variant="ghost" className="text-rose-400 hover:text-rose-300"
+   387→              onClick={() => { if (selectedTraceId) usePCB.getState().deleteTrace(selectedTraceId); }}>
+   388→              <Trash2 size={14} />
+   389→            </Button>
+   390→          </TooltipTrigger>
+   391→          <TooltipContent>Delete selected trace</TooltipContent>
+   392→        </Tooltip>
+   393→
+   394→        <div className="mx-1 h-5 w-px bg-slate-700" />
+   395→
+   396→        {/* DRC */}
+   397→        <Tooltip>
+   398→          <TooltipTrigger asChild>
+   399→            <Button size="sm" variant="ghost" onClick={handleDRC} className={drcErrors.length > 0 ? 'text-amber-400' : ''}>
+   400→              <ShieldCheck size={14} />
+   401→              {drcErrors.length > 0 && <span className="ml-1 text-xs">{drcErrors.length}</span>}
+   402→            </Button>
+   403→          </TooltipTrigger>
+   404→          <TooltipContent>Run DRC (Design Rule Check)</TooltipContent>
+   405→        </Tooltip>
+   406→
+   407→        {/* Copper pour */}
+   408→        <Tooltip>
+   409→          <TooltipTrigger asChild>
+   410→            <Button size="sm" variant={copperPours.some((p) => p.layer === activeLayer) ? 'default' : 'ghost'} onClick={handleCopperPour}>
+   411→              <Layers size={14} />
+   412→            </Button>
+   413→          </TooltipTrigger>
+   414→          <TooltipContent>Toggle GND copper pour on {activeLayer} layer</TooltipContent>
+   415→        </Tooltip>
+   416→
+   417→        {/* Auto-route */}
+   418→        <Tooltip>
+   419→          <TooltipTrigger asChild>
+   420→            <Button size="sm" variant="ghost" onClick={handleAutoRoute} className="text-purple-400 hover:text-purple-300">
+   421→              <Wand2 size={14} />
+   422→            </Button>
+   423→          </TooltipTrigger>
+   424→          <TooltipContent>Auto-route all unrouted nets (Lee's algorithm)</TooltipContent>
+   425→        </Tooltip>
+   426→
+   427→        {/* Differential pair routing */}
+   428→        <Tooltip>
+   429→          <TooltipTrigger asChild>
+   430→            <Button size="sm" variant="ghost" onClick={handleRouteDiffPair} className="text-cyan-400 hover:text-cyan-300">
+   431→              <GitBranch size={14} />
+   432→            </Button>
+   433→          </TooltipTrigger>
+   434→          <TooltipContent>Route differential pair (P+N traces, parallel)</TooltipContent>
+   435→        </Tooltip>
+   436→
+   437→        {/* Length tuning */}
+   438→        <Tooltip>
+   439→          <TooltipTrigger asChild>
+   440→            <Button size="sm" variant="ghost" onClick={handleLengthTune} className="text-amber-400 hover:text-amber-300">
+   441→              <Activity size={14} />
+   442→            </Button>
+   443→          </TooltipTrigger>
+   444→          <TooltipContent>Length-tune selected trace (serpentine meander)</TooltipContent>
+   445→        </Tooltip>
+   446→
+   447→        {/* Layer stack dialog */}
+   448→        <Tooltip>
+   449→          <TooltipTrigger asChild>
+   450→            <Button size="sm" variant="ghost" onClick={() => setShowLayerStack(true)} className="text-slate-300">
+   451→              <Layers3 size={14} />
+   452→            </Button>
+   453→          </TooltipTrigger>
+   454→          <TooltipContent>Layer stack editor (2/4/6-layer)</TooltipContent>
+   455→        </Tooltip>
+   456→
+   457→        {/* HDI vias dropdown */}
+   458→        <DropdownMenu>
+   459→          <DropdownMenuTrigger asChild>
+   460→            <Button size="sm" variant="ghost" className="text-emerald-400 hover:text-emerald-300">
+   461→              <CircleDot size={14} />
+   462→            </Button>
+   463→          </DropdownMenuTrigger>
+   464→          <DropdownMenuContent align="end" className="w-48 bg-slate-900 border-slate-700">
+   465→            <DropdownMenuLabel className="text-slate-300">HDI Vias</DropdownMenuLabel>
+   466→            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handleAddBlindVia}>
+   467→              Blind via (top → inner1)
+   468→            </DropdownMenuItem>
+   469→            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handleAddMicroVia}>
+   470→              Microvia (top → inner1, laser)
+   471→            </DropdownMenuItem>
+   472→          </DropdownMenuContent>
+   473→        </DropdownMenu>
+   474→
+   475→        {/* DRC settings dialog */}
+   476→        <Tooltip>
+   477→          <TooltipTrigger asChild>
+   478→            <Button size="sm" variant="ghost" onClick={() => setShowDRCSettings(true)} className="text-slate-300">
+   479→              <SlidersHorizontal size={14} />
+   480→            </Button>
+   481→          </TooltipTrigger>
+   482→          <TooltipContent>DRC settings + exclusions</TooltipContent>
+   483→        </Tooltip>
+   484→
+   485→        {/* Tools dropdown: align, distribute, flip, length-tune */}
+   486→        <DropdownMenu>
+   487→          <DropdownMenuTrigger asChild>
+   488→            <Button size="sm" variant="ghost">
+   489→              <AlignLeft size={14} />
+   490→              <ChevronDown size={12} className="ml-1" />
+   491→            </Button>
+   492→          </DropdownMenuTrigger>
+   493→          <DropdownMenuContent align="end" className="w-56 bg-slate-900 border-slate-700">
+   494→            <DropdownMenuLabel className="text-slate-300">Alignment (select 2+)</DropdownMenuLabel>
+   495→            <div className="grid grid-cols-3 gap-1 p-2">
+   496→              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('left')}>Left</DropdownMenuItem>
+   497→              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('hCenter')}>H Center</DropdownMenuItem>
+   498→              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('right')}>Right</DropdownMenuItem>
+   499→              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('top')}>Top</DropdownMenuItem>
+   500→              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('vCenter')}>V Center</DropdownMenuItem>
+   501→              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().alignSelected('bottom')}>Bottom</DropdownMenuItem>
+   502→            </div>
+   503→            <DropdownMenuSeparator className="bg-slate-700" />
+   504→            <DropdownMenuLabel className="text-slate-300">Distribute (3+)</DropdownMenuLabel>
+   505→            <div className="grid grid-cols-2 gap-1 p-2">
+   506→              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().distributeSelected('horizontal')}>Horizontal</DropdownMenuItem>
+   507→              <DropdownMenuItem className="justify-center" onClick={() => usePCB.getState().distributeSelected('vertical')}>Vertical</DropdownMenuItem>
+   508→            </div>
+   509→            <DropdownMenuSeparator className="bg-slate-700" />
+   510→            <DropdownMenuItem onClick={() => {
+   511→              const id = usePCB.getState().selectedTraceId;
+   512→              if (!id) { toast.error('Select a trace first'); return; }
+   513→              const trace = usePCB.getState().traces.find(t => t.id === id);
+   514→              if (!trace) return;
+   515→              const len = trace.segments.reduce((a, s) => a + Math.hypot(s.end.x - s.start.x, s.end.y - s.start.y), 0);
+   516→              usePCB.getState().lengthTuneTrace(id, len * 1.2);
+   517→              toast.success(`Length-tuned: +20% (serpentine meander)`);
+   518→            }}>
+   519→              <Droplet size={12} className="mr-2" /> Length-Tune Trace (+20%)
+   520→            </DropdownMenuItem>
+   521→            <DropdownMenuItem onClick={() => {
+   522→              const id = usePCB.getState().selectedFootprintId;
+   523→              if (!id) { toast.error('Select a footprint first'); return; }
+   524→              usePCB.getState().flipFootprint(id);
+   525→              toast.success('Flipped to other side');
+   526→            }}>
+   527→              <FlipHorizontal size={12} className="mr-2" /> Flip to Other Side
+   528→            </DropdownMenuItem>
+   529→          </DropdownMenuContent>
+   530→        </DropdownMenu>
+   531→
+   532→        {/* Netlist verify */}
+   533→        <Tooltip>
+   534→          <TooltipTrigger asChild>
+   535→            <Button size="sm" variant="ghost" onClick={handleNetlistVerify} className="text-cyan-400 hover:text-cyan-300">
+   536→              <GitCompare size={14} />
+   537→            </Button>
+   538→          </TooltipTrigger>
+   539→          <TooltipContent>Verify PCB netlist matches schematic</TooltipContent>
+   540→        </Tooltip>
+   541→
+   542→        <div className="mx-1 h-5 w-px bg-slate-700" />
+   543→
+   544→        {/* View toggles */}
+   545→        <Tooltip>
+   546→          <TooltipTrigger asChild>
+   547→            <Button size="sm" variant={showRatsnest ? 'default' : 'ghost'} onClick={toggleRatsnest}>
+   548→              <Eye size={14} />
+   549→            </Button>
+   550→          </TooltipTrigger>
+   551→          <TooltipContent>Toggle Ratsnest</TooltipContent>
+   552→        </Tooltip>
+   553→        <Tooltip>
+   554→          <TooltipTrigger asChild>
+   555→            <Button size="sm" variant={showGrid ? 'default' : 'ghost'} onClick={toggleGrid}>
+   556→              <Grid3x3 size={14} />
+   557→            </Button>
+   558→          </TooltipTrigger>
+   559→          <TooltipContent>Toggle Grid</TooltipContent>
+   560→        </Tooltip>
+   561→
+   562→        <div className="ml-auto flex items-center gap-1">
+   563→          {/* Export JSON */}
+   564→          <Tooltip>
+   565→            <TooltipTrigger asChild>
+   566→              <Button size="sm" variant="ghost" onClick={handleExportJSON}>
+   567→                <Download size={14} />
+   568→                <span className="ml-1 hidden md:inline">JSON</span>
+   569→              </Button>
+   570→            </TooltipTrigger>
+   571→            <TooltipContent>Export PCB as JSON</TooltipContent>
+   572→          </Tooltip>
+   573→          {/* Export Gerbers (X1 + X2) */}
+   574→          <DropdownMenu>
+   575→            <DropdownMenuTrigger asChild>
+   576→              <Button size="sm" className="bg-amber-500 text-slate-900 hover:bg-amber-400">
+   577→                <FileDown size={14} />
+   578→                <span className="ml-1 hidden md:inline">Gerbers</span>
+   579→                <ChevronDown size={12} className="ml-1" />
+   580→              </Button>
+   581→            </DropdownMenuTrigger>
+   582→            <DropdownMenuContent align="end" className="w-56 bg-slate-900 border-slate-700">
+   583→              <DropdownMenuLabel className="text-slate-300">Manufacturing Export</DropdownMenuLabel>
+   584→              <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handleGerberExport}>
+   585→                Gerber X1 (RS-274X)
+   586→                <span className="ml-auto text-[10px] text-slate-500">legacy</span>
+   587→              </DropdownMenuItem>
+   588→              <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={handleGerberX2Export}>
+   589→                Gerber X2 (with attributes)
+   590→                <span className="ml-auto text-[10px] text-emerald-400">recommended</span>
+   591→              </DropdownMenuItem>
+   592→            </DropdownMenuContent>
+   593→          </DropdownMenu>
+   594→          {/* Export BOM */}
+   595→          <Tooltip>
+   596→            <TooltipTrigger asChild>
+   597→              <Button size="sm" variant="ghost" onClick={() => {
+   598→                const s = usePCB.getState();
+   599→                const csv = exportBOM(s.footprints);
+   600→                const blob = new Blob([csv], { type: 'text/csv' });
+   601→                const url = URL.createObjectURL(blob);
+   602→                const a = document.createElement('a'); a.href = url; a.download = 'bom.csv'; a.click();
+   603→                URL.revokeObjectURL(url);
+   604→                toast.success('BOM exported');
+   605→              }}>
+   606→                <FileDown size={14} />
+   607→                <span className="ml-1 hidden md:inline">BOM</span>
+   608→              </Button>
+   609→            </TooltipTrigger>
+   610→            <TooltipContent>Export Bill of Materials (CSV)</TooltipContent>
+   611→          </Tooltip>
+   612→          {/* Export IPC-2581 */}
+   613→          <Tooltip>
+   614→            <TooltipTrigger asChild>
+   615→              <Button size="sm" variant="ghost" onClick={() => {
+   616→                const s = usePCB.getState();
+   617→                const xml = exportIPC2581(s.footprints, s.traces, s.vias, s.board, s.padNets);
+   618→                const blob = new Blob([xml], { type: 'application/xml' });
+   619→                const url = URL.createObjectURL(blob);
+   620→                const a = document.createElement('a'); a.href = url; a.download = 'pcb.ipc2581.xml'; a.click();
+   621→                URL.revokeObjectURL(url);
+   622→                toast.success('IPC-2581 exported');
+   623→              }}>
+   624→                <FileDown size={14} />
+   625→                <span className="ml-1 hidden md:inline">IPC-2581</span>
+   626→              </Button>
+   627→            </TooltipTrigger>
+   628→            <TooltipContent>Export IPC-2581 (single XML manufacturing file)</TooltipContent>
+   629→          </Tooltip>
+   630→        </div>
+   631→      </div>
+   632→
+   633→      {/* Footprint Editor dialog */}
+   634→      <FootprintEditorDialog
+   635→        open={showFootprintEditor}
+   636→        onClose={() => setShowFootprintEditor(false)}
+   637→        onSave={() => {
+   638→          // Notify any listening UI that the footprint registry changed
+   639→          // (e.g. future Library Manager auto-refresh).
+   640→          window.dispatchEvent(new CustomEvent('circuitlab:footprint-registered'));
+   641→        }}
+   642→      />
+   643→
+   644→      {/* Layer Stack dialog */}
+   645→      <LayerStackDialog open={showLayerStack} onClose={() => setShowLayerStack(false)} />
+   646→
+   647→      {/* DRC Settings + Exclusions dialog */}
+   648→      <DRCSettingsDialog open={showDRCSettings} onClose={() => setShowDRCSettings(false)} />
+   649→
+   650→      {/* Length Tune dialog */}
+   651→      <LengthTuneDialog open={showLengthTune} onClose={() => setShowLengthTune(false)} />
+   652→    </TooltipProvider>
+   653→  );
+   654→}
+   655→

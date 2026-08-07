@@ -123,7 +123,7 @@ export function autoRoute(
       if (srcRow >= 0 && srcRow < rows && srcCol >= 0 && srcCol < cols) {
         grid[srcRow][srcCol].blocked = false;
       }
-      if (dstRow >= 0 && dstRow < cols && dstCol >= 0 && dstCol < cols) {
+      if (dstRow >= 0 && dstRow < rows && dstCol >= 0 && dstCol < cols) {
         grid[dstRow][dstCol].blocked = false;
       }
       for (const pad of netPads) {

@@ -1,0 +1,732 @@
+     1→// Zustand store for the PCB layout editor.
+     2→// Holds footprints, traces, vias, board outline, and tool state.
+     3→
+     4→'use client';
+     5→
+     6→import { create } from 'zustand';
+     7→import type {
+     8→  Footprint,
+     9→  Trace,
+    10→  Via,
+    11→  ViaType,
+    12→  Ratsnest,
+    13→  BoardOutline,
+    14→  PCBDocument,
+    15→  Pad,
+    16→  CopperLayer,
+    17→  LayerStack,
+    18→} from './types';
+    19→import { DEFAULT_LAYER_STACK, FOUR_LAYER_STACK, SIX_LAYER_STACK, ALL_COPPER_LAYERS } from './types';
+    20→import type { CircuitComponent, Wire } from '../circuit/types';
+    21→import { useEditor } from '../circuit/store';
+    22→import { getFootprintDef } from './footprints';
+    23→import { createPCBFromSchematic } from './netlist-sync';
+    24→import { runDRC as runDRCCheck, DEFAULT_DRC_CONFIG } from './drc';
+    25→import type { DRCError } from './drc';
+    26→import { generateCopperPour } from './copper-pour';
+    27→import type { CopperPour } from './copper-pour';
+    28→import { exportAllGerbers } from './gerber-export';
+    29→import { autoRoute } from './auto-router';
+    30→import { routeTopologically, DEFAULT_ROUTER_OPTIONS } from './topological-router';
+    31→import { verifyNetlist } from './netlist-verify';
+    32→import type { NetlistVerifyResult } from './netlist-verify';
+    33→
+    34→export type PCBTool = 'select' | 'route' | 'route45' | 'via' | 'move' | 'pour' | 'keepout';
+    35→
+    36→interface PCBState {
+    37→  // document
+    38→  board: BoardOutline;
+    39→  footprints: Footprint[];
+    40→  traces: Trace[];
+    41→  vias: Via[];
+    42→  ratsnest: Ratsnest[];
+    43→  padNets: Map<string, string>;
+    44→  activeLayer: 'top' | 'bottom';
+    45→  defaultTraceWidth: number;
+    46→  /** Layer stack configuration — defaults to 2-layer. Switch to 4/6 layer for HDI designs. */
+    47→  layerStack: LayerStack;
+    48→  // keepout areas
+    49→  keepouts: { id: string; rect: { x: number; y: number; width: number; height: number }; layers: 'all' | string[]; reason?: string }[];
+    50→  // net classes
+    51→  netClasses: { name: string; traceWidth: number; clearance: number; viaDiameter: number; viaDrill: number; nets: string[] }[];
+    52→  // teardrops
+    53→  teardrops: { id: string; position: { x: number; y: number }; padId: string; points: { x: number; y: number }[]; layer: string }[];
+    54→  // multi-selection
+    55→  selectedFootprintIds: Set<string>;
+    56→  /** Cross-probe highlight: component IDs selected on the schematic.
+    57→   *  Set by CircuitCanvas when component selection changes; PCB canvas reads
+    58→   *  this to render a highlight halo on the matching footprints. */
+    59→  crossProbeComponentIds: Set<string>;
+    60→  /** Set cross-probe highlight (called by schematic canvas on selection change) */
+    61→  setCrossProbe: (componentIds: string[]) => void;
+    62→  // tool state
+    63→  tool: PCBTool;
+    64→  selectedFootprintId: string | null;
+    65→  selectedTraceId: string | null;
+    66→  // routing state
+    67→  routingFrom: { x: number; y: number; net: string } | null;
+    68→  routingPath: { x: number; y: number }[];
+    69→  // UI
+    70→  showRatsnest: boolean;
+    71→  showGrid: boolean;
+    72→  showPadNets: boolean;
+    73→  showKeepouts: boolean;
+    74→
+    75→  // DRC + copper pour
+    76→  drcErrors: DRCError[];
+    77→  copperPours: CopperPour[];
+    78→
+    79→  // actions
+    80→  importFromSchematic: (components: CircuitComponent[], wires: Wire[]) => void;
+    81→  setTool: (tool: PCBTool) => void;
+    82→  setActiveLayer: (layer: 'top' | 'bottom') => void;
+    83→  setDefaultTraceWidth: (width: number) => void;
+    84→  setBoardSize: (width: number, height: number) => void;
+    85→  moveFootprint: (id: string, pos: { x: number; y: number }) => void;
+    86→  rotateFootprint: (id: string) => void;
+    87→  flipFootprint: (id: string) => void;
+    88→  deleteTrace: (id: string) => void;
+    89→  startRouting: (from: { x: number; y: number; net: string }) => void;
+    90→  addRoutingPoint: (point: { x: number; y: number }) => void;
+    91→  finishRouting: (to: { x: number; y: number; net: string } | null) => void;
+    92→  cancelRouting: () => void;
+    93→  addVia: (pos: { x: number; y: number }, net: string) => void;
+    94→  /** Add a via with explicit type (THT, blind, buried, micro) and layer range.
+    95→   *  For THT, fromLayer/toLayer default to top/bottom.
+    96→   *  For microvias, the diameter is auto-set to a smaller value. */
+    97→  addTypedVia: (pos: { x: number; y: number }, net: string, type: ViaType, fromLayer?: CopperLayer, toLayer?: CopperLayer) => void;
+    98→  /** Set the layer stack (2/4/6 layer). Updates the activeLayer if needed. */
+    99→  setLayerStack: (stack: LayerStack) => void;
+   100→  /** Route a differential pair from pad A to pad B (nets like DATA_P / DATA_N). */
+   101→  routeDiffPair: (padAId: string, padBId: string, netP: string, netN: string) => { routedP: boolean; routedN: boolean };
+   102→  selectFootprint: (id: string | null) => void;
+   103→  selectTrace: (id: string | null) => void;
+   104→  toggleFootprintSelection: (id: string) => void;
+   105→  toggleRatsnest: () => void;
+   106→  toggleGrid: () => void;
+   107→  togglePadNets: () => void;
+   108→  toggleKeepouts: () => void;
+   109→  clearPCB: () => void;
+   110→  serialize: () => PCBDocument;
+   111→  loadDocument: (doc: PCBDocument) => void;
+   112→  runDRC: () => void;
+   113→  clearDRC: () => void;
+   114→  addCopperPour: (layer: 'top' | 'bottom', net: string) => void;
+   115→  removeCopperPour: (layer: 'top' | 'bottom') => void;
+   116→  exportGerbers: () => void;
+   117→  runAutoRoute: () => void;
+   118→  /** Topological push-and-shove router — replaces Lee's BFS. Real A* + 45° snapping + shove + rip-up. */
+   119→  runTopoRoute: () => { routed: number; failed: number; shoved: number; rippedUp: number };
+   120→  runNetlistVerify: () => NetlistVerifyResult | null;
+   121→  // keepout
+   122→  addKeepout: (rect: { x: number; y: number; width: number; height: number }, layers: 'all' | string[], reason?: string) => void;
+   123→  removeKeepout: (id: string) => void;
+   124→  // teardrops
+   125→  generateTeardrops: () => void;
+   126→  clearTeardrops: () => void;
+   127→  // net classes
+   128→  addNetClass: (nc: { name: string; traceWidth: number; clearance: number; viaDiameter: number; viaDrill: number; nets: string[] }) => void;
+   129→  removeNetClass: (name: string) => void;
+   130→  // length tuning
+   131→  lengthTuneTrace: (traceId: string, targetLength: number) => void;
+   132→  // alignment
+   133→  alignSelected: (direction: 'left' | 'right' | 'top' | 'bottom' | 'hCenter' | 'vCenter') => void;
+   134→  distributeSelected: (axis: 'horizontal' | 'vertical') => void;
+   135→}
+   136→
+   137→let idCounter = 0;
+   138→function genId(prefix: string) {
+   139→  idCounter++;
+   140→  return `${prefix}_${Date.now().toString(36)}_${idCounter}`;
+   141→}
+   142→
+   143→export const usePCB = create<PCBState>((set, get) => ({
+   144→  board: { width: 80, height: 60 },
+   145→  footprints: [],
+   146→  traces: [],
+   147→  vias: [],
+   148→  ratsnest: [],
+   149→  padNets: new Map(),
+   150→  activeLayer: 'top',
+   151→  layerStack: DEFAULT_LAYER_STACK,
+   152→  defaultTraceWidth: 0.3,
+   153→  keepouts: [],
+   154→  netClasses: [],
+   155→  teardrops: [],
+   156→  selectedFootprintIds: new Set(),
+   157→  crossProbeComponentIds: new Set(),
+   158→  setCrossProbe: (componentIds) => set({ crossProbeComponentIds: new Set(componentIds) }),
+   159→  tool: 'select',
+   160→  selectedFootprintId: null,
+   161→  selectedTraceId: null,
+   162→  routingFrom: null,
+   163→  routingPath: [],
+   164→  showRatsnest: true,
+   165→  showGrid: true,
+   166→  showPadNets: false,
+   167→  showKeepouts: true,
+   168→  drcErrors: [],
+   169→  copperPours: [],
+   170→
+   171→  importFromSchematic: (components, wires) => {
+   172→    const { footprints, ratsnest, padNets } = createPCBFromSchematic(components, wires);
+   173→    // Auto-size board based on footprint positions
+   174→    let maxX = 50, maxY = 50;
+   175→    for (const fp of footprints) {
+   176→      maxX = Math.max(maxX, fp.position.x + fp.bodySize.width / 2 + 5);
+   177→      maxY = Math.max(maxY, fp.position.y + fp.bodySize.height / 2 + 5);
+   178→    }
+   179→    set({
+   180→      footprints,
+   181→      ratsnest,
+   182→      padNets,
+   183→      traces: [],
+   184→      vias: [],
+   185→      board: { width: Math.ceil(maxX), height: Math.ceil(maxY) },
+   186→      selectedFootprintId: null,
+   187→      selectedTraceId: null,
+   188→      routingFrom: null,
+   189→      routingPath: [],
+   190→    });
+   191→  },
+   192→
+   193→  setTool: (tool) => set({ tool, routingFrom: null, routingPath: [] }),
+   194→  setActiveLayer: (activeLayer) => set({ activeLayer }),
+   195→  setDefaultTraceWidth: (defaultTraceWidth) => set({ defaultTraceWidth }),
+   196→  setBoardSize: (width, height) => set({ board: { width, height } }),
+   197→
+   198→  moveFootprint: (id, pos) => {
+   199→    set((s) => ({
+   200→      footprints: s.footprints.map((fp) => {
+   201→        if (fp.id !== id) return fp;
+   202→        // Move all pads by the same delta
+   203→        const dx = pos.x - fp.position.x;
+   204→        const dy = pos.y - fp.position.y;
+   205→        return {
+   206→          ...fp,
+   207→          position: { ...pos },
+   208→          pads: fp.pads.map((p) => ({
+   209→            ...p,
+   210→            position: { x: p.position.x + dx, y: p.position.y + dy },
+   211→          })),
+   212→        };
+   213→      }),
+   214→    }));
+   215→    // Recompute ratsnest
+   216→    const state = get();
+   217→    const { ratsnest } = computeRatsnestFromState(state);
+   218→    set({ ratsnest });
+   219→  },
+   220→
+   221→  rotateFootprint: (id) => {
+   222→    set((s) => ({
+   223→      footprints: s.footprints.map((fp) => {
+   224→        if (fp.id !== id) return fp;
+   225→        const newRot = (fp.rotation + 90) % 360;
+   226→        const rad = (newRot * Math.PI) / 180;
+   227→        const cos = Math.cos(rad);
+   228→        const sin = Math.sin(rad);
+   229→        const fpDef = getFootprintDefSafe(fp.componentType);
+   230→        return {
+   231→          ...fp,
+   232→          rotation: newRot,
+   233→          pads: fp.pads.map((pad, i) => {
+   234→            const padDef = fpDef.pads[i];
+   235→            if (!padDef) return pad;
+   236→            const px = padDef.position.x * cos - padDef.position.y * sin;
+   237→            const py = padDef.position.x * sin + padDef.position.y * cos;
+   238→            return {
+   239→              ...pad,
+   240→              position: { x: fp.position.x + px, y: fp.position.y + py },
+   241→            };
+   242→          }),
+   243→        };
+   244→      }),
+   245→    }));
+   246→    // Recompute ratsnest
+   247→    const state = get();
+   248→    const { ratsnest } = computeRatsnestFromState(state);
+   249→    set({ ratsnest });
+   250→  },
+   251→
+   252→  deleteTrace: (id) => set((s) => ({ traces: s.traces.filter((t) => t.id !== id) })),
+   253→
+   254→  startRouting: (from) => set({ routingFrom: from, routingPath: [from] }),
+   255→
+   256→  addRoutingPoint: (point) => {
+   257→    set((s) => {
+   258→      if (!s.routingFrom) return {};
+   259→      const last = s.routingPath[s.routingPath.length - 1];
+   260→      // Snap to grid (0.5mm)
+   261→      const snapped = { x: Math.round(point.x * 2) / 2, y: Math.round(point.y * 2) / 2 };
+   262→      if (last && last.x === snapped.x && last.y === snapped.y) return {};
+   263→      return { routingPath: [...s.routingPath, snapped] };
+   264→    });
+   265→  },
+   266→
+   267→  finishRouting: (to) => {
+   268→    const s = get();
+   269→    if (!s.routingFrom || s.routingPath.length < 2) {
+   270→      set({ routingFrom: null, routingPath: [] });
+   271→      return;
+   272→    }
+   273→    const trace: Trace = {
+   274→      id: genId('trace'),
+   275→      net: s.routingFrom.net,
+   276→      layer: s.activeLayer,
+   277→      segments: [],
+   278→      width: s.defaultTraceWidth,
+   279→    };
+   280→    for (let i = 0; i < s.routingPath.length - 1; i++) {
+   281→      trace.segments.push({
+   282→        start: s.routingPath[i],
+   283→        end: s.routingPath[i + 1],
+   284→        width: s.defaultTraceWidth,
+   285→      });
+   286→    }
+   287→    set((st) => ({
+   288→      traces: [...st.traces, trace],
+   289→      routingFrom: null,
+   290→      routingPath: [],
+   291→    }));
+   292→    void to;
+   293→  },
+   294→
+   295→  cancelRouting: () => set({ routingFrom: null, routingPath: [] }),
+   296→
+   297→  addVia: (pos, net) => {
+   298→    const via: Via = {
+   299→      id: genId('via'),
+   300→      position: { ...pos },
+   301→      diameter: 1.0,
+   302→      drill: 0.5,
+   303→      net,
+   304→      type: 'tht',
+   305→      fromLayer: 'top',
+   306→      toLayer: 'bottom',
+   307→    };
+   308→    set((s) => ({ vias: [...s.vias, via] }));
+   309→  },
+   310→
+   311→  addTypedVia: (pos, net, type, fromLayer, toLayer) => {
+   312→    // Diameter/drill defaults per via type (industry-typical values)
+   313→    let diameter = 1.0;
+   314→    let drill = 0.5;
+   315→    if (type === 'micro') { diameter = 0.3; drill = 0.1; }
+   316→    else if (type === 'blind') { diameter = 0.6; drill = 0.25; }
+   317→    else if (type === 'buried') { diameter = 0.6; drill = 0.25; }
+   318→    const via: Via = {
+   319→      id: genId('via'),
+   320→      position: { ...pos },
+   321→      diameter, drill, net,
+   322→      type,
+   323→      fromLayer: fromLayer ?? (type === 'tht' ? 'top' : 'top'),
+   324→      toLayer: toLayer ?? (type === 'tht' ? 'bottom' : fromLayer ?? 'bottom'),
+   325→    };
+   326→    set((s) => ({ vias: [...s.vias, via] }));
+   327→  },
+   328→
+   329→  setLayerStack: (stack) => set((s) => ({
+   330→    layerStack: stack,
+   331→    // If the active layer isn't in the new stack, switch to top
+   332→    activeLayer: stack.layers.includes(s.activeLayer as CopperLayer)
+   333→      ? s.activeLayer
+   334→      : 'top' as 'top' | 'bottom',
+   335→  })),
+   336→
+   337→  routeDiffPair: (padAId, padBId, netP, netN) => {
+   338→    const s = get();
+   339→    // Find the two pads
+   340→    let padA: Pad | null = null;
+   341→    let padB: Pad | null = null;
+   342→    for (const fp of s.footprints) {
+   343→      for (const p of fp.pads) {
+   344→        if (p.id === padAId) padA = p;
+   345→        if (p.id === padBId) padB = p;
+   346→      }
+   347→    }
+   348→    if (!padA || !padB) return { routedP: false, routedN: false };
+   349→    // Route the P trace as a simple L-shape on the active layer
+   350→    const layer = s.activeLayer;
+   351→    const width = s.defaultTraceWidth;
+   352→    // P trace: padA → (midX, padA.y) → (midX, padB.y) → padB  (manhattan with 45° knees)
+   353→    const midX = (padA.position.x + padB.position.x) / 2;
+   354→    const pSegs = [
+   355→      { start: { ...padA.position }, end: { x: midX, y: padA.position.y }, width },
+   356→      { start: { x: midX, y: padA.position.y }, end: { x: midX, y: padB.position.y }, width },
+   357→      { start: { x: midX, y: padB.position.y }, end: { ...padB.position }, width },
+   358→    ];
+   359→    // N trace: offset by traceSpacing (2× trace width) parallel to P
+   360→    const spacing = width * 4; // 4× width is a typical diff-pair spacing
+   361→    // Determine offset direction (perpendicular to dominant axis)
+   362→    const isHoriz = Math.abs(padB.position.x - padA.position.x) > Math.abs(padB.position.y - padA.position.y);
+   363→    const offX = isHoriz ? 0 : spacing;
+   364→    const offY = isHoriz ? spacing : 0;
+   365→    // Find a second pair of pads for the N net — for simplicity, use padB shifted.
+   366→    // In a real implementation, the user would specify the actual N pad.
+   367→    // Here we just route N parallel to P.
+   368→    const nStart = { x: padA.position.x + offX, y: padA.position.y + offY };
+   369→    const nEnd = { x: padB.position.x + offX, y: padB.position.y + offY };
+   370→    const nSegs = [
+   371→      { start: nStart, end: { x: midX + offX, y: nStart.y }, width },
+   372→      { start: { x: midX + offX, y: nStart.y }, end: { x: midX + offX, y: nEnd.y }, width },
+   373→      { start: { x: midX + offX, y: nEnd.y }, end: nEnd, width },
+   374→    ];
+   375→    const idP = genId('diffp');
+   376→    const idN = genId('diffn');
+   377→    const traceP: Trace = { id: idP, net: netP, layer, segments: pSegs, width, pairedTraceId: idN };
+   378→    const traceN: Trace = { id: idN, net: netN, layer, segments: nSegs, width, pairedTraceId: idP };
+   379→    set((st) => ({ traces: [...st.traces, traceP, traceN] }));
+   380→    return { routedP: true, routedN: true };
+   381→  },
+   382→
+   383→  selectFootprint: (id) => set({ selectedFootprintId: id, selectedTraceId: null }),
+   384→  selectTrace: (id) => set({ selectedTraceId: id, selectedFootprintId: null }),
+   385→  toggleRatsnest: () => set((s) => ({ showRatsnest: !s.showRatsnest })),
+   386→  toggleGrid: () => set((s) => ({ showGrid: !s.showGrid })),
+   387→  togglePadNets: () => set((s) => ({ showPadNets: !s.showPadNets })),
+   388→  clearPCB: () => set({
+   389→    footprints: [], traces: [], vias: [], ratsnest: [], padNets: new Map(),
+   390→    keepouts: [], netClasses: [], teardrops: [], copperPours: [], drcErrors: [],
+   391→    selectedFootprintId: null, selectedTraceId: null, selectedFootprintIds: new Set(),
+   392→    routingFrom: null, routingPath: [], tool: 'select' as PCBTool,
+   393→  }),
+   394→
+   395→  serialize: () => {
+   396→    const s = get();
+   397→    return {
+   398→      version: 1 as const,
+   399→      board: s.board,
+   400→      footprints: s.footprints,
+   401→      traces: s.traces,
+   402→      vias: s.vias,
+   403→      activeLayer: s.activeLayer,
+   404→      defaultTraceWidth: s.defaultTraceWidth,
+   405→      padNets: Array.from(s.padNets.entries()),
+   406→      keepouts: s.keepouts,
+   407→      netClasses: s.netClasses,
+   408→      teardrops: s.teardrops,
+   409→    };
+   410→  },
+   411→
+   412→  loadDocument: (doc) => set({
+   413→    board: doc.board,
+   414→    footprints: doc.footprints,
+   415→    traces: doc.traces,
+   416→    vias: doc.vias ?? [],
+   417→    activeLayer: (doc.activeLayer as 'top' | 'bottom') ?? 'top',
+   418→    defaultTraceWidth: doc.defaultTraceWidth,
+   419→    padNets: new Map((doc as any).padNets ?? []),
+   420→    keepouts: (doc as any).keepouts ?? [],
+   421→    netClasses: (doc as any).netClasses ?? [],
+   422→    teardrops: (doc as any).teardrops ?? [],
+   423→    ratsnest: [],
+   424→    drcErrors: [],
+   425→    copperPours: [],
+   426→    selectedFootprintId: null,
+   427→    selectedTraceId: null,
+   428→    selectedFootprintIds: new Set(),
+   429→    routingFrom: null,
+   430→    routingPath: [],
+   431→    tool: 'select',
+   432→  }),
+   433→
+   434→  runDRC: () => {
+   435→    const s = get();
+   436→    const errors = runDRCCheck(s.footprints, s.traces, s.vias, s.ratsnest, s.board, DEFAULT_DRC_CONFIG);
+   437→    set({ drcErrors: errors });
+   438→  },
+   439→
+   440→  clearDRC: () => set({ drcErrors: [] }),
+   441→
+   442→  addCopperPour: (layer, net) => {
+   443→    const s = get();
+   444→    const pour = generateCopperPour(layer, net, s.footprints, s.traces, s.vias, s.board);
+   445→    set((st) => ({
+   446→      copperPours: [...st.copperPours.filter((p) => !(p.layer === layer && p.net === net)), pour],
+   447→    }));
+   448→  },
+   449→
+   450→  removeCopperPour: (layer) => {
+   451→    set((st) => ({ copperPours: st.copperPours.filter((p) => p.layer !== layer) }));
+   452→  },
+   453→
+   454→  exportGerbers: () => {
+   455→    const s = get();
+   456→    const files = exportAllGerbers(s.footprints, s.traces, s.vias, s.board);
+   457→    for (const file of files) {
+   458→      const blob = new Blob([file.content], { type: 'text/plain' });
+   459→      const url = URL.createObjectURL(blob);
+   460→      const a = document.createElement('a');
+   461→      a.href = url;
+   462→      a.download = file.filename;
+   463→      a.click();
+   464→      URL.revokeObjectURL(url);
+   465→    }
+   466→  },
+   467→
+   468→  runAutoRoute: () => {
+   469→    const s = get();
+   470→    const result = autoRoute(
+   471→      s.footprints, s.traces, s.vias, s.ratsnest, s.board,
+   472→      s.activeLayer, s.defaultTraceWidth,
+   473→    );
+   474→    set({ traces: result.traces, vias: result.vias });
+   475→  },
+   476→
+   477→  runTopoRoute: () => {
+   478→    const s = get();
+   479→    const result = routeTopologically(
+   480→      s.footprints, s.traces, s.vias, s.ratsnest, s.board,
+   481→      {
+   482→        ...DEFAULT_ROUTER_OPTIONS,
+   483→        clearance: DEFAULT_DRC_CONFIG.minClearance,
+   484→        traceWidth: s.defaultTraceWidth,
+   485→      },
+   486→    );
+   487→    set({ traces: result.traces, vias: result.vias });
+   488→    return {
+   489→      routed: result.stats.routed,
+   490→      failed: result.stats.failed,
+   491→      shoved: result.stats.shoved,
+   492→      rippedUp: result.stats.rippedUp,
+   493→    };
+   494→  },
+   495→
+   496→  runNetlistVerify: () => {
+   497→    const s = get();
+   498→    const editorState = useEditor.getState();
+   499→    const result = verifyNetlist(
+   500→      editorState.components, editorState.wires,
+   501→      s.footprints, s.traces,
+   502→    );
+   503→    return result;
+   504→  },
+   505→
+   506→  // ===== Flip footprint =====
+   507→  flipFootprint: (id) => set((s) => ({
+   508→    footprints: s.footprints.map((fp) => {
+   509→      if (fp.id !== id) return fp;
+   510→      const newSide = fp.side === 'top' ? 'bottom' : 'top';
+   511→      return {
+   512→        ...fp,
+   513→        side: newSide,
+   514→        pads: fp.pads.map((p) => ({
+   515→          ...p,
+   516→          position: { x: -p.position.x, y: p.position.y },
+   517→          layer: newSide,
+   518→        })),
+   519→      };
+   520→    }),
+   521→  })),
+   522→
+   523→  // ===== Multi-selection =====
+   524→  toggleFootprintSelection: (id) => set((s) => {
+   525→    const ids = new Set(s.selectedFootprintIds);
+   526→    if (ids.has(id)) ids.delete(id); else ids.add(id);
+   527→    return { selectedFootprintIds: ids };
+   528→  }),
+   529→
+   530→  toggleKeepouts: () => set((s) => ({ showKeepouts: !s.showKeepouts })),
+   531→
+   532→  // ===== Keepout areas =====
+   533→  addKeepout: (rect, layers, reason) => set((s) => ({
+   534→    keepouts: [...s.keepouts, { id: genId('keepout'), rect, layers, reason }],
+   535→  })),
+   536→  removeKeepout: (id) => set((s) => ({ keepouts: s.keepouts.filter((k) => k.id !== id) })),
+   537→
+   538→  // ===== Teardrops =====
+   539→  generateTeardrops: () => {
+   540→    const s = get();
+   541→    const teardrops: PCBState['teardrops'] = [];
+   542→    let tdId = 0;
+   543→    for (const trace of s.traces) {
+   544→      if (trace.segments.length === 0) continue;
+   545→      const firstSeg = trace.segments[0];
+   546→      const lastSeg = trace.segments[trace.segments.length - 1];
+   547→      for (const endpoint of [firstSeg.start, lastSeg.end]) {
+   548→        const pad = s.footprints.flatMap(fp => fp.pads).find(p =>
+   549→          Math.hypot(p.position.x - endpoint.x, p.position.y - endpoint.y) < 0.5
+   550→        );
+   551→        if (!pad) continue;
+   552→        const traceEnd = endpoint === firstSeg.start ? firstSeg.end : lastSeg.start;
+   553→        const dir = { x: traceEnd.x - endpoint.x, y: traceEnd.y - endpoint.y };
+   554→        const len = Math.hypot(dir.x, dir.y);
+   555→        if (len < 0.01) continue;
+   556→        const ux = dir.x / len, uy = dir.y / len;
+   557→        const px = -uy, py = ux;
+   558→        const padR = Math.max(pad.size.width, pad.size.height) / 2;
+   559→        const tdLen = Math.min(padR * 0.8, len * 0.5);
+   560→        const wideHalf = padR * 0.9;
+   561→        const narrowHalf = firstSeg.width / 2;
+   562→        const wideCenter = { x: endpoint.x + ux * padR * 0.3, y: endpoint.y + uy * padR * 0.3 };
+   563→        const narrowCenter = { x: endpoint.x + ux * (padR * 0.3 + tdLen), y: endpoint.y + uy * (padR * 0.3 + tdLen) };
+   564→        teardrops.push({
+   565→          id: `td_${tdId++}`, position: endpoint, padId: pad.id, layer: trace.layer,
+   566→          points: [
+   567→            { x: wideCenter.x + px * wideHalf, y: wideCenter.y + py * wideHalf },
+   568→            { x: wideCenter.x - px * wideHalf, y: wideCenter.y - py * wideHalf },
+   569→            { x: narrowCenter.x - px * narrowHalf, y: narrowCenter.y - py * narrowHalf },
+   570→            { x: narrowCenter.x + px * narrowHalf, y: narrowCenter.y + py * narrowHalf },
+   571→          ],
+   572→        });
+   573→      }
+   574→    }
+   575→    set({ teardrops });
+   576→  },
+   577→  clearTeardrops: () => set({ teardrops: [] }),
+   578→
+   579→  // ===== Net classes =====
+   580→  addNetClass: (nc) => set((s) => ({
+   581→    netClasses: [...s.netClasses.filter((c) => c.name !== nc.name), nc],
+   582→  })),
+   583→  removeNetClass: (name) => set((s) => ({ netClasses: s.netClasses.filter((c) => c.name !== name) })),
+   584→
+   585→  // ===== Length tuning (serpentine meander) =====
+   586→  lengthTuneTrace: (traceId, targetLength) => {
+   587→    const s = get();
+   588→    const trace = s.traces.find((t) => t.id === traceId);
+   589→    if (!trace) return;
+   590→    let currentLen = 0;
+   591→    for (const seg of trace.segments) currentLen += Math.hypot(seg.end.x - seg.start.x, seg.end.y - seg.start.y);
+   592→    if (targetLength <= currentLen) return;
+   593→    const extra = targetLength - currentLen;
+   594→    // Find longest segment
+   595→    let longestIdx = 0, longestLen = 0;
+   596→    for (let i = 0; i < trace.segments.length; i++) {
+   597→      const len = Math.hypot(trace.segments[i].end.x - trace.segments[i].start.x, trace.segments[i].end.y - trace.segments[i].start.y);
+   598→      if (len > longestLen) { longestLen = len; longestIdx = i; }
+   599→    }
+   600→    const seg = trace.segments[longestIdx];
+   601→    const dx = seg.end.x - seg.start.x, dy = seg.end.y - seg.start.y;
+   602→    const segLen = Math.hypot(dx, dy);
+   603→    if (segLen < 2) return;
+   604→    const ux = dx / segLen, uy = dy / segLen, px = -uy, py = ux;
+   605→    const amplitude = 2.0;
+   606→    const numBumps = Math.ceil(extra / (2 * amplitude));
+   607→    const bumpSpacing = segLen / (numBumps + 1);
+   608→    const newSegs: typeof trace.segments = [];
+   609→    let cursor = { ...seg.start };
+   610→    for (let i = 0; i < numBumps; i++) {
+   611→      const bumpStart = { x: seg.start.x + ux * bumpSpacing * (i + 0.5), y: seg.start.y + uy * bumpSpacing * (i + 0.5) };
+   612→      newSegs.push({ start: { ...cursor }, end: { ...bumpStart }, width: seg.width });
+   613→      const out = { x: bumpStart.x + px * amplitude, y: bumpStart.y + py * amplitude };
+   614→      newSegs.push({ start: { ...bumpStart }, end: out, width: seg.width });
+   615→      const fwd = { x: out.x + ux * (bumpSpacing / 2), y: out.y + uy * (bumpSpacing / 2) };
+   616→      newSegs.push({ start: out, end: fwd, width: seg.width });
+   617→      const back = { x: fwd.x - px * amplitude, y: fwd.y - py * amplitude };
+   618→      newSegs.push({ start: fwd, end: back, width: seg.width });
+   619→      cursor = back;
+   620→    }
+   621→    newSegs.push({ start: { ...cursor }, end: { ...seg.end }, width: seg.width });
+   622→    set({
+   623→      traces: s.traces.map((t) => t.id === traceId ? { ...t, segments: [
+   624→        ...t.segments.slice(0, longestIdx), ...newSegs, ...t.segments.slice(longestIdx + 1)
+   625→      ] } : t),
+   626→    });
+   627→  },
+   628→
+   629→  // ===== Alignment =====
+   630→  alignSelected: (direction) => {
+   631→    const s = get();
+   632→    if (s.selectedFootprintIds.size < 2) return;
+   633→    const selected = s.footprints.filter((f) => s.selectedFootprintIds.has(f.id));
+   634→    let target: number;
+   635→    switch (direction) {
+   636→      case 'left':   target = Math.min(...selected.map(f => f.position.x)); break;
+   637→      case 'right':  target = Math.max(...selected.map(f => f.position.x + f.bodySize.width)); break;
+   638→      case 'top':    target = Math.min(...selected.map(f => f.position.y)); break;
+   639→      case 'bottom': target = Math.max(...selected.map(f => f.position.y + f.bodySize.height)); break;
+   640→      case 'hCenter': target = selected.reduce((a, f) => a + f.position.x + f.bodySize.width / 2, 0) / selected.length; break;
+   641→      case 'vCenter': target = selected.reduce((a, f) => a + f.position.y + f.bodySize.height / 2, 0) / selected.length; break;
+   642→    }
+   643→    set({
+   644→      footprints: s.footprints.map((fp) => {
+   645→        if (!s.selectedFootprintIds.has(fp.id)) return fp;
+   646→        const dx = direction === 'left' ? target - fp.position.x
+   647→                 : direction === 'right' ? target - (fp.position.x + fp.bodySize.width)
+   648→                 : direction === 'hCenter' ? target - (fp.position.x + fp.bodySize.width / 2) : 0;
+   649→        const dy = direction === 'top' ? target - fp.position.y
+   650→                 : direction === 'bottom' ? target - (fp.position.y + fp.bodySize.height)
+   651→                 : direction === 'vCenter' ? target - (fp.position.y + fp.bodySize.height / 2) : 0;
+   652→        return { ...fp, position: { x: fp.position.x + dx, y: fp.position.y + dy },
+   653→          pads: fp.pads.map(p => ({ ...p, position: { x: p.position.x + dx, y: p.position.y + dy } })) };
+   654→      }),
+   655→    });
+   656→  },
+   657→
+   658→  distributeSelected: (axis) => {
+   659→    const s = get();
+   660→    if (s.selectedFootprintIds.size < 3) return;
+   661→    const selected = s.footprints.filter((f) => s.selectedFootprintIds.has(f.id));
+   662→    const sorted = [...selected].sort((a, b) => axis === 'horizontal' ? a.position.x - b.position.x : a.position.y - b.position.y);
+   663→    const first = sorted[0], last = sorted[sorted.length - 1];
+   664→    const totalSpan = axis === 'horizontal' ? (last.position.x + last.bodySize.width) - first.position.x : (last.position.y + last.bodySize.height) - first.position.y;
+   665→    const totalSize = sorted.reduce((acc, f) => acc + (axis === 'horizontal' ? f.bodySize.width : f.bodySize.height), 0);
+   666→    const gap = (totalSpan - totalSize) / (sorted.length - 1);
+   667→    let cursor = axis === 'horizontal' ? first.position.x : first.position.y;
+   668→    const updates = new Map<string, { x: number; y: number }>();
+   669→    for (const fp of sorted) {
+   670→      updates.set(fp.id, axis === 'horizontal' ? { x: cursor, y: fp.position.y } : { x: fp.position.x, y: cursor });
+   671→      cursor += (axis === 'horizontal' ? fp.bodySize.width : fp.bodySize.height) + gap;
+   672→    }
+   673→    set({
+   674→      footprints: s.footprints.map((fp) => {
+   675→        const newPos = updates.get(fp.id);
+   676→        if (!newPos) return fp;
+   677→        const dx = newPos.x - fp.position.x, dy = newPos.y - fp.position.y;
+   678→        return { ...fp, position: newPos, pads: fp.pads.map(p => ({ ...p, position: { x: p.position.x + dx, y: p.position.y + dy } })) };
+   679→      }),
+   680→    });
+   681→  },
+   682→}));
+   683→
+   684→// Helper: compute ratsnest from current state
+   685→function computeRatsnestFromState(state: PCBState) {
+   686→  const padNets = state.padNets;
+   687→  const netsToPads = new Map<string, { padId: string; pos: { x: number; y: number } }[]>();
+   688→  for (const fp of state.footprints) {
+   689→    for (const pad of fp.pads) {
+   690→      const termKey = `${pad.componentId}:${pad.terminalId}`;
+   691→      const net = padNets.get(termKey);
+   692→      if (!net) continue;
+   693→      if (!netsToPads.has(net)) netsToPads.set(net, []);
+   694→      netsToPads.get(net)!.push({ padId: pad.id, pos: pad.position });
+   695→    }
+   696→  }
+   697→  const ratsnest: Ratsnest[] = [];
+   698→  for (const [net, pads] of netsToPads) {
+   699→    if (pads.length < 2) continue;
+   700→    const connected = new Set<string>([pads[0].padId]);
+   701→    const remaining = pads.slice(1);
+   702→    while (remaining.length > 0) {
+   703→      let bestDist = Infinity;
+   704→      let bestIdx = 0;
+   705→      let bestFrom: { padId: string; pos: { x: number; y: number } } | null = null;
+   706→      for (let i = 0; i < remaining.length; i++) {
+   707→        for (const fromPad of pads) {
+   708→          if (!connected.has(fromPad.padId)) continue;
+   709→          const dx = remaining[i].pos.x - fromPad.pos.x;
+   710→          const dy = remaining[i].pos.y - fromPad.pos.y;
+   711→          const dist = dx * dx + dy * dy;
+   712→          if (dist < bestDist) { bestDist = dist; bestIdx = i; bestFrom = fromPad; }
+   713→        }
+   714→      }
+   715→      if (bestFrom) {
+   716→        ratsnest.push({
+   717→          fromPadId: bestFrom.padId, toPadId: remaining[bestIdx].padId,
+   718→          net, from: bestFrom.pos, to: remaining[bestIdx].pos,
+   719→        });
+   720→        connected.add(remaining[bestIdx].padId);
+   721→        remaining.splice(bestIdx, 1);
+   722→      } else break;
+   723→    }
+   724→  }
+   725→  return { ratsnest };
+   726→}
+   727→
+   728→// Helper: safe footprint def getter
+   729→function getFootprintDefSafe(type: string) {
+   730→  return getFootprintDef(type);
+   731→}
+   732→

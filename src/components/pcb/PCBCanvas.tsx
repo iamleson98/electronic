@@ -220,16 +220,21 @@ export function PCBCanvas() {
         const sp = mmToScreen(cell.x - pour.cellSize / 2, cell.y - pour.cellSize / 2);
         ctx.fillRect(sp.x, sp.y, cellPx, cellPx);
       }
-      // Thermal relief pads
+      // Thermal relief pads — 4 spokes (N, S, E, W)
       if (pour.thermalPads) {
         for (const tp of pour.thermalPads) {
           const sp = mmToScreen(tp.pos.x, tp.pos.y);
           const spokePx = tp.spokeWidth * PX_PER_MM * zoom;
+          const spokeLen = (tp.padRadius + 0.3) * PX_PER_MM * zoom;
           ctx.fillStyle = pal.copper;
-          // 4 spokes
-          for (const dir of [[0,1],[0,-1],[1,0],[-1,0]]) {
-            ctx.fillRect(sp.x - spokePx/2, sp.y - spokePx/2, spokePx, (tp.padRadius + 0.3) * PX_PER_MM * zoom * dir[1] || spokePx);
-          }
+          // North spoke (up)
+          ctx.fillRect(sp.x - spokePx / 2, sp.y - spokeLen, spokePx, spokeLen);
+          // South spoke (down)
+          ctx.fillRect(sp.x - spokePx / 2, sp.y, spokePx, spokeLen);
+          // East spoke (right)
+          ctx.fillRect(sp.x, sp.y - spokePx / 2, spokeLen, spokePx);
+          // West spoke (left)
+          ctx.fillRect(sp.x - spokeLen, sp.y - spokePx / 2, spokeLen, spokePx);
         }
       }
     }
@@ -745,6 +750,7 @@ export function PCBCanvas() {
   const onMouseUp = () => { panRef.current = null; dragRef.current = null; };
 
   const onWheel = (e: React.WheelEvent) => {
+    e.preventDefault(); // Prevent page scroll while zooming PCB
     const rect = canvasRef.current!.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
