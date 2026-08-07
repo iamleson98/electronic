@@ -22,7 +22,7 @@ import {
   getSheetPinAbsPos,
 } from '@/lib/circuit/sheet-render';
 import type { HierarchicalSheet } from '@/lib/circuit/types';
-// Extracted types and utilities (previously inline)
+// Extracted modules
 import {
   CELL_SIZE,
   DragState,
@@ -36,8 +36,10 @@ import {
   segmentMidpoint,
   angleFromCenter,
   rerouteWireForDrag,
-  pointToSegmentDist,
 } from './canvas-wire-utils';
+import { useCanvasKeyboard } from './use-canvas-keyboard';
+import { useSimulationLoop } from './use-simulation-loop';
+import { useCanvasCoordinates } from './use-canvas-coordinates';
 
 export function CircuitCanvas() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -61,9 +63,7 @@ export function CircuitCanvas() {
     wireHandle: null,
     rotateHandle: null,
   });
-  // animation phase for current flow dots — continuous counter (never wraps)
-  // Using a large float that never resets eliminates the "snap back" visual glitch.
-  const flowPhaseRef = useRef(0);
+  // animation phase is now provided by useSimulationLoop hook
   const [use45Routing, setUse45Routing] = useState(false);
   const plugins = getAllPlugins();
 
@@ -141,220 +141,26 @@ export function CircuitCanvas() {
     return () => ro.disconnect();
   }, []);
 
-  // SINGLE unified animation+simulation loop.
-  // Both the simulation step and the flow-dot phase advance happen in the same
-  // requestAnimationFrame callback, so there's only ONE re-render per frame.
-  // This eliminates the blinking/lag caused by two competing RAF loops.
-  // The flow dot speed is linked to the simulation speed setting so they match.
-  const [animTick, setAnimTick] = useState(0);
-  useEffect(() => {
-    if (!running) return;
-    let raf = 0;
-    let lastSimTime = performance.now();
-    const SIM_INTERVAL = 16; // ms between simulation steps (~60Hz)
-    const loop = (now: number) => {
-      // Advance flow phase continuously — never wrap with % 1.
-      // Each wire uses frac(phase * speed) internally, so dots cycle smoothly
-      // per-wire without all dots snapping back at the same time.
-      const simSpeed = useEditor.getState().speed;
-      flowPhaseRef.current += 0.012 * Math.max(0.5, Math.min(4, simSpeed));
-      // Run simulation step at fixed interval
-      if (now - lastSimTime >= SIM_INTERVAL) {
-        try {
-          step();
-        } catch (err) {
-          // If step() throws (e.g., a plugin crashes), stop the loop
-          // to prevent silent freeze. The store's try/catch should handle
-          // most errors, but this is a safety net.
-          console.error('[Simulation] step() threw:', err);
-          useEditor.getState().setRunning(false);
-        }
-        lastSimTime = now;
-      }
-      // Single re-render per frame — covers both sim state and animation
-      setAnimTick((t) => (t + 1) % 1000000);
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [running, step]);
-  void animTick; // referenced in render effect deps
+  // Use extracted simulation loop hook
+  const { flowPhaseRef } = useSimulationLoop(running, step);
 
-  // helpers
-  const screenToGrid = useCallback((sx: number, sy: number): Vec2 => {
-    const x = (sx - pan.x) / (CELL_SIZE * zoom);
-    const y = (sy - pan.y) / (CELL_SIZE * zoom);
-    return snapToGrid ? { x: Math.round(x), y: Math.round(y) } : { x, y };
-  }, [pan, zoom, snapToGrid]);
+  // Use extracted coordinate/hit-testing hook
+  const {
+    screenToGrid,
+    gridToScreen,
+    getTerminalPos,
+    resolveEndpointPos,
+    findTerminalAt,
+    findComponentAt,
+    findWireAt,
+    findWireHandle,
+    getRotateHandlePos,
+  } = useCanvasCoordinates({
+    pan, zoom, snapToGrid, components, wires, sheets, selection, use45Routing,
+  });
 
-  const gridToScreen = useCallback((gx: number, gy: number): Vec2 => {
-    return { x: gx * CELL_SIZE * zoom + pan.x, y: gy * CELL_SIZE * zoom + pan.y };
-  }, [pan, zoom]);
-
-  const getTerminalPos = useCallback((comp: CircuitComponent, terminal: TerminalDef): Vec2 => {
-    const plugin = getPlugin(comp.type);
-    if (!plugin) return { x: 0, y: 0 };
-    const rotated = rotateTerminal(terminal, comp.rotation, plugin.boundingBox);
-    return {
-      x: comp.position.x + rotated.position.x,
-      y: comp.position.y + rotated.position.y,
-    };
-  }, []);
-
-  /**
-   * Resolve a wire endpoint (componentId + terminalId) to its absolute grid position.
-   * Handles both real components (looked up in `components`) and sheet pins
-   * (componentId is `__sheet:${sheetId}`, terminalId is `pin:${pinId}`).
-   * Returns null if the endpoint can't be resolved (e.g. dangling wire).
-   */
-  const resolveEndpointPos = useCallback((endpoint: { componentId: string; terminalId: string }): Vec2 | null => {
-    // Sheet pin?
-    if (endpoint.componentId.startsWith('__sheet:')) {
-      const sheetId = endpoint.componentId.slice('__sheet:'.length);
-      const sheet = sheets.find((s) => s.id === sheetId);
-      if (!sheet) return null;
-      const pinId = endpoint.terminalId.startsWith('pin:') ? endpoint.terminalId.slice('pin:'.length) : endpoint.terminalId;
-      const pin = sheet.pins.find((p) => p.id === pinId);
-      if (!pin) return null;
-      return {
-        x: sheet.position.x + pin.position.x,
-        y: sheet.position.y + pin.position.y,
-      };
-    }
-    // Real component terminal
-    const comp = components.find((c) => c.id === endpoint.componentId);
-    if (!comp) return null;
-    const plugin = getPlugin(comp.type);
-    if (!plugin) return null;
-    const t = plugin.terminals.find((tt) => tt.id === endpoint.terminalId);
-    if (!t) return null;
-    return getTerminalPos(comp, t);
-  }, [components, sheets, getTerminalPos]);
-
-  const findTerminalAt = useCallback((gx: number, gy: number) => {
-    for (const comp of components) {
-      const plugin = getPlugin(comp.type);
-      if (!plugin) continue;
-      for (const t of plugin.terminals) {
-        const pos = getTerminalPos(comp, t);
-        const dx = pos.x - gx;
-        const dy = pos.y - gy;
-        if (dx * dx + dy * dy < 0.5 * 0.5) {
-          return { componentId: comp.id, terminalId: t.id, pos };
-        }
-      }
-    }
-    // Also check sheet pins — they behave as wire endpoints too
-    for (const sheet of sheets) {
-      for (const pin of sheet.pins) {
-        const pos = {
-          x: sheet.position.x + pin.position.x,
-          y: sheet.position.y + pin.position.y,
-        };
-        const dx = pos.x - gx;
-        const dy = pos.y - gy;
-        if (dx * dx + dy * dy < 0.5 * 0.5) {
-          return {
-            componentId: `__sheet:${sheet.id}`,
-            terminalId: `pin:${pin.id}`,
-            pos,
-          };
-        }
-      }
-    }
-    return null;
-  }, [components, getTerminalPos, sheets]);
-
-  const findComponentAt = useCallback((gx: number, gy: number): CircuitComponent | null => {
-    for (let i = components.length - 1; i >= 0; i--) {
-      const comp = components[i];
-      const plugin = getPlugin(comp.type);
-      if (!plugin) continue;
-      const bb = plugin.boundingBox;
-      const cx = bb.width / 2;
-      const cy = bb.height / 2;
-      const dx = gx - (comp.position.x + cx);
-      const dy = gy - (comp.position.y + cy);
-      let rx: number, ry: number;
-      switch (comp.rotation) {
-        case 0: rx = dx; ry = dy; break;
-        case 1: rx = -dy; ry = dx; break;
-        case 2: rx = -dx; ry = -dy; break;
-        case 3: rx = dy; ry = -dx; break;
-      }
-      if (Math.abs(rx) <= bb.width / 2 && Math.abs(ry) <= bb.height / 2) {
-        return comp;
-      }
-    }
-    return null;
-  }, [components]);
-
-  // find wire under cursor (hit-test against wire path)
-  const findWireAt = useCallback((sx: number, sy: number): string | null => {
-    for (const wire of wires) {
-      const fromComp = components.find((c) => c.id === wire.from.componentId);
-      const toComp = components.find((c) => c.id === wire.to.componentId);
-      if (!fromComp || !toComp) continue;
-      const fromPlugin = getPlugin(fromComp.type);
-      const toPlugin = getPlugin(toComp.type);
-      if (!fromPlugin || !toPlugin) continue;
-      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
-      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
-      if (!fromT || !toT) continue;
-      const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
-      const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
-      const path = getWirePath(wire, fromPos, toPos, gridToScreen, use45Routing);
-      for (let i = 0; i < path.length - 1; i++) {
-        const a = path[i];
-        const b = path[i + 1];
-        const dist = pointToSegmentDist(sx, sy, a.x, a.y, b.x, b.y);
-        if (dist < 5) return wire.id;
-      }
-    }
-    return null;
-  }, [wires, components, gridToScreen, getTerminalPos]);
-
-  // find a draggable wire segment midpoint handle
-  const findWireHandle = useCallback((sx: number, sy: number): HoverState['wireHandle'] => {
-    for (const wire of wires) {
-      const fromComp = components.find((c) => c.id === wire.from.componentId);
-      const toComp = components.find((c) => c.id === wire.to.componentId);
-      if (!fromComp || !toComp) continue;
-      const fromPlugin = getPlugin(fromComp.type);
-      const toPlugin = getPlugin(toComp.type);
-      if (!fromPlugin || !toPlugin) continue;
-      const fromT = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
-      const toT = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
-      if (!fromT || !toT) continue;
-      const fromPos = gridToScreen(getTerminalPos(fromComp, fromT).x, getTerminalPos(fromComp, fromT).y);
-      const toPos = gridToScreen(getTerminalPos(toComp, toT).x, getTerminalPos(toComp, toT).y);
-      const path = getWirePath(wire, fromPos, toPos, gridToScreen, use45Routing);
-      for (let i = 0; i < path.length - 1; i++) {
-        const a = path[i];
-        const b = path[i + 1];
-        const mid = segmentMidpoint(a, b);
-        const dx = sx - mid.x;
-        const dy = sy - mid.y;
-        if (dx * dx + dy * dy < 36) {
-          return { wireId: wire.id, segIndex: i, pos: mid };
-        }
-      }
-    }
-    return null;
-  }, [wires, components, gridToScreen, getTerminalPos]);
-
-  // compute rotation handle position for a component (in screen coords)
-  const getRotateHandlePos = useCallback((comp: CircuitComponent): Vec2 | null => {
-    const plugin = getPlugin(comp.type);
-    if (!plugin) return null;
-    const bb = plugin.boundingBox;
-    const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
-    const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
-    return {
-      x: centerScreen.x,
-      y: centerScreen.y - (bb.height / 2 * CELL_SIZE * zoom) - 18,
-    };
-  }, [gridToScreen, zoom]);
+  void getTerminalPos; // used in render effect
+  void resolveEndpointPos;
 
   // ----- Rendering -----
   useEffect(() => {
@@ -1109,7 +915,7 @@ export function CircuitCanvas() {
     }
 
     ctx.restore();
-  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, use45Routing, running, gridToScreen, getTerminalPos, plugins, animTick, getRotateHandlePos, ercErrors, hoveredERC, units, sheets, hoveredSheetId, resolveEndpointPos]);
+  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, use45Routing, running, gridToScreen, getTerminalPos, plugins, getRotateHandlePos, ercErrors, hoveredERC, units, sheets, hoveredSheetId, resolveEndpointPos]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
@@ -1558,130 +1364,17 @@ export function CircuitCanvas() {
     return 'crosshair';
   };
 
-  // keyboard
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (running) return;
-        const s = useEditor.getState();
-        if (s.multiSelection.components.size > 0 || s.multiSelection.wires.size > 0) {
-          s.deleteSelected();
-        } else if (s.selection.type === 'component') {
-          deleteComponent(s.selection.id!);
-        } else if (s.selection.type === 'wire') {
-          s.deleteWire(s.selection.id!);
-        }
-      } else if (e.key === 'r' || e.key === 'R') {
-        if (running) return;
-        const s = useEditor.getState().selection;
-        if (s.type === 'component') rotateComponent(s.id!);
-      } else if (e.key === 'x' || e.key === 'X') {
-        // Mirror X (vertical flip)
-        if (running) return;
-        e.preventDefault();
-        const s = useEditor.getState();
-        if (s.selection.type === 'component' && s.selection.id) s.mirrorComponent(s.selection.id, 'x');
-        else if (s.multiSelection.components.size > 0) s.mirrorSelected('x');
-      } else if (e.key === 'y' || e.key === 'Y') {
-        // Mirror Y (horizontal flip)
-        if (running) return;
-        e.preventDefault();
-        const s = useEditor.getState();
-        if (s.selection.type === 'component' && s.selection.id) s.mirrorComponent(s.selection.id, 'y');
-        else if (s.multiSelection.components.size > 0) s.mirrorSelected('y');
-      } else if (e.key === 'l' || e.key === 'L') {
-        // Lock/unlock component
-        if (running) return;
-        e.preventDefault();
-        const s = useEditor.getState();
-        if (s.selection.type === 'component' && s.selection.id) s.toggleLock(s.selection.id);
-      } else if (e.key === 'm' || e.key === 'M') {
-        // De Morgan alternate body toggle (KiCad parity)
-        if (running) return;
-        e.preventDefault();
-        const s = useEditor.getState();
-        if (s.selection.type === 'component' && s.selection.id) s.toggleDeMorgan(s.selection.id);
-      } else if (e.shiftKey && (e.key === 'R' || e.key === 'r')) {
-        // Shift+R = free rotation by 15° (clockwise). R alone still does 90° steps.
-        if (running) return;
-        e.preventDefault();
-        const s = useEditor.getState();
-        if (s.selection.type === 'component' && s.selection.id) {
-          const comp = s.components.find((c) => c.id === s.selection.id);
-          if (comp) {
-            const cur = comp.rotationDeg ?? (comp.rotation * 90);
-            const next = (cur + 15) % 360;
-            s.rotateComponentFree(s.selection.id, next);
-          }
-        }
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        // Find / Replace — dispatch a custom event the Toolbar listens for
-        if (running) return;
-        e.preventDefault();
-        window.dispatchEvent(new CustomEvent('circuitlab:open-find-replace'));
-      } else if (e.key === 'n' || e.key === 'N') {
-        // Add no-connect marker to hovered terminal
-        if (running) return;
-        e.preventDefault();
-        if (hover.terminal) {
-          const s = useEditor.getState();
-          // toggle: remove if exists, add if not
-          const exists = s.noConnects.find((nc) => nc.componentId === hover.terminal!.componentId && nc.terminalId === hover.terminal!.terminalId);
-          if (exists) s.removeNoConnect(hover.terminal!.componentId, hover.terminal!.terminalId);
-          else s.addNoConnect(hover.terminal!.componentId, hover.terminal!.terminalId);
-        }
-      } else if (e.key === 'Escape') {
-        // If we're inside a sub-sheet, Escape goes back to the parent (KiCad parity).
-        // Otherwise clear selection / cancel wire draft.
-        if (useEditor.getState().activeSheet) {
-          setActiveSheet('');
-        } else {
-          cancelWire();
-          setSelection({ type: null, id: null });
-          useEditor.getState().clearMultiSelection();
-        }
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
-        if (running) return;
-        e.preventDefault();
-        useEditor.getState().undo();
-      } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
-        if (running) return;
-        e.preventDefault();
-        useEditor.getState().redo();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-        if (running) return;
-        e.preventDefault();
-        useEditor.getState().copySelection();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
-        if (running) return;
-        e.preventDefault();
-        useEditor.getState().paste();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
-        if (running) return;
-        e.preventDefault();
-        useEditor.getState().duplicate();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
-        if (running) return;
-        e.preventDefault();
-        const s = useEditor.getState();
-        s.setMultiSelection({
-          components: new Set(s.components.map((c) => c.id)),
-          wires: new Set(s.wires.map((w) => w.id)),
-        });
-      } else if (e.key === ' ') {
-        e.preventDefault();
-        const s = useEditor.getState();
-        s.setRunning(!s.running);
-      } else if (e.key === '\\' || e.key === '|') {
-        e.preventDefault();
-        setUse45Routing((v) => !v);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [deleteComponent, rotateComponent, cancelWire, setSelection, running]);
+  // Use extracted keyboard hook
+  useCanvasKeyboard({
+    running,
+    hover,
+    cancelWire,
+    setSelection,
+    deleteComponent,
+    rotateComponent,
+    setActiveSheet,
+    setUse45Routing,
+  });
 
   return (
     <div
