@@ -1,0 +1,1053 @@
+     1→// The simulation engine: builds a node index from the wire graph, stamps
+     2→// every component into an MNA system, solves it, and propagates results.
+     3→//
+     4→// Supports DC operating point and transient analysis (backward Euler).
+     5→// Non-linear components do a few Newton iterations per step (simple).
+     6→
+     7→import type {
+     8→  CircuitComponent,
+     9→  ComponentPlugin,
+    10→  MnaSystem,
+    11→  SimContext,
+    12→  Wire,
+    13→} from './types';
+    14→import { createMnaSystem, solveMna } from './solver';
+    15→import { createSparseMnaSystem, solveSparse, shouldUseSparseSolver, asMnaSystem } from './sparse-klu';
+    16→
+    17→export interface NodeMap {
+    18→  /** key = `${componentId}:${terminalId}` -> node id (0 = ground) */
+    19→  terminalNode: Map<string, number>;
+    20→  /** total number of nodes (including ground) */
+    21→  numNodes: number;
+    22→}
+    23→
+    24→/**
+    25→ * Expand a bus vector name like "D[0..7]" into ["D0", "D1", ..., "D7"].
+    26→ * Supports [start..end] (ascending or descending).
+    27→ * Single-bit names like "D0" return ["D0"].
+    28→ * Invalid patterns return [name] unchanged.
+    29→ */
+    30→export function expandBusVector(name: string): string[] {
+    31→  // Match patterns: BASE[START..END] or BASE[START:END]
+    32→  const m = name.match(/^([A-Za-z_]\w*)\[(\d+)\.\.(\d+)\]$/);
+    33→  if (!m) return [name];
+    34→  const [, base, startStr, endStr] = m;
+    35→  const start = parseInt(startStr, 10);
+    36→  const end = parseInt(endStr, 10);
+    37→  if (start <= end) {
+    38→    const bits: string[] = [];
+    39→    for (let i = start; i <= end; i++) bits.push(`${base}${i}`);
+    40→    return bits;
+    41→  } else {
+    42→    const bits: string[] = [];
+    43→    for (let i = start; i >= end; i--) bits.push(`${base}${i}`);
+    44→    return bits;
+    45→  }
+    46→}
+    47→
+    48→/**
+    49→ * Build a node map by union-find over all terminal connections.
+    50→ * Any terminal connected to a `ground` plugin's terminal becomes node 0.
+    51→ */
+    52→export function buildNodeMap(components: CircuitComponent[], wires: Wire[], plugins: Map<string, ComponentPlugin>): NodeMap {
+    53→  const terminalNode = new Map<string, number>();
+    54→  const parent: number[] = [0]; // node 0 is ground
+    55→
+    56→  function find(x: number): number {
+    57→    while (parent[x] !== x) {
+    58→      parent[x] = parent[parent[x]];
+    59→      x = parent[x];
+    60→    }
+    61→    return x;
+    62→  }
+    63→  function union(a: number, b: number) {
+    64→    const ra = find(a);
+    65→    const rb = find(b);
+    66→    if (ra === rb) return;
+    67→    // prefer to keep ground (0) as root
+    68→    if (ra === 0) parent[rb] = 0;
+    69→    else if (rb === 0) parent[ra] = 0;
+    70→    else parent[rb] = ra;
+    71→  }
+    72→  function newNode(): number {
+    73→    const id = parent.length;
+    74→    parent.push(id);
+    75→    return id;
+    76→  }
+    77→
+    78→  function termKey(cId: string, tId: string) {
+    79→    return `${cId}:${tId}`;
+    80→  }
+    81→  function nodeFor(cId: string, tId: string): number {
+    82→    const k = termKey(cId, tId);
+    83→    let n = terminalNode.get(k);
+    84→    if (n === undefined) {
+    85→      n = newNode();
+    86→      terminalNode.set(k, n);
+    87→    }
+    88→    return n;
+    89→  }
+    90→
+    91→  // First: pre-assign ground nodes from any "ground" plugin
+    92→  for (const comp of components) {
+    93→    const plugin = plugins.get(comp.type);
+    94→    if (!plugin) continue;
+    95→    if (comp.type === 'ground' || comp.type === 'powerGND') {
+    96→      for (const t of plugin.terminals) {
+    97→        const k = termKey(comp.id, t.id);
+    98→        terminalNode.set(k, 0);
+    99→      }
+   100→    }
+   101→  }
+   102→
+   103→  // Power symbols & net labels: unify all terminals with the same `net` parameter
+   104→  const netToNode = new Map<string, number>();
+   105→  for (const comp of components) {
+   106→    const plugin = plugins.get(comp.type);
+   107→    if (!plugin) continue;
+   108→    const isPowerSymbol =
+   109→      comp.type === 'powerGND' || comp.type === 'powerAGND' ||
+   110→      comp.type === 'powerVCC' || comp.type === 'power5V' || comp.type === 'power3V3' ||
+   111→      comp.type === 'power1V8' || comp.type === 'power2V5' ||
+   112→      comp.type === 'power12V' || comp.type === 'powerMinus12V' ||
+   113→      comp.type === 'powerMinus5V' || comp.type === 'powerAVDD' ||
+   114→      comp.type === 'powerVBAT' || comp.type === 'powerFlag' ||
+   115→      comp.type === 'netLabel' || comp.type === 'busLabel' ||
+   116→      comp.type === 'busVectorLabel' || comp.type === 'hierLabel';
+   117→    if (!isPowerSymbol) continue;
+   118→    const netName = (comp.parameters.net as string) || '';
+   119→    if (!netName) continue;
+   120→    if (netName === 'GND' || netName === 'gnd' || netName === '0') {
+   121→      for (const t of plugin.terminals) terminalNode.set(termKey(comp.id, t.id), 0);
+   122→      continue;
+   123→    }
+   124→    // Bus vector expansion: a label with text "D[0..7]" creates 8 implicit
+   125→    // nodes D0, D1, ..., D7. Each terminal of the busVectorLabel plugin gets
+   126→    // unified to its corresponding bit's shared node.
+   127→    const expandedBits = expandBusVector(netName);
+   128→    if (expandedBits.length > 1) {
+   129→      // Multi-bit bus vector — assign each terminal a separate bit's node
+   130→      for (let i = 0; i < plugin.terminals.length && i < expandedBits.length; i++) {
+   131→        const bitName = expandedBits[i];
+   132→        let bitNode = netToNode.get(bitName);
+   133→        if (bitNode === undefined) { bitNode = newNode(); netToNode.set(bitName, bitNode); }
+   134→        terminalNode.set(termKey(comp.id, plugin.terminals[i].id), bitNode);
+   135→      }
+   136→      continue;
+   137→    }
+   138→    let sharedNode = netToNode.get(netName);
+   139→    if (sharedNode === undefined) { sharedNode = newNode(); netToNode.set(netName, sharedNode); }
+   140→    for (const t of plugin.terminals) terminalNode.set(termKey(comp.id, t.id), sharedNode);
+   141→  }
+   142→
+   143→  // Process wires - union terminals
+   144→  for (const wire of wires) {
+   145→    const aKey = termKey(wire.from.componentId, wire.from.terminalId);
+   146→    const bKey = termKey(wire.to.componentId, wire.to.terminalId);
+   147→    const a = nodeFor(wire.from.componentId, wire.from.terminalId);
+   148→    const b = nodeFor(wire.to.componentId, wire.to.terminalId);
+   149→    // if either is already ground (0), union handles it
+   150→    union(a, b);
+   151→    const root = find(a);
+   152→    terminalNode.set(aKey, root);
+   153→    terminalNode.set(bKey, root);
+   154→  }
+   155→
+   156→  // Finalize: compress all paths and remap to 0..N contiguous
+   157→  // Collect all distinct roots
+   158→  const rootSet = new Set<number>();
+   159→  rootSet.add(0);
+   160→  for (const n of terminalNode.values()) {
+   161→    rootSet.add(find(n));
+   162→  }
+   163→  // assign contiguous ids, ground stays 0
+   164→  const rootToId = new Map<number, number>();
+   165→  rootToId.set(0, 0);
+   166→  let nextId = 1;
+   167→  for (const r of rootSet) {
+   168→    if (r === 0) continue;
+   169→    rootToId.set(r, nextId++);
+   170→  }
+   171→  for (const [k, n] of terminalNode) {
+   172→    terminalNode.set(k, rootToId.get(find(n))!);
+   173→  }
+   174→
+   175→  return { terminalNode, numNodes: nextId };
+   176→}
+   177→
+   178→export function getTerminalsForComponent(
+   179→  comp: CircuitComponent,
+   180→  plugin: ComponentPlugin,
+   181→  nodeMap: NodeMap,
+   182→): { terminalId: string; nodeId: number }[] {
+   183→  return plugin.terminals.map((t) => ({
+   184→    terminalId: t.id,
+   185→    nodeId: nodeMap.terminalNode.get(`${comp.id}:${t.id}`) ?? 0,
+   186→  }));
+   187→}
+   188→
+   189→/**
+   190→ * Compute the current flowing through each wire, in amperes.
+   191→ * Returns a map of wireId -> current (positive = from `from` terminal to `to` terminal).
+   192→ *
+   193→ * This follows the **conventional current** convention (positive charge flow from + to -),
+   194→ * which is what Falstad and most simulators use for the animated dots.
+   195→ *
+   196→ * Method:
+   197→ * - For each wire, we look at the component at the `from` end and compute the current
+   198→ *   flowing INTO that terminal from the wire's perspective.
+   199→ * - For passive components (R, C, L, diode, LED): current = (V(a)-V(b))/R flows from a to b
+   200→ *   THROUGH the component. If the wire is attached to terminal 'a', then current leaving
+   201→ *   the wire INTO 'a' = +I (the wire delivers current to 'a'). If attached to 'b',
+   202→ *   current leaving the wire INTO 'b' = -I.
+   203→ *   But we want current flowing FROM wire.to TO wire.from... actually simpler:
+   204→ *   The current through the wire = the current through the component, signed so that
+   205→ *   positive = conventional current flowing from wire.from to wire.to.
+   206→ *
+   207→ * - For voltage sources: current flows OUT of the + terminal (conventional current).
+   208→ *   We compute this from the actual MNA branch current if available, or approximate
+   209→ *   from the load.
+   210→ *
+   211→ * The sign convention: positive current = dots animate from `from` to `to`.
+   212→ * In the renderer, positive = amber dots, negative = cyan dots (reverse).
+   213→ */
+   214→export function computeWireCurrents(
+   215→  components: CircuitComponent[],
+   216→  wires: Wire[],
+   217→  plugins: Map<string, ComponentPlugin>,
+   218→  sim: SimContext,
+   219→): Map<string, number> {
+   220→  // First compute per-component currents
+   221→  const compCurrents = computeComponentCurrents(components, wires, plugins, sim);
+   222→  const result = new Map<string, number>();
+   223→  const nodeMap = buildNodeMap(components, wires, plugins);
+   224→
+   225→  // Build nodeCurrentOut for KCL-based voltage source current
+   226→  // This sums up ALL currents leaving each node from ALL component types,
+   227→  // so the voltage source current = total current drawn from its + node.
+   228→  const nodeCurrentOut = new Map<number, number>();
+   229→  for (const comp of components) {
+   230→    const plugin = plugins.get(comp.type);
+   231→    if (!plugin) continue;
+   232→    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+   233→    const i = compCurrents.get(comp.id) ?? 0;
+   234→
+   235→    if (comp.type === 'resistor' || comp.type === 'capacitor' || comp.type === 'inductor' ||
+   236→        comp.type === 'led' || comp.type === 'diode' || comp.type === 'switch' || comp.type === 'pushButton') {
+   237→      const t1Id = 'a';
+   238→      const t2Id = comp.type === 'led' || comp.type === 'diode' ? 'k' : 'b';
+   239→      const n1 = terms.find((t) => t.terminalId === t1Id)?.nodeId ?? 0;
+   240→      const n2 = terms.find((t) => t.terminalId === t2Id)?.nodeId ?? 0;
+   241→      nodeCurrentOut.set(n1, (nodeCurrentOut.get(n1) ?? 0) + i);
+   242→      nodeCurrentOut.set(n2, (nodeCurrentOut.get(n2) ?? 0) - i);
+   243→    } else if (comp.type === 'currentSource') {
+   244→      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+   245→      const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+   246→      nodeCurrentOut.set(p, (nodeCurrentOut.get(p) ?? 0) + i);
+   247→      nodeCurrentOut.set(n, (nodeCurrentOut.get(n) ?? 0) - i);
+   248→    } else if (comp.type === 'speaker' || comp.type === 'lamp' || comp.type === 'dcMotor') {
+   249→      // Load components: current flows a→b
+   250→      const n1 = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   251→      const n2 = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   252→      nodeCurrentOut.set(n1, (nodeCurrentOut.get(n1) ?? 0) + i);
+   253→      nodeCurrentOut.set(n2, (nodeCurrentOut.get(n2) ?? 0) - i);
+   254→    } else if (comp.type === 'timer555') {
+   255→      // 555: current exits OUT pin, enters VCC pin
+   256→      const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+   257→      const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
+   258→      nodeCurrentOut.set(outNode, (nodeCurrentOut.get(outNode) ?? 0) + i);
+   259→      nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) - i);
+   260→    } else if (comp.type === 'opamp') {
+   261→      // Op-amp: current exits OUT pin
+   262→      const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+   263→      nodeCurrentOut.set(outNode, (nodeCurrentOut.get(outNode) ?? 0) + i);
+   264→    } else if (comp.type === 'npn' || comp.type === 'nmos') {
+   265→      // Transistor: current flows C→E or D→S
+   266→      const cOrD = comp.type === 'npn' ? 'c' : 'd';
+   267→      const eOrS = comp.type === 'npn' ? 'e' : 's';
+   268→      const cNode = terms.find((t) => t.terminalId === cOrD)?.nodeId ?? 0;
+   269→      const eNode = terms.find((t) => t.terminalId === eOrS)?.nodeId ?? 0;
+   270→      nodeCurrentOut.set(cNode, (nodeCurrentOut.get(cNode) ?? 0) + i);
+   271→      nodeCurrentOut.set(eNode, (nodeCurrentOut.get(eNode) ?? 0) - i);
+   272→    } else if (comp.type === 'pnp' || comp.type === 'pmos') {
+   273→      // PNP/PMOS: current flows E→C or S→D (reversed)
+   274→      const eOrS = comp.type === 'pnp' ? 'e' : 's';
+   275→      const cOrD = comp.type === 'pnp' ? 'c' : 'd';
+   276→      const eNode = terms.find((t) => t.terminalId === eOrS)?.nodeId ?? 0;
+   277→      const cNode = terms.find((t) => t.terminalId === cOrD)?.nodeId ?? 0;
+   278→      nodeCurrentOut.set(eNode, (nodeCurrentOut.get(eNode) ?? 0) + i);
+   279→      nodeCurrentOut.set(cNode, (nodeCurrentOut.get(cNode) ?? 0) - i);
+   280→    } else if (comp.type === 'voltmeter' || comp.type === 'ammeter' || comp.type === 'oscilloscope') {
+   281→      // Meters: negligible current (10MΩ input)
+   282→      const pNode = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+   283→      const nNode = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+   284→      nodeCurrentOut.set(pNode, (nodeCurrentOut.get(pNode) ?? 0) + i);
+   285→      nodeCurrentOut.set(nNode, (nodeCurrentOut.get(nNode) ?? 0) - i);
+   286→    } else if (comp.type === 'sevenSegment') {
+   287→      // 7-segment: each segment is a conductance to com (no Vf).
+   288→      // Use the same hysteresis model as the stamp.
+   289→      const com = terms.find((t) => t.terminalId === 'com')?.nodeId ?? 0;
+   290→      const threshold = (comp.parameters.threshold as number) ?? 2.0;
+   291→      const rSeg = 220;
+   292→      const st = sim.state.__global ?? {};
+   293→      const stateKey = `7seg_${terms.map(t => t.nodeId).join('_')}`;
+   294→      const segStates = (st[stateKey] ?? {}) as Record<string, boolean>;
+   295→      for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+   296→        const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+   297→        const v = sim.nodeVoltage[segNode] - sim.nodeVoltage[com];
+   298→        const prevOn = segStates[seg] ?? false;
+   299→        const on = prevOn ? v > threshold * 0.5 : v > threshold;
+   300→        if (on) {
+   301→          const iSeg = v / rSeg;
+   302→          nodeCurrentOut.set(segNode, (nodeCurrentOut.get(segNode) ?? 0) + iSeg);
+   303→          nodeCurrentOut.set(com, (nodeCurrentOut.get(com) ?? 0) - iSeg);
+   304→        }
+   305→      }
+   306→    } else if (comp.type === 'cd4026') {
+   307→      // CD4026: handled in a second pass below (after all 7-segment displays
+   308→      // have contributed their segment currents to nodeCurrentOut).
+   309→      // We can't compute the CD4026's VCC current here because the 7-seg
+   310→      // displays (which determine the segment currents) may not have been
+   311→      // processed yet (they appear later in the component list).
+   312→    }
+   313→    // Voltage sources, ground, junction, power symbols: skip (they define the current, not draw it)
+   314→  }
+   315→
+   316→  // Second pass: add CD4026 VCC current (sum of all ON segment currents).
+   317→  // This must run AFTER all 7-segment displays have contributed to nodeCurrentOut.
+   318→  for (const comp of components) {
+   319→    if (comp.type !== 'cd4026') continue;
+   320→    const plugin = plugins.get(comp.type);
+   321→    if (!plugin) continue;
+   322→    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+   323→    const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
+   324→    let totalSegI = 0;
+   325→    for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+   326→      const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+   327→      totalSegI += Math.abs(nodeCurrentOut.get(segNode) ?? 0);
+   328→    }
+   329→    if (vccNode > 0) {
+   330→      nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) + totalSegI);
+   331→    }
+   332→  }
+   333→
+   334→  // Second pass (computeWireCurrents): VCO — sources current from VCC.
+   335→  for (const comp of components) {
+   336→    if (comp.type !== 'vco') continue;
+   337→    const plugin = plugins.get(comp.type);
+   338→    if (!plugin) continue;
+   339→    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+   340→    const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
+   341→    const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+   342→    const outI = Math.abs(nodeCurrentOut.get(outNode) ?? 0);
+   343→    if (vccNode > 0) {
+   344→      nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) + outI);
+   345→    }
+   346→  }
+   347→
+   348→  for (const wire of wires) {
+   349→    // For each wire, compute current from BOTH the from and to components.
+   350→    //
+   351→    // Sign convention:
+   352→    //   computeTerminalCurrent returns "current leaving the component terminal toward the wire"
+   353→    //   Positive = current flowing OUT of the terminal INTO the wire.
+   354→    //
+   355→    // For a wire from→to:
+   356→    //   fromCurrent > 0 means current flows FROM the from-component INTO the wire → flows from→to ✓
+   357→    //   toCurrent > 0 means current flows FROM the to-component INTO the wire → flows to→from
+   358→    //   So wire current (from→to positive) = fromCurrent = -toCurrent
+   359→    //
+   360→    // In a series circuit: fromCurrent = -toCurrent (KCL).
+   361→    // Take the one with larger magnitude for reliability.
+   362→    const fromComp = components.find((c) => c.id === wire.from.componentId);
+   363→    const toComp = components.find((c) => c.id === wire.to.componentId);
+   364→    if (!fromComp || !toComp) continue;
+   365→    const fromPlugin = plugins.get(fromComp.type);
+   366→    const toPlugin = plugins.get(toComp.type);
+   367→    if (!fromPlugin || !toPlugin) continue;
+   368→
+   369→    const fromCurrent = computeTerminalCurrent(fromComp, fromPlugin, wire.from.terminalId, nodeMap, sim, compCurrents, nodeCurrentOut);
+   370→    const toCurrent = computeTerminalCurrent(toComp, toPlugin, wire.to.terminalId, nodeMap, sim, compCurrents, nodeCurrentOut);
+   371→
+   372→    // fromCurrent = current leaving from-component → entering wire at from end → flows from→to
+   373→    // toCurrent = current leaving to-component → entering wire at to end → flows to→from
+   374→    // Wire current (from→to positive) = fromCurrent = -toCurrent
+   375→    //
+   376→    // Prefer the SMALLER non-zero magnitude. In a series circuit both ends agree
+   377→    // (same magnitude), so either works. But when multiple wires share a node
+   378→    // (e.g., 6 CD4026 VCC pins on the same 5V supply), the fromCurrent gives the
+   379→    // TOTAL node current (727mA) while toCurrent gives the INDIVIDUAL draw (45mA).
+   380→    // The individual draw is correct for THIS wire.
+   381→    const fromMag = Math.abs(fromCurrent);
+   382→    const toMag = Math.abs(toCurrent);
+   383→    let current: number;
+   384→    if (toMag > 1e-12 && (fromMag < 1e-12 || toMag < fromMag)) {
+   385→      // Prefer toCurrent when it's available and smaller (or fromCurrent is zero)
+   386→      current = -toCurrent;
+   387→    } else if (fromMag > 1e-12) {
+   388→      // Fall back to fromCurrent
+   389→      current = fromCurrent;
+   390→    } else {
+   391→      current = 0;
+   392→    }
+   393→
+   394→    result.set(wire.id, current);
+   395→  }
+   396→
+   397→  return result;
+   398→}
+   399→
+   400→/**
+   401→ * Compute the current leaving a specific terminal of a component, in amperes.
+   402→ * Positive = current flowing OUT of the terminal (into the wire).
+   403→ */
+   404→function computeTerminalCurrent(
+   405→  comp: CircuitComponent,
+   406→  plugin: ComponentPlugin,
+   407→  terminalId: string,
+   408→  nodeMap: any,
+   409→  sim: SimContext,
+   410→  compCurrents: Map<string, number>,
+   411→  nodeCurrentOut: Map<number, number>,
+   412→): number {
+   413→  const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+   414→  const compCurrent = compCurrents.get(comp.id) ?? 0;
+   415→
+   416→  if (comp.type === 'resistor' || comp.type === 'capacitor' || comp.type === 'inductor') {
+   417→    // compCurrent > 0 = current flows a→b through component.
+   418→    // At 'a': current ENTERS component FROM wire → "leaving terminal toward wire" = -I
+   419→    // At 'b': current EXITS component TO wire → "leaving terminal toward wire" = +I
+   420→    // This means: if wire.from is at 'b', fromCurrent = +I → dots flow from→to (correct).
+   421→    //             if wire.from is at 'a', fromCurrent = -I → dots flow to→from (correct, since
+   422→    //             current actually flows from the source toward 'a').
+   423→    const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   424→    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+   425→    return (termNode === a) ? -compCurrent : compCurrent;
+   426→  } else if (comp.type === 'led' || comp.type === 'diode') {
+   427→    // Same as resistor: compCurrent > 0 = current flows a→k (forward).
+   428→    // At 'a': -I (enters component). At 'k': +I (exits component).
+   429→    const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   430→    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+   431→    return (termNode === a) ? -compCurrent : compCurrent;
+   432→  } else if (comp.type === 'dcVoltage' || comp.type === 'acVoltage' || comp.type === 'pulseSource') {
+   433→    // Voltage source: compCurrent > 0 = current flows p→n externally (out of +, into -).
+   434→    // At 'p': current EXITS source TO wire → "leaving terminal" = +I
+   435→    // At 'n': current ENTERS source FROM wire → "leaving terminal" = -I
+   436→    const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+   437→    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+   438→    return (termNode === p) ? compCurrent : -compCurrent;
+   439→  } else if (comp.type === 'currentSource') {
+   440→    // Current source: same as voltage source — current flows p→n externally.
+   441→    const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+   442→    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+   443→    return (termNode === p) ? compCurrent : -compCurrent;
+   444→  } else if (comp.type === 'switch' || comp.type === 'pushButton') {
+   445→    // Same as resistor: a→b, at 'a' = -I, at 'b' = +I
+   446→    const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   447→    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+   448→    return (termNode === a) ? -compCurrent : compCurrent;
+   449→  } else if (comp.type === 'npn' || comp.type === 'pnp' || comp.type === 'nmos' || comp.type === 'pmos') {
+   450→    // 3-terminal transistor/MOSFET
+   451→    // Physics (NPN/NMOS): current flows C→E (or D→S) THROUGH the device.
+   452→    //   At collector/drain: current ENTERS (leaves terminal = negative)
+   453→    //   At emitter/source: current EXITS (leaves terminal = positive)
+   454→    // Physics (PNP/PMOS): current flows E→C (or S→D) — reversed.
+   455→    //   At emitter/source: current ENTERS (leaves terminal = negative)
+   456→    //   At collector/drain: current EXITS (leaves terminal = positive)
+   457→    const isNpn = comp.type === 'npn' || comp.type === 'nmos';
+   458→    const cOrD = isNpn ? (comp.type === 'npn' ? 'c' : 'd') : (comp.type === 'pnp' ? 'c' : 'd');
+   459→    const eOrS = isNpn ? (comp.type === 'npn' ? 'e' : 's') : (comp.type === 'pnp' ? 'e' : 's');
+   460→    if (terminalId === eOrS) {
+   461→      // Emitter/Source: for NPN/NMOS current EXITS here; for PNP/PMOS current ENTERS here
+   462→      return isNpn ? compCurrent : -compCurrent;
+   463→    } else if (terminalId === cOrD) {
+   464→      // Collector/Drain: for NPN/NMOS current ENTERS here; for PNP/PMOS current EXITS here
+   465→      return isNpn ? -compCurrent : compCurrent;
+   466→    } else {
+   467→      // Base/Gate: small current, return 0 for flow visualization
+   468→      return 0;
+   469→    }
+   470→  } else if (comp.type === 'sevenSegment') {
+   471→    // 7-segment: current flows from segment terminal → com terminal.
+   472→    // compCurrent > 0 = current flows from each segment to com (through the LED).
+   473→    // For each segment terminal: current ENTERS the display → "leaving terminal" = -I_per_seg
+   474→    // For the com terminal: current EXITS the display → "leaving terminal" = +totalI
+   475→    const comTerm = terms.find((t) => t.terminalId === 'com')?.nodeId ?? 0;
+   476→    const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+   477→    if (terminalId === 'com') {
+   478→      // Current exits through com (sum of all segment currents)
+   479→      return compCurrent;
+   480→    } else {
+   481→      // For a segment terminal: compute this segment's current from nodeCurrentOut
+   482→      // (current leaving the segment node through the display's LED).
+   483→      // nodeCurrentOut at the segment node includes the display's draw.
+   484→      // We want -I_seg (current enters the display at this terminal).
+   485→      const segI = Math.abs(nodeCurrentOut.get(termNode) ?? 0);
+   486→      void comTerm;
+   487→      return -segI;
+   488→    }
+   489→  } else if (comp.type === 'cd4026') {
+   490→    // CD4026: segment outputs (a-g) are voltage sources driving 5V (ON) or 0V (OFF).
+   491→    // Current flows FROM the CD4026 segment pin INTO the wire → "leaving terminal" = +I_seg.
+   492→    // The current is computed from nodeCurrentOut at the segment node (the 7-seg
+   493→    // draws current through its internal resistance).
+   494→    // For the CLK, RST, VCC, GND, CO pins: return 0 (not visualized).
+   495→    const segIds = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+   496→    if (segIds.includes(terminalId)) {
+   497→      const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
+   498→      // nodeCurrentOut at the segment node = current leaving through the 7-seg.
+   499→      // This equals the current the CD4026 is sourcing from this pin.
+   500→      const segI = Math.abs(nodeCurrentOut.get(termNode) ?? 0);
+   501→      return segI;
+   502→    }
+   503→    // VCC pin: current ENTERS the CD4026 (from the power supply).
+   504→    // "leaving terminal" = -totalSegI (negative = current enters component).
+   505→    // Compute THIS CD4026's segment currents only (not the shared VCC node total).
+   506→    if (terminalId === 'vcc') {
+   507→      let totalSegI = 0;
+   508→      for (const seg of segIds) {
+   509→        const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+   510→        totalSegI += Math.abs(nodeCurrentOut.get(segNode) ?? 0);
+   511→      }
+   512→      return -totalSegI;
+   513→    }
+   514→    // CO output: current flows out when HIGH (driving the next CD4026's CLK)
+   515→    if (terminalId === 'co') {
+   516→      const coNode = terms.find((t) => t.terminalId === 'co')?.nodeId ?? 0;
+   517→      return Math.abs(nodeCurrentOut.get(coNode) ?? 0);
+   518→    }
+   519→    return 0;
+   520→  } else if (comp.type === 'vco') {
+   521→    // VCO: output pin sources current, VCC pin draws current.
+   522→    const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+   523→    if (terminalId === 'out') {
+   524→      return Math.abs(nodeCurrentOut.get(outNode) ?? 0);
+   525→    }
+   526→    if (terminalId === 'vcc') {
+   527→      const outI = Math.abs(nodeCurrentOut.get(outNode) ?? 0);
+   528→      return -outI; // current enters VCC pin from supply
+   529→    }
+   530→    return 0;
+   531→  }
+   532→  return 0;
+   533→}
+   534→
+   535→/**
+   536→ * Compute the current flowing THROUGH each component (from its first terminal to
+   537→ * its second terminal), in amperes. Returns a map of componentId -> current.
+   538→ *
+   539→ * For 2-terminal components (R, C, L, diode, LED, switch): current = V(a)-V(b) / R etc.
+   540→ * For voltage sources: current = current through external circuit (from nodeCurrentOut).
+   541→ * For 3-terminal components (BJT, MOSFET): current = collector/drain current.
+   542→ *
+   543→ * Positive current = conventional current flowing from the first terminal to the
+   544→ * second terminal (for 2-terminal) or from collector/drain to emitter/source (for 3-terminal).
+   545→ */
+   546→export function computeComponentCurrents(
+   547→  components: CircuitComponent[],
+   548→  wires: Wire[],
+   549→  plugins: Map<string, ComponentPlugin>,
+   550→  sim: SimContext,
+   551→): Map<string, number> {
+   552→  const result = new Map<string, number>();
+   553→  const nodeMap = buildNodeMap(components, wires, plugins);
+   554→
+   555→  // ── Compute per-node current leaving through passive components ──────
+   556→  // This is used to find the current supplied by voltage sources.
+   557→  const nodeCurrentOut = new Map<number, number>();
+   558→  for (const comp of components) {
+   559→    const plugin = plugins.get(comp.type);
+   560→    if (!plugin) continue;
+   561→    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+   562→
+   563→    if (comp.type === 'resistor') {
+   564→      const r = Math.max(1e-9, comp.parameters.resistance as number);
+   565→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   566→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   567→      const i = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+   568→      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+   569→      nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
+   570→    } else if (comp.type === 'capacitor') {
+   571→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   572→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   573→      const st = sim.state.__global ?? {};
+   574→      // Use the current computed in step() (stored as '_i' suffix).
+   575→      // This is the ACTUAL current that flowed during the step, computed
+   576→      // BEFORE vPrev was updated. Computing it here from vPrev would give 0
+   577→      // because step() already updated vPrev to the current voltage.
+   578→      const i = st[`cap_${comp.id}_i`] ?? 0;
+   579→      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+   580→      nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
+   581→    } else if (comp.type === 'inductor') {
+   582→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   583→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   584→      const st = sim.state.__global ?? {};
+   585→      // Use the current computed in step() (stored as '_i' suffix).
+   586→      const i = st[`ind_${comp.id}_i`] ?? 0;
+   587→      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+   588→      nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
+   589→    } else if (comp.type === 'led' || comp.type === 'diode') {
+   590→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   591→      const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
+   592→      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+   593→      const vf = (comp.parameters.forwardV as number) || 0.7;
+   594→      const r = comp.type === 'led'
+   595→        ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
+   596→        : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
+   597→      const st = sim.state.__global ?? {};
+   598→      const on = st[`${comp.type}_${a}_${k}`] ?? false;
+   599→      const i = on ? Math.max(0, (v - vf) / r) : 0;
+   600→      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+   601→      nodeCurrentOut.set(k, (nodeCurrentOut.get(k) ?? 0) - i);
+   602→    } else if (comp.type === 'switch' || comp.type === 'pushButton') {
+   603→      const closed = comp.type === 'switch' ? comp.parameters.closed : comp.parameters.pressed;
+   604→      if (closed) {
+   605→        const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   606→        const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   607→        const i = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / 0.01;
+   608→        nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+   609→        nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
+   610→      }
+   611→    } else if (comp.type === 'currentSource') {
+   612→      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+   613→      const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+   614→      const i = comp.parameters.current as number;
+   615→      nodeCurrentOut.set(p, (nodeCurrentOut.get(p) ?? 0) + i);
+   616→      nodeCurrentOut.set(n, (nodeCurrentOut.get(n) ?? 0) - i);
+   617→    } else if (comp.type === 'speaker' || comp.type === 'lamp' || comp.type === 'dcMotor') {
+   618→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   619→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   620→      const r = Math.max(0.1, (comp.parameters.impedance as number) ?? (comp.parameters.resistance as number) ?? 8);
+   621→      const i = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+   622→      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+   623→      nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
+   624→    } else if (comp.type === 'photoresistor') {
+   625→      const darkR = comp.parameters.darkR as number;
+   626→      const lightR = comp.parameters.lightR as number;
+   627→      const light = Math.max(0, Math.min(1, comp.parameters.light as number));
+   628→      const r = Math.max(1e-6, darkR + (lightR - darkR) * light);
+   629→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   630→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   631→      const i = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+   632→      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+   633→      nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
+   634→    } else if (comp.type === 'voltmeter' || comp.type === 'ammeter' || comp.type === 'oscilloscope') {
+   635→      // Meters: very high impedance (10MΩ)
+   636→      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+   637→      const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+   638→      const i = (sim.nodeVoltage[p] - sim.nodeVoltage[n]) / 1e7;
+   639→      nodeCurrentOut.set(p, (nodeCurrentOut.get(p) ?? 0) + i);
+   640→      nodeCurrentOut.set(n, (nodeCurrentOut.get(n) ?? 0) - i);
+   641→    } else if (comp.type === 'sevenSegment') {
+   642→      // 7-segment: each segment draws current from its node to com.
+   643→      const com = terms.find((t) => t.terminalId === 'com')?.nodeId ?? 0;
+   644→      const threshold = (comp.parameters.threshold as number) ?? 2.0;
+   645→      const rSeg = 220;
+   646→      const st = sim.state.__global ?? {};
+   647→      const stateKey = `7seg_${terms.map(t => t.nodeId).join('_')}`;
+   648→      const segStates = (st[stateKey] ?? {}) as Record<string, boolean>;
+   649→      for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+   650→        const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+   651→        const v = sim.nodeVoltage[segNode] - sim.nodeVoltage[com];
+   652→        const prevOn = segStates[seg] ?? false;
+   653→        const on = prevOn ? v > threshold * 0.5 : v > threshold;
+   654→        if (on) {
+   655→          const iSeg = v / rSeg;
+   656→          nodeCurrentOut.set(segNode, (nodeCurrentOut.get(segNode) ?? 0) + iSeg);
+   657→          nodeCurrentOut.set(com, (nodeCurrentOut.get(com) ?? 0) - iSeg);
+   658→        }
+   659→      }
+   660→    }
+   661→    // Voltage sources, 555, opamp, transistors, logic gates, oscillators:
+   662→    // Their current is determined by the external circuit, not by their own impedance.
+   663→    // We'll compute it from nodeCurrentOut below.
+   664→  }
+   665→
+   666→  // Second pass: add CD4026 VCC current (sum of all ON segment currents).
+   667→  // Must run after 7-segment displays have contributed to nodeCurrentOut.
+   668→  for (const comp of components) {
+   669→    if (comp.type !== 'cd4026') continue;
+   670→    const plugin = plugins.get(comp.type);
+   671→    if (!plugin) continue;
+   672→    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+   673→    const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
+   674→    let totalSegI = 0;
+   675→    for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+   676→      const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+   677→      totalSegI += Math.abs(nodeCurrentOut.get(segNode) ?? 0);
+   678→    }
+   679→    if (vccNode > 0) {
+   680→      nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) + totalSegI);
+   681→    }
+   682→  }
+   683→
+   684→  // Second pass: VCO — sources current from VCC equal to output load current.
+   685→  for (const comp of components) {
+   686→    if (comp.type !== 'vco') continue;
+   687→    const plugin = plugins.get(comp.type);
+   688→    if (!plugin) continue;
+   689→    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+   690→    const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
+   691→    const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+   692→    const outI = Math.abs(nodeCurrentOut.get(outNode) ?? 0);
+   693→    if (vccNode > 0) {
+   694→      nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) + outI);
+   695→    }
+   696→  }
+   697→
+   698→  // Compute per-component current
+   699→  for (const comp of components) {
+   700→    const plugin = plugins.get(comp.type);
+   701→    if (!plugin) continue;
+   702→    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+   703→    let current = 0;
+   704→
+   705→    if (comp.type === 'resistor') {
+   706→      const r = Math.max(1e-9, comp.parameters.resistance as number);
+   707→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   708→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   709→      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+   710→    } else if (comp.type === 'capacitor') {
+   711→      const C = Math.max(1e-15, comp.parameters.capacitance as number);
+   712→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   713→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   714→      const st = sim.state.__global ?? {};
+   715→      const vPrev = st[`cap_${comp.id}`] ?? 0;
+   716→      current = (C / Math.max(sim.dt, 1e-12)) * ((sim.nodeVoltage[a] - sim.nodeVoltage[b]) - vPrev);
+   717→    } else if (comp.type === 'inductor') {
+   718→      const L = Math.max(1e-12, comp.parameters.inductance as number);
+   719→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   720→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   721→      const st = sim.state.__global ?? {};
+   722→      const iPrev = st[`ind_${comp.id}`] ?? 0;
+   723→      const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
+   724→      const dt = Math.max(sim.dt, 1e-12);
+   725→      current = iPrev + (v / L) * dt;
+   726→    } else if (comp.type === 'led' || comp.type === 'diode') {
+   727→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   728→      const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
+   729→      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+   730→      const vf = (comp.parameters.forwardV as number) || 0.7;
+   731→      const r = comp.type === 'led'
+   732→        ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
+   733→        : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
+   734→      const st = sim.state.__global ?? {};
+   735→      const on = st[`${comp.type}_${a}_${k}`] ?? false;
+   736→      current = on ? Math.max(0, (v - vf) / r) : 0;
+   737→    } else if (comp.type === 'dcVoltage' || comp.type === 'acVoltage' || comp.type === 'pulseSource') {
+   738→      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+   739→      current = nodeCurrentOut.get(p) ?? 0;
+   740→    } else if (comp.type === 'currentSource') {
+   741→      current = comp.parameters.current as number;
+   742→    } else if (comp.type === 'switch' || comp.type === 'pushButton') {
+   743→      const closed = comp.type === 'switch' ? comp.parameters.closed : comp.parameters.pressed;
+   744→      if (closed) {
+   745→        const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   746→        const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   747→        current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / 0.01;
+   748→      }
+   749→    } else if (comp.type === 'npn' || comp.type === 'pnp') {
+   750→      const isNpn = comp.type === 'npn';
+   751→      const cNode = terms.find((t) => t.terminalId === 'c')?.nodeId ?? 0;
+   752→      const eNode = terms.find((t) => t.terminalId === 'e')?.nodeId ?? 0;
+   753→      if (isNpn) {
+   754→        // NPN: current flows C→E. Collector is connected through load to VCC.
+   755→        current = -(nodeCurrentOut.get(cNode) ?? 0);
+   756→      } else {
+   757→        // PNP: current flows E→C. Collector is connected through load to GND.
+   758→        // Use collector node (connected to load) not emitter (connected to VCC directly).
+   759→        current = nodeCurrentOut.get(cNode) ?? 0;
+   760→      }
+   761→    } else if (comp.type === 'nmos' || comp.type === 'pmos') {
+   762→      const isNmos = comp.type === 'nmos';
+   763→      const dNode = terms.find((t) => t.terminalId === 'd')?.nodeId ?? 0;
+   764→      const sNode = terms.find((t) => t.terminalId === 's')?.nodeId ?? 0;
+   765→      if (isNmos) {
+   766→        // NMOS: current flows D→S. Current leaving drain node through load = device current.
+   767→        current = -(nodeCurrentOut.get(dNode) ?? 0);
+   768→      } else {
+   769→        // PMOS: current flows S→D. Current leaving drain node through load = device current.
+   770→        // Use drain node (connected to load) not source (connected to VCC directly).
+   771→        current = nodeCurrentOut.get(dNode) ?? 0;
+   772→      }
+   773→    } else if (comp.type === 'timer555') {
+   774→      const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+   775→      current = nodeCurrentOut.get(outNode) ?? 0;
+   776→    } else if (comp.type === 'opamp' || comp.type === 'opampRails') {
+   777→      const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+   778→      current = nodeCurrentOut.get(outNode) ?? 0;
+   779→    } else if (comp.type === 'arduino' || comp.type === 'arduinoReal' || comp.type === 'raspberryPi') {
+   780→      let totalCurrent = 0;
+   781→      for (const t of terms) {
+   782→        totalCurrent += Math.abs(nodeCurrentOut.get(t.nodeId) ?? 0);
+   783→      }
+   784→      current = totalCurrent;
+   785→    } else if (comp.type === 'voltmeter' || comp.type === 'ammeter' || comp.type === 'oscilloscope') {
+   786→      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+   787→      const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+   788→      current = (sim.nodeVoltage[p] - sim.nodeVoltage[n]) / 1e7;
+   789→    } else if (comp.type === 'vco' || comp.type === 'crystal') {
+   790→      const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+   791→      current = nodeCurrentOut.get(outNode) ?? 0;
+   792→    } else if (comp.type === 'speaker' || comp.type === 'lamp' || comp.type === 'dcMotor') {
+   793→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   794→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   795→      const r = Math.max(0.1, (comp.parameters.impedance as number) ?? (comp.parameters.resistance as number) ?? 8);
+   796→      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+   797→    } else if (comp.type === 'photoresistor') {
+   798→      const darkR = comp.parameters.darkR as number;
+   799→      const lightR = comp.parameters.lightR as number;
+   800→      const light = Math.max(0, Math.min(1, comp.parameters.light as number));
+   801→      const r = Math.max(1e-6, darkR + (lightR - darkR) * light);
+   802→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   803→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   804→      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+   805→    } else if (comp.type === 'sevenSegment') {
+   806→      // 7-segment: current = sum of segment currents (each segment ~10mA when on)
+   807→      const st = sim.state.__global ?? {};
+   808→      let totalI = 0;
+   809→      for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+   810→        const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+   811→        totalI += Math.abs(nodeCurrentOut.get(segNode) ?? 0);
+   812→      }
+   813→      current = totalI;
+   814→    } else if (comp.type === 'cd4026') {
+   815→      // CD4026: total current = sum of all segment output currents.
+   816→      // Each ON segment sources current into the external 7-seg display.
+   817→      let totalI = 0;
+   818→      for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
+   819→        const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
+   820→        totalI += Math.abs(nodeCurrentOut.get(segNode) ?? 0);
+   821→      }
+   822→      current = totalI;
+   823→    } else if (comp.type === 'transformer') {
+   824→      const p1 = terms.find((t) => t.terminalId === 'p1')?.nodeId ?? 0;
+   825→      current = nodeCurrentOut.get(p1) ?? 0;
+   826→    } else if (comp.type === 'potentiometer') {
+   827→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   828→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   829→      const r = Math.max(1e-6, comp.parameters.resistance as number);
+   830→      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+   831→    } else if (comp.type === 'fuse') {
+   832→      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+   833→      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+   834→      const r = Math.max(1e-6, comp.parameters.resistance as number);
+   835→      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+   836→    }
+   837→    // For all other types (logic gates, power symbols, etc.), current = 0
+   838→
+   839→    result.set(comp.id, current);
+   840→  }
+   841→
+   842→  return result;
+   843→}
+   844→
+   845→/**
+   846→ * Run one simulation step.
+   847→ * - Stamps all components (with Newton iteration for non-linear ones; for simplicity we do fixed iterations).
+   848→ * - Solves the linear system.
+   849→ * - Calls `step` on each plugin for stateful logic (555, MCU, etc.).
+   850→ */
+   851→export interface StepResult {
+   852→  sim: SimContext;
+   853→  branchCurrentSize: number;
+   854→  nodeMap: NodeMap;
+   855→}
+   856→
+   857→export interface PrevState {
+   858→  nodeVoltage: Float64Array;
+   859→  branchCurrent: Float64Array;
+   860→  time: number;
+   861→  /** persistent state map, survives across steps. Plugins store their internal state here. */
+   862→  state: Record<string, any>;
+   863→}
+   864→
+   865→export function simulateStep(
+   866→  components: CircuitComponent[],
+   867→  wires: Wire[],
+   868→  plugins: Map<string, ComponentPlugin>,
+   869→  prev?: PrevState,
+   870→  dt: number = 1e-4,
+   871→  simOptions?: { initialConditions?: Record<string, number>; nodeSets?: Record<string, number> },
+   872→): StepResult | null {
+   873→  const nodeMap = buildNodeMap(components, wires, plugins);
+   874→  const numNodes = nodeMap.numNodes; // includes ground (0)
+   875→  const maxExtras = components.length * 4 + 8;
+   876→
+   877→  // Use the sparse solver for circuits > 80 nodes — much faster for big designs.
+   878→  // Below that threshold, the dense solver wins (less overhead per stamp).
+   879→  const useSparse = shouldUseSparseSolver(numNodes - 1, maxExtras);
+   880→  const sparseSys = useSparse ? createSparseMnaSystem(numNodes - 1, maxExtras) : null;
+   881→  const sys = useSparse ? asMnaSystem(sparseSys!) : createMnaSystem(numNodes - 1, maxExtras);
+   882→
+   883→  const time = prev && prev.nodeVoltage.length > 0 ? prev.time + dt : 0;
+   884→
+   885→  // initialize SimContext with previous voltages (for companion models).
+   886→  // If prev has no data yet (first step), allocate fresh arrays sized to numNodes.
+   887→  const hasPrev = prev && prev.nodeVoltage.length > 0;
+   888→  const nodeVoltage = hasPrev ? Float64Array.from(prev.nodeVoltage) : new Float64Array(numNodes);
+   889→
+   890→  // Apply .IC (initial conditions) on the very first step (no prev) — these override
+   891→  // the default 0V initialization and are used when `uic` is true.
+   892→  // Apply .NODESET as a hint for the DC solver (initial guess).
+   893→  if (!hasPrev && simOptions) {
+   894→    // .IC — overrides node voltages at t=0
+   895→    if (simOptions.initialConditions) {
+   896→      for (const [termKey, voltage] of Object.entries(simOptions.initialConditions)) {
+   897→        const nodeId = nodeMap.terminalNode.get(termKey);
+   898→        if (nodeId != null && nodeId > 0 && nodeId - 1 < nodeVoltage.length) {
+   899→          nodeVoltage[nodeId - 1] = voltage;
+   900→        }
+   901→      }
+   902→    }
+   903→    // .NODESET — same as .IC but only used as an initial guess for the DC solver
+   904→    // (it gets overwritten by the solve, but helps convergence).
+   905→    // For the transient engine, .NODESET and .IC behave the same way at t=0.
+   906→    if (simOptions.nodeSets) {
+   907→      for (const [termKey, voltage] of Object.entries(simOptions.nodeSets)) {
+   908→        const nodeId = nodeMap.terminalNode.get(termKey);
+   909→        if (nodeId != null && nodeId > 0 && nodeId - 1 < nodeVoltage.length) {
+   910→          // Only apply if not already set by .IC
+   911→          if (simOptions.initialConditions?.[termKey] === undefined) {
+   912→            nodeVoltage[nodeId - 1] = voltage;
+   913→          }
+   914→        }
+   915→      }
+   916→    }
+   917→  }
+   918→
+   919→  const branchCurrent = hasPrev ? Float64Array.from(prev.branchCurrent) : new Float64Array(maxExtras);
+   920→  // PERSISTENT state: reuse the same state object across steps so plugins (capacitors,
+   921→  // inductors, 555, MCU) keep their memory. Created once per session.
+   922→  const stateMap: Record<string, any> = prev ? prev.state : {};
+   923→  // expose per-component state objects (also persistent via comp.simState)
+   924→  for (const comp of components) {
+   925→    if (!comp.simState) comp.simState = {};
+   926→    if (!stateMap[comp.id]) stateMap[comp.id] = comp.simState;
+   927→  }
+   928→
+   929→  const sim: SimContext = {
+   930→    nodeVoltage,
+   931→    branchCurrent,
+   932→    state: stateMap,
+   933→    time,
+   934→    dt,
+   935→  };
+   936→
+   937→  // First pass: let plugins initialize their simState (e.g., capacitor voltage)
+   938→  for (const comp of components) {
+   939→    const plugin = plugins.get(comp.type);
+   940→    if (!plugin) continue;
+   941→    if (!comp.simState) comp.simState = {};
+   942→    if (plugin.step && !comp.simState.__inited) {
+   943→      comp.simState.__inited = true;
+   944→    }
+   945→  }
+   946→
+   947→  // Stamp all components
+   948→  sys.nextExtra = numNodes - 1; // reset extra counter; extra vars start at index (numNodes-1)
+   949→  for (const comp of components) {
+   950→    const plugin = plugins.get(comp.type);
+   951→    if (!plugin || !plugin.stamp) continue;
+   952→    const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
+   953→    try {
+   954→      (plugin.stamp as any)(comp.parameters, terminals, sys, sim, comp);
+   955→    } catch (e) {
+   956→      console.error(`stamp error in ${comp.type} (${comp.id}):`, e);
+   957→    }
+   958→  }
+   959→
+   960→  // resize system: we may have allocated more extra vars than used.
+   961→  // build a smaller system to avoid singular cols
+   962→  const actualSize = sys.nextExtra;
+   963→  if (actualSize < sys.size) {
+   964→    // shrink
+   965→    const newA = new Float64Array(actualSize * actualSize);
+   966→    const newZ = new Float64Array(actualSize);
+   967→    for (let r = 0; r < actualSize; r++) {
+   968→      for (let c = 0; c < actualSize; c++) {
+   969→        newA[r * actualSize + c] = sys.A[r * sys.size + c];
+   970→      }
+   971→      newZ[r] = sys.z[r];
+   972→    }
+   973→    sys.A = newA;
+   974→    sys.z = newZ;
+   975→    sys.size = actualSize;
+   976→    sys.numExtra = actualSize - (numNodes - 1);
+   977→  }
+   978→
+   979→  const x = useSparse && sparseSys ? solveSparse(sparseSys) : solveMna(sys);
+   980→  if (!x) {
+   981→    return null;
+   982→  }
+   983→
+   984→  // copy results back into sim.nodeVoltage / branchCurrent
+   985→  for (let i = 0; i < numNodes; i++) {
+   986→    sim.nodeVoltage[i] = i === 0 ? 0 : x[i - 1];
+   987→  }
+   988→  for (let i = 0; i < sys.numExtra; i++) {
+   989→    sim.branchCurrent[i] = x[numNodes - 1 + i];
+   990→  }
+   991→
+   992→  // call step() for stateful components
+   993→  for (const comp of components) {
+   994→    const plugin = plugins.get(comp.type);
+   995→    if (!plugin || !plugin.step) continue;
+   996→    const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
+   997→    try {
+   998→      plugin.step(comp.parameters, terminals, sim, comp);
+   999→    } catch (e) {
+  1000→      console.error(`step error in ${comp.type} (${comp.id}):`, e);
+  1001→    }
+  1002→  }
+  1003→
+  1004→  return { sim, branchCurrentSize: sys.numExtra, nodeMap };
+  1005→}
+  1006→
+  1007→/**
+  1008→ * Solve a pure DC operating point (no time stepping).
+  1009→ * Iterates a few times to handle non-linear components (diodes, transistors).
+  1010→ */
+  1011→export function solveDC(
+  1012→  components: CircuitComponent[],
+  1013→  wires: Wire[],
+  1014→  plugins: Map<string, ComponentPlugin>,
+  1015→  maxIter: number = 50,
+  1016→): SimContext | null {
+  1017→  // initialize simState
+  1018→  for (const comp of components) {
+  1019→    if (!comp.simState) comp.simState = {};
+  1020→  }
+  1021→
+  1022→  let prev: PrevState | undefined;
+  1023→  let result: SimContext | null = null;
+  1024→  for (let iter = 0; iter < maxIter; iter++) {
+  1025→    const r = simulateStep(components, wires, plugins, prev, 1e-6);
+  1026→    if (!r) return null;
+  1027→    result = r.sim;
+  1028→    // check convergence
+  1029→    if (prev) {
+  1030→      let maxDelta = 0;
+  1031→      for (let i = 0; i < r.sim.nodeVoltage.length; i++) {
+  1032→        const d = Math.abs(r.sim.nodeVoltage[i] - prev.nodeVoltage[i]);
+  1033→        if (d > maxDelta) maxDelta = d;
+  1034→      }
+  1035→      prev = {
+  1036→        nodeVoltage: r.sim.nodeVoltage,
+  1037→        branchCurrent: r.sim.branchCurrent,
+  1038→        time: r.sim.time,
+  1039→        state: r.sim.state,
+  1040→      };
+  1041→      if (maxDelta < 1e-6 && iter > 0) break;
+  1042→    } else {
+  1043→      prev = {
+  1044→        nodeVoltage: r.sim.nodeVoltage,
+  1045→        branchCurrent: r.sim.branchCurrent,
+  1046→        time: r.sim.time,
+  1047→        state: r.sim.state,
+  1048→      };
+  1049→    }
+  1050→  }
+  1051→  return result;
+  1052→}
+  1053→
