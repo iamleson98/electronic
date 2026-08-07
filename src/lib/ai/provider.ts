@@ -110,9 +110,14 @@ class ZaiProvider implements AIProvider {
       body.tool_choice = 'auto';
     }
 
-    // Retry with exponential backoff on 429 (rate limit)
+    // Retry with exponential backoff on 429 (rate limit).
+    // The Z.ai free tier has aggressive rate limits that can persist for
+    // 30+ seconds, so we retry up to 5 times with increasing waits.
+    // Total max wait: 1 + 3 + 8 + 15 + 30 = 57 seconds.
+    const retryDelays = [1000, 3000, 8000, 15000, 30000]; // 1s, 3s, 8s, 15s, 30s
     let lastError: Error | null = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
+
+    for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
       try {
         const response = await zai.chat.completions.create(body);
         const choice = response.choices[0];
@@ -130,16 +135,43 @@ class ZaiProvider implements AIProvider {
         };
       } catch (e: any) {
         lastError = e;
-        // Check if it's a 429 rate-limit error
-        const isRateLimit = e?.message?.includes('429') || e?.message?.includes('Too many requests');
-        if (!isRateLimit) throw e;
-        // Wait before retrying: 2s, 4s, 8s
-        const waitMs = 2000 * Math.pow(2, attempt);
-        console.warn(`[zai] Rate limited, retrying in ${waitMs}ms (attempt ${attempt + 1}/3)`);
+        const msg = String(e?.message || e);
+        // Check if it's a rate-limit error (429) or a transient server error (500/502/503/504)
+        const isRateLimit = msg.includes('429') || msg.includes('Too many requests') || msg.includes('rate limit');
+        const isServerError = msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('504') || msg.includes('Bad Gateway') || msg.includes('Service Unavailable') || msg.includes('Internal Server Error');
+        const isRetryable = isRateLimit || isServerError;
+
+        if (!isRetryable || attempt === retryDelays.length) {
+          // Not retryable, or we've exhausted retries.
+          // If it's a rate limit, return a graceful fallback response instead of throwing,
+          // so the user sees a helpful message instead of an error.
+          if (isRateLimit) {
+            return {
+              content: "I'm currently rate-limited by the AI provider and can't process your request right now. Please wait a minute and try again. If this happens frequently, you can set `AI_PROVIDER=openai` or `AI_PROVIDER=anthropic` with your own API key in the `.env` file for a more reliable experience.",
+              finish_reason: 'stop' as const,
+            };
+          }
+          throw e;
+        }
+
+        const waitMs = retryDelays[attempt];
+        console.warn(`[zai] ${isRateLimit ? 'Rate limited' : 'Server error'}, retrying in ${waitMs}ms (attempt ${attempt + 1}/${retryDelays.length + 1})`);
         await new Promise(r => setTimeout(r, waitMs));
       }
     }
-    throw lastError || new Error('Z.ai request failed after retries');
+
+    // Should not reach here, but just in case
+    if (lastError) {
+      const msg = String(lastError.message || lastError);
+      if (msg.includes('429') || msg.includes('rate limit')) {
+        return {
+          content: "I'm currently rate-limited by the AI provider. Please wait a minute and try again.",
+          finish_reason: 'stop' as const,
+        };
+      }
+      throw lastError;
+    }
+    throw new Error('Z.ai request failed after retries');
   }
 }
 
