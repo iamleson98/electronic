@@ -16,7 +16,7 @@ import type { CircuitDocument } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
 
 export const runtime = 'nodejs';
-export const maxDuration = 120;
+export const maxDuration = 300;  // 5 min — allows for long retry sequences on rate limits
 
 const SYSTEM_PROMPT = `You are an expert electrical engineer and circuit design assistant in a circuit simulator app. You help users design, analyze, and debug circuits using the available tools.
 
@@ -74,11 +74,13 @@ export async function POST(req: NextRequest) {
         ];
 
         const executedToolCalls: any[] = [];
-        const MAX_ITERATIONS = 10;
+        // 20 iterations allows building complex circuits (e.g. a 555 timer
+        // circuit with 7+ components and 10+ wires needs ~15 tool calls).
+        const MAX_ITERATIONS = 20;
         let circuitModified = false;
 
         for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-          const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 4096 });
+          const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 16384 });
 
           // Stream any text content
           if (result.content) {

@@ -103,21 +103,28 @@ class ZaiProvider implements AIProvider {
       model: this.model,
       messages,
       temperature: options?.temperature ?? 0.4,
-      max_tokens: options?.max_tokens ?? 4096,
+      // Default to 16K tokens — complex circuits with many components/wires
+      // can produce very long tool-call sequences. GLM-4.6 supports up to 16K
+      // output tokens. The API caps at the model's actual limit.
+      max_tokens: options?.max_tokens ?? 16384,
     };
     if (tools && tools.length > 0) {
       body.tools = tools;
       body.tool_choice = 'auto';
     }
 
-    // Retry with exponential backoff on 429 (rate limit).
-    // The Z.ai free tier has aggressive rate limits that can persist for
-    // 30+ seconds, so we retry up to 5 times with increasing waits.
-    // Total max wait: 1 + 3 + 8 + 15 + 30 = 57 seconds.
-    const retryDelays = [1000, 3000, 8000, 15000, 30000]; // 1s, 3s, 8s, 15s, 30s
+    // Retry indefinitely on rate-limit (429) and server errors (5xx).
+    // The AI feature should NEVER fail due to rate limiting — it just keeps
+    // retrying with backoff until the request succeeds. We cap at 20 attempts
+    // (max ~10 minutes total) as a safety net against infinite loops, but
+    // in practice the rate limit always clears within 1-2 minutes.
+    //
+    // Backoff schedule: 2s, 4s, 8s, 15s, 30s, then 30s for all subsequent attempts.
+    const backoffSchedule = [2000, 4000, 8000, 15000, 30000];
+    const MAX_ATTEMPTS = 20;
     let lastError: Error | null = null;
 
-    for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       try {
         const response = await zai.chat.completions.create(body);
         const choice = response.choices[0];
@@ -136,42 +143,26 @@ class ZaiProvider implements AIProvider {
       } catch (e: any) {
         lastError = e;
         const msg = String(e?.message || e);
-        // Check if it's a rate-limit error (429) or a transient server error (500/502/503/504)
+        // Rate-limit (429) and transient server errors (5xx) are retryable.
+        // Everything else (400 Bad Request, 401 Unauthorized, etc.) fails immediately.
         const isRateLimit = msg.includes('429') || msg.includes('Too many requests') || msg.includes('rate limit');
-        const isServerError = msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('504') || msg.includes('Bad Gateway') || msg.includes('Service Unavailable') || msg.includes('Internal Server Error');
-        const isRetryable = isRateLimit || isServerError;
+        const isServerError = msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('504') || msg.includes('Bad Gateway') || msg.includes('Service Unavailable') || msg.includes('Internal Server Error') || msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('socket hang up');
 
-        if (!isRetryable || attempt === retryDelays.length) {
-          // Not retryable, or we've exhausted retries.
-          // If it's a rate limit, return a graceful fallback response instead of throwing,
-          // so the user sees a helpful message instead of an error.
-          if (isRateLimit) {
-            return {
-              content: "I'm currently rate-limited by the AI provider and can't process your request right now. Please wait a minute and try again. If this happens frequently, you can set `AI_PROVIDER=openai` or `AI_PROVIDER=anthropic` with your own API key in the `.env` file for a more reliable experience.",
-              finish_reason: 'stop' as const,
-            };
-          }
+        if (!isRateLimit && !isServerError) {
+          // Non-retryable error — throw immediately
           throw e;
         }
 
-        const waitMs = retryDelays[attempt];
-        console.warn(`[zai] ${isRateLimit ? 'Rate limited' : 'Server error'}, retrying in ${waitMs}ms (attempt ${attempt + 1}/${retryDelays.length + 1})`);
+        // Calculate wait time: use the backoff schedule, then 30s for all later attempts
+        const waitMs = attempt < backoffSchedule.length ? backoffSchedule[attempt] : 30000;
+        const errorType = isRateLimit ? 'Rate limited' : 'Server error';
+        console.warn(`[zai] ${errorType}, retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
         await new Promise(r => setTimeout(r, waitMs));
       }
     }
 
-    // Should not reach here, but just in case
-    if (lastError) {
-      const msg = String(lastError.message || lastError);
-      if (msg.includes('429') || msg.includes('rate limit')) {
-        return {
-          content: "I'm currently rate-limited by the AI provider. Please wait a minute and try again.",
-          finish_reason: 'stop' as const,
-        };
-      }
-      throw lastError;
-    }
-    throw new Error('Z.ai request failed after retries');
+    // Exhausted all 20 attempts — this should be extremely rare (10+ minutes of retries)
+    throw lastError || new Error('Z.ai request failed after 20 retry attempts');
   }
 }
 
@@ -188,7 +179,7 @@ class OpenAIProvider implements AIProvider {
       model: this.model,
       messages,
       temperature: options?.temperature ?? 0.4,
-      max_tokens: options?.max_tokens ?? 4096,
+      max_tokens: options?.max_tokens ?? 16384,
     };
     if (tools && tools.length > 0) {
       body.tools = tools;
@@ -278,7 +269,7 @@ class AnthropicProvider implements AIProvider {
 
     const body: any = {
       model: this.model,
-      max_tokens: options?.max_tokens ?? 4096,
+      max_tokens: options?.max_tokens ?? 16384,
       temperature: options?.temperature ?? 0.4,
       messages: anthropicMessages,
     };

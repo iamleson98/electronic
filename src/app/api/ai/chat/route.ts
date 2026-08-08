@@ -18,7 +18,7 @@ import type { CircuitDocument, CircuitComponent, Wire } from '@/lib/circuit/type
 import { getPlugin } from '@/lib/circuit/registry';
 
 export const runtime = 'nodejs';
-export const maxDuration = 60;
+export const maxDuration = 300;  // 5 min — allows for long retry sequences on rate limits
 
 interface RequestBody {
   messages: ChatMessage[];
@@ -79,12 +79,14 @@ export async function POST(req: NextRequest) {
       ...body.messages,
     ];
 
-    // AI loop: call provider, execute tools, repeat
+    // AI loop: call provider, execute tools, repeat.
+    // 20 iterations allows building complex circuits (e.g. a 555 timer
+    // circuit with 7+ components and 10+ wires needs ~15 tool calls).
     const executedToolCalls: any[] = [];
-    const MAX_ITERATIONS = 10;
+    const MAX_ITERATIONS = 20;
 
     for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-      const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 4096 });
+      const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 16384 });
 
       // If the AI wants to call tools, execute them
       if (result.tool_calls && result.tool_calls.length > 0) {
