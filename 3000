@@ -1,0 +1,24 @@
+▲ Next.js 16.1.3
+- Local:         http://localhost:3000
+- Network:       http://0.0.0.0:3000
+
+✓ Starting...
+✓ Ready in 69ms
+============================================================
+Bun v1.3.14 (0d9b296a) Linux x64 (baseline)
+Linux Kernel v5.10.134 | glibc v2.41
+CPU: sse42 popcnt avx avx2 avx512
+Args: "bun" ".next/standalone/server.js"
+Features: Bun.stderr(2) Bun.stdout(2) dotenv http_server jsc tsconfig tsconfig_paths process_dlopen 
+Builtins: "bun:main" "node:async_hooks" "node:buffer" "node:child_process" "node:constants" "node:crypto" "node:dns/promises" "node:events" "node:fs" "node:fs/promises" "node:http" "node:https" "node:module" "node:os" "node:path" "node:process" "node:querystring" "node:stream" "node:timers" "node:timers/promises" "node:tty" "node:url" "node:util" "node:vm" "node:zlib" "node:v8" "node:inspector" 
+Elapsed: 477ms | User: 424ms | Sys: 50ms
+RSS: 100.60MB | Peak: 121.96MB | Commit: 100.60MB | Faults: 433 | Machine: 4.24GB
+
+panic(main thread): NAPI FATAL ERROR: Error::New napi_get_last_error_info
+oh no: Bun has crashed. This indicates a bug in Bun, not your code.
+
+To send a redacted crash report to Bun's team,
+please file a GitHub issue using the link below:
+
+ https://bun.report/1.3.14/Ba10d9b296gmEqwgoCwgvypDq+6xpDyqnEq5uEillHkztHk/jw8D_suwxrC_23nxrC23nxrCq+pxrC___23nxrC_23nxrC23nxrCA0eNrzcwzwVHBzDHH0UXANCvIPslJwLSrKL7Ky8kstV8hLLMiMT08tic9JLC6JTwVJxGfmpeUDAMBTEms
+
