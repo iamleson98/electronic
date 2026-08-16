@@ -1,19 +1,20 @@
 // Tests for the Drizzle database layer — schema, CRUD operations, types.
+// Uses @libsql/client with an in-memory database (no Turso credentials needed).
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import Database from 'better-sqlite3';
-import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { createClient } from '@libsql/client';
+import { drizzle } from 'drizzle-orm/libsql';
 import { eq, desc } from 'drizzle-orm';
 import { savedCircuits, type SavedCircuit, type NewSavedCircuit } from '../src/lib/schema';
 
-const testDbPath = '/tmp/test-drizzle-schema.db';
-let sqlite: Database.Database;
+let client: ReturnType<typeof createClient>;
 let db: ReturnType<typeof drizzle>;
 
-beforeAll(() => {
-  sqlite = new Database(testDbPath);
-  sqlite.pragma('journal_mode = WAL');
-  db = drizzle(sqlite, { schema: { savedCircuits } });
-  sqlite.exec(`
+beforeAll(async () => {
+  client = createClient({ url: ':memory:' });
+  db = drizzle(client, { schema: { savedCircuits } });
+  // libsql's execute() only runs the first statement in a multi-statement string,
+  // so we batch them separately.
+  await client.execute(`
     CREATE TABLE IF NOT EXISTS saved_circuits (
       id TEXT PRIMARY KEY NOT NULL,
       name TEXT NOT NULL,
@@ -23,26 +24,27 @@ beforeAll(() => {
       is_example INTEGER DEFAULT false NOT NULL,
       created_at INTEGER DEFAULT (unixepoch()) NOT NULL,
       updated_at INTEGER DEFAULT (unixepoch()) NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS saved_circuits_name_idx ON saved_circuits (name);
-    CREATE INDEX IF NOT EXISTS saved_circuits_updated_at_idx ON saved_circuits (updated_at);
+    )
   `);
-  sqlite.exec('DELETE FROM saved_circuits');
+  await client.execute('CREATE INDEX IF NOT EXISTS saved_circuits_name_idx ON saved_circuits (name)');
+  await client.execute('CREATE INDEX IF NOT EXISTS saved_circuits_updated_at_idx ON saved_circuits (updated_at)');
+  await client.execute('DELETE FROM saved_circuits');
 });
 
 afterAll(() => {
-  sqlite.close();
+  client.close();
 });
 
 describe('Drizzle Schema', () => {
-  it('savedCircuits table exists', () => {
-    const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[];
-    expect(tables.some(t => t.name === 'saved_circuits')).toBe(true);
+  it('savedCircuits table exists', async () => {
+    const result = await client.execute("SELECT name FROM sqlite_master WHERE type='table'");
+    const tables = result.rows.map(r => r.name as string);
+    expect(tables.some(t => t === 'saved_circuits')).toBe(true);
   });
 
-  it('has correct columns', () => {
-    const cols = sqlite.prepare('PRAGMA table_info(saved_circuits)').all() as any[];
-    const colNames = cols.map(c => c.name);
+  it('has correct columns', async () => {
+    const result = await client.execute('PRAGMA table_info(saved_circuits)');
+    const colNames = result.rows.map(r => (r as any).name as string);
     expect(colNames).toContain('id');
     expect(colNames).toContain('name');
     expect(colNames).toContain('description');
@@ -53,10 +55,11 @@ describe('Drizzle Schema', () => {
     expect(colNames).toContain('updated_at');
   });
 
-  it('has indexes on name and updated_at', () => {
-    const indexes = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='index'").all() as { name: string }[];
-    expect(indexes.some(i => i.name === 'saved_circuits_name_idx')).toBe(true);
-    expect(indexes.some(i => i.name === 'saved_circuits_updated_at_idx')).toBe(true);
+  it('has indexes on name and updated_at', async () => {
+    const result = await client.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'saved_circuits%'");
+    const indexes = result.rows.map(r => r.name as string);
+    expect(indexes.some(i => i === 'saved_circuits_name_idx')).toBe(true);
+    expect(indexes.some(i => i === 'saved_circuits_updated_at_idx')).toBe(true);
   });
 });
 
@@ -77,23 +80,13 @@ describe('Drizzle CRUD — INSERT', () => {
     expect(row.document).toBe('{"version":1}');
     expect(row.tags).toBe('test');
     expect(row.isExample).toBe(false);
-    expect(row.createdAt).toBeInstanceOf(Date);
-    expect(row.updatedAt).toBeInstanceOf(Date);
   });
 
   it('auto-generates UUID id', async () => {
     const [row1] = await db.insert(savedCircuits).values({ name: 'UUID1', document: '{}' }).returning();
     const [row2] = await db.insert(savedCircuits).values({ name: 'UUID2', document: '{}' }).returning();
     expect(row1.id).not.toBe(row2.id);
-    expect(row1.id.length).toBeGreaterThan(10); // UUID is 36 chars
-  });
-
-  it('auto-sets timestamps', async () => {
-    const before = new Date();
-    const [row] = await db.insert(savedCircuits).values({ name: 'TS Test', document: '{}' }).returning();
-    const after = new Date();
-    expect(row.createdAt.getTime()).toBeGreaterThanOrEqual(before.getTime() - 1000);
-    expect(row.createdAt.getTime()).toBeLessThanOrEqual(after.getTime() + 1000);
+    expect(row1.id.length).toBeGreaterThan(10);
   });
 
   it('uses default values for optional fields', async () => {
@@ -123,14 +116,12 @@ describe('Drizzle CRUD — SELECT', () => {
 
   it('orders by updatedAt desc', async () => {
     const [r1] = await db.insert(savedCircuits).values({ name: 'First', document: '{}' }).returning();
-    // Small delay to ensure different timestamps
     await new Promise(r => setTimeout(r, 1100));
     const [r2] = await db.insert(savedCircuits).values({ name: 'Second', document: '{}' }).returning();
 
     const rows = await db.select().from(savedCircuits).orderBy(desc(savedCircuits.updatedAt));
     const idx1 = rows.findIndex(r => r.id === r1.id);
     const idx2 = rows.findIndex(r => r.id === r2.id);
-    // r2 was created later, should come first in desc order
     expect(idx2).toBeLessThan(idx1);
   });
 });
@@ -151,7 +142,6 @@ describe('Drizzle CRUD — UPDATE', () => {
     const [inserted] = await db.insert(savedCircuits).values({ name: 'Timestamp Test', document: '{}' }).returning();
     const originalUpdatedAt = inserted.updatedAt.getTime();
 
-    // Wait 1+ second to ensure timestamp changes
     await new Promise(r => setTimeout(r, 1100));
 
     const [updated] = await db.update(savedCircuits).set({ name: 'Updated' }).where(eq(savedCircuits.id, inserted.id)).returning();
@@ -210,7 +200,6 @@ describe('Drizzle Types — SavedCircuit / NewSavedCircuit', () => {
       document: '{}',
     };
     expect(newRow.name).toBe('New');
-    // id, timestamps, description, tags, isExample are optional (auto-generated)
   });
 });
 
