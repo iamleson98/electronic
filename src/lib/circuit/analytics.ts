@@ -1,0 +1,1 @@
+export function trackSimulationStep(...args: any[]): void {} export function trackFeature(f: string): void {} export function getSimulationStats(): any { return {totalSteps:0,successfulSteps:0,failedSteps:0}; } export function clearAnalytics(): void {}

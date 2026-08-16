@@ -1,0 +1,1 @@
+export function initErrorMonitoring(c?: any): Promise<void> { return Promise.resolve(); } export function captureError(e: Error | string, ctx?: any): string { return ''; } export function captureMessage(m: string, l?: string): string { return ''; } export function addBreadcrumb(c: any): void {} export function isMonitoringEnabled(): boolean { return false; }

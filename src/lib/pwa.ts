@@ -1,0 +1,1 @@
+export function registerServiceWorker(): Promise<any> { return Promise.resolve(null); } export function useOfflineStatus(): any { return {isOnline:true,wasOffline:false}; } export function setupInstallPromptListener(): void {} export function canInstall(): boolean { return false; } export function isStandalone(): boolean { return false; }

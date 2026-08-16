@@ -1,0 +1,1 @@
+export function runACAnalysis(opts: any): any { return { points: [], operatingPoint: null }; } export function logspace(a: number, b: number, n: number): number[] { return []; } export function findCutoffFrequency(p: any[]): number | null { return null; }

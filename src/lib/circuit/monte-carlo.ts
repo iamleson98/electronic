@@ -1,0 +1,1 @@
+export function runMonteCarlo(doc: any, config: any, plugins: any, spec?: any): any { return {runs:[],stats:{mean:0,stddev:0,min:0,max:0,minIdx:0,maxIdx:0},yield:1,histogram:[],histogramEdges:[]}; } export function runWorstCase(doc: any, config: any, plugins: any): any[] { return []; }

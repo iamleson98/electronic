@@ -1,0 +1,1 @@
+export function generateBOM(doc: any): any { return {lines:[],totalQuantity:0,totalCost:0,matchedCount:0,unmatchedCount:0}; } export function exportBOMAsCSV(bom: any): string { return 'Designator,Quantity,Comment\n'; } export function exportBOMForJLC(bom: any): string { return 'Designator,Quantity,Comment\n'; }
