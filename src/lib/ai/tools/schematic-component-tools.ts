@@ -1,0 +1,218 @@
+// SCHEMATIC COMPONENT TOOLS
+// Auto-extracted from the original ai/tools/index.ts during refactor.
+
+import type { Tool } from './types';
+import type { ToolContext } from './types';
+import { genId, findComponent } from './helpers';
+import type { CircuitDocument, CircuitComponent, Wire, SimContext } from '@/lib/circuit/types';
+import { simulateStep, buildNodeMap, getTerminalsForComponent, computeComponentCurrents, computeWireCurrents, solveDC } from '@/lib/circuit/engine';
+import { getPlugin, getAllPlugins, getPluginsByCategory } from '@/lib/circuit/registry';
+import { validatePhysics } from '@/lib/circuit/physics-validator';
+import { exampleCategories } from '@/lib/circuit/examples';
+import { exportSPICENetlist, exportBOMCSV, exportKiCadNetlist } from '@/lib/circuit/netlist-export';
+import { runDRC } from '@/lib/pcb/drc';
+import { verifyNetlist } from '@/lib/pcb/netlist-verify';
+import { autoRoute } from '@/lib/pcb/auto-router';
+import { routeTopologically, DEFAULT_ROUTER_OPTIONS } from '@/lib/pcb/topological-router';
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+const addComponentTool: Tool = {
+  name: 'schematic.addComponent',
+  category: 'Circuit Building',
+  description: 'Add a new component to the schematic. Returns the new component ID. Use this when the user wants to add a resistor, capacitor, IC, etc. After adding, you may want to addWire to connect it.',
+  parameters: {
+    type: 'object',
+    properties: {
+      type: { type: 'string', description: 'Component type, e.g. "resistor", "capacitor", "led", "npn", "opamp", "dcVoltage", "acVoltage", "ground", "arduinoReal", "timer555", "speaker". Use listComponentTypes to see all available types.' },
+      x: { type: 'number', description: 'X position on the grid (in grid units, 1 unit = 1 cell). Typical range: 0-40.' },
+      y: { type: 'number', description: 'Y position on the grid. Typical range: 0-30.' },
+      parameters: { type: 'object', description: 'Optional: parameter overrides, e.g. {resistance: 330} for a resistor, or {voltage: 5} for a DC source. Use getComponentInfo to see available parameters.', additionalProperties: true },
+    },
+    required: ['type', 'x', 'y'],
+  },
+  execute(args, ctx) {
+    const plugin = getPlugin(args.type);
+    if (!plugin) {
+      return { ok: false, error: `Unknown component type: "${args.type}". Use listComponentTypes to see available types.` };
+    }
+    const id = genId(args.type);
+    const defaults: any = {};
+    for (const p of plugin.parameters) defaults[p.key] = p.default;
+    const comp: CircuitComponent = {
+      id,
+      type: args.type,
+      position: { x: args.x, y: args.y },
+      rotation: 0,
+      parameters: { ...defaults, ...(args.parameters || {}) },
+    };
+    ctx.doc.components.push(comp);
+    return { ok: true, result: { id, type: args.type, position: comp.position, parameters: comp.parameters } };
+  },
+};
+
+const removeComponentTool: Tool = {
+  name: 'schematic.removeComponent',
+  category: 'Circuit Building',
+  description: 'Remove a component AND any wires connected to it from the schematic.',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'The component ID to remove (e.g. "r1", "led1", or an auto-generated ID returned by addComponent).' },
+    },
+    required: ['id'],
+  },
+  execute(args, ctx) {
+    const idx = ctx.doc.components.findIndex(c => c.id === args.id);
+    if (idx === -1) return { ok: false, error: `Component "${args.id}" not found` };
+    ctx.doc.components.splice(idx, 1);
+    // Remove wires connected to this component
+    const before = ctx.doc.wires.length;
+    ctx.doc.wires = ctx.doc.wires.filter(w => w.from.componentId !== args.id && w.to.componentId !== args.id);
+    return { ok: true, result: { removedId: args.id, wiresRemoved: before - ctx.doc.wires.length } };
+  },
+};
+
+const moveComponentTool: Tool = {
+  name: 'schematic.moveComponent',
+  category: 'Circuit Building',
+  description: 'Move a component to a new position on the grid.',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'Component ID to move.' },
+      x: { type: 'number', description: 'New X position.' },
+      y: { type: 'number', description: 'New Y position.' },
+    },
+    required: ['id', 'x', 'y'],
+  },
+  execute(args, ctx) {
+    const comp = findComponent(ctx.doc, args.id);
+    if (!comp) return { ok: false, error: `Component "${args.id}" not found` };
+    comp.position = { x: args.x, y: args.y };
+    return { ok: true, result: { id: args.id, position: comp.position } };
+  },
+};
+
+const rotateComponentTool: Tool = {
+  name: 'schematic.rotateComponent',
+  category: 'Circuit Building',
+  description: 'Rotate a component 90° clockwise. Rotation values: 0, 1, 2, 3 (for 0°, 90°, 180°, 270°).',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'Component ID to rotate.' },
+    },
+    required: ['id'],
+  },
+  execute(args, ctx) {
+    const comp = findComponent(ctx.doc, args.id);
+    if (!comp) return { ok: false, error: `Component "${args.id}" not found` };
+    comp.rotation = ((comp.rotation || 0) + 1) % 4 as 0 | 1 | 2 | 3;
+    return { ok: true, result: { id: args.id, rotation: comp.rotation } };
+  },
+};
+
+const setParameterTool: Tool = {
+  name: 'schematic.setParameter',
+  category: 'Circuit Building',
+  description: 'Set a parameter on a component (e.g. resistance, voltage, capacitance, hfe). Use getComponentInfo first to see what parameters a component type supports.',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'Component ID.' },
+      key: { type: 'string', description: 'Parameter key, e.g. "resistance", "voltage", "capacitance", "hfe", "forwardV".' },
+      value: { description: 'New value (number, string, or boolean depending on the parameter).' },
+    },
+    required: ['id', 'key', 'value'],
+  },
+  execute(args, ctx) {
+    const comp = findComponent(ctx.doc, args.id);
+    if (!comp) return { ok: false, error: `Component "${args.id}" not found` };
+    comp.parameters[args.key] = args.value;
+    return { ok: true, result: { id: args.id, key: args.key, value: args.value } };
+  },
+};
+
+const addWireTool: Tool = {
+  name: 'schematic.addWire',
+  category: 'Circuit Building',
+  description: 'Connect two component terminals with a wire. Terminals are like "p"/"n" (sources), "a"/"b" (passives), "c"/"b"/"e" (transistors), "in+"/"in-"/"out" (op-amps). Use getComponentInfo to see terminal IDs for a type.',
+  parameters: {
+    type: 'object',
+    properties: {
+      fromComponentId: { type: 'string', description: 'Source component ID.' },
+      fromTerminalId: { type: 'string', description: 'Source terminal ID (e.g. "p", "a", "b").' },
+      toComponentId: { type: 'string', description: 'Destination component ID.' },
+      toTerminalId: { type: 'string', description: 'Destination terminal ID.' },
+      waypoints: {
+        type: 'array',
+        description: 'Optional: list of [x, y] grid points the wire should pass through, for clean L-shaped routing. E.g. [[5, 9], [10, 9]].',
+        items: { type: 'array', items: [{ type: 'number' }, { type: 'number' }] },
+      },
+    },
+    required: ['fromComponentId', 'fromTerminalId', 'toComponentId', 'toTerminalId'],
+  },
+  execute(args, ctx) {
+    const fromComp = findComponent(ctx.doc, args.fromComponentId);
+    const toComp = findComponent(ctx.doc, args.toComponentId);
+    if (!fromComp) return { ok: false, error: `From component "${args.fromComponentId}" not found` };
+    if (!toComp) return { ok: false, error: `To component "${args.toComponentId}" not found` };
+    const fromPlugin = getPlugin(fromComp.type);
+    const toPlugin = getPlugin(toComp.type);
+    if (!fromPlugin) return { ok: false, error: `Plugin for type "${fromComp.type}" not found` };
+    if (!toPlugin) return { ok: false, error: `Plugin for type "${toComp.type}" not found` };
+    const fromTerm = fromPlugin.terminals.find(t => t.id === args.fromTerminalId);
+    const toTerm = toPlugin.terminals.find(t => t.id === args.toTerminalId);
+    if (!fromTerm) return { ok: false, error: `Terminal "${args.fromTerminalId}" not found on ${fromComp.type}. Available: ${fromPlugin.terminals.map(t=>t.id).join(', ')}` };
+    if (!toTerm) return { ok: false, error: `Terminal "${args.toTerminalId}" not found on ${toComp.type}. Available: ${toPlugin.terminals.map(t=>t.id).join(', ')}` };
+
+    const wire: Wire = {
+      id: genId('w'),
+      from: { componentId: args.fromComponentId, terminalId: args.fromTerminalId },
+      to: { componentId: args.toComponentId, terminalId: args.toTerminalId },
+    };
+    if (args.waypoints && args.waypoints.length > 0) {
+      (wire as any).waypoints = args.waypoints.map(([x, y]: [number, number]) => ({ x, y }));
+    }
+    ctx.doc.wires.push(wire);
+    return { ok: true, result: { id: wire.id, from: wire.from, to: wire.to } };
+  },
+};
+
+const removeWireTool: Tool = {
+  name: 'schematic.removeWire',
+  category: 'Circuit Building',
+  description: 'Remove a wire by its ID. Use listWires to find wire IDs.',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'Wire ID to remove.' },
+    },
+    required: ['id'],
+  },
+  execute(args, ctx) {
+    const idx = ctx.doc.wires.findIndex(w => w.id === args.id);
+    if (idx === -1) return { ok: false, error: `Wire "${args.id}" not found` };
+    ctx.doc.wires.splice(idx, 1);
+    return { ok: true, result: { removedId: args.id } };
+  },
+};
+
+const clearCircuitTool: Tool = {
+  name: 'schematic.clear',
+  category: 'Circuit Building',
+  description: 'Remove ALL components and wires from the schematic. Use with caution — this cannot be undone by the AI (but the user can undo via the UI).',
+  parameters: { type: 'object', properties: {} },
+  execute(_args, ctx) {
+    const compCount = ctx.doc.components.length;
+    const wireCount = ctx.doc.wires.length;
+    ctx.doc.components = [];
+    ctx.doc.wires = [];
+    return { ok: true, result: { cleared: true, componentsRemoved: compCount, wiresRemoved: wireCount } };
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+export { addComponentTool, removeComponentTool, moveComponentTool, rotateComponentTool, setParameterTool, addWireTool, removeWireTool, clearCircuitTool };
