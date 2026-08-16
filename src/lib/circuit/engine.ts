@@ -651,11 +651,81 @@ export function computeComponentCurrents(
           nodeCurrentOut.set(com, (nodeCurrentOut.get(com) ?? 0) - iSeg);
         }
       }
+    } else if (comp.type === 'potentiometer') {
+      const r = Math.max(0.001, comp.parameters.resistance as number);
+      const w = Math.max(0, Math.min(1, (comp.parameters.wiper as number) / 100));
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      const wp = terms.find((t) => t.terminalId === 'w')?.nodeId ?? 0;
+      const rTop = Math.max(1e-9, r * w);
+      const rBot = Math.max(1e-9, r * (1 - w));
+      const iTOP = (sim.nodeVoltage[a] - sim.nodeVoltage[wp]) / rTop;
+      const iBot = (sim.nodeVoltage[wp] - sim.nodeVoltage[b]) / rBot;
+      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + iTOP);
+      nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - iBot);
+      nodeCurrentOut.set(wp, (nodeCurrentOut.get(wp) ?? 0) + (-iTOP + iBot));
+    } else if (comp.type === 'transformer' || comp.type === 'coupledInductor') {
+      const lm = Math.max(1e-6, (comp.parameters.lm as number) ?? 0.01);
+      const dt = Math.max(sim.dt, 1e-12);
+      const g = dt / lm;
+      const p1 = terms.find((t) => t.terminalId === 'p1')?.nodeId ?? 0;
+      const p2 = terms.find((t) => t.terminalId === 'p2')?.nodeId ?? 0;
+      const i = (sim.nodeVoltage[p1] - sim.nodeVoltage[p2]) * g;
+      nodeCurrentOut.set(p1, (nodeCurrentOut.get(p1) ?? 0) + i);
+      nodeCurrentOut.set(p2, (nodeCurrentOut.get(p2) ?? 0) - i);
+    } else if (comp.type === 'opamp' || comp.type === 'opampRails' || comp.type === 'opampReal') {
+      if (comp.type !== 'opamp') {
+        const vp = terms.find((t) => t.terminalId === 'v+')?.nodeId ?? 0;
+        const vn = terms.find((t) => t.terminalId === 'v-')?.nodeId ?? 0;
+        const iVp = sim.nodeVoltage[vp] * 1e-9;
+        const iVn = sim.nodeVoltage[vn] * 1e-9;
+        nodeCurrentOut.set(vp, (nodeCurrentOut.get(vp) ?? 0) + iVp);
+        nodeCurrentOut.set(vn, (nodeCurrentOut.get(vn) ?? 0) + iVn);
+      }
+    } else if (comp.type === 'diodeShockley') {
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
+      const Is = (comp.parameters.Is as number) ?? 1e-14;
+      const N = (comp.parameters.N as number) ?? 1.5;
+      const Vt = 0.02585;
+      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+      const i = Is * (Math.exp(Math.max(-50, Math.min(50, v / (N * Vt)))) - 1);
+      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+      nodeCurrentOut.set(k, (nodeCurrentOut.get(k) ?? 0) - i);
+    } else if (comp.type === 'timer555' || comp.type === 'vco' || comp.type === 'crystal' ||
+               comp.type === 'and' || comp.type === 'or' || comp.type === 'nand' ||
+               comp.type === 'nor' || comp.type === 'xor' || comp.type === 'not' ||
+               comp.type === '7400_A' || comp.type === '7400_B' ||
+               comp.type === '7400_C' || comp.type === '7400_D' ||
+               comp.type === 'arduino' || comp.type === 'arduinoReal' || comp.type === 'raspberryPi') {
+      const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
+      if (vccNode > 0) {
+        let totalOutI = 0;
+        for (const t of terms) {
+          if (t.terminalId === 'vcc' || t.terminalId === 'gnd') continue;
+          const nodeI = nodeCurrentOut.get(t.nodeId) ?? 0;
+          if (nodeI > 0) totalOutI += nodeI;
+        }
+        nodeCurrentOut.set(vccNode, (nodeCurrentOut.get(vccNode) ?? 0) - totalOutI);
+      }
+    } else {
+      // GENERIC FALLBACK for any unhandled type.
+      const rParam = (comp.parameters.resistance as number) ??
+                     (comp.parameters.impedance as number) ??
+                     (comp.parameters.ron as number) ??
+                     (comp.parameters.onR as number);
+      if (rParam !== undefined && rParam > 0) {
+        const a = terms.find((t) => t.terminalId === 'a' || t.terminalId === 'p')?.nodeId ?? 0;
+        const b = terms.find((t) => t.terminalId === 'b' || t.terminalId === 'n')?.nodeId ?? 0;
+        if (a > 0 || b > 0) {
+          const r = Math.max(1e-9, rParam);
+          const i = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+          nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+          nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
+        }
+      }
     }
-    // Voltage sources, 555, opamp, transistors, logic gates, oscillators:
-    // Their current is determined by the external circuit, not by their own impedance.
-    // We'll compute it from nodeCurrentOut below.
-  }
+    }  // end of for (const comp of components) loop
 
   // Second pass: add CD4026 VCC current (sum of all ON segment currents).
   // Must run after 7-segment displays have contributed to nodeCurrentOut.
@@ -827,8 +897,79 @@ export function computeComponentCurrents(
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
       const r = Math.max(1e-6, comp.parameters.resistance as number);
       current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+    } else if (comp.type === 'opampReal') {
+      const outNode = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
+      current = nodeCurrentOut.get(outNode) ?? 0;
+    } else if (comp.type === 'diodeShockley') {
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
+      const Is = (comp.parameters.Is as number) ?? 1e-14;
+      const N = (comp.parameters.N as number) ?? 1.5;
+      const Vt = 0.02585;
+      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+      current = Is * (Math.exp(Math.max(-50, Math.min(50, v / (N * Vt)))) - 1);
+    } else if (comp.type === 'bjtGPNpn' || comp.type === 'bjtGPPnp') {
+      const cNode = terms.find((t) => t.terminalId === 'c')?.nodeId ?? 0;
+      current = comp.type === 'bjtGPNpn' ? -(nodeCurrentOut.get(cNode) ?? 0) : (nodeCurrentOut.get(cNode) ?? 0);
+    } else if (comp.type === 'jfetN' || comp.type === 'mosLevel1N') {
+      const dNode = terms.find((t) => t.terminalId === 'd')?.nodeId ?? 0;
+      current = -(nodeCurrentOut.get(dNode) ?? 0);
+    } else if (comp.type === 'jfetP' || comp.type === 'mosLevel1P') {
+      const dNode = terms.find((t) => t.terminalId === 'd')?.nodeId ?? 0;
+      current = nodeCurrentOut.get(dNode) ?? 0;
+    } else if (comp.type === 'vcSwitch') {
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      const ron = Math.max(1e-6, (comp.parameters.ron as number) ?? 0.01);
+      const roff = Math.max(1, (comp.parameters.roff as number) ?? 1e6);
+      const vt = (comp.parameters.vt as number) ?? 1.0;
+      const vh = (comp.parameters.vh as number) ?? 0.1;
+      const ctlNode = terms.find((t) => t.terminalId === 'ctl')?.nodeId;
+      const ctlV = ctlNode !== undefined ? sim.nodeVoltage[ctlNode] : 0;
+      const st = sim.state.__global ?? {};
+      const key = `vcsw_${comp.id}`;
+      const prevOn = st[key] ?? false;
+      const on = prevOn ? ctlV > vt - vh : ctlV > vt + vh;
+      st[key] = on;
+      const r = on ? ron : roff;
+      current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+    } else if (comp.type === 'bvSource' || comp.type === 'customPower') {
+      const pNode = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+      current = nodeCurrentOut.get(pNode) ?? 0;
+    } else if (comp.type === 'biSource') {
+      const pNode = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+      current = nodeCurrentOut.get(pNode) ?? 0;
+    } else if (comp.type === 'coupledInductor') {
+      const p1 = terms.find((t) => t.terminalId === 'p1')?.nodeId ?? 0;
+      current = nodeCurrentOut.get(p1) ?? 0;
+    } else {
+      // GENERIC FALLBACK for any unhandled type.
+      const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId;
+      if (vccNode !== undefined && vccNode > 0) {
+        let totalI = 0;
+        for (const t of terms) {
+          if (t.terminalId === 'vcc' || t.terminalId === 'gnd') continue;
+          totalI += Math.abs(nodeCurrentOut.get(t.nodeId) ?? 0);
+        }
+        current = totalI;
+      } else {
+        const outTerm = terms.find((t) => t.terminalId === 'out' || t.terminalId === 'y');
+        if (outTerm) {
+          current = nodeCurrentOut.get(outTerm.nodeId) ?? 0;
+        } else {
+          const rParam = (comp.parameters.resistance as number) ??
+                         (comp.parameters.impedance as number) ??
+                         (comp.parameters.ron as number) ??
+                         (comp.parameters.onR as number);
+          if (rParam !== undefined && rParam > 0) {
+            const a = terms.find((t) => t.terminalId === 'a' || t.terminalId === 'p')?.nodeId ?? 0;
+            const b = terms.find((t) => t.terminalId === 'b' || t.terminalId === 'n')?.nodeId ?? 0;
+            const r = Math.max(1e-9, rParam);
+            current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
+          }
+        }
+      }
     }
-    // For all other types (logic gates, power symbols, etc.), current = 0
 
     result.set(comp.id, current);
   }
