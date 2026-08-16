@@ -1,0 +1,15 @@
+import { describe, it, expect, beforeAll } from 'vitest';
+import { solveDC, buildNodeMap } from '../src/lib/circuit/engine';
+import { getPlugin, getAllPlugins } from '../src/lib/circuit/registry';
+import { ReferenceSolver } from '../src/lib/circuit/reference-solver';
+import type { CircuitComponent, Wire, ComponentPlugin } from '../src/lib/circuit/types';
+beforeAll(async () => { await import('../src/lib/circuit/components/sources'); await import('../src/lib/circuit/components/passive'); await import('../src/lib/circuit/components/semiconductors'); await import('../src/lib/circuit/components/extra'); });
+function comp(t:string,id:string,p?:any):CircuitComponent{const pl=getPlugin(t);const d:any={};if(pl)for(const pm of pl.parameters)d[pm.key]=pm.default;return{id,type:t,position:{x:0,y:0},rotation:0,parameters:{...d,...p},simState:{}};}
+function wire(id:string,f:string,ft:string,t:string,tt:string):Wire{return{id,from:{componentId:f,terminalId:ft},to:{componentId:t,terminalId:tt}};}
+function plugins():Map<string,ComponentPlugin>{return new Map(getAllPlugins().map(p=>[p.type,p]));}
+function approxEqual(a:number,e:number,l:string){const ae=Math.abs(a-e),re=ae/Math.max(Math.abs(e),1e-12);if(!(ae<1e-9||re<0.001))throw new Error(l+': expected '+e+', got '+a);}
+describe('SPICE reference comparison', () => {
+  it('Voltage divider matches reference solver', () => { const p=plugins();const c=[comp('dcVoltage','V1',{voltage:5}),comp('resistor','R1',{resistance:1000}),comp('resistor','R2',{resistance:1000}),comp('ground','GND')];const w=[wire('w1','V1','p','R1','a'),wire('w2','R1','b','R2','a'),wire('w3','R2','b','GND','g'),wire('w4','V1','n','GND','g')];const dc=solveDC(c,w,p);expect(dc).not.toBeNull();const nm=buildNodeMap(c,w,p);const mid=nm.terminalNode.get('R1:b')!;const ref=new ReferenceSolver();ref.addNode('a');ref.addNode('b');ref.stampV('a','0',5,'V1');ref.stampR('a','b',1000,'R1');ref.stampR('b','0',1000,'R2');const r=ref.solve();expect(r.ok).toBe(true);approxEqual(dc!.nodeVoltage[mid],r.voltages.get('b')!,'V(mid)');approxEqual(dc!.nodeVoltage[mid],2.5,'V(mid) expected');});
+  it('Capacitor DC steady state: V_cap = V_source', () => { const p=plugins();const c=[comp('dcVoltage','V1',{voltage:5}),comp('resistor','R1',{resistance:1000}),comp('capacitor','C1',{capacitance:1e-6}),comp('ground','GND')];const w=[wire('w1','V1','p','R1','a'),wire('w2','R1','b','C1','a'),wire('w3','C1','b','GND','g'),wire('w4','V1','n','GND','g')];const dc=solveDC(c,w,p);expect(dc).not.toBeNull();const nm=buildNodeMap(c,w,p);const cap=nm.terminalNode.get('C1:a')!;expect(dc!.nodeVoltage[cap]).toBeCloseTo(5,1);});
+  it('Inductor DC steady state: V_ind ≈ 0', () => { const p=plugins();const c=[comp('dcVoltage','V1',{voltage:5}),comp('resistor','R1',{resistance:1000}),comp('inductor','L1',{inductance:1e-3}),comp('ground','GND')];const w=[wire('w1','V1','p','R1','a'),wire('w2','R1','b','L1','a'),wire('w3','L1','b','GND','g'),wire('w4','V1','n','GND','g')];const dc=solveDC(c,w,p);expect(dc).not.toBeNull();const nm=buildNodeMap(c,w,p);const ind=nm.terminalNode.get('L1:a')!;expect(Math.abs(dc!.nodeVoltage[ind])).toBeLessThan(1e-3);});
+});

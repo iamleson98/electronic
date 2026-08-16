@@ -257,7 +257,7 @@ export function Toolbar() {
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="flex items-center gap-1 border-b border-slate-800 bg-slate-900 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-1 border-b border-slate-800 bg-slate-900 px-3 py-2">
         {/* Brand */}
         <div className="mr-2 flex items-center gap-2 pr-3">
           <div className="flex h-7 w-7 items-center justify-center rounded bg-gradient-to-br from-cyan-400 to-emerald-500 text-slate-900">

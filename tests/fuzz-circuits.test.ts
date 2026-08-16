@@ -1,0 +1,13 @@
+import { describe, it, expect, beforeAll } from 'vitest';
+import { solveDC, simulateStep } from '../src/lib/circuit/engine';
+import { getPlugin, getAllPlugins } from '../src/lib/circuit/registry';
+import type { CircuitComponent, Wire, ComponentPlugin } from '../src/lib/circuit/types';
+beforeAll(async () => { await import('../src/lib/circuit/components/sources'); await import('../src/lib/circuit/components/passive'); await import('../src/lib/circuit/components/semiconductors'); await import('../src/lib/circuit/components/extra'); });
+function mulberry32(seed:number){let a=seed;return()=>{a|=0;a=(a+0x6D2B79F5)|0;let t=Math.imul(a^(a>>>15),1|a);t=(t+Math.imul(t^(t>>>7),61|t))^t;return((t^(t>>>14))>>>0)/4294967296;};}
+const FUZZABLE=['resistor','capacitor','inductor','dcVoltage','acVoltage','currentSource','diode','led','npn','pnp','nmos','pmos','switch','pushButton'];
+function randomComp(rng:()=>number,id:string):CircuitComponent{const t=FUZZABLE[Math.floor(rng()*FUZZABLE.length)];const p=getPlugin(t)!;const params:any={};for(const pm of p.parameters){if(pm.type==='number'){const mn=pm.min??0;const mx=pm.max??1000;params[pm.key]=mn+rng()*Math.min(mx-mn,1000);}else if(pm.type==='boolean'){params[pm.key]=rng()>0.5;}else{params[pm.key]=pm.default;}}if(params.resistance!==undefined)params.resistance=Math.max(0.001,params.resistance);return{id,type:t,position:{x:0,y:0},rotation:0,parameters:params,simState:{}};}
+function genCircuit(rng:()=>number){const n=3+Math.floor(rng()*18);const comps:CircuitComponent[]=[{id:'GND',type:'ground',position:{x:0,y:0},rotation:0,parameters:{},simState:{}}];for(let i=0;i<n;i++)comps.push(randomComp(rng,'C'+i));const wires:Wire[]=[];let wi=0;for(const c of comps){if(c.type==='ground')continue;const p=getPlugin(c.type);if(!p)continue;for(const t of p.terminals){if(rng()<0.7){const tgt=comps[Math.floor(rng()*comps.length)];const tp=getPlugin(tgt.type);if(!tp||tp.terminals.length===0)continue;const tt=tp.terminals[Math.floor(rng()*tp.terminals.length)];wires.push({id:'w'+wi++,from:{componentId:c.id,terminalId:t.id},to:{componentId:tgt.id,terminalId:tt.id}});}}}return{components:comps,wires};}
+function plugins():Map<string,ComponentPlugin>{return new Map(getAllPlugins().map(p=>[p.type,p]));}
+describe('Circuit fuzzer', () => {
+  it('200 random circuits: no NaN/crash', () => { const rng=mulberry32(42);let solved=0,singular=0;const p=plugins();for(let i=0;i<200;i++){const{components,wires}=genCircuit(rng);const dc=solveDC(components,wires,p);if(!dc){singular++;continue;}solved++;for(let j=0;j<dc.nodeVoltage.length;j++){expect(isFinite(dc.nodeVoltage[j]),'Fuzz '+i+': NaN at node '+j).toBe(true);}for(let j=0;j<dc.nodeVoltage.length;j++){}}expect(solved).toBeGreaterThan(30);});
+});

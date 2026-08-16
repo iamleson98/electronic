@@ -1,0 +1,16 @@
+import { describe, it, expect, beforeAll } from 'vitest';
+import { simulateStep, solveDC, buildNodeMap } from '../src/lib/circuit/engine';
+import { getPlugin, getAllPlugins } from '../src/lib/circuit/registry';
+import type { CircuitComponent, Wire, ComponentPlugin } from '../src/lib/circuit/types';
+beforeAll(async () => { await import('../src/lib/circuit/components/sources'); await import('../src/lib/circuit/components/passive'); await import('../src/lib/circuit/components/semiconductors'); });
+function comp(t:string,id:string,p?:any){const pl=getPlugin(t);const d:any={};if(pl)for(const pm of pl.parameters)d[pm.key]=pm.default;return{id,type:t,position:{x:0,y:0},rotation:0,parameters:{...d,...p},simState:{}};}
+function wire(id:string,f:string,ft:string,t:string,tt:string){return{id,from:{componentId:f,terminalId:ft},to:{componentId:t,terminalId:tt}};}
+function plugins(){return new Map(getAllPlugins().map(p=>[p.type,p]));}
+describe('Sim worker', () => {
+  it('simulateStep: voltage divider', () => { const p=plugins();const c=[comp('dcVoltage','V1',{voltage:5}),comp('resistor','R1',{resistance:1000}),comp('resistor','R2',{resistance:1000}),comp('ground','GND')];const w=[wire('w1','V1','p','R1','a'),wire('w2','R1','b','R2','a'),wire('w3','R2','b','GND','g'),wire('w4','V1','n','GND','g')];const r=simulateStep(c,w,p,undefined,1e-4);expect(r).not.toBeNull();const nm=buildNodeMap(c,w,p);expect(r!.sim.nodeVoltage[nm.terminalNode.get('R1:b')!]).toBeCloseTo(2.5,4);});
+  it('solveDC: correct operating point', () => { const p=plugins();const c=[comp('dcVoltage','V1',{voltage:12}),comp('resistor','R1',{resistance:4000}),comp('resistor','R2',{resistance:8000}),comp('ground','GND')];const w=[wire('w1','V1','p','R1','a'),wire('w2','R1','b','R2','a'),wire('w3','R2','b','GND','g'),wire('w4','V1','n','GND','g')];const r=solveDC(c,w,p);expect(r).not.toBeNull();const nm=buildNodeMap(c,w,p);expect(r!.nodeVoltage[nm.terminalNode.get('R1:b')!]).toBeCloseTo(8,4);});
+  it('Singular matrix: returns null', () => { const p=plugins();const c=[comp('dcVoltage','V1',{voltage:5}),comp('dcVoltage','V2',{voltage:3}),comp('ground','GND')];const w=[wire('w1','V1','p','V2','p'),wire('w2','V1','n','GND','g'),wire('w3','V2','n','GND','g')];const r=solveDC(c,w,p);expect(r).toBeNull();});
+  it('100-node ladder: < 1s', () => { const p=plugins();const c:CircuitComponent[]=[comp('dcVoltage','V1',{voltage:5}),comp('ground','GND')];for(let i=0;i<100;i++)c.push(comp('resistor','R'+i,{resistance:1000}));const w:Wire[]=[wire('w0','V1','p','R0','a'),wire('wg','V1','n','GND','g')];for(let i=0;i<99;i++)w.push(wire('w'+(i+1),'R'+i,'b','R'+(i+1),'a'));w.push(wire('wf','R99','b','GND','g'));const s=Date.now();const r=simulateStep(c,w,p,undefined,1e-4);const e=Date.now()-s;expect(r).not.toBeNull();expect(e).toBeLessThan(1000);});
+  it('Float64Array transferable', () => { const o=new Float64Array([1,2.5,-3.14,0]);const b=o.buffer;const r=new Float64Array(b);expect(r[0]).toBe(1);expect(r[1]).toBe(2.5);expect(r[2]).toBe(-3.14);});
+  it('Map serializable as entries', () => { const o=new Map([['a',1],['b',2]]);const s=Array.from(o.entries());const r=new Map(s);expect(r.get('a')).toBe(1);expect(r.get('b')).toBe(2);});
+});
