@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
-import { db } from '@/lib/db';
+import { getDb } from '@/lib/db';
 import { savedCircuits } from '@/lib/schema';
 import { updateCircuitSchema } from '@/lib/validation-schemas';
 
@@ -10,6 +10,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 export async function GET(_req: NextRequest, { params }: RouteContext) {
   try {
     const { id } = await params;
+    const db = await getDb();
     const [circuit] = await db
       .select()
       .from(savedCircuits)
@@ -53,6 +54,7 @@ export async function PUT(req: NextRequest, { params }: RouteContext) {
 
     const updates = parseResult.data;
 
+    const db = await getDb();
     const [circuit] = await db
       .update(savedCircuits)
       .set(updates as Record<string, unknown>)
@@ -73,6 +75,7 @@ export async function PUT(req: NextRequest, { params }: RouteContext) {
 export async function DELETE(_req: NextRequest, { params }: RouteContext) {
   try {
     const { id } = await params;
+    const db = await getDb();
     await db.delete(savedCircuits).where(eq(savedCircuits.id, id));
     return new NextResponse(null, { status: 204 });
   } catch (err) {

@@ -2,13 +2,14 @@
 // Returns 200 if the server and database are operational.
 
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { getDb } from '@/lib/db';
 import { savedCircuits } from '@/lib/schema';
 import { sql } from 'drizzle-orm';
 
 export async function GET() {
   try {
     // Quick DB ping — SELECT 1
+    const db = await getDb();
     await db.select({ one: sql`1` }).from(savedCircuits).limit(1);
     return NextResponse.json({
       status: 'ok',

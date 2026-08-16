@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { desc, eq, sql, like, and } from 'drizzle-orm';
-import { db } from '@/lib/db';
+import { getDb } from '@/lib/db';
 import { savedCircuits } from '@/lib/schema';
 import { createCircuitSchema } from '@/lib/validation-schemas';
 
@@ -23,6 +23,7 @@ export async function GET(req?: NextRequest) {
 
     const where = conditions.length > 0 ? and(...conditions) : undefined;
 
+    const db = await getDb();
     const query = db
       .select({
         id: savedCircuits.id,
@@ -77,6 +78,7 @@ export async function POST(req: NextRequest) {
 
     const data = parseResult.data;
 
+    const db = await getDb();
     const [circuit] = await db
       .insert(savedCircuits)
       .values({
