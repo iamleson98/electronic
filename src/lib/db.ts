@@ -11,6 +11,8 @@
 
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { savedCircuits } from './schema';
 
 // Resolve the SQLite file path from `DATABASE_URL` (format: `file:/abs/path/custom.db`).
@@ -25,11 +27,36 @@ const globalForDb = globalThis as unknown as {
 };
 
 function createDb() {
+  // Ensure the parent directory exists — fresh checkouts (CI, new clones) won't
+  // have `db/` yet, and better-sqlite3 throws if the directory is missing.
+  try {
+    mkdirSync(dirname(dbPath), { recursive: true });
+  } catch {
+    // Directory creation may fail in read-only environments; let better-sqlite3
+    // throw a more descriptive error below in that case.
+  }
   const sqlite = new Database(dbPath);
   // WAL mode = better concurrency for read-heavy workloads (the API mostly reads).
   sqlite.pragma('journal_mode = WAL');
   // Enable foreign keys (good practice even though we have no FKs currently).
   sqlite.pragma('foreign_keys = ON');
+  // Auto-create the schema if missing — makes the app self-bootstrapping in
+  // fresh environments (CI, new clones, container restarts with empty volumes)
+  // without requiring `drizzle-kit push` to be run first.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS saved_circuits (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      document TEXT NOT NULL,
+      tags TEXT NOT NULL DEFAULT '',
+      is_example INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS saved_circuits_name_idx ON saved_circuits (name);
+    CREATE INDEX IF NOT EXISTS saved_circuits_updated_at_idx ON saved_circuits (updated_at);
+  `);
   globalForDb.__sqliteInstance = sqlite;
   return drizzle(sqlite, { schema: { savedCircuits } });
 }

@@ -2136,3 +2136,30 @@ Stage Summary:
 - packageManager field added to package.json
 - All local checks pass with Bun
 - Ready to push and verify CI run succeeds
+
+---
+Task ID: ci-bun-migration-fix2
+Agent: main
+Task: CI still failing after Bun migration — diagnose and fix.
+
+Work Log:
+- Second CI run (31931184154) failed at the "Run tests" step.
+- Downloaded CI logs: install ✓, typecheck ✓, lint ✓, but `tests/api-routes.test.ts` failed with:
+  `TypeError: Cannot open database because the directory does not exist`
+  at `new Database(dbPath)` in src/lib/db.ts:28
+- Root cause: the project's SQLite DB lives at `db/custom.db`, but the `db/` directory only exists locally (was committed as a tracked file before .gitignore covered it). Fresh CI checkouts have no `db/` directory and no `db/custom.db` file.
+
+- Fix 1: `src/lib/db.ts` createDb() now calls `mkdirSync(dirname(dbPath), { recursive: true })` before opening the DB. Wrapped in try/catch so read-only environments still get a descriptive error from better-sqlite3.
+
+- Fix 2: Even after creating the directory, the `saved_circuits` table didn't exist because drizzle migrations weren't run in CI. Added `CREATE TABLE IF NOT EXISTS saved_circuits (...)` + index creation to createDb(). This makes the app self-bootstrapping in any environment (CI, fresh clone, container restart with empty volume) without requiring `drizzle-kit push`.
+
+- Verified locally by deleting db/ AND /tmp/test-circuits-api.db before each test run:
+  * `bun run test tests/api-routes.test.ts` — 13 tests pass ✓
+  * `bun run test` (full suite) — 1195 tests pass across 51 files ✓
+  * `bun x tsc --noEmit` — clean ✓
+  * `bun run build` — succeeds ✓
+
+Stage Summary:
+- src/lib/db.ts now creates the db directory AND the saved_circuits table on startup
+- App is self-bootstrapping — no `drizzle-kit push` needed in CI or fresh clones
+- All 1195 tests pass from a clean state
