@@ -346,19 +346,6 @@ export function computeWireCurrents(
   }
 
   for (const wire of wires) {
-    // For each wire, compute current from BOTH the from and to components.
-    //
-    // Sign convention:
-    //   computeTerminalCurrent returns "current leaving the component terminal toward the wire"
-    //   Positive = current flowing OUT of the terminal INTO the wire.
-    //
-    // For a wire from→to:
-    //   fromCurrent > 0 means current flows FROM the from-component INTO the wire → flows from→to ✓
-    //   toCurrent > 0 means current flows FROM the to-component INTO the wire → flows to→from
-    //   So wire current (from→to positive) = fromCurrent = -toCurrent
-    //
-    // In a series circuit: fromCurrent = -toCurrent (KCL).
-    // Take the one with larger magnitude for reliability.
     const fromComp = components.find((c) => c.id === wire.from.componentId);
     const toComp = components.find((c) => c.id === wire.to.componentId);
     if (!fromComp || !toComp) continue;
@@ -366,26 +353,33 @@ export function computeWireCurrents(
     const toPlugin = plugins.get(toComp.type);
     if (!fromPlugin || !toPlugin) continue;
 
+    // Special case: if either end is an OPEN switch/pushButton, current = 0.
+    if (toComp.type === 'switch' && !toComp.parameters.closed) {
+      result.set(wire.id, 0);
+      continue;
+    }
+    if (toComp.type === 'pushButton' && !toComp.parameters.pressed) {
+      result.set(wire.id, 0);
+      continue;
+    }
+    if (fromComp.type === 'switch' && !fromComp.parameters.closed) {
+      result.set(wire.id, 0);
+      continue;
+    }
+    if (fromComp.type === 'pushButton' && !fromComp.parameters.pressed) {
+      result.set(wire.id, 0);
+      continue;
+    }
+
     const fromCurrent = computeTerminalCurrent(fromComp, fromPlugin, wire.from.terminalId, nodeMap, sim, compCurrents, nodeCurrentOut);
     const toCurrent = computeTerminalCurrent(toComp, toPlugin, wire.to.terminalId, nodeMap, sim, compCurrents, nodeCurrentOut);
 
-    // fromCurrent = current leaving from-component → entering wire at from end → flows from→to
-    // toCurrent = current leaving to-component → entering wire at to end → flows to→from
-    // Wire current (from→to positive) = fromCurrent = -toCurrent
-    //
-    // Prefer the SMALLER non-zero magnitude. In a series circuit both ends agree
-    // (same magnitude), so either works. But when multiple wires share a node
-    // (e.g., 6 CD4026 VCC pins on the same 5V supply), the fromCurrent gives the
-    // TOTAL node current (727mA) while toCurrent gives the INDIVIDUAL draw (45mA).
-    // The individual draw is correct for THIS wire.
     const fromMag = Math.abs(fromCurrent);
     const toMag = Math.abs(toCurrent);
     let current: number;
     if (toMag > 1e-12 && (fromMag < 1e-12 || toMag < fromMag)) {
-      // Prefer toCurrent when it's available and smaller (or fromCurrent is zero)
       current = -toCurrent;
     } else if (fromMag > 1e-12) {
-      // Fall back to fromCurrent
       current = fromCurrent;
     } else {
       current = 0;
