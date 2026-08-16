@@ -6,8 +6,39 @@ import { usePCB } from '@/lib/pcb/store';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { ChevronDown, ChevronRight, Send, Sparkles, Loader2, X, AlertCircle, CheckCircle2, Wrench, Undo2, Eye, GitBranch } from 'lucide-react';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { ChevronDown, ChevronRight, Send, Sparkles, Loader2, X, AlertCircle, CheckCircle2, Wrench, Undo2, Eye, GitBranch, Cpu } from 'lucide-react';
 import { toast } from 'sonner';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider selection — fetched once on mount from /api/ai/providers.
+// Persisted to localStorage so the user's choice survives reloads.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface ProviderInfo {
+  name: 'zai' | 'openai' | 'anthropic';
+  label: string;
+  available: boolean;
+  requiresKey: string | null;
+  model: string;
+}
+
+const PROVIDER_STORAGE_KEY = 'circuit-lab.ai-provider';
+
+function loadStoredProvider(): 'zai' | 'openai' | 'anthropic' | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const v = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
+    if (v === 'zai' || v === 'openai' || v === 'anthropic') return v;
+  } catch { /* localStorage disabled */ }
+  return null;
+}
+
+function storeProvider(name: 'zai' | 'openai' | 'anthropic') {
+  if (typeof window === 'undefined') return;
+  try { window.localStorage.setItem(PROVIDER_STORAGE_KEY, name); } catch { /* ignore */ }
+}
 
 interface ToolCallEntry {
   name: string;
@@ -66,6 +97,52 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
   const [autoApply, setAutoApply] = useState(false); // When false, show diff preview before applying
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // AI provider selection state
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<'zai' | 'openai' | 'anthropic'>('zai');
+  const [providersLoading, setProvidersLoading] = useState(true);
+
+  // Fetch available providers on mount
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/ai/providers');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+        setProviders(data.providers || []);
+        // Initialize selection: prefer localStorage, fall back to server default, then 'zai'.
+        const stored = loadStoredProvider();
+        const serverDefault = data.default as 'zai' | 'openai' | 'anthropic' | undefined;
+        const initial = stored || serverDefault || 'zai';
+        // If the stored/default provider isn't available (missing API key), fall back to 'zai'.
+        const info = (data.providers as ProviderInfo[]).find(p => p.name === initial);
+        setSelectedProvider(info && info.available ? initial : 'zai');
+      } catch (e) {
+        // Network or server error — default to Z.ai (always available).
+        if (!cancelled) {
+          setProviders([
+            { name: 'zai', label: 'Z.ai (GLM-4.6)', available: true, requiresKey: null, model: 'glm-4.6' },
+          ]);
+          setSelectedProvider('zai');
+        }
+      } finally {
+        if (!cancelled) setProvidersLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleProviderChange = useCallback((name: 'zai' | 'openai' | 'anthropic') => {
+    setSelectedProvider(name);
+    storeProvider(name);
+    const info = providers.find(p => p.name === name);
+    if (info) {
+      toast.success(`AI provider: ${info.label}`);
+    }
+  }, [providers]);
 
   // Editor + PCB stores
   const components = useEditor(s => s.components);
@@ -194,6 +271,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
         body: JSON.stringify({
           messages: apiMessages,
           circuit: circuitSnapshot,
+          provider: selectedProvider,
         }),
       });
 
@@ -336,7 +414,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     } finally {
       setIsLoading(false);
     }
-  }, [isLoading, components, wires, messages, autoApply, applyCircuitUpdate, handleClientSideAction]);
+  }, [isLoading, components, wires, messages, autoApply, selectedProvider, applyCircuitUpdate, handleClientSideAction]);
 
   const applyPendingDiff = useCallback((msgId: string) => {
     // Find the message FIRST (outside the setMessages updater — React updaters

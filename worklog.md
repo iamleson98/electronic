@@ -2051,3 +2051,52 @@ Stage Summary:
 - Total tests: **1163 passing** (target: > 1000).
 - All previously-passing tests still pass — no regressions.
 - Coverage extended to: complex-solver, reference-solver, integration methods, measurement parsing/execution, TraceMath, stimulus, net-annotation, share-url, schematic-plot, netlist-export, ERC, component plugin metadata, and many additional circuit behaviors (Wheatstone bridge, KVL, RC charging, diode drop, switch states, current source).
+
+---
+Task ID: ai-provider-selector
+Agent: main
+Task: User remembered having a UI dropdown to select AI provider; restore/add it. Also set up persistent git credentials for future pushes.
+
+Work Log:
+- Verified via git history research: provider selection UI never actually existed in the codebase. The original design (worklog lines 1873-1996) was env-var-only — `AI_PROVIDER` env var picks the provider at server start. The user remembered wanting it, so I added it from scratch.
+- Set up persistent git credentials: `git config --global credential.helper store` + wrote token to `~/.git-credentials` (mode 600, not in repo). Future pushes will use this automatically — no need to re-share the token.
+
+- Backend changes:
+  * `src/lib/ai/provider.ts` — `getProvider()` now accepts an optional `requested` argument for per-request override. Priority: explicit override > AI_PROVIDER env var > 'zai' fallback. If an authenticated provider is requested explicitly but the key is missing, throws a user-friendly error mentioning the dropdown. If the env-var default points to a provider without a key, silently falls back to Z.ai so the request still succeeds.
+  * New `getAvailableProviders()` export — returns the 3 providers with availability flags (based on env-var keys) so the UI can show which are usable.
+  * New endpoint `GET /api/ai/providers` — returns the provider list + the active default. No secrets exposed.
+  * `src/app/api/ai/chat/route.ts` — accepts `provider` field in request body, passes it to `getProvider()`.
+  * `src/app/api/ai/chat/stream/route.ts` — same: accepts `provider` field, passes to `getProvider()`.
+
+- Frontend changes (`src/components/ai/ChatPanel.tsx`):
+  * Added a `Select` dropdown in the header next to the Auto/Review toggle.
+  * Fetches `/api/ai/providers` on mount, populates the dropdown.
+  * Each option shows the provider label + model (e.g., "Z.ai (GLM-4.6)" with "glm-4.6" subtitle). Unavailable providers (missing API key) are shown with amber "needs OPENAI_API_KEY" subtitle and are disabled.
+  * Selected provider persists to `localStorage` (`circuit-lab.ai-provider` key) so it survives reloads.
+  * Sends the selected `provider` field in the request body to `/api/ai/chat/stream`.
+  * Tooltip on hover: "Choose which AI model to use / Selection persists across reloads".
+  * Falls back to Z.ai if the fetch fails or the stored/default provider is unavailable.
+
+- Docs: updated `.env.example` with the full AI provider env var block (AI_PROVIDER, OPENAI_API_KEY/MODEL, ANTHROPIC_API_KEY/MODEL) and a comment explaining that the UI dropdown overrides per-request.
+
+- New tests: `tests/ai-provider-selection.test.ts` — 32 tests covering:
+  * Default selection (no env, AI_PROVIDER=zai, unknown, uppercase)
+  * Explicit override (zai/openai/anthropic, throws when key missing)
+  * Env var fallback (silent fallback to Z.ai when AI_PROVIDER points to a keyless provider)
+  * Model overrides (OPENAI_MODEL, ANTHROPIC_MODEL env vars)
+  * getAvailableProviders() correctness (3 providers in order, availability flags, model strings, requiresKey labels)
+  * ProviderName type acceptance
+
+VERIFICATION:
+- Typecheck clean
+- All 1195 tests pass (51 files: 1163 prior + 32 new)
+- Build succeeds
+
+Stage Summary:
+- Persistent git credentials stored in ~/.git-credentials (mode 600, not in repo)
+- New AI provider dropdown in the ChatPanel header — choose between Z.ai (always available), OpenAI (if OPENAI_API_KEY set), Anthropic (if ANTHROPIC_API_KEY set)
+- Selection persists to localStorage across reloads
+- Backend supports per-request provider override via request body
+- New /api/ai/providers endpoint exposes available providers
+- .env.example documents all AI env vars
+- 32 new tests for provider selection logic

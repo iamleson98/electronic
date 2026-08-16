@@ -12,7 +12,7 @@
 //      can apply the mutations)
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getProvider, type ChatMessage, type ToolCall } from '@/lib/ai/provider';
+import { getProvider, type ChatMessage, type ToolCall, type ProviderName } from '@/lib/ai/provider';
 import { TOOLS_BY_NAME, getToolDefinitions, type ToolContext } from '@/lib/ai/tools';
 import type { CircuitDocument, CircuitComponent, Wire } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
@@ -26,6 +26,8 @@ interface RequestBody {
     components: CircuitComponent[];
     wires: Wire[];
   };
+  /** Per-request provider override (chosen from the AI panel dropdown). */
+  provider?: ProviderName;
 }
 
 const SYSTEM_PROMPT = `You are an expert electrical engineer and circuit design assistant in a circuit simulator app. You help users design, analyze, and debug circuits using the available tools.
@@ -69,8 +71,8 @@ export async function POST(req: NextRequest) {
       simContext: null,
     };
 
-    // Get the AI provider
-    const provider = getProvider();
+    // Get the AI provider (per-request override if provided)
+    const provider = getProvider(body.provider);
     const toolDefs = getToolDefinitions();
 
     // Build the message history (prepend system prompt)

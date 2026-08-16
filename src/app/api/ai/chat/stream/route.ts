@@ -10,13 +10,23 @@
 //   - error: { message }                          — error occurred
 
 import { NextRequest } from 'next/server';
-import { getProvider, type ChatMessage } from '@/lib/ai/provider';
+import { getProvider, type ChatMessage, type ProviderName } from '@/lib/ai/provider';
 import { TOOLS_BY_NAME, getToolDefinitions, type ToolContext } from '@/lib/ai/tools';
 import type { CircuitDocument } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;  // 5 min — allows for long retry sequences on rate limits
+
+interface RequestBody {
+  messages: ChatMessage[];
+  circuit?: {
+    components: any[];
+    wires: any[];
+  };
+  /** Per-request provider override (chosen from the AI panel dropdown). */
+  provider?: ProviderName;
+}
 
 const SYSTEM_PROMPT = `You are an expert electrical engineer and circuit design assistant in a circuit simulator app. You help users design, analyze, and debug circuits using the available tools.
 
@@ -65,7 +75,8 @@ export async function POST(req: NextRequest) {
         }
 
         const ctx: ToolContext = { doc, plugins, simContext: null };
-        const provider = getProvider();
+        // Per-request provider override (chosen from the AI panel dropdown).
+        const provider = getProvider((body as RequestBody).provider);
         const toolDefs = getToolDefinitions();
 
         const messages: ChatMessage[] = [

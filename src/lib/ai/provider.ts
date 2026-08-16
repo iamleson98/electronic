@@ -5,8 +5,11 @@
 //   - OpenAI — set OPENAI_API_KEY in .env
 //   - Anthropic — set ANTHROPIC_API_KEY in .env
 //
-// The provider is selected at runtime via env vars:
-//   AI_PROVIDER=zai | openai | anthropic  (default: zai)
+// Provider selection (in priority order):
+//   1. Per-request override — caller passes `provider` to getProvider(name)
+//      (e.g., user picks a different provider in the ChatPanel dropdown)
+//   2. AI_PROVIDER env var — server-side default
+//   3. 'zai' — built-in fallback (no API key required)
 //
 // All providers expose the same interface: a chat() method that takes
 // messages + tools, and returns either a text response or a tool-call request.
@@ -68,23 +71,75 @@ export interface AIProvider {
 // Provider factory
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function getProvider(): AIProvider {
-  const requested = (process.env.AI_PROVIDER || 'zai').toLowerCase() as ProviderName;
-  switch (requested) {
+/**
+ * Resolve a provider name. Priority:
+ *   1. Explicit `requested` argument (per-request override from the UI)
+ *   2. AI_PROVIDER env var (server-side default)
+ *   3. 'zai' (built-in fallback)
+ *
+ * Validates that the required API key exists when an authenticated provider
+ * is requested. If validation fails AND the caller did not explicitly ask for
+ * that provider, falls back to Z.ai so the request still succeeds. If the
+ * caller explicitly asked (e.g., user picked OpenAI in the dropdown), the
+ * error is thrown so the UI can surface a helpful message.
+ */
+export function getProvider(requested?: ProviderName): AIProvider {
+  const name = (requested || process.env.AI_PROVIDER || 'zai').toLowerCase() as ProviderName;
+  switch (name) {
     case 'openai':
       if (!process.env.OPENAI_API_KEY) {
-        throw new Error('AI_PROVIDER=openai but OPENAI_API_KEY is not set. Add it to .env');
+        if (requested) {
+          throw new Error(
+            'OpenAI provider selected but OPENAI_API_KEY is not set. ' +
+            'Add it to your .env file or choose a different provider in the AI panel.',
+          );
+        }
+        // Implicit env-var default without a key → fall back to Z.ai.
+        return new ZaiProvider();
       }
       return new OpenAIProvider();
     case 'anthropic':
       if (!process.env.ANTHROPIC_API_KEY) {
-        throw new Error('AI_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set. Add it to .env');
+        if (requested) {
+          throw new Error(
+            'Anthropic provider selected but ANTHROPIC_API_KEY is not set. ' +
+            'Add it to your .env file or choose a different provider in the AI panel.',
+          );
+        }
+        return new ZaiProvider();
       }
       return new AnthropicProvider();
     case 'zai':
     default:
       return new ZaiProvider();
   }
+}
+
+/** Returns the list of providers available given the current env. */
+export function getAvailableProviders(): Array<{ name: ProviderName; label: string; available: boolean; requiresKey: string | null; model: string }> {
+  return [
+    {
+      name: 'zai',
+      label: 'Z.ai (GLM-4.6)',
+      available: true,
+      requiresKey: null,
+      model: 'glm-4.6',
+    },
+    {
+      name: 'openai',
+      label: 'OpenAI (GPT-4o)',
+      available: !!process.env.OPENAI_API_KEY,
+      requiresKey: 'OPENAI_API_KEY',
+      model: process.env.OPENAI_MODEL || 'gpt-4o',
+    },
+    {
+      name: 'anthropic',
+      label: 'Anthropic (Claude 3.5 Sonnet)',
+      available: !!process.env.ANTHROPIC_API_KEY,
+      requiresKey: 'ANTHROPIC_API_KEY',
+      model: process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022',
+    },
+  ];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
