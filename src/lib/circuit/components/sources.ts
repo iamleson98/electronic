@@ -46,11 +46,18 @@ const dcVoltage: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, `${(params.voltage as number).toFixed(1)}V`, cx + 20, 2 * cellSize);
   },
-  stamp(params, terminals, sys) {
+  stamp(params, terminals, sys, sim, comp) {
     const v = params.voltage as number;
     const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
-    sys.stampVoltageSource(p, n, v);
+    const branchIdx = sys.stampVoltageSource(p, n, v);
+    // Record the branch index so CCCS/CCVS components can reference it.
+    // The map is keyed by component id (and refdes as fallback).
+    if (sim && comp) {
+      const map = sim.state.__branchIndices ?? (sim.state.__branchIndices = {});
+      map[comp.id] = branchIdx;
+      if (comp.refdes) map[comp.refdes] = branchIdx;
+    }
   },
   // No getFlowPath — current flow dots should NOT animate through power sources
   measure(params, terminals, sim) {
@@ -101,7 +108,7 @@ const acVoltage: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, `${(params.amplitude as number).toFixed(1)}V ${(params.frequency as number).toFixed(0)}Hz`, cx + 20, 2 * cellSize);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const amp = params.amplitude as number;
     const f = params.frequency as number;
     const offset = params.offset as number;
@@ -109,7 +116,12 @@ const acVoltage: ComponentPlugin = {
     const v = offset + amp * Math.sin(2 * Math.PI * f * sim.time + phase);
     const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
-    sys.stampVoltageSource(p, n, v);
+    const branchIdx = sys.stampVoltageSource(p, n, v);
+    if (sim && comp) {
+      const map = sim.state.__branchIndices ?? (sim.state.__branchIndices = {});
+      map[comp.id] = branchIdx;
+      if (comp.refdes) map[comp.refdes] = branchIdx;
+    }
   },
   // No getFlowPath — no dots through power sources
 };

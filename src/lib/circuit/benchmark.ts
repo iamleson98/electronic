@@ -1,5 +1,6 @@
 import type { CircuitComponent, Wire, CircuitDocument, ComponentPlugin } from './types';
 import { solveDC, buildNodeMap, getTerminalsForComponent, computeComponentCurrents, simulateStep } from './engine';
+import { getPlugin } from './registry';
 
 export const MAX_COMPONENTS = 2000;
 export const MAX_WIRES = 5000;
@@ -26,7 +27,7 @@ function makeComp(type: string, id: string, params?: any): CircuitComponent {
   if (p) for (const pm of (p as any).parameters) d[pm.key] = pm.default;
   return { id, type, position: { x: 0, y: 0 }, rotation: 0, parameters: { ...d, ...params }, simState: {} };
 }
-function plugins_getPlugin(type: string): any { try { return require('./registry').getPlugin(type); } catch { return null; } }
+function plugins_getPlugin(type: string): any { return getPlugin(type) ?? null; }
 
 export function generateResistorLadder(stages: number, resistance: number = 1000): CircuitDocument {
   const components: CircuitComponent[] = [

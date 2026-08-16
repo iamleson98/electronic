@@ -68,7 +68,7 @@ export function runBatch(
   opts?: Partial<SimOptions>,
 ): BatchResult {
   const start = performance.now();
-  const sweepValues = generateSweepValues(config);
+  const sweepValues = generateSweepValues(config, components);
   const traces: RealTrace[] = [];
   const outputValues: number[] = [];
 
@@ -112,7 +112,7 @@ export function runBatch(
   };
 }
 
-function generateSweepValues(config: BatchConfig): SweepValue[] {
+function generateSweepValues(config: BatchConfig, components?: CircuitComponent[]): SweepValue[] {
   const values: SweepValue[] = [];
   if (config.type === 'step') {
     if (config.list) {
@@ -129,32 +129,51 @@ function generateSweepValues(config: BatchConfig): SweepValue[] {
     const runs = config.runs ?? 100;
     const tol = config.tolerance ?? 0.05;
     const dist = config.distribution ?? 'uniform';
-    // nominal value — we need a reference; use 1 (placeholder, the caller should provide)
-    // Actually for .mc we need the nominal value of the param. We'd need to look it up
-    // in the components array. For simplicity, we'll let the caller specify it via `start`.
-    const nominal = config.start ?? 1000;
+    // Look up the actual nominal value of the param from the components array.
+    // If the caller explicitly provided `config.start`, use that instead
+    // (for cases where the user wants to sweep an absolute range rather than
+    // perturb the nominal).
+    let nominal: number | undefined = config.start;
+    if (nominal === undefined && components) {
+      const c = components.find(cc => cc.id === config.componentId);
+      if (c) {
+        const v = c.parameters[config.param];
+        if (typeof v === 'number') nominal = v;
+      }
+    }
+    // Fall back to 1 if we genuinely can't find a nominal — better than 1000.
+    const nominalValue = nominal ?? 1;
     for (let i = 0; i < runs; i++) {
       let delta: number;
       if (dist === 'uniform') {
-        delta = (Math.random() * 2 - 1) * tol * nominal;
+        delta = (Math.random() * 2 - 1) * tol * nominalValue;
       } else if (dist === 'gaussian') {
         // Box-Muller transform for gaussian
         const u1 = Math.random();
         const u2 = Math.random();
         const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-        delta = z * (tol / 3) * nominal;  // 3σ = tol
+        delta = z * (tol / 3) * nominalValue;  // 3σ = tol
       } else {
         // worst_case: ±tol only
-        delta = (i % 2 === 0 ? 1 : -1) * tol * nominal;
+        delta = (i % 2 === 0 ? 1 : -1) * tol * nominalValue;
       }
-      values.push({ name: config.param, value: nominal + delta });
+      values.push({ name: config.param, value: nominalValue + delta });
     }
   } else if (config.type === 'worst') {
     // Two runs: min and max (worst-case ±tol)
     const tol = config.tolerance ?? 0.05;
-    const nominal = config.start ?? 1000;
-    values.push({ name: config.param, value: nominal * (1 + tol) });
-    values.push({ name: config.param, value: nominal * (1 - tol) });
+    // Look up nominal from components (same as .mc above)
+    let nominal: number | undefined = config.start;
+    if (nominal === undefined && components) {
+      const c = components.find(cc => cc.id === config.componentId);
+      if (c) {
+        const v = c.parameters[config.param];
+        if (typeof v === 'number') nominal = v;
+      }
+    }
+    const nominalValue = nominal ?? 1;
+    values.push({ name: config.param, value: nominalValue * (1 + tol) });
+    values.push({ name: config.param, value: nominalValue * (1 - tol) });
   }
   return values;
 }

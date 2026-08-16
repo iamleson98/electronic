@@ -783,11 +783,21 @@ export const cccsUser: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, 'F', 3 * cellSize, 2 * cellSize);
   },
-  stamp(_params, _terminals, _sys) {
-    // CCCS requires knowing the branch current of a voltage source.
-    // We'd need to track that across stamps — for simplicity, this is a stub.
-    // Proper implementation would find the V-source by vsenseName and use its
-    // extra var index.
+  stamp(params, terminals, sys, sim) {
+    // CCCS: I(out) = beta * I(Vsense)
+    // The sense voltage source's branch index is stored in sim.state.__branchIndices
+    // (registered when the V-source's stamp() ran earlier in the same step).
+    const beta = params.beta as number;
+    const vsenseName = params.vsenseName as string;
+    if (!sim) return;
+    const map = sim.state.__branchIndices;
+    if (!map) return;
+    const branchIdx = map[vsenseName];
+    if (branchIdx === undefined) return;
+    const op = terminals.find((t) => t.terminalId === 'op')?.nodeId ?? 0;
+    const on = terminals.find((t) => t.terminalId === 'on')?.nodeId ?? 0;
+    // stampCCCS: current from op to on = beta * I_branch(branchIdx)
+    sys.stampCCCS(op, on, branchIdx, beta);
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 6, y: 1 }]; },
 };
@@ -817,8 +827,19 @@ export const ccvsUser: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, 'H', 3 * cellSize, 2 * cellSize);
   },
-  stamp(_params, _terminals, _sys) {
-    // Same as CCCS — needs voltage source branch current tracking.
+  stamp(params, terminals, sys, sim) {
+    // CCVS: V(out) = transimp * I(Vsense)
+    const transimp = params.transimp as number;
+    const vsenseName = params.vsenseName as string;
+    if (!sim) return;
+    const map = sim.state.__branchIndices;
+    if (!map) return;
+    const branchIdx = map[vsenseName];
+    if (branchIdx === undefined) return;
+    const op = terminals.find((t) => t.terminalId === 'op')?.nodeId ?? 0;
+    const on = terminals.find((t) => t.terminalId === 'on')?.nodeId ?? 0;
+    // stampCCVS: V(op) - V(on) = transimp * I_branch(branchIdx)
+    sys.stampCCVS(op, on, branchIdx, transimp);
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 6, y: 1 }]; },
 };

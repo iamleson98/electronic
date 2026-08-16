@@ -61,7 +61,7 @@ export function AnalysisDialog({ open, onClose }: { open: boolean; onClose: () =
   useEffect(() => {
     if (open && !sourceId && components.length > 0) {
       const source = components.find((c) => c.type === 'dcVoltage' || c.type === 'acVoltage' || c.type === 'currentSource');
-      if (source) setSourceId(source.id);
+      if (source && sourceId !== source.id) setSourceId(source.id);
     }
   }, [open, components, sourceId]);
 
@@ -538,7 +538,7 @@ export function BatchSweepDialog({ open, onClose }: { open: boolean; onClose: ()
   useEffect(() => {
     if (open && !componentId && components.length > 0) {
       const c = components.find((c) => c.type === 'resistor') ?? components[0];
-      setComponentId(c.id);
+      if (c && componentId !== c.id) setComponentId(c.id);
     }
   }, [open, components, componentId]);
 

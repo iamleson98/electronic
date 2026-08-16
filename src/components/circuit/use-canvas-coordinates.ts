@@ -143,7 +143,7 @@ export function useCanvasCoordinates(opts: {
       }
     }
     return null;
-  }, [wires, components, gridToScreen, getTerminalPos]);
+  }, [wires, components, gridToScreen, getTerminalPos, use45Routing]);
 
   const findWireHandle = useCallback((sx: number, sy: number): HoverState['wireHandle'] => {
     for (const wire of wires) {
@@ -171,7 +171,7 @@ export function useCanvasCoordinates(opts: {
       }
     }
     return null;
-  }, [wires, components, gridToScreen, getTerminalPos]);
+  }, [wires, components, gridToScreen, getTerminalPos, use45Routing]);
 
   const getRotateHandlePos = useCallback((comp: CircuitComponent): Vec2 | null => {
     const plugin = getPlugin(comp.type);

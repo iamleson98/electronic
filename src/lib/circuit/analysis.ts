@@ -494,9 +494,10 @@ export function runTF(
   // gain = V_out / V_in (since V_in = 1)
   const gain = vOut;
 
-  // 3. Compute input resistance: kill all independent sources except the input, drive with test current
-  // Simplified: Rin = V_in / I_in where I_in is current drawn from input source
-  // We can compute it from KCL at the input node
+  // 3. Compute input resistance: Rin = V_in / I_in where I_in is the current
+  //    drawn from the input source. Since we set V_in = 1V above, Rin = 1 / I_in.
+  //    For a voltage source, the branch current returned by the solver is the
+  //    current flowing through it — that IS I_in.
   const inputComp = modifiedComponents.find((c) => c.id === config.inputSourceId);
   let rin = Infinity;
   if (inputComp) {
@@ -504,35 +505,112 @@ export function runTF(
     if (inputPlugin) {
       const inputTerms = getTerminalsForComponent(inputComp, inputPlugin, nodeMap);
       const pNode = inputTerms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
-      const vIn = dcOp.nodeVoltage[pNode];
-      // current = voltage / equivalent input resistance
-      // need to compute total current leaving the + node
-      // ...for simplicity, use 1V source with 0 output load to find I_in
-      // Kill output: short output to ground (set output node = 0)
-      const shortedComponents = [...modifiedComponents, {
-        id: 'tf_test_short',
-        type: 'ground',
-        position: { x: 0, y: 0 },
-        rotation: 0 as 0|1|2|3,
-        parameters: {},
-        refdes: 'GND_TEST',
-      } as CircuitComponent];
-      // add a wire from output node to ground
-      const shortedWires: Wire[] = [...wires];
-      // (We don't actually modify wires — instead we just measure I_in from the input source.)
-      // Simple Rin estimate: I_in ≈ source voltage / total load on + node
-      // This requires KCL sum; for now we'll approximate Rin = 1V / I_in by re-solving with output killed
-      rin = 1; // placeholder — a full implementation would re-solve with output shorted
-      void shortedComponents;
-      void shortedWires;
-      void vIn;
+      const vIn = dcOp.nodeVoltage[pNode] ?? 0;
+      // For a voltage source, use the branch current directly.
+      // For a current source, Rin is undefined (it's a current drive).
+      if (inputComp.type === 'dcVoltage' || inputComp.type === 'acVoltage') {
+        // Find the branch index for this source by linear-scanning the components
+        // — the solver stamps voltage sources in component order, so we need to
+        // count how many voltage sources precede this one.
+        let vSourceIdx = 0;
+        for (const c of modifiedComponents) {
+          if (c.id === inputComp.id) break;
+          const p = plugins.get(c.type);
+          if (p && (c.type === 'dcVoltage' || c.type === 'acVoltage')) vSourceIdx++;
+        }
+        // The branch currents in dcOp.branchCurrent are indexed by source order.
+        // We don't have a direct map from component → branch index, so we
+        // approximate by computing I_in via KCL at the + node: sum of currents
+        // flowing out of + node through other components = I_in.
+        // For a 1V source, Rin = 1V / I_in.
+        let iIn = 0;
+        for (const c of modifiedComponents) {
+          if (c.id === inputComp.id) continue;
+          const p = plugins.get(c.type);
+          if (!p) continue;
+          const terms = getTerminalsForComponent(c, p, nodeMap);
+          // Sum current contributions: for a resistor between pNode and any other node,
+          // current flowing OUT of pNode = (V_p - V_other) / R
+          for (const t of terms) {
+            if (t.nodeId === pNode) {
+              const otherTerm = terms.find(tt => tt !== t);
+              if (!otherTerm) continue;
+              const vOther = dcOp.nodeVoltage[otherTerm.nodeId] ?? 0;
+              if (c.type === 'resistor') {
+                const R = Number(c.parameters.resistance) || 1e-12;
+                iIn += (vIn - vOther) / R;
+              }
+              // Other component types contribute via their own stamp; we approximate
+              // using just resistors for now. For circuits with semiconductors or
+              // sources, this underestimates I_in and overestimates Rin.
+            }
+          }
+        }
+        if (Math.abs(iIn) > 1e-15) {
+          rin = Math.abs(vIn / iIn);
+        }
+      }
     }
   }
 
-  // 4. Output resistance: kill input, drive output with 1V test source, measure I_test
-  // Simplified: Rout = V_test / I_test
-  // For now: just return the gain
-  const rout = 0; // placeholder — proper computation requires killing sources
+  // 4. Output resistance: kill all independent sources, drive output with a
+  //    1A test current source, measure V_test. Rout = V_test / 1 = V_test.
+  //    "Killing" sources means setting their value to 0 (so they become 0V
+  //    voltage sources or 0A current sources — preserves the topology).
+  const routComponents = components.map((c) => {
+    if (c.type === 'dcVoltage' || c.type === 'acVoltage') {
+      return { ...c, parameters: { ...c.parameters, voltage: 0 } };
+    }
+    if (c.type === 'currentSource') {
+      return { ...c, parameters: { ...c.parameters, current: 0 } };
+    }
+    return c;
+  });
+  // Add a 1A test source between output node and ground
+  const testSourceId = '__rout_test_source__';
+  routComponents.push({
+    id: testSourceId,
+    type: 'currentSource',
+    position: { x: 0, y: 0 },
+    rotation: 0 as 0|1|2|3,
+    parameters: { current: 1 },
+  });
+  const routWires: Wire[] = [...wires];
+  // Wire test source + to output node, - to ground
+  // (We can't easily reach the original output terminal, so we use the
+  // existing node map's first terminal at vOutNode.)
+  let outTerminalKey = '';
+  for (const [key, nodeId] of nodeMap.terminalNode) {
+    if (nodeId === vOutNode) { outTerminalKey = key; break; }
+  }
+  if (outTerminalKey) {
+    const [outCompId, outTermId] = outTerminalKey.split(':');
+    routWires.push({
+      id: '__rout_test_wire__',
+      from: { componentId: testSourceId, terminalId: 'p' },
+      to: { componentId: outCompId, terminalId: outTermId },
+    });
+  }
+  // Connect - terminal to ground
+  const groundComp = components.find(c => c.type === 'ground');
+  if (groundComp) {
+    routWires.push({
+      id: '__rout_test_wire2__',
+      from: { componentId: testSourceId, terminalId: 'n' },
+      to: { componentId: groundComp.id, terminalId: 'g' },
+    });
+  }
+  const routOp = solveDC(routComponents, routWires, plugins, options.itl1);
+  let rout = 0;
+  if (routOp) {
+    const routNodeMap = buildNodeMap(routComponents, routWires, plugins);
+    // Find the output node voltage in the new map
+    let routOutNode = 0;
+    for (const [key, nodeId] of routNodeMap.terminalNode) {
+      if (key === outTerminalKey) { routOutNode = nodeId; break; }
+    }
+    rout = Math.abs(routOp.nodeVoltage[routOutNode] ?? 0);
+  }
 
   return {
     type: 'tf',

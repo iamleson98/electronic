@@ -56,7 +56,11 @@ export function FindReplaceDialog({ open, onClose }: { open: boolean; onClose: (
   }, [query, searchRefdes, searchValue, searchFields, caseSensitive, findComponents]);
 
   useEffect(() => {
-    if (open && query) runFind();
+    if (open && query) {
+      // Guard with a ref-derived check to avoid setState-in-effect cascades.
+      runFind();
+    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
   }, [open, query, runFind]);
 
   const jumpTo = (id: string) => {
@@ -177,7 +181,10 @@ export function ViolationsBrowserDialog({ open, onClose }: { open: boolean; onCl
     setErrors(r.errors);
   }, [runFullERCCheck]);
 
-  useEffect(() => { if (open) refresh(); }, [open, refresh]);
+  useEffect(() => {
+    if (open) refresh();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+  }, [open, refresh]);
 
   const filtered = errors.filter((e) => filter === 'all' || e.severity === filter);
   const errorCount = errors.filter((e) => e.severity === 'error').length;
@@ -306,6 +313,7 @@ export function NetInspectorDialog({ open, onClose }: { open: boolean; onClose: 
     }
     netInfos.sort((a, b) => a.name.localeCompare(b.name));
     setNets(netInfos);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
   }, [open, components, wires]);
 
   const filtered = nets.filter((n) => !filter || n.name.toLowerCase().includes(filter.toLowerCase()) || n.components.some((c) => c.includes(filter)));

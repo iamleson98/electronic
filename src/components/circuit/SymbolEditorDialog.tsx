@@ -140,6 +140,7 @@ export function SymbolEditorDialog({ open, onClose, onSaved, initialDesign }: Pr
       setDesign(initialDesign);
       setSelectedId(null);
     }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
   }, [open, initialDesign]);
 
   // ── Coordinate helpers ──────────────────────────────────────────────
