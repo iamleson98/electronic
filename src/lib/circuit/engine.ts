@@ -1019,10 +1019,18 @@ export function solveDC(
     if (!comp.simState) comp.simState = {};
   }
 
+  // For DC operating point: capacitors should be OPEN and inductors SHORT.
+  // The companion models stamp:
+  //   Capacitor: G = C/dt  (large dt → small G → open circuit)
+  //   Inductor:   G = dt/L  (large dt → large G → short circuit)
+  // Using dt = 1e6 seconds makes both companion models converge to their
+  // DC steady-state behavior. This is the standard SPICE approach (.OP).
+  const DC_DT = 1e6;
+
   let prev: PrevState | undefined;
   let result: SimContext | null = null;
   for (let iter = 0; iter < maxIter; iter++) {
-    const r = simulateStep(components, wires, plugins, prev, 1e-6);
+    const r = simulateStep(components, wires, plugins, prev, DC_DT);
     if (!r) return null;
     result = r.sim;
     // check convergence
