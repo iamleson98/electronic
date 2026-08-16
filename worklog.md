@@ -2163,3 +2163,31 @@ Stage Summary:
 - src/lib/db.ts now creates the db directory AND the saved_circuits table on startup
 - App is self-bootstrapping — no `drizzle-kit push` needed in CI or fresh clones
 - All 1195 tests pass from a clean state
+
+---
+Task ID: ci-bun-migration-fix3
+Agent: main
+Task: CI still failing — Build step fails with "Cannot open database because the directory does not exist".
+
+Work Log:
+- Third CI run (31931410232) — quality job PASSED (install, typecheck, lint, tests all succeed!), but build job failed at "Collecting page data" step with:
+  `TypeError: Cannot open database because the directory does not exist`
+  at .next/server/chunks/[root-of-the-server]__dbf87aca._.js (during static page data collection for /api/circuits/[id])
+- Root cause: Next.js evaluates route modules at build time to collect page metadata. The route module imports `db` from src/lib/db.ts, which triggers `createDb()` at module-load. Even though my mkdirSync fix creates the directory, the SQLite open still fails in CI because the build runner's working directory or filesystem permissions differ from local.
+
+- Fix: src/lib/db.ts createDb() now detects the Next.js build phase via NEXT_BUILD env var (or NEXT_PHASE=phase-production-build) and returns a no-op stub `{ stub: true }` instead of opening SQLite. Route handlers are only invoked at runtime when the server actually starts — never during build — so the stub is never actually called.
+
+- Updated .github/workflows/ci.yml Build step to set NEXT_BUILD=true and NEXT_PHASE=phase-production-build env vars, so the build phase is explicitly marked.
+
+- Also refactored dbPath resolution into a resolveDbPath() function for clarity (functionally equivalent to the original).
+
+- Verified locally by simulating CI exactly:
+  * Removed .env, db/, .next/
+  * `NEXT_BUILD=true NODE_ENV=production bun run build` — succeeds, all routes compile ✓
+  * `bun run test` (without NEXT_BUILD, fresh db) — 1195 tests pass ✓
+  * `bun x tsc --noEmit` — clean ✓
+
+Stage Summary:
+- Build step no longer opens SQLite during page-data collection (returns stub in NEXT_BUILD phase)
+- CI workflow sets NEXT_BUILD=true + NEXT_PHASE=phase-production-build on the Build step
+- All local checks pass — ready to push and verify CI succeeds end-to-end

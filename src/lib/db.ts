@@ -16,9 +16,18 @@ import { dirname } from 'node:path';
 import { savedCircuits } from './schema';
 
 // Resolve the SQLite file path from `DATABASE_URL` (format: `file:/abs/path/custom.db`).
-const dbPath = (process.env.DATABASE_URL ?? 'file:./db/custom.db')
-  .replace(/^file:/, '')
-  .replace(/^\.\//, `${process.cwd()}/`);
+// Falls back to `./db/custom.db` (relative to project root) when DATABASE_URL is unset.
+function resolveDbPath(): string {
+  const raw = (process.env.DATABASE_URL ?? 'file:./db/custom.db').replace(/^file:/, '');
+  // If the path is relative, anchor it to the project root (cwd at module load).
+  // This ensures the path is absolute regardless of when it's evaluated.
+  if (!raw.startsWith('/')) {
+    return `${process.cwd()}/${raw.replace(/^\.\//, '')}`;
+  }
+  return raw;
+}
+
+const dbPath = resolveDbPath();
 
 const globalForDb = globalThis as unknown as {
   __drizzleDb: ReturnType<typeof createDb> | undefined;
@@ -27,6 +36,14 @@ const globalForDb = globalThis as unknown as {
 };
 
 function createDb() {
+  // During `next build`, Next.js evaluates route modules to collect page data.
+  // If the build runs in an environment without write access to the db directory
+  // (e.g. CI), opening SQLite would fail and break the build. Detect the build
+  // phase via NEXT_BUILD env var (set explicitly in CI) and return a no-op stub
+  // — the real DB is only needed at runtime when the server actually starts.
+  if (process.env.NEXT_BUILD === 'true' || process.env.NEXT_PHASE === 'phase-production-build') {
+    return { stub: true } as any;
+  }
   // Ensure the parent directory exists — fresh checkouts (CI, new clones) won't
   // have `db/` yet, and better-sqlite3 throws if the directory is missing.
   try {

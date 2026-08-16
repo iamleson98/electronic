@@ -77,3 +77,5 @@ jobs:
         run: bun run build
         env:
           NODE_ENV: production
+          NEXT_BUILD: 'true'
+          NEXT_PHASE: phase-production-build
