@@ -25,8 +25,25 @@ export function useSimulationLoop(running: boolean, step: () => void) {
       if (now - lastSimTime >= SIM_INTERVAL) {
         try {
           step();
+          // NaN/Infinity detection — if the solver produced non-finite node
+          // voltages, pause the sim and surface an error so the user knows
+          // their circuit is broken instead of letting it run silently forever.
+          const sim = useEditor.getState().simContext;
+          if (sim) {
+            for (let i = 0; i < sim.nodeVoltage.length; i++) {
+              if (!isFinite(sim.nodeVoltage[i])) {
+                useEditor.getState().setSimError(
+                  `Simulation diverged (node ${i} = ${sim.nodeVoltage[i]}). ` +
+                  `Check for short circuits, floating nodes, or conflicting sources.`,
+                );
+                useEditor.getState().setRunning(false);
+                return;
+              }
+            }
+          }
         } catch (err) {
           console.error('[Simulation] step() threw:', err);
+          useEditor.getState().setSimError(`Simulation error: ${(err as Error).message}`);
           useEditor.getState().setRunning(false);
         }
         lastSimTime = now;
@@ -40,6 +57,21 @@ export function useSimulationLoop(running: boolean, step: () => void) {
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
   }, [running, step]);
+
+  // Pause the simulation when the tab is hidden — browsers throttle RAF to
+  // ~1Hz when backgrounded, which would cause the sim to drift wildly from
+  // real-time and make cross-tab experiments impossible to reproduce.
+  // The user can resume by clicking Play again after returning to the tab.
+  useEffect(() => {
+    if (!running) return;
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        useEditor.getState().setRunning(false);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [running]);
 
   return { flowPhaseRef, animTick };
 }

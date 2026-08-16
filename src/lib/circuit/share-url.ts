@@ -2,11 +2,31 @@
 
 import type { CircuitDocument } from './types';
 
+/**
+ * Encode a circuit document into a shareable URL.
+ *
+ * Preserves the FULL document (components, wires, drawings, noConnects,
+ * groups, sheets, netClasses, pageSetup, metadata, childSheets) so that
+ * shared circuits are not silently broken. Previously this only encoded
+ * components + wires, which dropped sub-sheets, drawings, and net classes.
+ *
+ * `simState` is always stripped (it's runtime-only and would bloat the URL).
+ */
 export function createShareURL(doc: CircuitDocument): string {
   const clean: CircuitDocument = {
     version: 1,
-    components: doc.components.map(c => ({ ...c, simState: undefined, parameters: { ...c.parameters } })),
+    components: doc.components.map(c => ({ ...c, simState: undefined, parameters: { ...c.parameters }, fields: c.fields ? c.fields.map(f => ({ ...f })) : undefined })),
     wires: doc.wires.map(w => ({ ...w })),
+    drawings: doc.drawings,
+    noConnects: doc.noConnects,
+    groups: doc.groups,
+    sheets: doc.sheets,
+    netClasses: doc.netClasses,
+    pageSetup: doc.pageSetup,
+    metadata: doc.metadata,
+    savedViews: doc.savedViews,
+    childSheets: doc.childSheets,
+    activeSheet: doc.activeSheet,
   };
   const json = JSON.stringify(clean);
   const base64 = typeof btoa !== 'undefined'

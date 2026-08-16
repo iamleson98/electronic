@@ -2299,3 +2299,56 @@ Stage Summary:
 - 10 lint errors fixed (require, Math.random, useCallback deps, setState-in-effect)
 - 4 new test files with 114 new tests
 - Total: 1309 tests passing, 55 files, all green
+
+---
+Task ID: reliability-fixes
+Agent: main
+Task: Make the system work perfectly and reliably for building circuits and experiments.
+
+Work Log:
+- Restored git credentials to ~/.git-credentials (mode 600) — environment had been reset.
+- Ran comprehensive reliability check: all 23 examples simulate cleanly (DC + 200-step transient + physics validation), all 15 edge cases pass (bare V source, short circuit, floating inputs, parallel V sources, 1 TΩ, 1 µΩ, floating cap, pure inductor, negative V, 1 GHz AC, no ground, open switch, reverse diode, 100-node ladder, cap with initial V).
+- Audited for reliability gaps via subagent — found 9 HIGH-severity issues affecting real usage. Fixed all:
+
+1. UNDO/REDO FULL SNAPSHOT (HIGH): store.ts undo()/redo() only restored components and wires — drawings, noConnects, groups, sheets, netClasses were silently lost on Ctrl+Z. Fixed by restoring all snapshot fields. Also expanded snapshot() to capture pageSetup, metadata, savedViews, childSheets, activeSheet. Changed past[]/future[] type to ReturnType<typeof snapshot>[].
+
+2. CLEAR/LOAD STATE RESET (HIGH): clear() and loadDocument() didn't reset running, paused, simError, ercErrors, lastAnalysisResult, physicsViolations, wireDraft — stale sim errors and wire drafts persisted across "new circuit" and "load circuit". Fixed by resetting all session state.
+
+3. TOGGLE SWITCH UNDOABLE (MEDIUM): toggleSwitch() didn't call pushHistory() — switch toggles (which change circuit topology) were permanent and irreversible. Fixed. Also added beginDrag() action for single-undo-step drags (canvas already calls pushHistory() on drag start).
+
+4. SET WIRE WAYPOINTS UNDOABLE (MEDIUM): setWireWaypoints() didn't push history. Fixed.
+
+5. SHARE URL FULL DOCUMENT (HIGH): createShareURL() only encoded components and wires — drawings, noConnects, groups, sheets, netClasses, metadata were silently dropped, breaking shared circuits. Fixed to encode the full CircuitDocument (still strips simState).
+
+6. NAN/INFINITY DETECTION IN SIM LOOP (HIGH): use-simulation-loop.ts had no NaN detection — broken sims (near-singular matrices, conflicting sources) ran silently forever with "NaN V" on the oscilloscope. Fixed: after each step(), checks all node voltages for isFinite(); on NaN, pauses the sim and surfaces a user-friendly error message via setSimError().
+
+7. TAB-HIDDEN PAUSE (HIGH): no visibilitychange listener — browsers throttle RAF to ~1Hz when backgrounded, causing the sim to drift wildly from real-time. Fixed: adds a visibilitychange listener that pauses the sim when the tab is hidden.
+
+8. AUTOSAVE WIRED UP (HIGH): AutosaveManager was completely dead code — no production code path called it, so any browser crash = total data loss. Fixed: page.tsx now creates an AutosaveManager, subscribes to store changes (markDirty on every mutation), and flushes on beforeunload. Also implemented crash recovery: on startup, if detectCrashRecovery() shows a crashed session with components, prompts the user to restore.
+
+9. AUTOSAVE MANAGER GETTER PATTERN (HIGH): markDirty(doc) captured the doc at first call — subsequent edits in the debounce window were lost. Fixed: markDirty() now takes no arg; the manager holds a getDoc() callback registered via start(), so the debounced save always writes the latest state.
+
+NEW TESTS (25 tests in tests/reliability-fixes.test.ts):
+- Undo/redo full snapshot: 6 tests (drawings, noConnects, netClasses, groups, redo, setParameter)
+- clear()/loadDocument() state reset: 5 tests (running, simError, loadDocument running, simError, history)
+- toggleSwitch undoable: 2 tests
+- createShareURL full document: 5 tests (drawings, noConnects, netClasses, metadata, simState stripped)
+- AutosaveManager getter pattern: 5 tests (getter, debounce, shutdown clean, crash detection, clearAutosave)
+- beginDrag action: 1 test
+- setSimError action: 1 test
+
+VERIFICATION:
+- Typecheck clean
+- All 1334 tests pass across 56 files (was 1309 — +25 new)
+- Build succeeds
+- All 23 examples still simulate cleanly
+- All 15 edge cases still pass
+
+Stage Summary:
+- 9 HIGH-severity reliability issues fixed
+- Autosave + crash recovery now actually works (was dead code)
+- Undo/redo preserves full document (drawings, sheets, groups, etc.)
+- Broken sims now auto-pause with an error message instead of running silently
+- Sim pauses when tab is hidden (no more time drift)
+- Share URLs preserve full circuit (drawings, sub-sheets, net classes)
+- 25 regression tests added

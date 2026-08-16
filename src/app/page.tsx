@@ -24,8 +24,12 @@ import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
 import { installScriptingAPI } from '@/lib/scripting-api';
 import { hasSharedCircuit, loadFromShareURL, createShareURL } from '@/lib/circuit/share-url';
+import { AutosaveManager, detectCrashRecovery, loadAutosave, clearAutosave } from '@/lib/circuit/autosave';
 import '@/lib/circuit/components';
 import { toast } from 'sonner';
+
+// Module-level autosave manager — survives re-renders but is per-tab.
+const autosaveMgr = new AutosaveManager();
 
 export default function Home() {
   const [mode, setMode] = useState<'schematic' | 'pcb' | '3d'>('schematic');
@@ -40,8 +44,58 @@ export default function Home() {
       if (hasSharedCircuit()) {
         const doc = loadFromShareURL(window.location.hash);
         if (doc && doc.components && doc.wires) useEditor.getState().loadDocument(doc);
+      } else {
+        // Crash recovery — if the previous session crashed (tab closed
+        // unexpectedly, browser crashed, etc.), offer to restore the last
+        // autosaved circuit. Previously: unsaved work was silently lost.
+        const info = detectCrashRecovery();
+        if (info && info.crashed && info.componentCount > 0) {
+          const when = new Date(info.timestamp).toLocaleString();
+          const restore = window.confirm(
+            `Recover unsaved work?\n\n` +
+            `A previous session ended unexpectedly (${when}).\n` +
+            `${info.componentCount} components, ${info.wireCount} wires were recovered.\n\n` +
+            `Click OK to restore, or Cancel to start fresh.`,
+          );
+          if (restore) {
+            const doc = loadAutosave();
+            if (doc) useEditor.getState().loadDocument(doc);
+          } else {
+            clearAutosave();
+          }
+        }
       }
     } catch (e) { console.warn('Init failed:', e); }
+  }, []);
+
+  // Autosave: subscribe to store changes, debounce-save to localStorage,
+  // and flush on tab close. Without this, any browser crash = total data loss.
+  useEffect(() => {
+    autosaveMgr.start(() => {
+      const s = useEditor.getState();
+      // Strip simState before saving — it's runtime-only and bloats the payload.
+      return {
+        version: 1 as const,
+        components: s.components.map(c => ({ ...c, simState: undefined, parameters: { ...c.parameters }, fields: c.fields ? c.fields.map(f => ({ ...f })) : undefined })),
+        wires: s.wires.map(w => ({ ...w })),
+        drawings: s.drawings,
+        noConnects: s.noConnects,
+        groups: s.groups,
+        sheets: s.sheets,
+        netClasses: s.netClasses,
+        pageSetup: s.pageSetup,
+        metadata: s.metadata,
+      };
+    });
+    // Subscribe to store changes — mark dirty on every mutation.
+    const unsub = useEditor.subscribe(() => autosaveMgr.markDirty());
+    // Save on tab close / navigation / browser close.
+    const onUnload = () => autosaveMgr.shutdown();
+    window.addEventListener('beforeunload', onUnload);
+    return () => {
+      unsub();
+      window.removeEventListener('beforeunload', onUnload);
+    };
   }, []);
 
   // Ctrl+K command palette, Ctrl+J AI panel

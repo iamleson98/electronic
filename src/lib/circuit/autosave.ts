@@ -26,15 +26,65 @@ export function detectCrashRecovery(): any | null {
 export function loadAutosave(): any | null { return loadFromLocalStorage('circuitsim:autosave'); }
 export function clearAutosave(): void { removeFromLocalStorage('circuitsim:autosave'); removeFromLocalStorage('circuitsim:autosave:timestamp'); removeFromLocalStorage('circuitsim:autosave:crashed'); removeFromLocalStorage('circuitsim:autosave:version'); }
 export function getLastAutosaveTime(): Date | null { if (typeof localStorage === 'undefined') return null; const ts = localStorage.getItem('circuitsim:autosave:timestamp'); return ts ? new Date(parseInt(ts)) : null; }
+
+/**
+ * AutosaveManager — wires periodic autosave + shutdown save into the app.
+ *
+ * Usage:
+ *   const mgr = new AutosaveManager();
+ *   useEffect(() => {
+ *     // subscribe to store changes — mark dirty on every change
+ *     const unsub = useEditor.subscribe((s) => mgr.markDirty(() => s.serialize()));
+ *     // save on tab close / navigation
+ *     const onUnload = () => mgr.shutdown(() => useEditor.getState().serialize());
+ *     window.addEventListener('beforeunload', onUnload);
+ *     return () => { unsub(); window.removeEventListener('beforeunload', onUnload); };
+ *   }, []);
+ *
+ * markDirty takes a GETTER (not a doc) so the debounced save always writes
+ * the latest state — previously the first markDirty's doc was captured and
+ * subsequent edits in the debounce window were lost.
+ */
 export class AutosaveManager {
-  private timer: any = null; private lastSaveTime = 0; private isDirty = false;
-  saveNow(doc: any): boolean { const ok = autosave(doc); this.lastSaveTime = Date.now(); this.isDirty = false; return ok; }
-  markDirty(doc: any): void { this.isDirty = true; if (this.timer) return; this.timer = setTimeout(() => { this.timer = null; if (this.isDirty) this.saveNow(doc); }, 1000); }
-  shutdown(doc: any): void { if (this.timer) { clearTimeout(this.timer); this.timer = null; } this.saveNow(doc); markCleanShutdown(); }
+  private timer: any = null;
+  private lastSaveTime = 0;
+  private isDirty = false;
+  private getDoc: (() => any) | null = null;
+
+  /** Register the doc getter — must be called before markDirty. */
+  start(getDoc: () => any): void {
+    this.getDoc = getDoc;
+  }
+
+  saveNow(doc?: any): boolean {
+    const d = doc ?? (this.getDoc ? this.getDoc() : null);
+    if (!d) return false;
+    const ok = autosave(d);
+    this.lastSaveTime = Date.now();
+    this.isDirty = false;
+    return ok;
+  }
+
+  /** Mark the doc as dirty. Saves after a 1-second debounce. */
+  markDirty(_doc?: any): void {
+    this.isDirty = true;
+    if (this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.isDirty) this.saveNow();
+    }, 1000);
+  }
+
+  /** Save immediately and mark a clean shutdown (so no crash-recovery prompt). */
+  shutdown(_doc?: any): void {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    this.saveNow();
+    markCleanShutdown();
+  }
+
   getLastSaveTime(): number { return this.lastSaveTime; }
-  startPeriodic(fn: any): void {}
-  stopPeriodic(): void {}
 }
+
 export function saveNamedCircuit(name: string, doc: any): string | null { return null; }
 export function listNamedCircuits(): any[] { return []; }
 export function loadNamedCircuit(id: string): any | null { return null; }

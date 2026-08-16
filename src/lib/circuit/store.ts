@@ -90,9 +90,10 @@ interface EditorState {
   // probe traces (per oscilloscope)
   traces: ProbeTrace[];
   maxTraceSamples: number;
-  // history
-  past: { components: CircuitComponent[]; wires: Wire[] }[];
-  future: { components: CircuitComponent[]; wires: Wire[] }[];
+  // history — full document snapshot so undo/redo restore everything
+  // (drawings, noConnects, groups, sheets, netClasses, pageSetup, etc.)
+  past: ReturnType<typeof snapshot>[];
+  future: ReturnType<typeof snapshot>[];
   // ui
   paused: boolean;
   showGrid: boolean;
@@ -136,6 +137,8 @@ interface EditorState {
   // actions
   addComponent: (type: string, position: { x: number; y: number }) => string;
   moveComponent: (id: string, position: { x: number; y: number }) => void;
+  /** Push history once at drag start so the whole drag is a single undo step. */
+  beginDrag: () => void;
   rotateComponent: (id: string) => void;
   /** Free rotation: rotate by arbitrary degrees (snapped to 15° increments). Stored as degrees. */
   rotateComponentFree: (id: string, degrees: number) => void;
@@ -243,6 +246,7 @@ interface EditorState {
   serialize: () => CircuitDocument;
 
   setRunning: (running: boolean) => void;
+  setSimError: (msg: string | null) => void;
   setSpeed: (s: number) => void;
   setDt: (dt: number) => void;
   step: () => void;
@@ -352,6 +356,11 @@ function snapshot(s: {
   groups?: Group[];
   sheets?: HierarchicalSheet[];
   netClasses?: NetClass[];
+  pageSetup?: any;
+  metadata?: any;
+  savedViews?: any[];
+  childSheets?: Record<string, any>;
+  activeSheet?: string;
 }) {
   return {
     components: s.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined, fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined })),
@@ -361,6 +370,12 @@ function snapshot(s: {
     groups: s.groups ? s.groups.map((g) => ({ ...g, componentIds: [...g.componentIds], wireIds: [...g.wireIds], drawingIds: [...g.drawingIds] })) : [],
     sheets: s.sheets ? s.sheets.map((sh) => ({ ...sh, pins: sh.pins.map((p) => ({ ...p })) })) : [],
     netClasses: s.netClasses ? s.netClasses.map((nc) => ({ ...nc, nets: [...nc.nets] })) : [],
+    // Capture page setup + metadata too so undo restores the full document.
+    pageSetup: s.pageSetup ? { ...s.pageSetup } : undefined,
+    metadata: s.metadata ? { ...s.metadata } : undefined,
+    savedViews: s.savedViews ? s.savedViews.map((v) => ({ ...v })) : undefined,
+    childSheets: s.childSheets ? { ...s.childSheets } : undefined,
+    activeSheet: s.activeSheet,
   };
 }
 
@@ -437,7 +452,18 @@ export const useEditor = create<EditorState>((set, get) => ({
     return id;
   },
 
+  beginDrag: () => {
+    // Push a single history entry at drag start. The canvas calls this on
+    // mousedown before the first moveComponent() so that the entire drag
+    // sequence becomes a single Ctrl+Z undo step (instead of one entry
+    // per mousemove, which would flood the history stack).
+    get().pushHistory();
+  },
+
   moveComponent: (id, position) => {
+    // Note: pushHistory() is called once at drag START (via beginDrag),
+    // not on every mousemove. Calling it here would flood the history stack
+    // with hundreds of micro-moves.
     set((s) => ({
       components: s.components.map((c) =>
         c.id === id ? { ...c, position: { ...position } } : c,
@@ -1163,12 +1189,16 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
 
   setWireWaypoints: (id, waypoints) => {
+    // Make wire handle drags undoable — same pattern as moveComponent.
+    get().pushHistory();
     set((s) => ({
       wires: s.wires.map((w) => (w.id === id ? { ...w, waypoints: waypoints.length > 0 ? waypoints : undefined } : w)),
     }));
   },
 
   toggleSwitch: (id) => {
+    // Switch toggles change circuit topology (open ↔ closed) — must be undoable.
+    get().pushHistory();
     set((s) => ({
       components: s.components.map((c) => {
         if (c.id !== id) return c;
@@ -1195,8 +1225,16 @@ export const useEditor = create<EditorState>((set, get) => ({
       return {
         past: s.past.slice(0, -1),
         future: [current, ...s.future].slice(0, MAX_HISTORY),
+        // Restore the FULL snapshot — drawings, noConnects, groups, sheets,
+        // netClasses. Previously only components/wires were restored, which
+        // silently lost every other document field on Ctrl+Z.
         components: prev.components,
         wires: prev.wires,
+        drawings: prev.drawings,
+        noConnects: prev.noConnects,
+        groups: prev.groups,
+        sheets: prev.sheets,
+        netClasses: prev.netClasses,
         selection: { type: null, id: null },
       };
     });
@@ -1210,8 +1248,14 @@ export const useEditor = create<EditorState>((set, get) => ({
       return {
         past: [...s.past, current].slice(-MAX_HISTORY),
         future: s.future.slice(1),
+        // Same fix as undo — restore the full snapshot.
         components: next.components,
         wires: next.wires,
+        drawings: next.drawings,
+        noConnects: next.noConnects,
+        groups: next.groups,
+        sheets: next.sheets,
+        netClasses: next.netClasses,
         selection: { type: null, id: null },
       };
     });
@@ -1234,6 +1278,16 @@ export const useEditor = create<EditorState>((set, get) => ({
       multiSelection: { components: new Set(), wires: new Set() },
       traces: [],
       simContext: null,
+      // Reset session state that should not persist across a "new circuit".
+      // Previously: stale sim errors, ERC violations, wire drafts, and a
+      // still-running sim would carry over into the empty canvas.
+      running: false,
+      paused: false,
+      simError: null,
+      ercErrors: [],
+      lastAnalysisResult: null,
+      physicsViolations: [],
+      wireDraft: null,
     });
   },
 
@@ -1255,6 +1309,15 @@ export const useEditor = create<EditorState>((set, get) => ({
       multiSelection: { components: new Set(), wires: new Set() },
       traces: [],
       simContext: null,
+      // Reset session state — same rationale as clear(). Loading a new
+      // circuit should not inherit sim errors or wire drafts from the old one.
+      running: false,
+      paused: false,
+      simError: null,
+      ercErrors: [],
+      lastAnalysisResult: null,
+      physicsViolations: [],
+      wireDraft: null,
       past: [],
       future: [],
     });
@@ -1293,6 +1356,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       set({ running: false, paused: true });
     }
   },
+  setSimError: (msg: string | null) => set({ simError: msg }),
   setSpeed: (speed) => set({ speed }),
   setDt: (dt) => set({ dt }),
 
