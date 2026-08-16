@@ -2352,3 +2352,53 @@ Stage Summary:
 - Sim pauses when tab is hidden (no more time drift)
 - Share URLs preserve full circuit (drawings, sub-sheets, net classes)
 - 25 regression tests added
+
+---
+Task ID: schema-migrations
+Agent: main
+Task: Switch from auto-create-table approach to proper Drizzle schema migrations.
+
+Work Log:
+- User correctly pointed out that the auto-create approach (inline CREATE TABLE IF NOT EXISTS in db.ts) has downsides: schema drift (SQL in db.ts can diverge from schema.ts), no migration history, no way to add columns/migrate data later.
+
+- Generated migration files from schema.ts:
+  * `bun x drizzle-kit generate` produced ./drizzle/0000_past_tana_nile.sql
+  * The SQL matches schema.ts exactly (saved_circuits table + 2 indexes)
+  * ./drizzle/meta/_journal.json tracks migration history
+
+- Refactored src/lib/db.ts:
+  * Removed inline CREATE TABLE SQL — no more schema duplication
+  * Added `migrate()` calls from drizzle-orm/libsql/migrator (Turso) and
+    drizzle-orm/better-sqlite3/migrator (local)
+  * Migrations run automatically on first DB connection
+  * Drizzle tracks applied migrations in __drizzle_migrations table —
+    each migration only runs once (idempotent across deploys)
+  * Made env var reads lazy (getTursoUrl(), getTursoToken(), getLocalDbPath())
+    so tests can override DATABASE_URL per-test
+
+- Updated tests/db-turso.test.ts:
+  * Renamed "auto-schema creation" → "migration-based schema creation"
+  * Added test: verifies __drizzle_migrations table exists and has entries
+  * Added test: verifies re-running init is idempotent (migration count stays at 1)
+  * Fixed db path resolution in tests (use process.cwd() + relative path,
+    same as db.ts)
+
+- Updated .env.example with migration workflow documentation:
+  * How to add columns: edit schema.ts → bun run db:generate → commit
+  * Migrations auto-apply on app startup — no manual step needed on Vercel
+  * Manual options: bun run db:migrate, bun run db:push (dev only)
+
+VERIFICATION:
+- Typecheck clean
+- All 1344 tests pass across 57 files (+2 new migration tests)
+- Build succeeds
+- Local SQLite: migrations apply correctly, __drizzle_migrations table tracks state
+- Turso: dropped existing tables, re-ran — migrations applied cleanly, all CRUD passes
+- Idempotency verified: re-running init doesn't duplicate migrations
+
+Stage Summary:
+- Single source of truth: schema.ts (no more duplicated SQL in db.ts)
+- Versioned migrations: ./drizzle/ folder tracks schema evolution
+- Auto-apply on startup: drizzle's migrate() runs pending migrations
+- Idempotent: __drizzle_migrations table prevents re-applying
+- Future schema changes: edit schema.ts → bun run db:generate → commit → deploy

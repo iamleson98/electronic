@@ -68,8 +68,8 @@ describe('db.ts: provider selection', () => {
   });
 });
 
-describe('db.ts: auto-schema creation', () => {
-  it('auto-creates the saved_circuits table on first connection', async () => {
+describe('db.ts: migration-based schema creation', () => {
+  it('creates the saved_circuits table via migration on first connection', async () => {
     process.env.DATABASE_URL = 'file:./db/test-schema.db';
     const db = await getDb();
     // If the table exists, this query should not throw
@@ -77,7 +77,38 @@ describe('db.ts: auto-schema creation', () => {
     expect(Array.isArray(rows)).toBe(true);
   });
 
-  it('can perform CRUD operations on the auto-created table', async () => {
+  it('tracks applied migrations in __drizzle_migrations table', async () => {
+    process.env.DATABASE_URL = 'file:./db/test-migration-tracking.db';
+    const db = await getDb();
+    // Drizzle's migrate() creates a __drizzle_migrations table to track
+    // which migrations have been applied. Verify it exists and has at least
+    // one entry (the initial migration).
+    // Use the same absolute path resolution as db.ts (process.cwd() + relative path)
+    const dbPath = `${process.cwd()}/db/test-migration-tracking.db`;
+    const Database = (await import('better-sqlite3')).default;
+    const sqlite = new Database(dbPath);
+    const migs = sqlite.prepare('SELECT COUNT(*) as count FROM __drizzle_migrations').get() as any;
+    expect(migs.count).toBeGreaterThanOrEqual(1);
+    sqlite.close();
+  });
+
+  it('re-running init does not duplicate migrations (idempotent)', async () => {
+    process.env.DATABASE_URL = 'file:./db/test-idempotent.db';
+    await getDb();  // first init — applies migration
+    // Clear cache and re-init
+    const g = globalThis as any;
+    g.__drizzleDb = undefined;
+    g.__dbPromise = undefined;
+    await getDb();  // second init — should not re-apply
+    const dbPath = `${process.cwd()}/db/test-idempotent.db`;
+    const Database = (await import('better-sqlite3')).default;
+    const sqlite = new Database(dbPath);
+    const migs = sqlite.prepare('SELECT COUNT(*) as count FROM __drizzle_migrations').get() as any;
+    expect(migs.count).toBe(1);  // still only 1 migration
+    sqlite.close();
+  });
+
+  it('can perform CRUD operations on the migrated table', async () => {
     process.env.DATABASE_URL = 'file:./db/test-crud.db';
     const db = await getDb();
 
