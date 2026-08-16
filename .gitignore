@@ -53,6 +53,9 @@ server.log
 # Skills directory
 /skills/
 
+# Tool results — internal scratch files (cached tool outputs, debug reads)
+/tool-results/
+
 # Database files — never commit SQLite databases or WAL files
 /db/*.db
 /db/*.db-shm
