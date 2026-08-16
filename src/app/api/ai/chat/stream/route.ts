@@ -26,6 +26,8 @@ interface RequestBody {
   };
   /** Per-request provider override (chosen from the AI panel dropdown). */
   provider?: ProviderName;
+  /** Per-request model override (chosen from the AI panel model dropdown). */
+  model?: string;
 }
 
 const SYSTEM_PROMPT = `You are an expert electrical engineer and circuit design assistant in a circuit simulator app. You help users design, analyze, and debug circuits using the available tools.
@@ -76,7 +78,7 @@ export async function POST(req: NextRequest) {
 
         const ctx: ToolContext = { doc, plugins, simContext: null };
         // Per-request provider override (chosen from the AI panel dropdown).
-        const provider = getProvider((body as RequestBody).provider);
+        const provider = getProvider((body as RequestBody).provider, (body as RequestBody).model);
         const toolDefs = getToolDefinitions();
 
         const messages: ChatMessage[] = [
@@ -206,6 +208,7 @@ export async function POST(req: NextRequest) {
             },
             provider: provider.name,
             model: provider.model,
+            usage: result.usage,
           });
           controller.close();
           return;

@@ -257,9 +257,9 @@ export function Toolbar() {
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="flex flex-wrap items-center gap-1 border-b border-slate-800 bg-slate-900 px-3 py-2">
+      <div className="flex items-center gap-1 overflow-x-auto border-b border-slate-800 bg-slate-900 px-3 py-2 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
         {/* Brand */}
-        <div className="mr-2 flex items-center gap-2 pr-3">
+        <div className="mr-2 flex flex-shrink-0 items-center gap-2 pr-3">
           <div className="flex h-7 w-7 items-center justify-center rounded bg-gradient-to-br from-cyan-400 to-emerald-500 text-slate-900">
             <Zap size={16} strokeWidth={2.5} />
           </div>
@@ -268,7 +268,7 @@ export function Toolbar() {
 
         {/* Hierarchical sheet breadcrumb — shows Root / Sub-sheet when navigating */}
         {activeSheet && (
-          <div className="mr-2 flex items-center gap-1 rounded bg-slate-800/60 px-2 py-1 text-xs font-mono">
+          <div className="mr-2 flex flex-shrink-0 items-center gap-1 rounded bg-slate-800/60 px-2 py-1 text-xs font-mono whitespace-nowrap">
             <button
               className="text-slate-300 hover:text-emerald-300 transition-colors"
               onClick={() => setActiveSheet('')}
@@ -317,7 +317,7 @@ export function Toolbar() {
           <TooltipContent>Reset simulation (stops + clears state)</TooltipContent>
         </Tooltip>
 
-        <div className="mx-1 h-5 w-px bg-slate-700" />
+        <div className="mx-1 h-5 w-px flex-shrink-0 bg-slate-700" />
 
         {/* Speed control */}
         <div className="flex items-center gap-2 px-1">
@@ -350,7 +350,7 @@ export function Toolbar() {
           </span>
         </div>
 
-        <div className="mx-1 h-5 w-px bg-slate-700" />
+        <div className="mx-1 h-5 w-px flex-shrink-0 bg-slate-700" />
 
         {/* Undo / Redo */}
         <Tooltip>
@@ -370,7 +370,7 @@ export function Toolbar() {
           <TooltipContent>{running ? 'Pause to redo' : 'Redo (Ctrl+Y)'}</TooltipContent>
         </Tooltip>
 
-        <div className="mx-1 h-5 w-px bg-slate-700" />
+        <div className="mx-1 h-5 w-px flex-shrink-0 bg-slate-700" />
 
         {/* Examples */}
         <DropdownMenu>
@@ -795,7 +795,7 @@ export function Toolbar() {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex flex-shrink-0 items-center gap-1">
           {/* Save / Load / Clear */}
           <Tooltip>
             <TooltipTrigger asChild>

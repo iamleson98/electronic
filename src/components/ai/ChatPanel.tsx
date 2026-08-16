@@ -16,15 +16,24 @@ import { toast } from 'sonner';
 // Persisted to localStorage so the user's choice survives reloads.
 // ─────────────────────────────────────────────────────────────────────────────
 
+interface ModelInfo {
+  id: string;
+  label: string;
+  description: string;
+  free: boolean;
+}
+
 interface ProviderInfo {
   name: 'zai' | 'openai' | 'anthropic';
   label: string;
   available: boolean;
   requiresKey: string | null;
   model: string;
+  models: ModelInfo[];
 }
 
 const PROVIDER_STORAGE_KEY = 'circuit-lab.ai-provider';
+const MODEL_STORAGE_KEY = 'circuit-lab.ai-model';
 
 function loadStoredProvider(): 'zai' | 'openai' | 'anthropic' | null {
   if (typeof window === 'undefined') return null;
@@ -38,6 +47,18 @@ function loadStoredProvider(): 'zai' | 'openai' | 'anthropic' | null {
 function storeProvider(name: 'zai' | 'openai' | 'anthropic') {
   if (typeof window === 'undefined') return;
   try { window.localStorage.setItem(PROVIDER_STORAGE_KEY, name); } catch { /* ignore */ }
+}
+
+function loadStoredModel(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(MODEL_STORAGE_KEY);
+  } catch { return null; }
+}
+
+function storeModel(model: string) {
+  if (typeof window === 'undefined') return;
+  try { window.localStorage.setItem(MODEL_STORAGE_KEY, model); } catch { /* ignore */ }
 }
 
 interface ToolCallEntry {
@@ -60,6 +81,12 @@ interface ChatMessage {
     components: any[];
     wires: any[];
     summary: string;
+  };
+  /** Token usage for this message (from the AI provider's response). */
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
   };
 }
 
@@ -98,10 +125,13 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // AI provider selection state
+  // AI provider + model selection state
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<'zai' | 'openai' | 'anthropic'>('zai');
+  const [selectedModel, setSelectedModel] = useState<string>('glm-4.6');
   const [providersLoading, setProvidersLoading] = useState(true);
+  // Cumulative token usage across all messages in this session
+  const [totalTokens, setTotalTokens] = useState({ prompt: 0, completion: 0, total: 0 });
 
   // Fetch available providers on mount
   useEffect(() => {
@@ -119,14 +149,27 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
         const initial = stored || serverDefault || 'zai';
         // If the stored/default provider isn't available (missing API key), fall back to 'zai'.
         const info = (data.providers as ProviderInfo[]).find(p => p.name === initial);
-        setSelectedProvider(info && info.available ? initial : 'zai');
+        const providerName = info && info.available ? initial : 'zai';
+        setSelectedProvider(providerName);
+        // Initialize model: prefer localStorage, fall back to provider's default model.
+        const storedModel = loadStoredModel();
+        const providerInfo = (data.providers as ProviderInfo[]).find(p => p.name === providerName);
+        if (providerInfo) {
+          const modelToUse = storedModel && providerInfo.models.some(m => m.id === storedModel)
+            ? storedModel
+            : providerInfo.model;
+          setSelectedModel(modelToUse);
+        }
       } catch (e) {
         // Network or server error — default to Z.ai (always available).
         if (!cancelled) {
           setProviders([
-            { name: 'zai', label: 'Z.ai (GLM-4.6)', available: true, requiresKey: null, model: 'glm-4.6' },
+            { name: 'zai', label: 'Z.ai (GLM)', available: true, requiresKey: null, model: 'glm-4.6', models: [
+              { id: 'glm-4.6', label: 'GLM-4.6 (Default, Free)', description: 'Z.ai built-in model.', free: true },
+            ] },
           ]);
           setSelectedProvider('zai');
+          setSelectedModel('glm-4.6');
         }
       } finally {
         if (!cancelled) setProvidersLoading(false);
@@ -140,9 +183,22 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     storeProvider(name);
     const info = providers.find(p => p.name === name);
     if (info) {
+      // Switch to the provider's default model
+      setSelectedModel(info.model);
+      storeModel(info.model);
       toast.success(`AI provider: ${info.label}`);
     }
   }, [providers]);
+
+  const handleModelChange = useCallback((modelId: string) => {
+    setSelectedModel(modelId);
+    storeModel(modelId);
+    const provider = providers.find(p => p.name === selectedProvider);
+    const model = provider?.models.find(m => m.id === modelId);
+    if (model) {
+      toast.success(`Model: ${model.label}`);
+    }
+  }, [providers, selectedProvider]);
 
   // Editor + PCB stores
   const components = useEditor(s => s.components);
@@ -272,6 +328,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
           messages: apiMessages,
           circuit: circuitSnapshot,
           provider: selectedProvider,
+          model: selectedModel,
         }),
       });
 
@@ -354,6 +411,19 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                 }
               } else if (eventType === 'done') {
                 textContent = data.response || textContent;
+                // Capture token usage from the done event
+                if (data.usage) {
+                  const usage = data.usage;
+                  setTotalTokens(prev => ({
+                    prompt: prev.prompt + (usage.prompt_tokens || 0),
+                    completion: prev.completion + (usage.completion_tokens || 0),
+                    total: prev.total + (usage.total_tokens || 0),
+                  }));
+                  // Attach usage to the assistant message
+                  setMessages(prev => prev.map(m =>
+                    m.id === assistantMsgId ? { ...m, usage } : m
+                  ));
+                }
                 // Apply final circuit if not auto-applied and there's a pending diff
                 if (!autoApply && data.circuit && (
                   data.circuit.components.length !== circuitSnapshot.components.length ||
@@ -414,7 +484,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     } finally {
       setIsLoading(false);
     }
-  }, [isLoading, components, wires, messages, autoApply, selectedProvider, applyCircuitUpdate, handleClientSideAction]);
+  }, [isLoading, components, wires, messages, autoApply, selectedProvider, selectedModel, applyCircuitUpdate, handleClientSideAction]);
 
   const applyPendingDiff = useCallback((msgId: string) => {
     // Find the message FIRST (outside the setMessages updater — React updaters
@@ -450,21 +520,107 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
           </div>
         </div>
         <div className="flex items-center gap-1">
+          {/* Provider selector */}
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div>
+                  <Select
+                    value={selectedProvider}
+                    onValueChange={(v) => handleProviderChange(v as 'zai' | 'openai' | 'anthropic')}
+                    disabled={providersLoading || providers.length === 0}
+                  >
+                    <SelectTrigger className="h-7 w-[130px] gap-1 border-slate-700 bg-slate-800 px-2 text-xs text-slate-200 cursor-pointer hover:border-slate-600">
+                      <Cpu className="h-3 w-3 text-cyan-400" />
+                      <SelectValue placeholder="Provider…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {providers.map(p => (
+                        <SelectItem
+                          key={p.name}
+                          value={p.name}
+                          disabled={!p.available}
+                          className="cursor-pointer"
+                        >
+                          <div className="flex flex-col">
+                            <span className="text-xs font-medium">{p.label}</span>
+                            <span className={`text-[10px] ${p.available ? 'text-slate-400' : 'text-amber-400'}`}>
+                              {p.available ? `${p.models.length} models` : `needs ${p.requiresKey}`}
+                            </span>
+                          </div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                <p>Choose which AI provider to use</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          {/* Model selector */}
+          {(() => {
+            const provider = providers.find(p => p.name === selectedProvider);
+            const models = provider?.models ?? [];
+            if (models.length === 0) return null;
+            return (
+              <Select
+                value={selectedModel}
+                onValueChange={(v) => handleModelChange(v)}
+                disabled={providersLoading}
+              >
+                <SelectTrigger className="h-7 w-[160px] gap-1 border-slate-700 bg-slate-800 px-2 text-xs text-slate-200 cursor-pointer hover:border-slate-600">
+                  <SelectValue placeholder="Model…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {models.map(m => (
+                    <SelectItem key={m.id} value={m.id} className="cursor-pointer">
+                      <div className="flex flex-col">
+                        <span className="text-xs font-medium">
+                          {m.label}
+                          {m.free && <span className="ml-1 text-emerald-400">●</span>}
+                        </span>
+                        <span className="text-[10px] text-slate-500">{m.description}</span>
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            );
+          })()}
           <Button
             variant="ghost"
             size="sm"
             onClick={() => setAutoApply(s => !s)}
-            className="h-7 px-2 text-xs"
+            className="h-7 px-2 text-xs cursor-pointer hover:bg-slate-800"
             title={autoApply ? 'Auto-apply ON — changes apply immediately' : 'Auto-apply OFF — review before applying'}
           >
             <GitBranch className={`h-3.5 w-3.5 ${autoApply ? 'text-emerald-400' : 'text-amber-400'}`} />
             <span className="ml-1 hidden sm:inline">{autoApply ? 'Auto' : 'Review'}</span>
           </Button>
-          <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8">
+          <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8 cursor-pointer hover:bg-slate-800">
             <X className="h-4 w-4" />
           </Button>
         </div>
       </div>
+
+      {/* Token usage bar */}
+      {totalTokens.total > 0 && (
+        <div className="flex items-center gap-3 border-b border-slate-800 bg-slate-900/50 px-4 py-1.5 text-[10px] text-slate-500">
+          <span className="font-mono">Tokens:</span>
+          <span>↑ {totalTokens.prompt.toLocaleString()}</span>
+          <span>↓ {totalTokens.completion.toLocaleString()}</span>
+          <span className="font-mono text-cyan-400">Σ {totalTokens.total.toLocaleString()}</span>
+          <button
+            onClick={() => setTotalTokens({ prompt: 0, completion: 0, total: 0 })}
+            className="ml-auto cursor-pointer text-slate-600 hover:text-slate-400"
+            title="Reset token counter"
+          >
+            reset
+          </button>
+        </div>
+      )}
 
       {/* Messages */}
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">

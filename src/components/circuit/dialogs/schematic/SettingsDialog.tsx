@@ -34,8 +34,9 @@ import { DEFAULT_HOTKEYS } from './DEFAULT_HOTKEYS';
 
 
 export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const theme = useEditor((s) => s.theme);
-  const setTheme = useEditor((s) => s.setTheme);
+  // Theme is always dark now — no toggle needed.
+  // const theme = useEditor((s) => s.theme);
+  // const setTheme = useEditor((s) => s.setTheme);
   const customHotkeys = useEditor((s) => s.customHotkeys);
   const setHotkey = useEditor((s) => s.setHotkey);
   const resetHotkeys = useEditor((s) => s.resetHotkeys);
@@ -69,32 +70,19 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
       <DialogContent className="max-w-2xl bg-slate-900 border-slate-700 text-slate-100">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><Settings size={16} /> Settings</DialogTitle>
-          <DialogDescription>Customize theme and keyboard shortcuts.</DialogDescription>
+          <DialogDescription>Customize keyboard shortcuts.</DialogDescription>
         </DialogHeader>
         <div className="space-y-5">
-          {/* Theme */}
+          {/* Theme — dark only */}
           <div>
             <Label className="text-xs text-slate-400 mb-2 block">Theme</Label>
             <div className="flex gap-2">
-              <Button
-                size="sm"
-                variant={theme === 'dark' ? 'default' : 'ghost'}
-                onClick={() => setTheme('dark')}
-                className={theme === 'dark' ? 'bg-slate-700' : ''}
-              >
-                Dark (default)
-              </Button>
-              <Button
-                size="sm"
-                variant={theme === 'light' ? 'default' : 'ghost'}
-                onClick={() => setTheme('light')}
-                className={theme === 'light' ? 'bg-amber-500 text-slate-900' : ''}
-              >
-                Light
+              <Button size="sm" variant="default" className="bg-slate-700" disabled>
+                Dark (only)
               </Button>
             </div>
             <p className="text-xs text-slate-500 mt-1">
-              Note: Light theme is applied to the schematic + PCB canvas backgrounds and dialogs. Toolbar theming is partial.
+              The app uses a dark theme exclusively.
             </p>
           </div>
 

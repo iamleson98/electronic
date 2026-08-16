@@ -28,6 +28,8 @@ interface RequestBody {
   };
   /** Per-request provider override (chosen from the AI panel dropdown). */
   provider?: ProviderName;
+  /** Per-request model override (chosen from the AI panel model dropdown). */
+  model?: string;
 }
 
 const SYSTEM_PROMPT = `You are an expert electrical engineer and circuit design assistant in a circuit simulator app. You help users design, analyze, and debug circuits using the available tools.
@@ -72,7 +74,7 @@ export async function POST(req: NextRequest) {
     };
 
     // Get the AI provider (per-request override if provided)
-    const provider = getProvider(body.provider);
+    const provider = getProvider(body.provider, body.model);
     const toolDefs = getToolDefinitions();
 
     // Build the message history (prepend system prompt)

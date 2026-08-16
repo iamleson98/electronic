@@ -126,12 +126,12 @@ describe('getProvider — model overrides', () => {
 
   it('uses default OpenAI model when OPENAI_MODEL not set', () => {
     process.env.OPENAI_API_KEY = 'sk-test';
-    expect(getProvider('openai').model).toBe('gpt-4o');
+    expect(getProvider('openai').model).toBe('gpt-4o-mini');
   });
 
   it('uses default Anthropic model when ANTHROPIC_MODEL not set', () => {
     process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
-    expect(getProvider('anthropic').model).toBe('claude-3-5-sonnet-20241022');
+    expect(getProvider('anthropic').model).toBe('claude-3-5-haiku-20241022');
   });
 });
 
@@ -186,8 +186,8 @@ describe('getAvailableProviders', () => {
 
   it('uses default models when env overrides absent', () => {
     const list = getAvailableProviders();
-    expect(list.find(p => p.name === 'openai')!.model).toBe('gpt-4o');
-    expect(list.find(p => p.name === 'anthropic')!.model).toBe('claude-3-5-sonnet-20241022');
+    expect(list.find(p => p.name === 'openai')!.model).toBe('gpt-4o-mini');
+    expect(list.find(p => p.name === 'anthropic')!.model).toBe('claude-3-5-haiku-20241022');
   });
 
   it('reflects OPENAI_MODEL override in the model field', () => {

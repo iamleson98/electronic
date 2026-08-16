@@ -5,11 +5,11 @@
 //   - OpenAI — set OPENAI_API_KEY in .env
 //   - Anthropic — set ANTHROPIC_API_KEY in .env
 //
-// Provider selection (in priority order):
-//   1. Per-request override — caller passes `provider` to getProvider(name)
-//      (e.g., user picks a different provider in the ChatPanel dropdown)
-//   2. AI_PROVIDER env var — server-side default
-//   3. 'zai' — built-in fallback (no API key required)
+// Provider + model selection (in priority order):
+//   1. Per-request override — caller passes `provider` + `model` to getProvider()
+//      (e.g., user picks a different model in the ChatPanel dropdown)
+//   2. AI_PROVIDER / OPENAI_MODEL / ANTHROPIC_MODEL env vars — server-side defaults
+//   3. 'zai' / 'glm-4.6' — built-in fallback (no API key required)
 //
 // All providers expose the same interface: a chat() method that takes
 // messages + tools, and returns either a text response or a tool-call request.
@@ -68,22 +68,48 @@ export interface AIProvider {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Available models per provider — curated list of top free / low-cost models.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ModelInfo {
+  id: string;
+  label: string;
+  description: string;
+  free: boolean;
+}
+
+export const AVAILABLE_MODELS: Record<ProviderName, ModelInfo[]> = {
+  zai: [
+    { id: 'glm-4.6', label: 'GLM-4.6 (Default, Free)', description: 'Z.ai built-in model. No API key needed.', free: true },
+    { id: 'glm-4.5', label: 'GLM-4.5 (Free)', description: 'Previous generation Z.ai model.', free: true },
+    { id: 'glm-4-flash', label: 'GLM-4 Flash (Free, Fast)', description: 'Lighter model for fast responses.', free: true },
+  ],
+  openai: [
+    { id: 'gpt-4o-mini', label: 'GPT-4o mini (Cheapest)', description: 'Fast and affordable. Best for most tasks.', free: false },
+    { id: 'gpt-4o', label: 'GPT-4o', description: 'Most capable OpenAI model.', free: false },
+    { id: 'gpt-4.1-nano', label: 'GPT-4.1 nano (Cheapest)', description: 'Smallest GPT-4.1 variant.', free: false },
+    { id: 'gpt-4.1-mini', label: 'GPT-4.1 mini', description: 'Balanced cost/performance.', free: false },
+  ],
+  anthropic: [
+    { id: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku (Fastest)', description: 'Fast and affordable Claude.', free: false },
+    { id: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet', description: 'Most capable Claude model.', free: false },
+    { id: 'claude-3-opus-20240229', label: 'Claude 3 Opus', description: 'Legacy Opus model.', free: false },
+  ],
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Provider factory
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Resolve a provider name. Priority:
+ * Resolve a provider. Priority:
  *   1. Explicit `requested` argument (per-request override from the UI)
  *   2. AI_PROVIDER env var (server-side default)
  *   3. 'zai' (built-in fallback)
  *
- * Validates that the required API key exists when an authenticated provider
- * is requested. If validation fails AND the caller did not explicitly ask for
- * that provider, falls back to Z.ai so the request still succeeds. If the
- * caller explicitly asked (e.g., user picked OpenAI in the dropdown), the
- * error is thrown so the UI can surface a helpful message.
+ * The `model` parameter overrides the provider's default model.
  */
-export function getProvider(requested?: ProviderName): AIProvider {
+export function getProvider(requested?: ProviderName, model?: string): AIProvider {
   const name = (requested || process.env.AI_PROVIDER || 'zai').toLowerCase() as ProviderName;
   switch (name) {
     case 'openai':
@@ -94,10 +120,9 @@ export function getProvider(requested?: ProviderName): AIProvider {
             'Add it to your .env file or choose a different provider in the AI panel.',
           );
         }
-        // Implicit env-var default without a key → fall back to Z.ai.
-        return new ZaiProvider();
+        return new ZaiProvider(model);
       }
-      return new OpenAIProvider();
+      return new OpenAIProvider(model);
     case 'anthropic':
       if (!process.env.ANTHROPIC_API_KEY) {
         if (requested) {
@@ -106,38 +131,41 @@ export function getProvider(requested?: ProviderName): AIProvider {
             'Add it to your .env file or choose a different provider in the AI panel.',
           );
         }
-        return new ZaiProvider();
+        return new ZaiProvider(model);
       }
-      return new AnthropicProvider();
+      return new AnthropicProvider(model);
     case 'zai':
     default:
-      return new ZaiProvider();
+      return new ZaiProvider(model);
   }
 }
 
 /** Returns the list of providers available given the current env. */
-export function getAvailableProviders(): Array<{ name: ProviderName; label: string; available: boolean; requiresKey: string | null; model: string }> {
+export function getAvailableProviders(): Array<{ name: ProviderName; label: string; available: boolean; requiresKey: string | null; model: string; models: ModelInfo[] }> {
   return [
     {
       name: 'zai',
-      label: 'Z.ai (GLM-4.6)',
+      label: 'Z.ai (GLM)',
       available: true,
       requiresKey: null,
       model: 'glm-4.6',
+      models: AVAILABLE_MODELS.zai,
     },
     {
       name: 'openai',
-      label: 'OpenAI (GPT-4o)',
+      label: 'OpenAI (GPT)',
       available: !!process.env.OPENAI_API_KEY,
       requiresKey: 'OPENAI_API_KEY',
-      model: process.env.OPENAI_MODEL || 'gpt-4o',
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      models: AVAILABLE_MODELS.openai,
     },
     {
       name: 'anthropic',
-      label: 'Anthropic (Claude 3.5 Sonnet)',
+      label: 'Anthropic (Claude)',
       available: !!process.env.ANTHROPIC_API_KEY,
       requiresKey: 'ANTHROPIC_API_KEY',
-      model: process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022',
+      model: process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-20241022',
+      models: AVAILABLE_MODELS.anthropic,
     },
   ];
 }
@@ -148,7 +176,11 @@ export function getAvailableProviders(): Array<{ name: ProviderName; label: stri
 
 class ZaiProvider implements AIProvider {
   name: ProviderName = 'zai';
-  model = 'glm-4.6';
+  model: string;
+
+  constructor(model?: string) {
+    this.model = model || 'glm-4.6';
+  }
 
   /**
    * Create a ZAI SDK instance.
@@ -259,7 +291,11 @@ class ZaiProvider implements AIProvider {
 
 class OpenAIProvider implements AIProvider {
   name: ProviderName = 'openai';
-  model = process.env.OPENAI_MODEL || 'gpt-4o';
+  model: string;
+
+  constructor(model?: string) {
+    this.model = model || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  }
 
   async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number }): Promise<ChatResult> {
     const body: any = {
@@ -310,7 +346,11 @@ class OpenAIProvider implements AIProvider {
 
 class AnthropicProvider implements AIProvider {
   name: ProviderName = 'anthropic';
-  model = process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022';
+  model: string;
+
+  constructor(model?: string) {
+    this.model = model || process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-20241022';
+  }
 
   async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number }): Promise<ChatResult> {
     // Separate system message from conversation
