@@ -378,7 +378,7 @@ const arduinoReal: ComponentPlugin = {
       // Inputs (A1, A2): high-Z with weak pull-down
       ['a1', 'a2'].forEach((tid) => {
         const t = terminals.find((tt) => tt.terminalId === tid);
-        if (t && t.nodeId !== gnd) sys.stampConductance(t.nodeId, gnd, 1e-9);
+        if (t && t.nodeId !== gnd) sys.stampConductance(t.nodeId, gnd, 1e-6);
       });
       return;
     }
@@ -436,7 +436,7 @@ const arduinoReal: ComponentPlugin = {
     // Inputs (A0, A1, A2): high-Z with weak pull-down
     ['a0', 'a1', 'a2'].forEach((tid) => {
       const t = terminals.find((tt) => tt.terminalId === tid);
-      if (t && t.nodeId !== gnd) sys.stampConductance(t.nodeId, gnd, 1e-9);
+      if (t && t.nodeId !== gnd) sys.stampConductance(t.nodeId, gnd, 1e-6);
     });
   },
   measure(params, terminals, sim) {

@@ -106,8 +106,8 @@ const pnp: ComponentPlugin = {
       : (veb > vebOn);
     st[key] = on;
     if (!on) {
-      sys.stampConductance(c, e, 1e-9);
-      sys.stampConductance(b, e, 1e-9);
+      sys.stampConductance(c, e, 1e-13);
+      sys.stampConductance(b, e, 1e-13);
       st[key + '_ib'] = 0;
       st[key + '_branch'] = -1;
       return;
@@ -245,9 +245,9 @@ const nmos: ComponentPlugin = {
     const on = prevOn ? vgs > vth - 0.2 : vgs > vth;
     st[key] = on;
     if (!on) {
-      sys.stampConductance(d, s, 1e-9);
+      sys.stampConductance(d, s, 1e-13);
       // gate is high-Z
-      sys.stampConductance(g, s, 1e-12);
+      sys.stampConductance(g, s, 1e-6);
       return;
     }
     // On: if vds > (vgs - vth): saturation -> current source Id = Kp * (vgs-vth)^2
@@ -270,7 +270,7 @@ const nmos: ComponentPlugin = {
       sys.stampConductance(d, s, 1 / ron);
     }
     // gate high-Z
-    sys.stampConductance(g, s, 1e-12);
+    sys.stampConductance(g, s, 1e-6);
   },
   measure(params, terminals, sim) {
     const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
@@ -367,8 +367,8 @@ const pmos: ComponentPlugin = {
     const on = prevOn ? vsg > vth - 0.2 : vsg > vth;
     st[key] = on;
     if (!on) {
-      sys.stampConductance(s, d, 1e-9);
-      sys.stampConductance(g, s, 1e-12);
+      sys.stampConductance(s, d, 1e-13);
+      sys.stampConductance(g, s, 1e-6);
       return;
     }
     const vov = vsg - vth;
@@ -384,7 +384,7 @@ const pmos: ComponentPlugin = {
     } else {
       sys.stampConductance(s, d, 1 / ron);
     }
-    sys.stampConductance(g, s, 1e-12);
+    sys.stampConductance(g, s, 1e-6);
   },
   measure(params, terminals, sim) {
     const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
@@ -464,9 +464,12 @@ const opampRails: ComponentPlugin = {
     const vout = Math.max(vLow, Math.min(vHigh, voutIdeal));
     // Stamp as a voltage source (with limited gain -> just use the clamped value)
     sys.stampVoltageSource(out, 0, vout);
+    // Input pins: 1 MΩ pull-down to GND (prevents floating when unconnected).
+    sys.stampConductance(inp, 0, 1e-6);
+    sys.stampConductance(inn, 0, 1e-6);
     // Power pins: high-Z
-    sys.stampConductance(vp, 0, 1e-9);
-    sys.stampConductance(vn, 0, 1e-9);
+    sys.stampConductance(vp, 0, 1e-13);
+    sys.stampConductance(vn, 0, 1e-13);
   },
   measure(params, terminals, sim) {
     const inp = terminals.find((t) => t.terminalId === 'in+')!.nodeId;
@@ -611,11 +614,11 @@ const sevenSegment: ComponentPlugin = {
         if (on) {
           sys.stampConductance(node, com, 1 / rSeg);
         } else {
-          sys.stampConductance(node, com, 1e-9);
+          sys.stampConductance(node, com, 1e-13);
         }
       } else {
         // Inactive: high impedance, keep latched state
-        sys.stampConductance(node, com, 1e-9);
+        sys.stampConductance(node, com, 1e-13);
       }
     }
   },
@@ -701,8 +704,8 @@ const vco: ComponentPlugin = {
     const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
     const vin = terminals.find((t) => t.terminalId === 'in')!.nodeId;
     const vcc = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
-    if (vcc !== gnd) sys.stampConductance(vcc, gnd, 1e-9);
-    sys.stampConductance(vin, gnd, 1e-9);
+    if (vcc !== gnd) sys.stampConductance(vcc, gnd, 1e-13);
+    sys.stampConductance(vin, gnd, 1e-6);
     // compute frequency
     const vIn = sim.nodeVoltage[vin];
     const freq = Math.max(0.001, (params.baseFreq as number) + (params.sensitivity as number) * vIn);
@@ -775,7 +778,7 @@ const crystal: ComponentPlugin = {
     st.phase = (st.phase + freq * sim.dt) % 1;
     const high = st.phase < 0.5;
     if (out !== gnd) sys.stampVoltageSource(out, gnd, high ? vccV : 0);
-    if (gnd !== 0) sys.stampConductance(gnd, 0, 1e-9);
+    if (gnd !== 0) sys.stampConductance(gnd, 0, 1e-13);
   },
   measure(params, terminals, sim) {
     const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
@@ -1135,7 +1138,18 @@ const cd4026: ComponentPlugin = {
     const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
     const vcc = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
     // Power: weak pull-up on vcc to gnd (avoid floating)
-    if (vcc !== gnd) sys.stampConductance(vcc, gnd, 1e-9);
+    if (vcc !== gnd) sys.stampConductance(vcc, gnd, 1e-13);
+
+    // Add weak pull-down on CLK and RST input pins.
+    const clkPin = terminals.find((t) => t.terminalId === 'clk')?.nodeId;
+    const rstPin = terminals.find((t) => t.terminalId === 'rst')?.nodeId;
+    const inputPullDown = 1e-6;
+    if (clkPin !== undefined && clkPin !== gnd && clkPin !== vcc) {
+      sys.stampConductance(clkPin, gnd, inputPullDown);
+    }
+    if (rstPin !== undefined && rstPin !== gnd && rstPin !== vcc) {
+      sys.stampConductance(rstPin, gnd, inputPullDown);
+    }
 
     // Persistent state for this counter instance
     const key = `cd4026_${terminals.map(t => `${t.terminalId}=${t.nodeId}`).join('_')}`;

@@ -209,7 +209,7 @@ const arduino: ComponentPlugin = {
     // A0, A1: inputs (high-Z, weak pull-down to avoid floating node)
     ['a0', 'a1'].forEach((tid) => {
       const node = terminals.find((t) => t.terminalId === tid)!.nodeId;
-      if (node !== gnd) sys.stampConductance(node, gnd, 1e-9);
+      if (node !== gnd) sys.stampConductance(node, gnd, 1e-6);
     });
     // sketch
     const key = 'arduino_' + terminals.find((t) => t.terminalId === 'd2')!.nodeId;
@@ -318,7 +318,7 @@ const raspberryPi: ComponentPlugin = {
     } else {
       ['gpio2', 'gpio3', 'gpio4', 'gpio17'].forEach((tid) => {
         const node = terminals.find((t) => t.terminalId === tid)!.nodeId;
-        if (node !== gnd) sys.stampConductance(node, gnd, 1e-9);
+        if (node !== gnd) sys.stampConductance(node, gnd, 1e-6);
       });
     }
   },

@@ -446,7 +446,7 @@ const led: ComponentPlugin = {
       sys.stampCurrentSource(k, a, vf / r);
     } else {
       // reverse biased: leak (1e-9 S wins against open switches in voltage divider)
-      sys.stampConductance(a, k, 1e-9);
+      sys.stampConductance(a, k, 1e-13);
     }
   },
   getFlowPath(params, sim) {

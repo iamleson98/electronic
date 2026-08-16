@@ -66,7 +66,7 @@ const diode: ComponentPlugin = {
       sys.stampCurrentSource(k, a, vf / r);
     } else {
       // reverse biased: leak (1e-9 S wins against open switches in voltage divider)
-      sys.stampConductance(a, k, 1e-9);
+      sys.stampConductance(a, k, 1e-13);
     }
   },
   getFlowPath() {
@@ -193,8 +193,8 @@ const npn: ComponentPlugin = {
     if (!on) {
       // Off: tiny leak so the matrix stays non-singular and the base is
       // pulled to a defined voltage by the external circuit.
-      sys.stampConductance(c, e, 1e-9);
-      sys.stampConductance(b, e, 1e-9);
+      sys.stampConductance(c, e, 1e-13);
+      sys.stampConductance(b, e, 1e-13);
       st[key + '_ib'] = 0;
       st[key + '_branch'] = -1;
       return;
@@ -336,6 +336,9 @@ const opamp: ComponentPlugin = {
     const inp = terminals.find((t) => t.terminalId === 'in+')!.nodeId;
     const inn = terminals.find((t) => t.terminalId === 'in-')!.nodeId;
     const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
+    // Add high-impedance input bias (1 MΩ to GND) on both input pins.
+    sys.stampConductance(inp, 0, 1e-6);
+    sys.stampConductance(inn, 0, 1e-6);
     // VCVS: V(out) - V(0) = gain * (V(inp) - V(inn))
     sys.stampVCVS(out, 0, inp, inn, gain);
   },
@@ -432,7 +435,7 @@ const timer555: ComponentPlugin = {
     const vcc = params.vcc as number;
     const vccNode = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
     const gndNode = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
-    if (vccNode !== gndNode) sys.stampConductance(vccNode, gndNode, 1e-9);
+    if (vccNode !== gndNode) sys.stampConductance(vccNode, gndNode, 1e-13);
 
     // CTRL pin: if left unconnected, add weak pull to 2/3 VCC
     const ctrlNode = terminals.find((t) => t.terminalId === 'ctrl')!.nodeId;
@@ -440,6 +443,22 @@ const timer555: ComponentPlugin = {
       const ctrlG = 1 / 5e6;
       sys.stampConductance(ctrlNode, gndNode, ctrlG);
       sys.stampCurrentSource(gndNode, ctrlNode, (2 / 3) * vcc * ctrlG);
+    }
+
+    // Add weak pull-down on THR, TRIG input pins (1 MΩ to GND).
+    // RST pin: pull UP to VCC (active-low).
+    const thrPin = terminals.find((t) => t.terminalId === 'thr')?.nodeId;
+    const trigPin = terminals.find((t) => t.terminalId === 'trig')?.nodeId;
+    const rstPin = terminals.find((t) => t.terminalId === 'rst')?.nodeId;
+    const inputPullDown = 1e-6;
+    if (thrPin !== undefined && thrPin !== gndNode && thrPin !== vccNode) {
+      sys.stampConductance(thrPin, gndNode, inputPullDown);
+    }
+    if (trigPin !== undefined && trigPin !== gndNode && trigPin !== vccNode) {
+      sys.stampConductance(trigPin, gndNode, inputPullDown);
+    }
+    if (rstPin !== undefined && rstPin !== gndNode && rstPin !== vccNode) {
+      sys.stampConductance(rstPin, vccNode, inputPullDown);
     }
 
     const key = stateKey555(terminals);
@@ -468,7 +487,7 @@ const timer555: ComponentPlugin = {
       if (!st.ff) {
         if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1 / 50);
       } else {
-        if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1e-9);
+        if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1e-13);
       }
       return;
     }
@@ -506,7 +525,7 @@ const timer555: ComponentPlugin = {
     if (!st.ff) {
       if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1 / 50);
     } else {
-      if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1e-9);
+      if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1e-13);
     }
   },
   step(params, terminals, sim, instance) {
@@ -628,6 +647,16 @@ function makeLogicGate(type: string, name: string, symbol: string, op: (a: boole
       const b = terminals.find((t) => t.terminalId === 'b')?.nodeId;
       const y = terminals.find((t) => t.terminalId === 'y')!.nodeId;
       const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
+      const vcc = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
+
+      // Add weak pull-down resistors on input pins (1 MΩ to GND).
+      // Prevents floating input nodes when button is open → singular matrix.
+      const inputPullDown = 1e-6;  // 1 MΩ = 1e-6 S
+      if (a !== gnd && a !== vcc) sys.stampConductance(a, gnd, inputPullDown);
+      if (b !== undefined && b !== gnd && b !== vcc) sys.stampConductance(b, gnd, inputPullDown);
+      // Power pin: ultra-tiny leak for matrix conditioning.
+      if (vcc !== gnd) sys.stampConductance(vcc, gnd, 1e-13);
+
       const key = `gate_${y}`;
       const st = sim.state[key] ?? (sim.state[key] = { out: false });
       const aHigh = sim.nodeVoltage[a] > thresh;
