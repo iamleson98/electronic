@@ -150,9 +150,41 @@ class ZaiProvider implements AIProvider {
   name: ProviderName = 'zai';
   model = 'glm-4.6';
 
-  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number }): Promise<ChatResult> {
+  /**
+   * Create a ZAI SDK instance.
+   *
+   * On the local dev environment, /etc/.z-ai-config exists and ZAI.create()
+   * reads it automatically.
+   *
+   * On Vercel (or any environment where the config file is missing), we
+   * bypass the file and construct the instance directly from the ZAI_CONFIG
+   * env var (a JSON string with baseUrl, apiKey, token, userId, chatId).
+   */
+  private async createZAI(): Promise<any> {
     const { default: ZAI } = await import('z-ai-web-dev-sdk');
-    const zai = await ZAI.create();
+    try {
+      // Try the normal file-based config first (works locally)
+      return await ZAI.create();
+    } catch {
+      // File not found — construct from env var (Vercel deployment)
+      const configJson = process.env.ZAI_CONFIG;
+      if (!configJson) {
+        throw new Error(
+          'Z.ai config file not found and ZAI_CONFIG env var not set. ' +
+          'On Vercel: set ZAI_CONFIG to the JSON config from /etc/.z-ai-config. ' +
+          'Locally: ensure /etc/.z-ai-config exists.'
+        );
+      }
+      const config = JSON.parse(configJson);
+      // The constructor is private in the type declarations but works at runtime.
+      // We cast to any to bypass the TypeScript private check — this is the only
+      // way to initialize the SDK without a config file on Vercel.
+      return new (ZAI as any)(config);
+    }
+  }
+
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number }): Promise<ChatResult> {
+    const zai = await this.createZAI();
 
     const body: any = {
       model: this.model,
