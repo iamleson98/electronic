@@ -1678,7 +1678,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       }
       const trace = traces[traceIdx];
       trace.samples.push({ time: result.sim.time, voltage: v });
-      if (trace.samples.length > s.maxTraceSamples) {
+      // Ring buffer: only slice every 50 steps to reduce GC pressure
+      // (was: slice on every step, allocating a new array 60×/sec)
+      if (trace.samples.length > s.maxTraceSamples + 50) {
         trace.samples = trace.samples.slice(-s.maxTraceSamples);
       }
       traces[traceIdx] = { ...trace };

@@ -68,7 +68,7 @@ export function runBatch(
   opts?: Partial<SimOptions>,
 ): BatchResult {
   const start = performance.now();
-  const sweepValues = generateSweepValues(config, components);
+  const sweepValues = generateSweepValues(config, components, wires, plugins);
   const traces: RealTrace[] = [];
   const outputValues: number[] = [];
 
@@ -112,7 +112,7 @@ export function runBatch(
   };
 }
 
-function generateSweepValues(config: BatchConfig, components?: CircuitComponent[]): SweepValue[] {
+function generateSweepValues(config: BatchConfig, components: CircuitComponent[], wires: Wire[], plugins: Map<string, ComponentPlugin>): SweepValue[] {
   const values: SweepValue[] = [];
   if (config.type === 'step') {
     if (config.list) {
@@ -126,38 +126,29 @@ function generateSweepValues(config: BatchConfig, components?: CircuitComponent[
       }
     }
   } else if (config.type === 'mc') {
-    const runs = config.runs ?? 100;
-    const tol = config.tolerance ?? 0.05;
-    const dist = config.distribution ?? 'uniform';
-    // Look up the actual nominal value of the param from the components array.
-    // If the caller explicitly provided `config.start`, use that instead
-    // (for cases where the user wants to sweep an absolute range rather than
-    // perturb the nominal).
-    let nominal: number | undefined = config.start;
-    if (nominal === undefined && components) {
-      const c = components.find(cc => cc.id === config.componentId);
-      if (c) {
-        const v = c.parameters[config.param];
-        if (typeof v === 'number') nominal = v;
+    // Use the real Monte Carlo implementation from monte-carlo.ts
+    // (synchronous import — monte-carlo.ts is pure JS, no async needed)
+    const { runMonteCarlo } = require('./monte-carlo');
+    const mcConfig = {
+      runs: config.runs ?? 100,
+      seed: 42,
+      tolerances: [{
+        componentId: config.componentId,
+        param: config.param,
+        tolerance: config.tolerance ?? 0.05,
+        distribution: (config.distribution === 'gaussian' ? 'gauss' : 'uniform'),
+      }],
+      measurement: { type: 'voltage', node: '' },
+      nBins: 20,
+    };
+    const doc = { version: 1, components, wires };
+    const mcResult = runMonteCarlo(doc, mcConfig, plugins);
+    // Extract sweep values from the Monte Carlo perturbations
+    for (const run of mcResult.runs) {
+      const perturbation = run.perturbations.find((p: any) => p.componentId === config.componentId && p.param === config.param);
+      if (perturbation) {
+        values.push({ name: config.param, value: perturbation.perturbed });
       }
-    }
-    // Fall back to 1 if we genuinely can't find a nominal — better than 1000.
-    const nominalValue = nominal ?? 1;
-    for (let i = 0; i < runs; i++) {
-      let delta: number;
-      if (dist === 'uniform') {
-        delta = (Math.random() * 2 - 1) * tol * nominalValue;
-      } else if (dist === 'gaussian') {
-        // Box-Muller transform for gaussian
-        const u1 = Math.random();
-        const u2 = Math.random();
-        const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-        delta = z * (tol / 3) * nominalValue;  // 3σ = tol
-      } else {
-        // worst_case: ±tol only
-        delta = (i % 2 === 0 ? 1 : -1) * tol * nominalValue;
-      }
-      values.push({ name: config.param, value: nominalValue + delta });
     }
   } else if (config.type === 'worst') {
     // Two runs: min and max (worst-case ±tol)

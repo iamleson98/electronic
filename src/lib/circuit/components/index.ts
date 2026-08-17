@@ -24,3 +24,5 @@ export type { ComponentPlugin } from '../types';
 import './p1-components';
 // Register P1 logic ICs
 import './p1-logic';
+// Register P2 components
+import './p2-components';
