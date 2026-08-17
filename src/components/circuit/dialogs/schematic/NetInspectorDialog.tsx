@@ -88,8 +88,8 @@ export function NetInspectorDialog({ open, onClose }: { open: boolean; onClose: 
       });
     }
     netInfos.sort((a, b) => a.name.localeCompare(b.name));
-    setNets(netInfos);
     // eslint-disable-next-line react-hooks/set-state-in-effect
+    setNets(netInfos);
   }, [open, components, wires]);
 
   const filtered = nets.filter((n) => !filter || n.name.toLowerCase().includes(filter.toLowerCase()) || n.components.some((c) => c.includes(filter)));

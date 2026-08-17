@@ -7,7 +7,7 @@ import {
   ResizablePanelGroup,
 } from '@/components/ui/resizable';
 import { Button } from '@/components/ui/button';
-import { CircuitBoard, Cpu, Zap, Box, HelpCircle, Share2, Library, Sparkles } from 'lucide-react';
+import { CircuitBoard, Zap, Box, HelpCircle, Share2, Library, Sparkles } from 'lucide-react';
 import { CircuitCanvas } from '@/components/circuit/CircuitCanvas';
 import { Toolbar } from '@/components/circuit/Toolbar';
 import { ComponentPalette } from '@/components/circuit/ComponentPalette';
@@ -229,7 +229,7 @@ export default function Home() {
                 </div>
                 <ResizablePanelGroup direction="horizontal">
                   <ResizablePanel defaultSize={18} minSize={14} maxSize={28}>
-                    <nav aria-label="Component palette">
+                    <nav aria-label="Component palette" className="h-full min-h-0">
                       <ComponentPalette />
                     </nav>
                   </ResizablePanel>
@@ -237,7 +237,7 @@ export default function Home() {
                   <ResizablePanel defaultSize={64} minSize={40}>
                     <ResizablePanelGroup direction="vertical">
                       <ResizablePanel defaultSize={70} minSize={30}>
-                        <main aria-label="Circuit canvas">
+                        <main aria-label="Circuit canvas" className="h-full min-h-0">
                           <CircuitCanvas />
                         </main>
                       </ResizablePanel>

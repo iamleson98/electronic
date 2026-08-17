@@ -1,5 +1,5 @@
 // Type definitions and shared constants for CircuitCanvas.
-import type { Vec2, Wire } from '@/lib/circuit/types';
+import type { Vec2 } from '@/lib/circuit/types';
 
 export const CELL_SIZE = 24;
 

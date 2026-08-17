@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
-import { examples, exampleCategories } from '@/lib/circuit/examples';
+import { exampleCategories } from '@/lib/circuit/examples';
 import { toast } from 'sonner';
 import {
-  Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Square, Gauge, Zap,
+  Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Gauge, Zap,
   FileText, ChevronDown, Settings2, Database, FileCode, Boxes, ShieldCheck,
   Search, FileDown, Network, Layers, BookOpen, Wand2, Ruler, Pencil,
   Activity, Sliders, Sigma, Waves, ChevronRight, ChevronLeft, RotateCcw,
@@ -20,10 +20,6 @@ import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-// Extracted toolbar sub-components
-import { ExamplesDropdown } from './toolbar/ExamplesDropdown';
-import { SimulationControls } from './toolbar/SimulationControls';
-import { FileOperations } from './toolbar/FileOperations';
 import { MyCircuitsDialog } from './MyCircuitsDialog';
 import { SpiceImportDialog } from './SpiceImportDialog';
 import { SubCircuitDialog } from './SubCircuitDialog';

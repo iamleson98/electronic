@@ -47,6 +47,7 @@ export function FindReplaceDialog({ open, onClose }: { open: boolean; onClose: (
 
   const runFind = useCallback(() => {
     const comps = findComponents(query, { searchRefdes, searchValue, searchFields, caseSensitive });
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setResults(comps.map((c) => {
       // figure out which field matched
       let matchField = 'refdes';
@@ -59,9 +60,9 @@ export function FindReplaceDialog({ open, onClose }: { open: boolean; onClose: (
   useEffect(() => {
     if (open && query) {
       // Guard with a ref-derived check to avoid setState-in-effect cascades.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       runFind();
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
   }, [open, query, runFind]);
 
   const jumpTo = (id: string) => {

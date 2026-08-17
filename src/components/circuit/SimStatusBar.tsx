@@ -15,9 +15,14 @@ export function SimStatusBar() {
   const wires = useEditor((s) => s.wires);
   const [fps, setFps] = useState(0);
   const frameCountRef = useRef(0);
-  const lastFpsTimeRef = useRef(performance.now());
+  // Initialize lazily inside useEffect to avoid calling performance.now()
+  // during render (which is an impure function call).
+  const lastFpsTimeRef = useRef(0);
 
   useEffect(() => {
+    // Initialize the FPS timer inside the effect (avoids calling
+    // performance.now() during render).
+    lastFpsTimeRef.current = performance.now();
     let raf = 0;
     const loop = () => {
       frameCountRef.current++;

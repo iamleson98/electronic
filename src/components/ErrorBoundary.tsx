@@ -1,6 +1,7 @@
 'use client';
 
 import React, { Component, ErrorInfo } from 'react';
+import { reportError as reportErrorToMonitor } from '@/lib/error-monitoring';
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -30,8 +31,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
     // Wire to the real error monitoring module (previously was a no-op).
     try {
-      const { reportError: report } = require('@/lib/error-monitoring');
-      report(error, errorInfo);
+      reportErrorToMonitor(error, errorInfo);
     } catch {
       // error-monitoring may not be initialized — ignore.
     }
@@ -117,8 +117,7 @@ export function withErrorBoundary(Component: React.ComponentType<any>, options: 
 export function reportError(error: Error, errorInfo?: any): void {
   console.error('[ErrorBoundary] Reported error:', error, errorInfo);
   try {
-    const { reportError: report } = require('@/lib/error-monitoring');
-    report(error, errorInfo);
+    reportErrorToMonitor(error, errorInfo);
   } catch {
     // error-monitoring may not be initialized — ignore.
   }

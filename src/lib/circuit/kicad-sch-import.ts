@@ -318,8 +318,8 @@ export function parseEagleSch(text: string): KicadImportResult {
   const nextId = () => `e_${Date.now().toString(36)}_${idCounter++}`;
 
   // Use DOMParser if available, else regex
-  let parts: { name: string; library: string; deviceset: string; x: number; y: number; rot: number }[] = [];
-  let eagleWires: { x1: number; y1: number; x2: number; y2: number }[] = [];
+  const parts: { name: string; library: string; deviceset: string; x: number; y: number; rot: number }[] = [];
+  const eagleWires: { x1: number; y1: number; x2: number; y2: number }[] = [];
   if (typeof DOMParser !== 'undefined') {
     const dom = new DOMParser().parseFromString(text, 'application/xml');
     const partEls = dom.getElementsByTagName('part');

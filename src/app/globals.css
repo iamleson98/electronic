@@ -84,9 +84,12 @@
    Activated via the `data-theme="high-contrast"` attribute on <html>.
    - All backgrounds: pure black (#000) or pure white (#fff)
    - All text: pure white on black (21:1 contrast ratio)
-   - Borders: thick white (3px) for clear delineation
+   - Borders: thick white (2px) for UI chrome (buttons, inputs, panels)
    - Accent: bright yellow (#ffd400) for selections and active elements
    - Error: bright red (#ff3030), Warning: bright yellow (#ffd400)
+   NOTE: we deliberately DO NOT use `* { border-width: 2px }` because that
+   would also affect internal layout divs, breaking flex/grid sizing.
+   Instead, we scope the thicker borders to interactive elements only.
    ────────────────────────────────────────────────────────────────────────── */
 [data-theme="high-contrast"] {
   --background: #000000;
@@ -109,8 +112,24 @@
   --ring: #ffd400;
   --radius: 0.25rem;
 }
-[data-theme="high-contrast"] * {
-  border-width: 2px !important;
+/* Thicker borders on interactive / panel elements only — NOT `*` (avoids
+   breaking flex/grid layout calculations on internal divs). */
+[data-theme="high-contrast"] button,
+[data-theme="high-contrast"] [role="button"],
+[data-theme="high-contrast"] [role="application"],
+[data-theme="high-contrast"] input,
+[data-theme="high-contrast"] select,
+[data-theme="high-contrast"] textarea,
+[data-theme="high-contrast"] [data-slot="button"],
+[data-theme="high-contrast"] [data-slot="dropdown-menu-item"],
+[data-theme="high-contrast"] [data-slot="select-item"],
+[data-theme="high-contrast"] [data-slot="dialog-content"],
+[data-theme="high-contrast"] [data-slot="dropdown-menu-content"],
+[data-theme="high-contrast"] [data-slot="select-content"],
+[data-theme="high-contrast"] aside,
+[data-theme="high-contrast"] nav,
+[data-theme="high-contrast"] main {
+  border: 2px solid #ffffff !important;
 }
 [data-theme="high-contrast"] button:focus-visible,
 [data-theme="high-contrast"] [role="button"]:focus-visible,

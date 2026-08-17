@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useEffect } from 'react';
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+  Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
@@ -12,7 +12,6 @@ import { exampleCategories, type ExampleEntry } from '@/lib/circuit/examples';
 import { exportSchematicSVG } from '@/lib/circuit/schematic-plot';
 import { useEditor } from '@/lib/circuit/store';
 import {
-  KEYBOARD_SHORTCUTS,
   getShortcutsByCategory,
   getAllCategories,
   formatShortcut,
@@ -102,6 +101,7 @@ export function HelpDialog({ open, onClose }: Props) {
   useEffect(() => {
     try {
       const seen = localStorage.getItem(CHANGELOG_SEEN_KEY);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setHasUnseen(seen !== LAST_SEEN_VERSION);
     } catch { /* localStorage disabled */ }
   }, []);

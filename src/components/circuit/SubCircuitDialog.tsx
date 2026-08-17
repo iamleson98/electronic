@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import { registerSubCircuit } from '@/lib/circuit/subcircuit';
-import type { CircuitComponent } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
 import {
   Dialog,

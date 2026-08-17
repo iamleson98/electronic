@@ -12,7 +12,7 @@
 //      can apply the mutations)
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getProvider, type ChatMessage, type ToolCall, type ProviderName } from '@/lib/ai/provider';
+import { getProvider, type ChatMessage, type ProviderName } from '@/lib/ai/provider';
 import { TOOLS_BY_NAME, getToolDefinitions, type ToolContext } from '@/lib/ai/tools';
 import type { CircuitDocument, CircuitComponent, Wire } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';

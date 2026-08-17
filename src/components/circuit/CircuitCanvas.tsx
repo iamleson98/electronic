@@ -1,14 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Zap } from 'lucide-react';
 import { useEditor } from '@/lib/circuit/store';
 import { getPlugin, getAllPlugins } from '@/lib/circuit/registry';
-import { computeWireCurrents, computeComponentCurrents } from '@/lib/circuit/engine';
-import { buildNodeMap } from '@/lib/circuit/engine';
+import { exampleCategories } from '@/lib/circuit/examples';
+import { computeWireCurrents, computeComponentCurrents, buildNodeMap } from '@/lib/circuit/engine';
 import { buildWireColorMap } from '@/lib/circuit/net-colors';
-import type { CircuitComponent, ComponentPlugin, TerminalDef, Vec2, Wire } from '@/lib/circuit/types';
-import { rotateTerminal } from '@/lib/circuit/components/draw';
+import type { Vec2 } from '@/lib/circuit/types';
 import {
   drawERCMarkers,
   drawAutoJunctions,
@@ -21,9 +20,7 @@ import {
   drawSheetBox,
   findSheetAt,
   findSheetPinAt,
-  getSheetPinAbsPos,
 } from '@/lib/circuit/sheet-render';
-import type { HierarchicalSheet } from '@/lib/circuit/types';
 // Extracted modules
 import {
   CELL_SIZE,
@@ -1439,7 +1436,6 @@ export function CircuitCanvas() {
               <button
                 className="cursor-pointer rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-900 hover:bg-cyan-400"
                 onClick={() => {
-                  const { exampleCategories } = require('@/lib/circuit/examples');
                   if (exampleCategories.length > 0 && exampleCategories[0].examples.length > 0) {
                     useEditor.getState().loadDocument(exampleCategories[0].examples[0].doc);
                   }
@@ -1509,7 +1505,6 @@ export function CircuitCanvas() {
           onClick={() => {
             // Zoom to fit: compute bounding box of all components + wires
             const plugins = new Map<string, any>();
-            const { getAllPlugins } = require('@/lib/circuit/registry');
             for (const p of getAllPlugins()) plugins.set(p.type, p);
             if (components.length === 0) { setZoom(1); setPan({ x: 0, y: 0 }); return; }
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;

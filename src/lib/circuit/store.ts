@@ -22,8 +22,9 @@ import type {
   Wire,
 } from './types';
 import { DEFAULT_PAGE_SETUP, DEFAULT_TITLE_BLOCK } from './types';
-import { getPlugin } from './registry';
+import { getPlugin, getAllPlugins } from './registry';
 import { simulateStep, getTerminalsForComponent, buildNodeMap } from './engine';
+import { findRoute, buildRoutingGrid, pathToWaypoints } from './smart-wire-router';
 import { validatePhysics, type PhysicsViolation } from './physics-validator';
 import { runFullERC } from './erc';
 import { snapshotSheet, flattenHierarchy } from './hierarchy';
@@ -1271,8 +1272,6 @@ export const useEditor = create<EditorState>((set, get) => ({
     // simple L-shaped routing if findRoute fails or isn't available.
     let waypoints: { x: number; y: number }[] | undefined;
     try {
-      const { findRoute, buildRoutingGrid, pathToWaypoints } = require('./smart-wire-router');
-      const { getAllPlugins } = require('./registry');
       const s = get();
       const plugins = new Map(getAllPlugins().map((p: any) => [p.type, p]));
       const grid = buildRoutingGrid(s.components, s.wires, plugins, { width: 100, height: 60 }, 5);

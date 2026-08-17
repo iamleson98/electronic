@@ -13,9 +13,7 @@ import { AnalysisType, ResultDisplay } from './shared';
 
 import { useEffect, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
-import type { AnalysisConfig, AnalysisResult } from '@/lib/circuit/analysis';
-import type { SimOptions } from '@/lib/circuit/sim-options';
-import { exportRawFile, TraceMath, computeFFT, complexToMagnitude, complexToPhase, complexToDb, type MeasCommand, parseMeasLine, type Stimulus, sampleStimulus, stimulusToSPICE } from '@/lib/circuit/measurement';
+import type { AnalysisConfig } from '@/lib/circuit/analysis';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
@@ -23,14 +21,11 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Switch } from '@/components/ui/switch';
-import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from 'sonner';
 import {
-  Activity, BarChart3, Sliders, Gauge, Waves, Sigma, AlertTriangle, CheckCircle,
+  Activity, Waves, Sigma, AlertTriangle, CheckCircle,
   Save, FunctionSquare, Microscope, Wand2,
 } from 'lucide-react';
 
@@ -62,7 +57,10 @@ export function AnalysisDialog({ open, onClose }: { open: boolean; onClose: () =
   useEffect(() => {
     if (open && !sourceId && components.length > 0) {
       const source = components.find((c) => c.type === 'dcVoltage' || c.type === 'acVoltage' || c.type === 'currentSource');
-      if (source && sourceId !== source.id) setSourceId(source.id);
+      if (source && sourceId !== source.id) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setSourceId(source.id);
+      }
     }
   }, [open, components, sourceId]);
 

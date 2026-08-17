@@ -6,7 +6,7 @@
 
 import { useMemo } from 'react';
 import type { RealTrace, ComplexTrace } from '@/lib/circuit/analysis';
-import { complexToMagnitude, complexToPhase, complexToDb } from '@/lib/circuit/measurement';
+import { complexToPhase, complexToDb } from '@/lib/circuit/measurement';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BodePlot — dual-axis log-x chart for AC analysis

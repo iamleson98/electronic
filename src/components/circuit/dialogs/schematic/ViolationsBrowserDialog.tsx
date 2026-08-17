@@ -40,12 +40,15 @@ export function ViolationsBrowserDialog({ open, onClose }: { open: boolean; onCl
 
   const refresh = useCallback(() => {
     const r = runFullERCCheck();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setErrors(r.errors);
   }, [runFullERCCheck]);
 
   useEffect(() => {
-    if (open) refresh();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      refresh();
+    }
   }, [open, refresh]);
 
   const filtered = errors.filter((e) => filter === 'all' || e.severity === filter);

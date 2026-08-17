@@ -217,7 +217,7 @@ function routeOneNet(
   const target = conn.to;
 
   // Try direct routing first
-  let attempt = attemptRoute(
+  const attempt = attemptRoute(
     source, target, netEntry.net,
     existingTraces, existingVias, padsByNet, board, options,
   );

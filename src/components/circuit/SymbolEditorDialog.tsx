@@ -137,10 +137,10 @@ export function SymbolEditorDialog({ open, onClose, onSaved, initialDesign }: Pr
   // Load initialDesign when it changes
   useEffect(() => {
     if (open && initialDesign) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDesign(initialDesign);
       setSelectedId(null);
     }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
   }, [open, initialDesign]);
 
   // ── Coordinate helpers ──────────────────────────────────────────────

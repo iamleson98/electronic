@@ -28,10 +28,25 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "@next/next/no-img-element": "off",
   },
 }, {
+  // Scripts are CLI tools where console.log is the primary output mechanism.
+  files: ["scripts/**/*"],
+  rules: {
+    "no-console": "off",
+    "@typescript-eslint/no-explicit-any": "off",
+    "@typescript-eslint/no-unused-vars": "off",
+  },
+}, {
+  // Test files use relaxed rules for any/unused.
+  files: ["tests/**/*", "tests-e2e/**/*"],
+  rules: {
+    "@typescript-eslint/no-explicit-any": "off",
+    "@typescript-eslint/no-unused-vars": "off",
+    "no-console": "off",
+  },
+}, {
   ignores: [
     "node_modules/**", ".next/**", "out/**", "build/**",
     "next-env.d.ts", "examples/**", "skills/**",
-    "tests/**",  // test files use relaxed rules
   ],
 }];
 

@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Dialog, DialogContent,
 } from '@/components/ui/dialog';
-import { Search, ChevronRight } from 'lucide-react';
+import { Search } from 'lucide-react';
 import { useEditor } from '@/lib/circuit/store';
 import { usePCB } from '@/lib/pcb/store';
 import { getAllPlugins } from '@/lib/circuit/registry';

@@ -107,6 +107,7 @@ export function FirstRunTutorial() {
     const onResize = () => updateHighlight();
     window.addEventListener('resize', onResize);
     window.addEventListener('scroll', onResize, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     return () => {
       window.removeEventListener('resize', onResize);
       window.removeEventListener('scroll', onResize, true);

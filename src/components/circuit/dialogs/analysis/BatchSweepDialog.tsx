@@ -57,7 +57,10 @@ export function BatchSweepDialog({ open, onClose }: { open: boolean; onClose: ()
   useEffect(() => {
     if (open && !componentId && components.length > 0) {
       const c = components.find((c) => c.type === 'resistor') ?? components[0];
-      if (c && componentId !== c.id) setComponentId(c.id);
+      if (c && componentId !== c.id) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setComponentId(c.id);
+      }
     }
   }, [open, components, componentId]);
 

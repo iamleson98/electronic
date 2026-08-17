@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { desc, eq, sql, like, and } from 'drizzle-orm';
+import { desc, eq, like, and } from 'drizzle-orm';
 import { getDb } from '@/lib/db';
 import { savedCircuits } from '@/lib/schema';
 import { createCircuitSchema } from '@/lib/validation-schemas';

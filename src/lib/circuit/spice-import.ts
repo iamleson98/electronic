@@ -21,6 +21,7 @@
 
 import type { CircuitComponent, Wire, CircuitDocument } from './types';
 import { getPlugin } from './registry';
+import './components'; // register all built-in plugins (idempotent)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Value parsing — handles SPICE engineering suffixes (case-insensitive)
@@ -234,10 +235,6 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
   const netMembers = new Map<number, NetMember[]>();
   let groundId: string | null = null;
   let inSubckt = false;
-
-  // Ensure components module is loaded so plugins are registered
-  // (safe to call multiple times)
-  try { require('./components'); } catch { /* may be ESM */ }
 
   // Helper: ensure a ground component exists
   function ensureGround(): string {

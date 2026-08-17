@@ -6,10 +6,9 @@ import { getPlugin } from '@/lib/circuit/registry';
 import { getTerminalsForComponent, buildNodeMap } from '@/lib/circuit/engine';
 import { parseMeasLine, execMeas, computeFFT, type MeasCommand, type MeasResult } from '@/lib/circuit/measurement';
 import { computeTHD, downsampleSpectrum, type THDResult } from '@/lib/circuit/fourier';
-import { Activity, BarChart3, AlertCircle, Crosshair, Table2, Waves } from 'lucide-react';
+import { Activity, BarChart3, AlertCircle, Crosshair, Waves } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
 
 interface CursorState {
   active: boolean;
@@ -243,7 +242,12 @@ export function ProbePanel() {
   const hasCircuit = components.length > 0;
   const hasGround = components.some((c) => c.type === 'ground');
   const hasSource = components.some((c) => ['dcVoltage', 'acVoltage', 'pulseSource', 'currentSource', 'arduino', 'arduinoReal', 'raspberryPi', 'vco', 'crystal', 'timer555'].includes(c.type));
-  const readout = cursorReadout();
+  // Compute cursor readout in an effect (avoids accessing canvasRef during render).
+  const [readout, setReadout] = useState<ReturnType<typeof cursorReadout>>(null);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setReadout(cursorReadout());
+  }, [cursorReadout, cursor, cursorEnabled, traces]);
 
   return (
     <div className="flex h-full flex-col bg-slate-900" role="complementary" aria-label="Probe and oscilloscope panel">

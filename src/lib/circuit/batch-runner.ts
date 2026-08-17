@@ -14,6 +14,7 @@ import type { CircuitComponent, ComponentPlugin, Wire } from './types';
 import type { AnalysisConfig, AnalysisResult, RealTrace } from './analysis';
 import { runAnalysis } from './analysis';
 import { mergeOptions, type SimOptions } from './sim-options';
+import { runMonteCarlo } from './monte-carlo';
 
 export interface SweepValue {
   name: string;
@@ -127,8 +128,6 @@ function generateSweepValues(config: BatchConfig, components: CircuitComponent[]
     }
   } else if (config.type === 'mc') {
     // Use the real Monte Carlo implementation from monte-carlo.ts
-    // (synchronous import — monte-carlo.ts is pure JS, no async needed)
-    const { runMonteCarlo } = require('./monte-carlo');
     const mcConfig = {
       runs: config.runs ?? 100,
       seed: 42,
@@ -136,12 +135,12 @@ function generateSweepValues(config: BatchConfig, components: CircuitComponent[]
         componentId: config.componentId,
         param: config.param,
         tolerance: config.tolerance ?? 0.05,
-        distribution: (config.distribution === 'gaussian' ? 'gauss' : 'uniform'),
+        distribution: (config.distribution === 'gaussian' ? 'gauss' : 'uniform') as 'uniform' | 'gauss',
       }],
-      measurement: { type: 'voltage', node: '' },
+      measurement: { type: 'voltage' as const, node: '' },
       nBins: 20,
     };
-    const doc = { version: 1, components, wires };
+    const doc = { version: 1 as const, components, wires };
     const mcResult = runMonteCarlo(doc, mcConfig, plugins);
     // Extract sweep values from the Monte Carlo perturbations
     for (const run of mcResult.runs) {
