@@ -2,15 +2,17 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Exports:
 //   - `getDb()` — async getter that returns the initialized Drizzle instance.
-//   - `dbReady` — the init promise (resolved when migrations are applied).
+//   - `dbReady` — the init promise (resolved when the DB is connected).
+//   - `runMigrations()` — applies pending drizzle migrations. Called from
+//      src/instrumentation.ts on server startup so the first request after a
+//      deploy doesn't pay the migration cost.
 //
 // Requires two env vars:
 //   TURSO_DATABASE_URL  — e.g. libsql://your-db.turso.io
 //   TURSO_AUTH_TOKEN    — the Turso auth token
 //
-// On startup, drizzle's migrate() applies any pending migration files from
-// ./drizzle/. The __drizzle_migrations table tracks applied migrations so
-// each only runs once (idempotent across deploys).
+// Migrations live in ./drizzle/. The __drizzle_migrations table tracks applied
+// migrations so each only runs once (idempotent across deploys).
 //
 // During `next build`, returns a no-op stub — the real DB is only needed at
 // runtime when API routes handle requests.
@@ -31,6 +33,8 @@ const globalForDb = globalThis as unknown as {
   __drizzleDb: ReturnType<typeof createDrizzleDb> | undefined;
   __libsqlClient: ReturnType<typeof createClient> | undefined;
   __dbPromise: Promise<ReturnType<typeof createDrizzleDb>> | undefined;
+  __migrationsPromise: Promise<void> | undefined;
+  __migrationsApplied: boolean | undefined;
   __shutdownRegistered: boolean | undefined;
 };
 
@@ -42,6 +46,42 @@ function createDrizzleDb() {
   const db = drizzle(client, { schema: { savedCircuits } });
   globalForDb.__libsqlClient = client;
   return db;
+}
+
+/**
+ * Run pending drizzle migrations.
+ *
+ * Called from src/instrumentation.ts on server startup so migrations happen
+ * BEFORE any request is handled. If the instrumentation hook doesn't run
+ * (e.g., in tests, or in a non-Next.js environment), `initDb()` falls back
+ * to running migrations itself on first DB access.
+ *
+ * Safe to call multiple times — drizzle tracks applied migrations in the
+ * __drizzle_migrations table and only runs new ones.
+ */
+export async function runMigrations(): Promise<void> {
+  if (globalForDb.__migrationsApplied) return;
+  if (globalForDb.__migrationsPromise) return globalForDb.__migrationsPromise;
+
+  globalForDb.__migrationsPromise = (async () => {
+    // Skip during build phase
+    if (process.env.NEXT_BUILD === 'true' || process.env.NEXT_PHASE === 'phase-production-build') {
+      globalForDb.__migrationsApplied = true;
+      return;
+    }
+    if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
+      // Defer to initDb()'s error message
+      return;
+    }
+    const db = createDrizzleDb();
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    globalForDb.__migrationsApplied = true;
+    if (process.env.NODE_ENV !== 'production') {
+      globalForDb.__drizzleDb = db;
+    }
+  })();
+
+  return globalForDb.__migrationsPromise;
 }
 
 async function initDb(): Promise<ReturnType<typeof createDrizzleDb>> {
@@ -60,17 +100,16 @@ async function initDb(): Promise<ReturnType<typeof createDrizzleDb>> {
       );
     }
 
-    const db = createDrizzleDb();
-
-    // Run pending migrations — creates the schema if missing, applies any
-    // new migrations added in future deploys. Idempotent: tracks applied
-    // migrations in the __drizzle_migrations table.
-    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
-
-    if (process.env.NODE_ENV !== 'production') {
-      globalForDb.__drizzleDb = db;
+    // If migrations haven't been applied yet (e.g., instrumentation hook
+    // didn't run, or this is a test), apply them now as a fallback.
+    if (!globalForDb.__migrationsApplied) {
+      await runMigrations();
     }
-    return db;
+
+    // Reuse the drizzle instance created by runMigrations if it exists,
+    // otherwise create a new one.
+    if (globalForDb.__drizzleDb) return globalForDb.__drizzleDb;
+    return createDrizzleDb();
   })();
 
   return globalForDb.__dbPromise;

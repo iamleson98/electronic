@@ -8,7 +8,7 @@ import {
   Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Square, Gauge, Zap,
   FileText, ChevronDown, Settings2, Database, FileCode, Boxes, ShieldCheck,
   Search, FileDown, Network, Layers, BookOpen, Wand2, Ruler, Pencil,
-  Activity, Sliders, Sigma, Waves, ChevronRight, RotateCcw,
+  Activity, Sliders, Sigma, Waves, ChevronRight, ChevronLeft, RotateCcw,
 } from 'lucide-react';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
@@ -94,6 +94,8 @@ export function Toolbar() {
   const setShowValues = useEditor((s) => s.setShowValues);
   const showNetColors = useEditor((s) => s.showNetColors);
   const setShowNetColors = useEditor((s) => s.setShowNetColors);
+  const theme = useEditor((s) => s.theme);
+  const setTheme = useEditor((s) => s.setTheme);
   const activeTool = useEditor((s) => s.activeTool);
   const setActiveTool = useEditor((s) => s.setActiveTool);
 
@@ -268,22 +270,38 @@ export function Toolbar() {
           <span className="hidden text-sm font-semibold text-slate-100 sm:inline">CircuitLab</span>
         </div>
 
-        {/* Hierarchical sheet breadcrumb — shows Root / Sub-sheet when navigating */}
+        {/* Hierarchical sheet breadcrumb — sticky, prominent when inside a sub-sheet.
+            Shows Root / Sub-sheet with a left-arrow icon for back navigation. */}
         {activeSheet && (
-          <div className="mr-2 flex flex-shrink-0 items-center gap-1 rounded bg-slate-800/60 px-2 py-1 text-xs font-mono whitespace-nowrap">
+          <div
+            className="mr-2 flex flex-shrink-0 items-center gap-1 rounded-md border border-emerald-700/50 bg-emerald-950/40 px-2 py-1 text-xs font-mono whitespace-nowrap shadow-sm"
+            role="navigation"
+            aria-label="Sheet hierarchy breadcrumb"
+          >
             <button
-              className="text-slate-300 hover:text-emerald-300 transition-colors"
+              className="flex cursor-pointer items-center gap-0.5 text-slate-300 hover:text-emerald-300 transition-colors"
               onClick={() => setActiveSheet('')}
               title="Back to root sheet (Esc)"
             >
-              Root
+              <ChevronLeft size={12} />
+              <span>Root</span>
             </button>
             <ChevronRight size={12} className="text-slate-500" />
-            <span className="text-emerald-300">
+            <span className="font-semibold text-emerald-300">
               {sheets.find((s) => s.fileName === activeSheet)?.sheetName ??
                 childSheets[activeSheet]?.sheets?.find?.((s: any) => s.fileName === activeSheet)?.sheetName ??
                 activeSheet.replace(/\.kicad_sch$/, '')}
             </span>
+            {/* Pin count badge */}
+            {(() => {
+              const sheet = sheets.find((s) => s.fileName === activeSheet);
+              const pinCount = sheet?.pins?.length ?? 0;
+              return pinCount > 0 ? (
+                <span className="ml-1 rounded-full bg-emerald-700/40 px-1.5 py-0.5 text-[10px] text-emerald-200" title="Sheet pin count">
+                  {pinCount} pin{pinCount !== 1 ? 's' : ''}
+                </span>
+              ) : null;
+            })()}
           </div>
         )}
 
@@ -752,6 +770,22 @@ export function Toolbar() {
             <DropdownMenuCheckboxItem checked={showNetColors} onCheckedChange={setShowNetColors}>
               Color-Code Wires by Net
             </DropdownMenuCheckboxItem>
+            <DropdownMenuSeparator className="bg-slate-700" />
+            <DropdownMenuLabel className="text-slate-300">Theme</DropdownMenuLabel>
+            <div className="flex gap-1 px-2 py-1">
+              {(['dark', 'high-contrast'] as const).map((t) => (
+                <Button
+                  key={t}
+                  size="sm"
+                  variant={theme === t ? 'default' : 'ghost'}
+                  className="flex-1 h-7 text-xs"
+                  onClick={() => setTheme(t)}
+                  title={t === 'high-contrast' ? 'WCAG AAA high-contrast theme for low-vision users' : 'Default dark theme'}
+                >
+                  {t === 'high-contrast' ? 'High Contrast' : 'Dark'}
+                </Button>
+              ))}
+            </div>
             <DropdownMenuSeparator className="bg-slate-700" />
             <DropdownMenuLabel className="text-slate-300">Units</DropdownMenuLabel>
             <div className="flex gap-1 px-2 py-1">

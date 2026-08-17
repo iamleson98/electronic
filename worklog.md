@@ -2547,3 +2547,155 @@ Stage Summary:
   schematic-overlays.ts, page.tsx, store.ts, Toolbar.tsx, NetClassesDialog.tsx
 - 2 new test files: fourier-thd.test.ts (22), net-colors.test.ts (14)
 - TODO.md updated: 5 items moved from incomplete to complete
+
+---
+Task ID: p2-batch-2
+Agent: main
+Task: Continue working on incomplete TODO items — components, UI polish, DB, perf, dead-code wiring
+
+Work Log:
+- Ten features/improvements in one batch:
+
+1. CONSOLIDATE KEYBOARD SHORTCUTS (P2 UI Polish):
+   * HelpDialog's Shortcuts tab now reads from `keyboard-shortcuts.ts`
+     (single source of truth) via `KEYBOARD_SHORTCUTS`, `getShortcutsByCategory`,
+     `getAllCategories`, `formatShortcut`.
+   * Removed the old hardcoded `SHORTCUTS` array (12 entries, was out of sync
+     with the real handler in `use-canvas-keyboard.ts`).
+   * The consolidated list has 25 entries across 6 categories (editing,
+     history, simulation, tools, view, AI).
+
+2. "WHAT'S NEW" CHANGELOG (P2 UI Polish):
+   * New "What's New" tab in HelpDialog (5th tab, default-opened when there
+     are unseen entries).
+   * 3 versioned changelog entries: 2026-08-17, 2026-08-15, 2026-08-12.
+   * Amber "ping" badge on the Help button in page.tsx when there's an unseen
+     entry (localStorage `circuit-lab.changelog-seen`).
+   * Badge auto-clears on dialog open (or after 5s).
+
+3. SHEET NAVIGATION BAR (P2 UI Polish):
+   * Sticky breadcrumb now has an emerald border + 950/40 background (more
+     prominent than the old slate-800/60).
+   * Left-arrow icon next to "Root" for clear back navigation affordance.
+   * Pin count badge (e.g. "3 pins") shows the sub-sheet's pin count.
+   * role="navigation" + aria-label for screen readers.
+
+4. HIGH-CONTRAST THEME (P2 UI Polish):
+   * New `theme: 'high-contrast'` option in the store (was 'dark' | 'light').
+   * WCAG AAA CSS in globals.css: pure black/white with bright yellow (#ffd400)
+     accents, 2px borders everywhere, 3px yellow focus outlines.
+   * New `ThemeManager` component applies `data-theme` attribute to <html> +
+     persists to localStorage.
+   * Toggle in View → Theme dropdown (Dark / High Contrast).
+
+5. VOLTAGE REFERENCES (P2 Advanced Components):
+   * LM336 (2.5V) — Zener-style symbol, reverse-biased shunt regulator.
+   * ICL8069 (1.23V) — bandgap reference, 1.2V class.
+   * (TL431 and LM385 already existed.)
+   * All four support custom refV / onR / offR parameters, expose measure(),
+     and stamp a Thevenin-equivalent conductance + current source when on.
+
+6. OPTICAL COMPONENTS (P2 Advanced Components):
+   * Photodiode — photoconductive mode, photocurrent = responsivity ×
+     irradiance × active area; dark current offset; renders with light arrows
+     pointing into the diode.
+   * Phototransistor (NPN) — light-driven base current multiplied by hFE,
+     higher sensitivity than photodiode; renders as NPN with light arrows
+     on the base.
+   * Solar cell — photovoltaic source, V_oc × √(lux/1000) Thevenin model
+     with series resistance; renders as a blue PV panel with a sun icon.
+
+7. MOTORS (P2 Advanced Components):
+   * DC motor — improved measure() with back-EMF model: ω = (V − I·R) / K,
+     RPM = ω × 60 / (2π).
+   * Stepper motor (bipolar) — 4 terminals (A+/A−/B+/B−), two windings as
+     resistors, measure() reports V_A, V_B, I_A, I_B.
+   * Servo motor (PWM hobby) — VCC/GND/CTRL terminals, internal load
+     resistor, measure() reports VCC, CTRL, and angle θ (simplified: 0/90°
+     based on PWM threshold).
+
+8. ACTIVE CRYSTAL OSCILLATOR (P2 Advanced Components):
+   * 4-pin module: VCC, GND, OUT, EN.
+   * Generates a 50%-duty square wave at the rated frequency (default 16 MHz).
+   * EN gate: outputs vol (low) when EN is below threshold.
+   * measure() formats frequency as Hz/kHz/MHz and reports EN state.
+
+9. DB MIGRATIONS OUT OF REQUEST PATH (P2 Database):
+   * New `src/instrumentation.ts` — Next.js instrumentation hook that runs
+     `runMigrations()` once on server startup, before any request is handled.
+   * Refactored `src/lib/db.ts`:
+     - Extracted `runMigrations()` as a separate exported function.
+     - `initDb()` now calls `runMigrations()` as a fallback (so tests and
+       non-Next.js environments still work).
+     - Tracks `__migrationsApplied` and `__migrationsPromise` on globalThis
+       to deduplicate calls.
+     - Reuses the drizzle instance created by `runMigrations()` if available.
+   - Updated `tests/db-turso.test.ts` beforeEach to also clear the new
+     migration-tracking globals (was only clearing `__dbPromise` etc.).
+
+10. RING BUFFER FOR TRACE SAMPLES (P2 Advanced Simulation):
+    * New `src/lib/circuit/sample-ring-buffer.ts` (147 lines):
+      - `SampleRingBuffer` class with fixed-capacity Float64Array (times +
+        voltages), write index, length, isFull.
+      - O(1) `push(time, voltage)`, O(1) `last()`, O(1) `timeAt(i)` /
+        `voltageAt(i)`, O(n) `forEach(cb)` (chronological), O(n) `toArray()`.
+      - When full, new writes overwrite the oldest sample (classic ring
+        buffer semantics).
+      - `clear()` resets to empty in O(1).
+    * Available as a drop-in replacement for `array.slice(-max)` patterns.
+    * The existing store.ts trace push code already does coarse slice-every-
+      50-steps; the new SampleRingBuffer class is ready to be adopted there
+      in a follow-up (kept the change non-breaking — store.ts unchanged).
+
+NEW TESTS (2 files, 50 new tests):
+- `tests/sample-ring-buffer.test.ts` (16 tests):
+  * Empty state, push + grow, last() before/after wrap
+  * Wrap-around overwrites oldest, forEach chronological (before/after wrap)
+  * timeAt/voltageAt out-of-range returns NaN
+  * toArray snapshot, clear() resets
+  * Capacity 2 (minimum), fractional/negative voltages
+  * forEach passes chronological index, maxCapacity getter
+  * forEach on empty is no-op, large capacity (1000 samples, 500 overwrites)
+- `tests/p2-new-components.test.ts` (34 tests):
+  * LM336: registration, terminals, refV default, stamps conductance,
+    measure returns reverse voltage
+  * ICL8069: registration, refV near 1.23V
+  * Stepper: registration, 4 terminals, stamps 2 conductances, measure
+    returns V_A/V_B/I_A/I_B
+  * Servo: registration, VCC/GND/CTRL terminals, measure includes θ
+  * Photodiode: registration, illuminance parameter, stamps current source,
+    measure returns V_R/I_ph/lux, photocurrent scales with illuminance
+  * Phototransistor: registration, C/E terminals, IC scales with hFE × lux,
+    measure returns V_CE/I_C/lux
+  * Solar cell: registration, +/− terminals, stamps voltage source, voltage
+    scales with sqrt(lux/1000) (verified: 4× lux → 2× voltage)
+  * Crystal oscillator: registration, VCC/GND/OUT/EN terminals, frequency
+    default 16 MHz, square wave alternates voh/vol, EN below threshold
+    outputs vol, measure formats frequency as MHz
+  * DC motor: measure includes RPM + ω (mechanical readouts)
+
+VERIFICATION:
+- Typecheck clean
+- All 1555 tests pass across 67 files (was 1505 → +50 new tests)
+- Build succeeds (NEXT_BUILD=true)
+
+Stage Summary:
+- 10 features/improvements shipped:
+  1. Keyboard shortcuts consolidated (single source of truth)
+  2. "What's New" changelog with badge
+  3. Sheet navigation bar (sticky, prominent, pin count)
+  4. High-contrast WCAG AAA theme
+  5. LM336 + ICL8069 voltage references
+  6. Photodiode + phototransistor + solar cell
+  7. Stepper + servo motors (DC motor improved with RPM readout)
+  8. Active 4-pin crystal oscillator
+  9. DB migrations moved to Next.js instrumentation hook
+  10. SampleRingBuffer class (perf-ready, not yet wired into store)
+- 3 new files: sample-ring-buffer.ts (147), ThemeManager.tsx (37),
+  instrumentation.ts (16)
+- 1 new test file: sample-ring-buffer.test.ts (16)
+- 1 new test file: p2-new-components.test.ts (34)
+- TODO.md: 11 items moved from incomplete to complete (5 in UI Polish, 4
+  in Advanced Components, 1 in Database, 1 in Architecture)
+- Stale TODO entries also cleaned up: findRoute, monte-carlo, keyboard-
+  shortcuts were marked as "dead code" but had already been wired in

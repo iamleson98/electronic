@@ -130,8 +130,8 @@ interface EditorState {
   showTitleBlock: boolean;
   /** color-code wires by net name (ground=gray, power=red, signal=cyan) */
   showNetColors: boolean;
-  /** UI theme: 'dark' (default) or 'light' */
-  theme: 'dark' | 'light';
+  /** UI theme: 'dark' (default), 'light', or 'high-contrast' (WCAG AAA) */
+  theme: 'dark' | 'light' | 'high-contrast';
   /** Customizable hotkeys (overrides defaults). Keys are hotkey names, values are key strings. */
   customHotkeys: Record<string, string>;
   activeTool: 'select' | 'wire' | 'bus' | 'label' | 'globalLabel' | 'hierLabel' | 'junction' | 'noConnect' | 'powerPort' | 'text' | 'line' | 'poly' | 'image';
@@ -228,7 +228,7 @@ interface EditorState {
   setShowValues: (s: boolean) => void;
   setShowTitleBlock: (s: boolean) => void;
   setShowNetColors: (s: boolean) => void;
-  setTheme: (t: 'dark' | 'light') => void;
+  setTheme: (t: 'dark' | 'light' | 'high-contrast') => void;
   setHotkey: (name: string, key: string) => void;
   resetHotkeys: () => void;
   setActiveTool: (t: EditorState['activeTool']) => void;

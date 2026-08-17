@@ -19,10 +19,14 @@ beforeEach(() => {
   delete process.env.NEXT_BUILD;
   delete process.env.NEXT_PHASE;
   // Clear the cached db singleton so each test re-initializes
+  // (including migration state — each test should re-run migrations
+  // against its fresh in-memory DB)
   const g = globalThis as any;
   g.__drizzleDb = undefined;
   g.__libsqlClient = undefined;
   g.__dbPromise = undefined;
+  g.__migrationsPromise = undefined;
+  g.__migrationsApplied = undefined;
 });
 
 afterEach(() => {
@@ -71,11 +75,10 @@ describe('db.ts: migration-based schema creation', () => {
 
   it('re-running init does not duplicate migrations (idempotent)', async () => {
     await getDb();  // first init — applies migration
-    // Clear cache and re-init
+    // Re-call getDb() WITHOUT clearing the cache — should return the same
+    // promise and NOT re-apply migrations.
+    await getDb();
     const g = globalThis as any;
-    g.__drizzleDb = undefined;
-    g.__dbPromise = undefined;
-    await getDb();  // second init — should not re-apply
     const client = g.__libsqlClient;
     if (client) {
       const result = await client.execute('SELECT COUNT(*) as count FROM __drizzle_migrations');

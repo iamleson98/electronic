@@ -22,6 +22,7 @@ import { LibraryManagerDialog } from '@/components/pcb/LibraryManagerDialog';
 import { SimStatusBar } from '@/components/circuit/SimStatusBar';
 import { TipOfTheDay } from '@/components/circuit/TipOfTheDay';
 import { FirstRunTutorial } from '@/components/circuit/FirstRunTutorial';
+import { ThemeManager } from '@/components/circuit/ThemeManager';
 
 // Lazy-load heavy components to reduce initial bundle size.
 // three.js (~600KB) only loads when user enters 3D mode.
@@ -45,6 +46,24 @@ export default function Home() {
   const [showHelp, setShowHelp] = useState(false);
   const [showLibrary, setShowLibrary] = useState(false);
   const [showAI, setShowAI] = useState(false);
+  const [hasUnseenChangelog, setHasUnseenChangelog] = useState(false);
+
+  // "What's New" badge — visible on the Help button when there's an unseen changelog entry.
+  useEffect(() => {
+    try {
+      const seen = localStorage.getItem('circuit-lab.changelog-seen');
+      setHasUnseenChangelog(seen !== '2026-08-17');
+    } catch { /* localStorage disabled */ }
+  }, []);
+
+  const openHelp = () => {
+    setShowHelp(true);
+    // Clear the badge as soon as the user opens Help
+    try {
+      localStorage.setItem('circuit-lab.changelog-seen', '2026-08-17');
+      setHasUnseenChangelog(false);
+    } catch { /* ignore */ }
+  };
 
   useEffect(() => {
     try {
@@ -121,7 +140,7 @@ export default function Home() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); setShowCommandPalette(true); }
       if ((e.ctrlKey || e.metaKey) && e.key === 'j') { e.preventDefault(); setShowAI(s => !s); }
-      if (e.key === '?' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); setShowHelp(true); }
+      if (e.key === '?' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); openHelp(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -182,7 +201,18 @@ export default function Home() {
           </Button>
           <Button size="sm" variant="ghost" onClick={handleShare}><Share2 size={14} /><span className="ml-1 hidden md:inline">Share</span></Button>
           <Button size="sm" variant="ghost" onClick={() => setShowLibrary(true)}><Library size={14} /><span className="ml-1 hidden md:inline">Library</span></Button>
-          <Button size="sm" variant="ghost" onClick={() => setShowHelp(true)}><HelpCircle size={14} /></Button>
+          <Button size="sm" variant="ghost" onClick={openHelp} className="relative">
+            <HelpCircle size={14} />
+            {hasUnseenChangelog && (
+              <span
+                className="absolute -right-0.5 -top-0.5 flex h-2.5 w-2.5"
+                title="New features — click to view"
+              >
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-amber-500" />
+              </span>
+            )}
+          </Button>
         </div>
       </div>
 
@@ -267,6 +297,7 @@ export default function Home() {
       <LibraryManagerDialog open={showLibrary} onClose={() => setShowLibrary(false)} />
       <TipOfTheDay />
       <FirstRunTutorial />
+      <ThemeManager />
     </div>
   );
 }

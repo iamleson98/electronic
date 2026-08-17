@@ -1,42 +1,33 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { HelpCircle, Keyboard, BookOpen, Lightbulb, Code } from 'lucide-react';
+import { HelpCircle, Keyboard, BookOpen, Lightbulb, Code, Sparkles } from 'lucide-react';
 import { exampleCategories, type ExampleEntry } from '@/lib/circuit/examples';
 import { exportSchematicSVG } from '@/lib/circuit/schematic-plot';
 import { useEditor } from '@/lib/circuit/store';
+import {
+  KEYBOARD_SHORTCUTS,
+  getShortcutsByCategory,
+  getAllCategories,
+  formatShortcut,
+} from '@/lib/circuit/keyboard-shortcuts';
 
 interface Props { open: boolean; onClose: () => void; }
 
-const SHORTCUTS = [
-  { category: 'Schematic Editing', keys: [
-    { key: 'Space', desc: 'Start/Pause simulation' },
-    { key: 'R', desc: 'Rotate selected component 90°' },
-    { key: 'Delete', desc: 'Delete selected component or wire' },
-    { key: 'Escape', desc: 'Cancel current action / clear selection' },
-    { key: 'Ctrl+Z', desc: 'Undo' },
-    { key: 'Ctrl+Y', desc: 'Redo' },
-    { key: 'Ctrl+C', desc: 'Copy selected components' },
-    { key: 'Ctrl+V', desc: 'Paste copied components' },
-    { key: 'Ctrl+D', desc: 'Duplicate selected components' },
-    { key: 'Ctrl+A', desc: 'Select all' },
-    { key: 'Shift+Click', desc: 'Add to multi-selection' },
-    { key: '\\', desc: 'Toggle 45° wire routing' },
-  ]},
-  { category: 'PCB Layout', keys: [
-    { key: '1', desc: 'Select/Move tool' },
-    { key: '2', desc: 'Route tool (90°)' },
-    { key: '3', desc: 'Add via' },
-    { key: 'R', desc: 'Rotate footprint' },
-    { key: 'Delete', desc: 'Delete selected trace' },
-    { key: 'Ctrl+K', desc: 'Open Command Palette' },
-  ]},
-];
+const CATEGORY_LABELS: Record<string, string> = {
+  editing: 'Editing',
+  history: 'History',
+  simulation: 'Simulation',
+  tools: 'Tools',
+  view: 'View',
+  ai: 'AI Assistant',
+};
 
 const GETTING_STARTED = [
   { step: 1, title: 'Add components', desc: 'Click a component in the left palette, or drag it onto the canvas.' },
@@ -49,7 +40,86 @@ const GETTING_STARTED = [
   { step: 8, title: 'Export', desc: 'Click "Gerbers" to download manufacturing files.' },
 ];
 
+// ─── Changelog ─────────────────────────────────────────────────────────────
+// Append new entries at the top. Bump LAST_SEEN_VERSION when adding entries.
+const LAST_SEEN_VERSION = '2026-08-17';
+const CHANGELOG_SEEN_KEY = 'circuit-lab.changelog-seen';
+
+interface ChangelogEntry {
+  version: string;
+  date: string;
+  title: string;
+  items: string[];
+}
+
+const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: '2026-08-17',
+    date: 'Aug 17, 2026',
+    title: 'Spectrum analysis, net coloring, onboarding',
+    items: [
+      'New "Spectrum" tab in ProbePanel — FFT bar chart with H1..H10 markers, THD%, SNR, SINAD, harmonic breakdown table.',
+      'Wires now color-code by electrical role: ground=slate, power=red, signal=cyan. User-defined NetClass colors override the palette. Toggle in View → Color-Code Wires by Net.',
+      'Help → Examples now shows live SVG thumbnails (auto-generated from each example doc), grouped by category.',
+      'First-run tutorial: 6-step walkthrough with SVG mask cutouts highlighting the main UI. Skips on subsequent visits.',
+      'Color-blind safe ERC icons: errors use ✕, warnings use ! (shape distinction independent of red/amber).',
+      'NetClassesDialog gained a color picker column.',
+    ],
+  },
+  {
+    version: '2026-08-15',
+    date: 'Aug 15, 2026',
+    title: 'Reliability & schema migrations',
+    items: [
+      'Undo/redo preserves full document (drawings, sheets, groups, net classes) — was silently dropping them.',
+      'Autosave now actually runs (was dead code) — marks dirty on every mutation, flushes on beforeunload, prompts crash recovery on next load.',
+      'Broken sims auto-pause with a user-friendly error message instead of running silently with NaN voltages.',
+      'Tab-hidden pause: sim pauses when the tab is backgrounded so it doesn\'t drift from real-time.',
+      'Share URLs preserve the full circuit (drawings, sub-sheets, net classes, metadata).',
+      'Drizzle schema migrations: versioned SQL in ./drizzle/, auto-applied on startup, idempotent across deploys.',
+    ],
+  },
+  {
+    version: '2026-08-12',
+    date: 'Aug 12, 2026',
+    title: 'SPICE import, AC analysis, Monte Carlo, BSIM3',
+    items: [
+      'SPICE netlist import — parses R/C/L/V/I/D/Q/M/S cards, engineering suffixes, SINE() sources, auto-creates ground.',
+      'Real AC small-signal analysis — DC op point + complex admittance matrix per frequency, returns magnitude/phase/real/imag, finds -3dB cutoff.',
+      'Monte Carlo analysis — LCG RNG, Gaussian/uniform distributions, tolerance perturbation, yield %, worst-case 2^N corner analysis.',
+      'BSIM3v3 MOSFET model — full threshold, mobility degradation, velocity saturation, channel-length modulation, subthreshold.',
+      'Sparse KLU-style solver — CSR + zero-skipping LU, 3-5x speedup on > 80 node circuits.',
+      'AI provider selector — choose between Z.ai (always), OpenAI, Anthropic in the ChatPanel header.',
+    ],
+  },
+];
+
 export function HelpDialog({ open, onClose }: Props) {
+  // "What's New" badge — shown when there are unseen changelog entries.
+  // Marked seen when the user opens the dialog and the changelog tab is viewed
+  // (or after 5s of the dialog being open, whichever comes first).
+  const [hasUnseen, setHasUnseen] = useState(false);
+  useEffect(() => {
+    try {
+      const seen = localStorage.getItem(CHANGELOG_SEEN_KEY);
+      setHasUnseen(seen !== LAST_SEEN_VERSION);
+    } catch { /* localStorage disabled */ }
+  }, []);
+
+  const markSeen = () => {
+    try {
+      localStorage.setItem(CHANGELOG_SEEN_KEY, LAST_SEEN_VERSION);
+      setHasUnseen(false);
+    } catch { /* ignore */ }
+  };
+
+  // Auto-mark seen after 5s of the dialog being open
+  useEffect(() => {
+    if (!open || !hasUnseen) return;
+    const t = setTimeout(markSeen, 5000);
+    return () => clearTimeout(t);
+  }, [open, hasUnseen]);
+
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden bg-slate-900 border-slate-700">
@@ -58,24 +128,49 @@ export function HelpDialog({ open, onClose }: Props) {
             <HelpCircle size={18} /> Help & Documentation
           </DialogTitle>
         </DialogHeader>
-        <Tabs defaultValue="shortcuts" className="w-full">
-          <TabsList className="grid w-full grid-cols-4 bg-slate-950">
+        <Tabs defaultValue={hasUnseen ? 'whatsnew' : 'shortcuts'} className="w-full">
+          <TabsList className="grid w-full grid-cols-5 bg-slate-950">
+            <TabsTrigger value="whatsnew" className="data-[state=active]:bg-slate-700 text-xs">
+              <Sparkles size={12} className="mr-1" /> What's New
+              {hasUnseen && <Badge variant="secondary" className="ml-1 h-4 px-1 text-[9px] bg-amber-500 text-slate-900">new</Badge>}
+            </TabsTrigger>
             <TabsTrigger value="shortcuts" className="data-[state=active]:bg-slate-700 text-xs"><Keyboard size={12} className="mr-1" /> Shortcuts</TabsTrigger>
             <TabsTrigger value="guide" className="data-[state=active]:bg-slate-700 text-xs"><BookOpen size={12} className="mr-1" /> Getting Started</TabsTrigger>
             <TabsTrigger value="examples" className="data-[state=active]:bg-slate-700 text-xs"><Lightbulb size={12} className="mr-1" /> Examples</TabsTrigger>
             <TabsTrigger value="api" className="data-[state=active]:bg-slate-700 text-xs"><Code size={12} className="mr-1" /> API</TabsTrigger>
           </TabsList>
+          <TabsContent value="whatsnew" className="mt-4">
+            <ScrollArea className="h-[60vh]">
+              <div className="space-y-4" onClick={markSeen}>
+                {CHANGELOG.map(entry => (
+                  <div key={entry.version} className="rounded-md border border-slate-800 bg-slate-950 p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <h3 className="text-sm font-semibold text-cyan-300">{entry.title}</h3>
+                      <span className="font-mono text-[10px] text-slate-500">{entry.date} · v{entry.version}</span>
+                    </div>
+                    <ul className="space-y-1">
+                      {entry.items.map((item, i) => (
+                        <li key={i} className="text-xs text-slate-300 leading-relaxed">
+                          <span className="mr-2 text-cyan-500">•</span>{item}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          </TabsContent>
           <TabsContent value="shortcuts" className="mt-4">
             <ScrollArea className="h-[60vh]">
               <div className="space-y-4">
-                {SHORTCUTS.map(group => (
-                  <div key={group.category}>
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">{group.category}</h3>
+                {getAllCategories().map(cat => (
+                  <div key={cat}>
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">{CATEGORY_LABELS[cat] ?? cat}</h3>
                     <div className="space-y-1">
-                      {group.keys.map(s => (
+                      {getShortcutsByCategory(cat).map(s => (
                         <div key={s.key} className="flex items-center justify-between py-1 px-2 rounded hover:bg-slate-800">
-                          <span className="text-sm text-slate-300">{s.desc}</span>
-                          <kbd className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300">{s.key}</kbd>
+                          <span className="text-sm text-slate-300">{s.description}</span>
+                          <kbd className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300">{formatShortcut(s.key)}</kbd>
                         </div>
                       ))}
                     </div>

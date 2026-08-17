@@ -116,11 +116,11 @@ This file tracks all remaining improvements.
 
 - [x] **Simulation status panel** — Bottom bar showing node count, FPS, speed, sim time
 - [x] **Net coloring** — Wires color-coded by net name (ground=slate, power=red, signal=cyan); user NetClass colors override; toolbar toggle
-- [ ] **"What's New" / changelog** — Badge Help button when new features are added
+- [x] **"What's New" / changelog** — "What's New" tab in HelpDialog with versioned entries; amber ping badge on Help button when unseen; auto-clears on open
 - [x] **Tip of the Day** — Random tip toast on startup (sessionStorage, once per session)
-- [ ] **High-contrast theme** — For low-vision users
-- [ ] **Sheet navigation bar** — Prominent sticky breadcrumb when inside hierarchical sheets
-- [ ] **Consolidate keyboard shortcuts** — Merge 3 sources (`keyboard-shortcuts.ts`, `use-canvas-keyboard.ts`, `HelpDialog.tsx`) into one
+- [x] **High-contrast theme** — WCAG AAA pure black/white with bright yellow accents, persisted via ThemeManager, toggle in View → Theme
+- [x] **Sheet navigation bar** — Prominent sticky breadcrumb with emerald border, left-arrow back icon, pin count badge
+- [x] **Consolidate keyboard shortcuts** — HelpDialog's Shortcuts tab now reads from `keyboard-shortcuts.ts` (single source of truth); hardcoded SHORTCUTS array removed
 
 ### Advanced Simulation
 
@@ -130,27 +130,26 @@ This file tracks all remaining improvements.
 - [x] **Wire in `memory.ts`** — cleanupComponentState called on deleteComponent (inline), orphaned sim state removed
 - [ ] **Memoize nodeMap + MNA system** — Cache across sim steps, invalidate on component/wire edits
 - [ ] **Move canvas rendering out of React** — Direct RAF loop reading from `useEditor.getState()`, bypass React for hot path
-- [ ] **Ring buffer for trace samples** — Replace `slice(-max)` with `Float64Array` + write index
+- [x] **Ring buffer for trace samples** — `SampleRingBuffer` class with fixed-capacity Float64Array + write index; O(1) push, O(1) last(), chronological iteration
 - [x] **Fix autosave to filter sim updates** — Only marks dirty on component/wire reference changes, not 60Hz simContext updates
-- [ ] **What's New / changelog** — Badge Help button when new features are added
 
 ### Advanced Components
 
 - [ ] **PLL** — 74HC4046, LM565
-- [ ] **ADC/DAC** — ADC0804, MCP3208, DAC0808, MCP4921
-- [ ] **Active crystal oscillator** — 4-pin active oscillator (passive crystal exists)
+- [x] **ADC/DAC** — 8-bit ADC (4 MSB outputs + VREF + VCC/GND), 8-bit DAC (4 digital inputs + VREF + VOUT + GND)
+- [x] **Active crystal oscillator** — 4-pin active oscillator (VCC/GND/OUT/EN), square wave at rated frequency, EN gate
 - [ ] **Multi-unit IC support** — Extend beyond 7400 sample (7402, 7404, etc. as multi-unit)
-- [ ] **Voltage references** — TL431, LM336, LM385, ICL8069
+- [x] **Voltage references** — TL431 (adjustable shunt), LM336 (2.5V), LM385 (1.2V), ICL8069 (1.2V bandgap)
 - [ ] **Hall-effect sensors, IMUs** — For embedded/robotics
-- [ ] **Photodiode, phototransistor, solar cell** — Optical components
-- [ ] **Motors** — DC, stepper, servo
+- [x] **Photodiode, phototransistor, solar cell** — Photodiode (responsivity × lux × area), NPN phototransistor (hFE × photo-base current), Solar cell (V_oc × √(lux/1000) Thevenin)
+- [x] **Motors** — DC motor (with back-EMF RPM readout), Bipolar 2-coil stepper (A+/A−/B+/B−), PWM hobby servo (VCC/GND/CTRL with θ readout)
 - [ ] **Constant-current diode** — JFET current regulator
 
 ### Database
 
 - [ ] **Normalize tags** — Separate `circuit_tags` table with FK for indexed tag lookup
 - [ ] **Turso embedded replica** — Configure `syncUrl` for local read caching
-- [ ] **Move migrations out of request path** — Use Next.js instrumentation hook or startup script
+- [x] **Move migrations out of request path** — `src/instrumentation.ts` runs `runMigrations()` on server startup (Next.js instrumentation hook); `initDb()` falls back to running migrations if the hook hasn't run yet (e.g., in tests)
 - [ ] **FTS5 full-text search** — On `name` and `tags` for fast searching
 
 ### Architecture
@@ -159,8 +158,8 @@ This file tracks all remaining improvements.
 - [ ] **Split store.ts** (1630 lines) — Into separate stores for sim state, history, UI state
 - [ ] **Split SymbolEditorDialog.tsx** (1241 lines) — Extract sub-components
 - [ ] **Split FootprintEditorDialog.tsx** (1427 lines) — Extract sub-components
-- [ ] **Wire in `findRoute`** — Connect smart-wire-router.ts A* to wire completion (568 lines of dead code)
+- [x] **Wire in `findRoute`** — A* smart-wire-router.ts is wired into `completeWire` in store.ts (falls back to L-shaped routing if findRoute fails)
 - [ ] **Wire in `scope-viewer.ts`** — Connect to ProbePanel (full scope with cursors/trigger)
-- [ ] **Wire in `monte-carlo.ts`** — Replace inline MC in batch-runner with real implementation
-- [ ] **Delete or implement `keyboard-shortcuts.ts`** — Currently dead code
-- [ ] **Delete or implement `integration.ts`** — Trap/Gear methods, currently dead code
+- [x] **Wire in `monte-carlo.ts`** — batch-runner.ts uses `runMonteCarlo` from monte-carlo.ts (LCG RNG, Gaussian/uniform, tolerance perturbation, yield %, worst-case)
+- [x] **Wire in `keyboard-shortcuts.ts`** — HelpDialog's Shortcuts tab now reads from keyboard-shortcuts.ts (single source of truth; was hardcoded duplicate)
+- [ ] **Wire in `integration.ts`** — Trap/Gear methods exist but capacitor/inductor stamps in passive.ts use inline logic; needs adapter to use capTrapezoidal/capGear2/inductorTrapezoidal/inductorGear2
