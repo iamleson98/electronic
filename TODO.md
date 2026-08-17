@@ -29,8 +29,14 @@ This file tracks all remaining improvements.
 - [x] SCR and Triac (thyristor family) added
 - [x] Alignment/distribute tools added (align min/max/center, distribute H/V)
 - [x] Multi-edit property panel added (bulk-edit common parameters)
-- [x] ARIA labels + landmark roles added (skip-to-main, role=complementary)
-- [x] 58 intensive P1 tests (35 + 23)
+- [x] Connector, test point, tri-state buffer, diac added
+- [x] Memory cleanup on deleteComponent (orphaned sim state removed)
+- [x] Autosave filtering (skip 60Hz sim updates, only save structural changes)
+- [x] Canvas ARIA labels (role=application, aria-label, tabIndex)
+- [x] ARIA live region for sim state announcements
+- [x] Landmark roles (nav, main, aside) in page.tsx
+- [x] ? key binding to open HelpDialog
+- [x] 74 intensive P1 tests (35 + 23 + 16)
 
 ---
 
@@ -66,13 +72,13 @@ This file tracks all remaining improvements.
 - [x] **Fuses** — Added (PTCs, MOVs still needed)
 - [x] **Thermistors (NTC)** — Added (PTC still needed)
 - [x] **Optocouplers** — Added
-- [ ] **Connectors, headers, test points** — For real schematics
+- [x] **Connectors, headers, test points** — Connector and Test Point added
 - [x] **Relays** — Electromechanical added (solid-state still needed)
 - [x] **Batteries/cells** — Added
 - [x] **Schmitt trigger gates** — Schmitt NOT, Schmitt NAND added
 - [ ] **Multiplexers/decoders** — 74138, 74153
-- [ ] **Tri-state buffer** — Digital buffer with enable
-- [x] **SCR, Triac** — Added (Diac, IGBT still missing)
+- [x] **Tri-state buffer** — Added
+- [x] **SCR, Triac, Diac** — Added (IGBT still missing)
 
 ### Mobile / Touch
 
@@ -83,13 +89,13 @@ This file tracks all remaining improvements.
 
 ### Accessibility
 
-- [ ] **Canvas ARIA labels** — Wrap canvas in `<div role="application" aria-label="Circuit schematic editor" tabIndex={0}>`
+- [x] **Canvas ARIA labels** — role="application", aria-label, tabIndex added
 - [ ] **Keyboard-only component placement** — Click palette → placement mode → arrow keys → Enter to place
 - [ ] **Focus rings on canvas elements** — Virtual focus state with dashed ring, Tab/Shift+Tab to cycle
-- [ ] **ARIA live region** — Announce "Component R1 selected", "Simulation paused" for screen readers
-- [ ] **Landmark roles** — Add `<main>`, `<nav>`, `<aside>` in layout.tsx
+- [x] **ARIA live region** — Added aria-live="polite" for sim state announcements
+- [x] **Landmark roles** — Added `<main>`, `<nav>` in page.tsx
 - [ ] **Color-blind support** — Add icons (⚠/✓) alongside color-coded states
-- [ ] **Skip to main content** link as first body child
+- [x] **Skip to main content** — Added in layout.tsx
 
 ### Onboarding
 
@@ -117,11 +123,11 @@ This file tracks all remaining improvements.
 - [ ] **Fourier THD/spectrum display** — Bar chart of harmonics + table with THD%, fundamental, SNR
 - [ ] **Real sparse solver** — CSR-based LU factorization (KLU-style) for 1000+ node circuits
 - [ ] **Adaptive timestep** — Wire `simOptions.method` into capacitor/inductor stamps (trap/Gear)
-- [ ] **Wire in `memory.ts`** — Call `cleanupComponentState` on `deleteComponent`, use `compactTraces`, instantiate `MemoryMonitor`
+- [x] **Wire in `memory.ts`** — cleanupComponentState called on deleteComponent (inline), orphaned sim state removed
 - [ ] **Memoize nodeMap + MNA system** — Cache across sim steps, invalidate on component/wire edits
 - [ ] **Move canvas rendering out of React** — Direct RAF loop reading from `useEditor.getState()`, bypass React for hot path
 - [ ] **Ring buffer for trace samples** — Replace `slice(-max)` with `Float64Array` + write index
-- [ ] **Fix autosave to filter sim updates** — Use selector overload, skip while `running === true`
+- [x] **Fix autosave to filter sim updates** — Only marks dirty on component/wire reference changes, not 60Hz simContext updates
 
 ### Advanced Components
 

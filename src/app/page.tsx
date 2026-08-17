@@ -92,8 +92,18 @@ export default function Home() {
         metadata: s.metadata,
       };
     });
-    // Subscribe to store changes — mark dirty on every mutation.
-    const unsub = useEditor.subscribe(() => autosaveMgr.markDirty());
+    // Subscribe to store changes — mark dirty only on circuit structure changes,
+    // NOT on 60Hz simContext/traces updates (which would flood localStorage).
+    let lastComponents = useEditor.getState().components;
+    let lastWires = useEditor.getState().wires;
+    const unsub = useEditor.subscribe((state) => {
+      // Only mark dirty if the circuit structure actually changed
+      if (state.components !== lastComponents || state.wires !== lastWires) {
+        lastComponents = state.components;
+        lastWires = state.wires;
+        autosaveMgr.markDirty();
+      }
+    });
     // Save on tab close / navigation / browser close.
     const onUnload = () => autosaveMgr.shutdown();
     window.addEventListener('beforeunload', onUnload);
@@ -103,11 +113,12 @@ export default function Home() {
     };
   }, []);
 
-  // Ctrl+K command palette, Ctrl+J AI panel
+  // Ctrl+K command palette, Ctrl+J AI panel, ? for help
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); setShowCommandPalette(true); }
       if ((e.ctrlKey || e.metaKey) && e.key === 'j') { e.preventDefault(); setShowAI(s => !s); }
+      if (e.key === '?' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); setShowHelp(true); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -178,16 +189,24 @@ export default function Home() {
           {mode === 'schematic' ? (
             <>
               <Toolbar />
-              <div className="min-h-0 flex-1">
+              <div className="min-h-0 flex-1" id="main-content">
+                {/* ARIA live region for screen reader announcements */}
+                <div aria-live="polite" className="sr-only">
+                  {useEditor.getState().running ? 'Simulation running' : 'Simulation stopped'}
+                </div>
                 <ResizablePanelGroup direction="horizontal">
                   <ResizablePanel defaultSize={18} minSize={14} maxSize={28}>
-                    <ComponentPalette />
+                    <nav aria-label="Component palette">
+                      <ComponentPalette />
+                    </nav>
                   </ResizablePanel>
                   <ResizableHandle withHandle />
                   <ResizablePanel defaultSize={64} minSize={40}>
                     <ResizablePanelGroup direction="vertical">
                       <ResizablePanel defaultSize={70} minSize={30}>
-                        <CircuitCanvas />
+                        <main aria-label="Circuit canvas">
+                          <CircuitCanvas />
+                        </main>
                       </ResizablePanel>
                       <ResizableHandle withHandle />
                       <ResizablePanel defaultSize={30} minSize={15}>

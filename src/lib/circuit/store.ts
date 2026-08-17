@@ -555,6 +555,18 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   deleteComponent: (id) => {
     get().pushHistory();
+    // Clean up orphaned sim-state entries for the deleted component.
+    // Previously: cap_${id}, ind_${id}, vcsw_${id}, etc. were left in
+    // sim.state.__global forever, causing a memory leak.
+    const s = get();
+    if (s.simContext?.state?.__global) {
+      const g = s.simContext.state.__global;
+      for (const key of Object.keys(g)) {
+        if (key.includes(`_${id}`) || key.includes(`${id}_`)) {
+          delete g[key];
+        }
+      }
+    }
     set((s) => ({
       components: s.components.filter((c) => c.id !== id),
       wires: s.wires.filter((w) => w.from.componentId !== id && w.to.componentId !== id),

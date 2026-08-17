@@ -899,3 +899,205 @@ registerPlugin(lm741);
 registerPlugin(tl072);
 registerPlugin(scr);
 registerPlugin(triac);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Connector / Header / Test Point
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const connector: ComponentPlugin = {
+  type: 'connector',
+  name: 'Connector (2-pin)',
+  category: 'passive',
+  description: 'Generic 2-pin connector/header. Passes signal through with negligible resistance.',
+  symbol: 'J',
+  boundingBox: { width: 2, height: 2 },
+  terminals: [
+    { id: 'a', label: '1', position: { x: 0, y: 1 } },
+    { id: 'b', label: '2', position: { x: 2, y: 1 } },
+  ],
+  parameters: [
+    { key: 'resistance', label: 'Contact Resistance', type: 'number', default: 0.001, unit: 'Ω', min: 0, max: 100, step: 0.001 },
+  ],
+  keywords: ['connector', 'header', 'jack', 'plug'],
+  render(ctx, _params, cellSize) {
+    ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+    // Two squares representing pins
+    ctx.strokeRect(0, 0.3 * cellSize, 0.7 * cellSize, 0.7 * cellSize);
+    ctx.strokeRect(1.3 * cellSize, 0.3 * cellSize, 0.7 * cellSize, 0.7 * cellSize);
+    // Connecting line
+    ctx.beginPath();
+    ctx.moveTo(0, cellSize); ctx.lineTo(0.35 * cellSize, cellSize);
+    ctx.moveTo(1.65 * cellSize, cellSize); ctx.lineTo(2 * cellSize, cellSize);
+    ctx.stroke();
+  },
+  stamp(params, terminals, sys) {
+    const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
+    const b = terminals.find(t => t.terminalId === 'b')!.nodeId;
+    const r = Math.max(1e-6, params.resistance as number);
+    sys.stampConductance(a, b, 1 / r);
+  },
+  getFlowPath() { return [{ x: 0, y: 1 }, { x: 2, y: 1 }]; },
+};
+
+export const testPoint: ComponentPlugin = {
+  type: 'testPoint',
+  name: 'Test Point',
+  category: 'passive',
+  description: 'Test point for probing. No electrical effect — just a labeled node marker.',
+  symbol: 'TP',
+  boundingBox: { width: 2, height: 2 },
+  terminals: [
+    { id: 'a', label: 'A', position: { x: 0, y: 1 } },
+  ],
+  parameters: [
+    { key: 'label', label: 'Label', type: 'string', default: 'TP1' },
+  ],
+  keywords: ['test', 'point', 'probe', 'tp'],
+  render(ctx, params, cellSize) {
+    ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cellSize, cellSize, 5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = '#64748b';
+    ctx.beginPath();
+    ctx.arc(cellSize, cellSize, 2, 0, Math.PI * 2);
+    ctx.fill();
+    drawLabel(ctx, (params.label as string) || 'TP', cellSize + 10, cellSize);
+  },
+  stamp() {
+    // No electrical effect — just a visual marker
+  },
+  getFlowPath() { return []; },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tri-state buffer
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const tristateBuffer: ComponentPlugin = {
+  type: 'tristate',
+  name: 'Tri-state Buffer',
+  category: 'logic',
+  description: 'Buffer with enable pin. When EN is HIGH, output follows input. When LOW, output is high-impedance (disconnected).',
+  symbol: '▷',
+  boundingBox: { width: 5, height: 3 },
+  terminals: [
+    { id: 'a', label: 'A', position: { x: 0, y: 1.5 }, electricalType: 'input' as const },
+    { id: 'en', label: 'EN', position: { x: 2.5, y: 3 }, electricalType: 'input' as const },
+    { id: 'y', label: 'Y', position: { x: 5, y: 1.5 }, electricalType: 'output' as const },
+    { id: 'vcc', label: 'VCC', position: { x: 2.5, y: 0 }, electricalType: 'power_in' as const },
+    { id: 'gnd', label: 'GND', position: { x: 0, y: 0 }, electricalType: 'power_in' as const },
+  ],
+  parameters: [
+    { key: 'vcc', label: 'Logic High', type: 'number', default: 5, unit: 'V', min: 1, max: 18, step: 0.1 },
+    { key: 'threshold', label: 'Enable Threshold', type: 'number', default: 2.5, unit: 'V', min: 0.1, max: 18, step: 0.1 },
+    { key: 'ron', label: 'On Resistance', type: 'number', default: 10, unit: 'Ω', min: 0.001, max: 1e6, step: 1 },
+    { key: 'roff', label: 'Off Resistance', type: 'number', default: 1e9, unit: 'Ω', min: 1e3, max: 1e15, step: 1e6 },
+  ],
+  keywords: ['tristate', 'buffer', 'enable', 'high-impedance', 'digital'],
+  render(ctx, _params, cellSize) {
+    ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, 1.5 * cellSize); ctx.lineTo(1.5 * cellSize, 1.5 * cellSize);
+    ctx.moveTo(3.5 * cellSize, 1.5 * cellSize); ctx.lineTo(5 * cellSize, 1.5 * cellSize);
+    // Triangle
+    ctx.beginPath();
+    ctx.moveTo(1.5 * cellSize, 0.8 * cellSize);
+    ctx.lineTo(1.5 * cellSize, 2.2 * cellSize);
+    ctx.lineTo(3.5 * cellSize, 1.5 * cellSize);
+    ctx.closePath();
+    ctx.fillStyle = '#fce7f3';
+    ctx.fill();
+    ctx.stroke();
+    // Enable line
+    ctx.beginPath();
+    ctx.moveTo(2.5 * cellSize, 2.2 * cellSize); ctx.lineTo(2.5 * cellSize, 3 * cellSize);
+    ctx.stroke();
+  },
+  stamp(params, terminals, sys, sim) {
+    const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
+    const en = terminals.find(t => t.terminalId === 'en')!.nodeId;
+    const y = terminals.find(t => t.terminalId === 'y')!.nodeId;
+    const gnd = terminals.find(t => t.terminalId === 'gnd')!.nodeId;
+    const vcc = terminals.find(t => t.terminalId === 'vcc')!.nodeId;
+    const thresh = params.threshold as number;
+    if (gnd !== vcc) sys.stampConductance(vcc, gnd, 1e-13);
+    const enV = sim.nodeVoltage[en] ?? 0;
+    if (enV > thresh) {
+      // Enabled: buffer passes signal through with small R
+      const r = Math.max(0.001, params.ron as number);
+      sys.stampConductance(a, y, 1 / r);
+    } else {
+      // Disabled: high impedance
+      sys.stampConductance(a, y, 1 / (params.roff as number));
+    }
+  },
+  getFlowPath() { return [{ x: 0, y: 1.5 }, { x: 5, y: 1.5 }]; },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Diac (bidirectional trigger diode)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const diac: ComponentPlugin = {
+  type: 'diac',
+  name: 'Diac',
+  category: 'semiconductor',
+  description: 'Bidirectional trigger diode. Breaks down in both directions when voltage exceeds breakover voltage. Used to trigger Triacs.',
+  symbol: 'Dia',
+  boundingBox: { width: 4, height: 2 },
+  terminals: [
+    { id: 'a', label: 'A', position: { x: 0, y: 1 } },
+    { id: 'b', label: 'B', position: { x: 4, y: 1 } },
+  ],
+  parameters: [
+    { key: 'breakoverV', label: 'Breakover Voltage', type: 'number', default: 30, unit: 'V', min: 5, max: 200, step: 1 },
+    { key: 'onR', label: 'On Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
+    { key: 'offR', label: 'Off Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
+  ],
+  keywords: ['diac', 'bidirectional', 'trigger', 'thyristor', 'ac'],
+  render(ctx, _params, cellSize) {
+    ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, cellSize); ctx.lineTo(1.5 * cellSize, cellSize);
+    ctx.moveTo(2.5 * cellSize, cellSize); ctx.lineTo(4 * cellSize, cellSize);
+    ctx.stroke();
+    // Bidirectional triangle
+    ctx.beginPath();
+    ctx.moveTo(1.5 * cellSize, cellSize - 6);
+    ctx.lineTo(1.5 * cellSize, cellSize + 6);
+    ctx.lineTo(2.5 * cellSize, cellSize);
+    ctx.closePath();
+    ctx.moveTo(2.5 * cellSize, cellSize - 6);
+    ctx.lineTo(2.5 * cellSize, cellSize + 6);
+    ctx.lineTo(1.5 * cellSize, cellSize);
+    ctx.closePath();
+    ctx.fillStyle = '#fbbf24';
+    ctx.fill();
+    ctx.stroke();
+  },
+  stamp(params, terminals, sys, sim) {
+    const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
+    const b = terminals.find(t => t.terminalId === 'b')!.nodeId;
+    const vAB = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[b] ?? 0);
+    const bv = params.breakoverV as number;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = `diac_${a}_${b}`;
+    const prevOn = st[key] ?? false;
+    // Hysteresis: turns on above breakover, stays on until current drops
+    const on = prevOn ? Math.abs(vAB) > 0.5 : Math.abs(vAB) > bv;
+    st[key] = on;
+    if (on) {
+      const r = Math.max(0.001, params.onR as number);
+      sys.stampConductance(a, b, 1 / r);
+    } else {
+      sys.stampConductance(a, b, 1 / (params.offR as number));
+    }
+  },
+  getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
+};
+
+registerPlugin(connector);
+registerPlugin(testPoint);
+registerPlugin(tristateBuffer);
+registerPlugin(diac);

@@ -1380,6 +1380,9 @@ export function CircuitCanvas() {
     <div
       ref={containerRef}
       className="relative h-full w-full overflow-hidden bg-slate-950"
+      role="application"
+      aria-label="Circuit schematic editor — use mouse to place and connect components"
+      tabIndex={0}
       onContextMenu={(e) => e.preventDefault()}
     >
       <canvas
