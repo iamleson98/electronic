@@ -19,6 +19,8 @@ import dynamic from 'next/dynamic';
 import { CommandPalette } from '@/components/CommandPalette';
 import { HelpDialog } from '@/components/circuit/HelpDialog';
 import { LibraryManagerDialog } from '@/components/pcb/LibraryManagerDialog';
+import { SimStatusBar } from '@/components/circuit/SimStatusBar';
+import { TipOfTheDay } from '@/components/circuit/TipOfTheDay';
 
 // Lazy-load heavy components to reduce initial bundle size.
 // three.js (~600KB) only loads when user enters 3D mode.
@@ -220,6 +222,7 @@ export default function Home() {
                   </ResizablePanel>
                 </ResizablePanelGroup>
               </div>
+              <SimStatusBar />
             </>
           ) : mode === 'pcb' ? (
             <>
@@ -261,6 +264,7 @@ export default function Home() {
       <CommandPalette open={showCommandPalette} onClose={() => setShowCommandPalette(false)} />
       <HelpDialog open={showHelp} onClose={() => setShowHelp(false)} />
       <LibraryManagerDialog open={showLibrary} onClose={() => setShowLibrary(false)} />
+      <TipOfTheDay />
     </div>
   );
 }

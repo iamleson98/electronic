@@ -14,6 +14,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
 import { CheckCircle, AlertTriangle, Save } from 'lucide-react';
+import { BodePlot } from '@/components/circuit/AnalysisCharts';
 
 export type AnalysisType = 'ac' | 'dc' | 'tran' | 'tf' | 'sens' | 'noise' | 'disto' | 'pz' | 'four';
 
@@ -110,7 +111,12 @@ export function ResultDisplay({ result }: { result: AnalysisResult }) {
                   <span className="font-mono text-cyan-400">{(tr as any).name}</span>
                   <span className="text-slate-500">{displayValues.length} pts</span>
                 </div>
-                <TraceSparkline values={displayValues} xValues={(tr as any).xValues ?? new Float64Array(0)} xLabel={xLabel} />
+                {/* If complex trace (AC analysis) and showing magnitude/dB, render Bode plot */}
+                {'yValues' in tr && tr.yValues instanceof Float64Array && tr.yValues.length === 2 * tr.xValues.length ? (
+                  <BodePlot trace={tr as any} width={580} height={280} />
+                ) : (
+                  <TraceSparkline values={displayValues} xValues={(tr as any).xValues ?? new Float64Array(0)} xLabel={xLabel} />
+                )}
               </div>
             );
           })}

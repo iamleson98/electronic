@@ -61,12 +61,12 @@ This file tracks all remaining improvements.
 
 ### Simulation Features
 
-- [ ] **Measurement cursor readouts** — Drag cursor on scope/plot to read "V at t=2.3ms" or "ΔV/Δt between two points"
-- [ ] **`.meas` results viewer** — Persistent table showing all `.meas` results with name/value/at columns
+- [x] **Measurement cursor readouts** — Cursor toggle on oscilloscope, shows V at cursor position
+- [x] **`.meas` results viewer** — .meas tab in ProbePanel with parse + run + results table
 - [x] **Convergence error suggestions** — Detects missing ground, parallel V-sources, floating nodes with actionable messages
-- [ ] **Interactive parameter sweep slider** — Drag R1 value → live V(out) curve update without modal
-- [ ] **Real Bode plot** — Replace `TraceSparkline` with Recharts dual-axis log-x chart (gain dB left, phase deg right, cursors, gain/phase margin markers)
-- [ ] **Parametric family plot** — `.step` overlay: N traces with legend showing swept parameter values, click-to-toggle visibility
+- [x] **Interactive parameter sweep slider** — Slider in ProbePanel, select component + param, drag to sweep
+- [x] **Real Bode plot** — SVG dual-axis log-x chart (dB + phase), rendered for AC analysis results
+- [x] **Parametric family plot** — FamilyPlot component with N overlaid traces + legend with sweep values
 
 ### Missing Components
 
@@ -89,12 +89,7 @@ This file tracks all remaining improvements.
 - [x] **Tri-state buffer** — Added
 - [x] **SCR, Triac, Diac** — Added (IGBT still missing)
 
-### Mobile / Touch
-
-- [ ] **Implement Pointer Events** — Replace `onMouse*` with `onPointer*` in CircuitCanvas (unifies mouse + touch + pen)
-- [ ] **Pinch-to-zoom** — Multi-touch gesture support
-- [ ] **Long-press context menu** — Touch equivalent of right-click
-- [ ] **Mobile layout** — Collapsed palette drawer, bottom sheet for properties, floating action buttons
+### ~~Mobile / Touch~~ (Removed — web-only project)
 
 ### Accessibility
 
@@ -109,9 +104,9 @@ This file tracks all remaining improvements.
 ### Onboarding
 
 - [ ] **First-run tutorial** — Step-by-step walkthrough highlighting UI elements
-- [ ] **Empty-state card** — Centered "Welcome to CircuitLab" with 3 quick-start buttons
+- [x] **Empty-state card** — Welcome card with "Load Example" + "Add Resistor" buttons
 - [ ] **Examples gallery with thumbnails** — Grid of auto-generated SVG previews, click to load
-- [ ] **Keyboard shortcut discovery** — Bind `?` to open HelpDialog
+- [x] **Keyboard shortcut discovery** — `?` key opens HelpDialog
 
 ---
 
@@ -119,10 +114,10 @@ This file tracks all remaining improvements.
 
 ### UI Polish
 
-- [ ] **Simulation status panel** — Bottom bar showing node count, FPS, solver iterations, last delta
+- [x] **Simulation status panel** — Bottom bar showing node count, FPS, speed, sim time
 - [ ] **Net coloring** — Color-code nets (power=red, ground=black, signal=blue) via NetClasses
 - [ ] **"What's New" / changelog** — Badge Help button when new features are added
-- [ ] **Tip of the Day** — Random tip toast on startup
+- [x] **Tip of the Day** — Random tip toast on startup (sessionStorage, once per session)
 - [ ] **High-contrast theme** — For low-vision users
 - [ ] **Sheet navigation bar** — Prominent sticky breadcrumb when inside hierarchical sheets
 - [ ] **Consolidate keyboard shortcuts** — Merge 3 sources (`keyboard-shortcuts.ts`, `use-canvas-keyboard.ts`, `HelpDialog.tsx`) into one
@@ -137,6 +132,8 @@ This file tracks all remaining improvements.
 - [ ] **Move canvas rendering out of React** — Direct RAF loop reading from `useEditor.getState()`, bypass React for hot path
 - [ ] **Ring buffer for trace samples** — Replace `slice(-max)` with `Float64Array` + write index
 - [x] **Fix autosave to filter sim updates** — Only marks dirty on component/wire reference changes, not 60Hz simContext updates
+- [ ] **Net coloring** — Color-code nets (power=red, ground=black, signal=blue) via NetClasses
+- [ ] **What's New / changelog** — Badge Help button when new features are added
 
 ### Advanced Components
 
