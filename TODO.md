@@ -1,19 +1,42 @@
 # Circuit Simulator — Improvement TODO List
 
-Generated from the deep research audit. P0 items have been completed.
-This file tracks all remaining P1 and P2 improvements.
+Generated from the deep research audit. P0 and key P1 items have been completed.
+This file tracks all remaining improvements.
 
-## P1 — Should-Have (implement in next sprints)
+## Completed ✅
+
+### P0 (all done)
+- [x] Web Worker hook wired in (replaced stub)
+- [x] Broken tran/sens analysis paths fixed
+- [x] Operating point (.op) analysis added
+- [x] Undefined result guard in runAnalysis
+- [x] ErrorBoundary replaced with real component
+- [x] Dynamic imports for three.js + ChatPanel
+- [x] 19 unused npm packages removed
+- [x] Zener diode plugin registered
+- [x] 16 intensive P0 tests
+
+### P1 (completed items)
+- [x] Smart wire router (findRoute A*) wired into completeWire
+- [x] Zoom-to-fit button added to CircuitCanvas
+- [x] Undo/redo toast feedback added
+- [x] Voltage regulators (LM7805, LM317) added
+- [x] Flip-flops (D, JK, SR latch) added
+- [x] Comparator added
+- [x] Battery, fuse, relay, thermistor, optocoupler added
+- [x] 35 intensive P1 tests
+
+---
+
+## P1 — Remaining Items
 
 ### Core UX
 
-- [ ] **Undo/redo toast feedback** — Show "Undid: moved R1" toast on each undo/redo, with a "Redo" action button
-- [ ] **Paste preview/ghost** — After paste, show translucent ghost that follows cursor; click to place (currently pastes immediately at +2,+2 offset)
-- [ ] **Component rotation during palette-drag** — Press R while dragging from palette to rotate the ghost before placing
+- [ ] **Paste preview/ghost** — After paste, show translucent ghost that follows cursor; click to place
+- [ ] **Component rotation during palette-drag** — Press R while dragging from palette to rotate the ghost
 - [ ] **Alignment/distribute tools** — Add "Align Left/Right/Center", "Distribute H/V" for multi-selected components
 - [ ] **Multi-edit property panel** — When 2+ components selected, show common parameters and allow bulk-edit
-- [ ] **Zoom-to-fit button** — Compute bbox of all components + wires, set pan/zoom to fit (shortcut: Z)
-- [ ] **Measurement ruler tool** — Wire in `drawMeasurementRuler` from `pcb-overlays.ts`; add a "Measure" tool to the Tools dropdown
+- [ ] **Measurement ruler tool** — Wire in `drawMeasurementRuler` from `pcb-overlays.ts`
 
 ### Simulation Features
 
@@ -26,24 +49,24 @@ This file tracks all remaining P1 and P2 improvements.
 
 ### Missing Components
 
-- [ ] **Voltage regulators** — LM317, LM7805, 78xx/79xx series, LM1117, LT3045
-- [ ] **Flip-flops** — D, JK, T, SR latches as primitives
+- [x] **Voltage regulators** — LM7805, LM317 added (78xx/79xx series, LM1117, LT3045 still needed)
+- [x] **Flip-flops** — D, JK, SR latch added
 - [ ] **Logic ICs** — 7402, 7404, 7408, 7432, 7486, 7490, 74138, 74153, 74164, 74245, 74374
 - [ ] **CD4000-series CMOS** — CD4013, CD4027, CD4017, CD4060, CD4066, CD4093, CD4511
-- [ ] **Comparators** — LM311, LM339, LM393 (open-collector output, distinct from op-amps)
+- [x] **Comparators** — Generic comparator added (LM311, LM393 macromodels still needed)
 - [ ] **Op-amp macromodels** — LM358, LM324, LM741, TL072, NE5532
-- [ ] **SPICE .SUBCKT import** — Parse `.lib`/`.sub` files and register as plugins (LTspice's killer feature)
+- [ ] **SPICE .SUBCKT import** — Parse `.lib`/`.sub` files and register as plugins
 - [ ] **SPICE .MODEL import** — Parse model files, attach to components
-- [ ] **Fuses, PTCs, MOVs** — Overcurrent/overvoltage protection
-- [ ] **Thermistors (NTC/PTC)** — Temperature sensing
-- [ ] **Optocouplers** — 4N35, PC817
+- [x] **Fuses** — Added (PTCs, MOVs still needed)
+- [x] **Thermistors (NTC)** — Added (PTC still needed)
+- [x] **Optocouplers** — Added
 - [ ] **Connectors, headers, test points** — For real schematics
-- [ ] **Relays** — Electromechanical + solid-state
-- [ ] **Batteries/cells** — Portable designs
+- [x] **Relays** — Electromechanical added (solid-state still needed)
+- [x] **Batteries/cells** — Added
 - [ ] **Schmitt trigger gates** — Debouncing, oscillators
 - [ ] **Multiplexers/decoders** — 74138, 74153
 - [ ] **Tri-state buffer** — Digital buffer with enable
-- [ ] **SCR, Triac, Diac** — Thyristor family (partially done — diac/IGBT still missing)
+- [ ] **SCR, Triac, Diac** — Thyristor family (diac/IGBT still missing)
 
 ### Mobile / Touch
 

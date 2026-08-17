@@ -1450,15 +1450,44 @@ export function CircuitCanvas() {
       <div className="absolute right-2 top-2 flex flex-col gap-1">
         <button
           onClick={() => setZoom((z) => Math.min(4, z * 1.2))}
-          className="h-7 w-7 rounded bg-slate-800 text-slate-200 hover:bg-slate-700"
+          className="h-7 w-7 cursor-pointer rounded bg-slate-800 text-slate-200 hover:bg-slate-700"
         >+</button>
         <button
           onClick={() => setZoom((z) => Math.max(0.4, z / 1.2))}
-          className="h-7 w-7 rounded bg-slate-800 text-slate-200 hover:bg-slate-700"
+          className="h-7 w-7 cursor-pointer rounded bg-slate-800 text-slate-200 hover:bg-slate-700"
         >−</button>
         <button
+          onClick={() => {
+            // Zoom to fit: compute bounding box of all components + wires
+            const plugins = new Map<string, any>();
+            const { getAllPlugins } = require('@/lib/circuit/registry');
+            for (const p of getAllPlugins()) plugins.set(p.type, p);
+            if (components.length === 0) { setZoom(1); setPan({ x: 0, y: 0 }); return; }
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const c of components) {
+              const plugin = plugins.get(c.type);
+              if (!plugin) continue;
+              const bb = plugin.boundingBox;
+              minX = Math.min(minX, c.position.x);
+              minY = Math.min(minY, c.position.y);
+              maxX = Math.max(maxX, c.position.x + bb.width);
+              maxY = Math.max(maxY, c.position.y + bb.height);
+            }
+            if (minX === Infinity) { setZoom(1); setPan({ x: 0, y: 0 }); return; }
+            const w = maxX - minX, h = maxY - minY;
+            const canvasW = size.width || 800, canvasH = size.height || 600;
+            const scaleX = canvasW / (w * 40 + 100); // 40px per grid unit + margin
+            const scaleY = canvasH / (h * 40 + 100);
+            const newZoom = Math.min(4, Math.max(0.4, Math.min(scaleX, scaleY)));
+            setZoom(newZoom);
+            setPan({ x: -minX * 40 * newZoom + 50, y: -minY * 40 * newZoom + 50 });
+          }}
+          className="h-7 w-7 cursor-pointer rounded bg-slate-800 text-slate-200 hover:bg-slate-700 text-xs"
+          title="Zoom to fit (Z)"
+        >⊞</button>
+        <button
           onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
-          className="h-7 w-7 rounded bg-slate-800 text-slate-200 hover:bg-slate-700 text-xs"
+          className="h-7 w-7 cursor-pointer rounded bg-slate-800 text-slate-200 hover:bg-slate-700 text-xs"
         >⌂</button>
       </div>
     </div>

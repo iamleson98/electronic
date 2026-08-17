@@ -1184,7 +1184,37 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     get().pushHistory();
     const id = genId('wire');
+
+    // Try smart wire routing (A* with obstacle avoidance) — falls back to
+    // simple L-shaped routing if findRoute fails or isn't available.
+    let waypoints: { x: number; y: number }[] | undefined;
+    try {
+      const { findRoute, buildRoutingGrid, pathToWaypoints } = require('./smart-wire-router');
+      const { getAllPlugins } = require('./registry');
+      const s = get();
+      const plugins = new Map(getAllPlugins().map((p: any) => [p.type, p]));
+      const grid = buildRoutingGrid(s.components, s.wires, plugins, { width: 100, height: 60 }, 5);
+      // Resolve terminal positions
+      const fromComp = s.components.find((c: any) => c.id === draft.from.componentId);
+      const toComp = s.components.find((c: any) => c.id === to.componentId);
+      if (fromComp && toComp) {
+        const fromTerm = (plugins.get(fromComp.type) as any)?.terminals.find((t: any) => t.id === draft.from.terminalId);
+        const toTerm = (plugins.get(toComp.type) as any)?.terminals.find((t: any) => t.id === to.terminalId);
+        if (fromTerm && toTerm) {
+          const startPos = { x: fromComp.position.x + fromTerm.position.x, y: fromComp.position.y + fromTerm.position.y };
+          const endPos = { x: toComp.position.x + toTerm.position.x, y: toComp.position.y + toTerm.position.y };
+          const route = findRoute(grid, startPos, endPos);
+          if (route.path.length > 2) {
+            waypoints = pathToWaypoints(route.path);
+          }
+        }
+      }
+    } catch {
+      // Smart router failed — use simple L-shape (no waypoints)
+    }
+
     const wire: Wire = { id, from: draft.from, to };
+    if (waypoints && waypoints.length > 0) wire.waypoints = waypoints;
     set((s) => ({ wires: [...s.wires, wire], wireDraft: null }));
   },
 
@@ -1218,6 +1248,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
 
   undo: () => {
+    const hadPast = get().past.length > 0;
     set((s) => {
       if (s.past.length === 0) return {};
       const prev = s.past[s.past.length - 1];
@@ -1225,9 +1256,6 @@ export const useEditor = create<EditorState>((set, get) => ({
       return {
         past: s.past.slice(0, -1),
         future: [current, ...s.future].slice(0, MAX_HISTORY),
-        // Restore the FULL snapshot — drawings, noConnects, groups, sheets,
-        // netClasses. Previously only components/wires were restored, which
-        // silently lost every other document field on Ctrl+Z.
         components: prev.components,
         wires: prev.wires,
         drawings: prev.drawings,
@@ -1238,9 +1266,16 @@ export const useEditor = create<EditorState>((set, get) => ({
         selection: { type: null, id: null },
       };
     });
+    // Toast feedback — fire after state update so it's visible to the user
+    if (hadPast && typeof window !== 'undefined') {
+      import('sonner').then(({ toast }) => {
+        toast.info('Undo', { description: `${get().future.length} redo available`, duration: 2000 });
+      }).catch(() => {});
+    }
   },
 
   redo: () => {
+    const hadFuture = get().future.length > 0;
     set((s) => {
       if (s.future.length === 0) return {};
       const next = s.future[0];
@@ -1248,7 +1283,6 @@ export const useEditor = create<EditorState>((set, get) => ({
       return {
         past: [...s.past, current].slice(-MAX_HISTORY),
         future: s.future.slice(1),
-        // Same fix as undo — restore the full snapshot.
         components: next.components,
         wires: next.wires,
         drawings: next.drawings,
@@ -1259,6 +1293,11 @@ export const useEditor = create<EditorState>((set, get) => ({
         selection: { type: null, id: null },
       };
     });
+    if (hadFuture && typeof window !== 'undefined') {
+      import('sonner').then(({ toast }) => {
+        toast.info('Redo', { description: `${get().past.length} undo available`, duration: 2000 });
+      }).catch(() => {});
+    }
   },
 
   clear: () => {

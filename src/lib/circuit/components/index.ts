@@ -20,3 +20,5 @@ registerBuiltinSubCircuits();
 
 export { registerPlugin, getPlugin, getAllPlugins, getPluginsByCategory, hasPlugin } from '../registry';
 export type { ComponentPlugin } from '../types';
+// Register P1 components
+import './p1-components';
