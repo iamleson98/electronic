@@ -15,11 +15,16 @@ import { PropertyPanel } from '@/components/circuit/PropertyPanel';
 import { ProbePanel } from '@/components/circuit/ProbePanel';
 import { PCBCanvas } from '@/components/pcb/PCBCanvas';
 import { PCBToolbar } from '@/components/pcb/PCBToolbar';
-import { PCB3DViewer } from '@/components/pcb/PCB3DViewer';
+import dynamic from 'next/dynamic';
 import { CommandPalette } from '@/components/CommandPalette';
 import { HelpDialog } from '@/components/circuit/HelpDialog';
 import { LibraryManagerDialog } from '@/components/pcb/LibraryManagerDialog';
-import { ChatPanel } from '@/components/ai/ChatPanel';
+
+// Lazy-load heavy components to reduce initial bundle size.
+// three.js (~600KB) only loads when user enters 3D mode.
+// ChatPanel (AI SDK) only loads when user opens AI panel.
+const PCB3DViewer = dynamic(() => import('@/components/pcb/PCB3DViewer').then(m => ({ default: m.PCB3DViewer })), { ssr: false });
+const ChatPanel = dynamic(() => import('@/components/ai/ChatPanel').then(m => ({ default: m.ChatPanel })), { ssr: false });
 import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
 import { installScriptingAPI } from '@/lib/scripting-api';

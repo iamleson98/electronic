@@ -689,6 +689,105 @@ registerPlugin(makeLogicGate('xor', 'XOR', '=1', (a, b) => !!(a !== b)));
 registerPlugin(makeLogicGate('not', 'NOT', '1', (a) => !a));
 
 registerPlugin(diode);
+
+// ----- Zener Diode -----
+// Previously this type was referenced by netlist-export.ts but no plugin
+// registered it — a phantom type that would crash on export.
+const zener: ComponentPlugin = {
+  type: 'zener',
+  name: 'Zener Diode',
+  category: 'semiconductor',
+  description: 'Zener diode with reverse breakdown voltage. Conducts in reverse when V > Vz.',
+  symbol: 'Z',
+  boundingBox: { width: 4, height: 2 },
+  terminals: [
+    { id: 'a', label: 'A', position: { x: 0, y: 1 } },
+    { id: 'k', label: 'K', position: { x: 4, y: 1 } },
+  ],
+  parameters: [
+    { key: 'zenerV', label: 'Zener Voltage', type: 'number', default: 3.3, unit: 'V', min: 0.1, max: 100, step: 0.1 },
+    { key: 'forwardV', label: 'Forward Voltage', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.05 },
+    { key: 'onR', label: 'On Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
+    { key: 'offR', label: 'Off Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
+  ],
+  render(ctx, params, cellSize) {
+    ctx.beginPath();
+    ctx.moveTo(0, cellSize);
+    ctx.lineTo(2 * cellSize - 8, cellSize);
+    ctx.moveTo(2 * cellSize + 8, cellSize);
+    ctx.lineTo(4 * cellSize, cellSize);
+    ctx.stroke();
+    ctx.translate(2 * cellSize, cellSize);
+    // triangle (anode)
+    ctx.beginPath();
+    ctx.moveTo(-8, -8);
+    ctx.lineTo(-8, 8);
+    ctx.lineTo(0, 0);
+    ctx.closePath();
+    ctx.fillStyle = '#fbbf24';
+    ctx.fill();
+    ctx.stroke();
+    // bar (cathode) — zener has "wings" on the bar
+    ctx.beginPath();
+    ctx.moveTo(0, -8);
+    ctx.lineTo(0, 8);
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // zener wings
+    ctx.beginPath();
+    ctx.moveTo(0, -8);
+    ctx.lineTo(-4, -12);
+    ctx.moveTo(0, 8);
+    ctx.lineTo(4, 12);
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  },
+  stamp(params, terminals, sys, sim) {
+    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
+    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const v = sim.nodeVoltage[a] - sim.nodeVoltage[k]; // V(A) - V(K)
+    const vf = params.forwardV as number;
+    const vz = params.zenerV as number;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = `zener_${a}_${k}`;
+    const prevMode = st[key] ?? 'off'; // 'off' | 'forward' | 'reverse'
+    // Forward biased: V(A) > V(K) + Vf
+    // Reverse breakdown: V(K) > V(A) + Vz  (i.e., V = V(A)-V(K) < -Vz)
+    let mode: string;
+    if (v > vf) {
+      mode = 'forward';
+    } else if (v < -vz) {
+      mode = 'reverse';
+    } else {
+      // Hysteresis: stay in current mode until clearly out of breakdown
+      if (prevMode === 'forward' && v > vf - 0.1) mode = 'forward';
+      else if (prevMode === 'reverse' && v < -vz + 0.1) mode = 'reverse';
+      else mode = 'off';
+    }
+    st[key] = mode;
+    const r = Math.max(0.001, params.onR as number);
+    if (mode === 'forward') {
+      sys.stampConductance(a, k, 1 / r);
+      sys.stampCurrentSource(k, a, vf / r);
+    } else if (mode === 'reverse') {
+      // Reverse breakdown: V(K) - V(A) = Vz, current flows K→A
+      sys.stampConductance(a, k, 1 / r);
+      sys.stampCurrentSource(a, k, vz / r);
+    } else {
+      sys.stampConductance(a, k, 1 / (params.offR as number));
+    }
+  },
+  getFlowPath() {
+    return [{ x: 0, y: 1 }, { x: 4, y: 1 }];
+  },
+  measure(params, terminals, sim) {
+    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
+    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+    return [{ label: 'V', value: v.toFixed(3), unit: 'V' }];
+  },
+};
+registerPlugin(zener);
 registerPlugin(npn);
 registerPlugin(opamp);
 registerPlugin(timer555);

@@ -75,6 +75,9 @@ export function AnalysisDialog({ open, onClose }: { open: boolean; onClose: () =
       case 'dc':
         config = { type: 'dc', sourceId, vStart, vStop, vStep, outputNode };
         break;
+      case 'tran':
+        config = { type: 'tran', tStop, tStep, probes: outputNode ? [outputNode] : [] };
+        break;
       case 'tf':
         config = { type: 'tf', inputSourceId: sourceId, outputNode };
         break;
@@ -96,6 +99,10 @@ export function AnalysisDialog({ open, onClose }: { open: boolean; onClose: () =
     }
     try {
       const result = runAnalysis(config);
+      if (!result) {
+        toast.error('Analysis returned no result');
+        return;
+      }
       if (result.report.converged) {
         toast.success(`${analysisType.toUpperCase()} analysis complete: ${result.traces.length} trace(s) in ${result.durationMs.toFixed(0)}ms`);
       } else {

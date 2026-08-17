@@ -17,6 +17,7 @@ import {
 } from './complex-solver';
 import { mergeOptions, type SimOptions, type ConvergenceReport } from './sim-options';
 import { thermalVoltage } from './sim-options';
+import { runSens as _runSens, type SensConfig } from './sensitivity';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Trace data types (returned from analyses)
@@ -1271,7 +1272,141 @@ export type AnalysisConfig =
   | NoiseConfig
   | DistoConfig
   | FourConfig
-  | TempConfig;
+  | TempConfig
+  | TranConfig
+  | OpConfig
+  | SensConfig;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transient analysis (.tran)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface TranConfig {
+  type: 'tran';
+  tStop: number;
+  tStep: number;
+  /** nodes to probe (format: "componentId:terminalId") */
+  probes?: string[];
+}
+
+export function runTran(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  config: TranConfig,
+  opts?: Partial<SimOptions>,
+): AnalysisResult {
+  const start = performance.now();
+  const options = mergeOptions(opts);
+  const { tStop, tStep, probes = [] } = config;
+
+  // Solve DC operating point first
+  let prev = solveDC(components, wires, plugins, options.itl1);
+  if (!prev) {
+    return {
+      type: 'tran',
+      traces: [],
+      scalars: {},
+      report: { converged: false, iterations: 0, finalDelta: 0, attempts: ['solveDC failed'] },
+      durationMs: performance.now() - start,
+    };
+  }
+
+  // Collect traces: one per probe node
+  const nm = buildNodeMap(components, wires, plugins);
+  const probeNodes = probes.map(p => ({
+    key: p,
+    nodeId: nm.terminalNode.get(p) ?? 0,
+  }));
+  const timeValues: number[] = [];
+  const traceData: Record<string, number[]> = {};
+  for (const pn of probeNodes) traceData[pn.key] = [];
+
+  let simState = prev;
+  let stepCount = 0;
+  const maxSteps = Math.min(Math.ceil(tStop / tStep), 100000);
+
+  for (let i = 0; i < maxSteps; i++) {
+    const t = i * tStep;
+    timeValues.push(t);
+    for (const pn of probeNodes) {
+      traceData[pn.key].push(simState.nodeVoltage[pn.nodeId] ?? 0);
+    }
+    const result = simulateStep(components, wires, plugins, {
+      nodeVoltage: simState.nodeVoltage,
+      branchCurrent: simState.branchCurrent,
+      time: simState.time,
+      state: simState.state,
+    }, tStep);
+    if (!result) break;
+    simState = result.sim;
+    stepCount++;
+  }
+
+  const traces: RealTrace[] = probeNodes.map(pn => ({
+    name: pn.key,
+    xValues: Float64Array.from(timeValues),
+    yValues: Float64Array.from(traceData[pn.key]),
+    xLabel: 'Time (s)',
+    yLabel: 'Voltage (V)',
+  }));
+
+  return {
+    type: 'tran',
+    traces,
+    scalars: { steps: stepCount, finalTime: simState.time },
+    report: { converged: true, iterations: stepCount, finalDelta: 0, attempts: [] },
+    durationMs: performance.now() - start,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Operating Point analysis (.op)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface OpConfig {
+  type: 'op';
+}
+
+export function runOp(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  _config: OpConfig,
+  opts?: Partial<SimOptions>,
+): AnalysisResult {
+  const start = performance.now();
+  const options = mergeOptions(opts);
+  const dc = solveDC(components, wires, plugins, options.itl1);
+
+  if (!dc) {
+    return {
+      type: 'op',
+      traces: [],
+      scalars: {},
+      report: { converged: false, iterations: 0, finalDelta: 0, attempts: ['solveDC failed'] },
+      durationMs: performance.now() - start,
+    };
+  }
+
+  // Collect all node voltages as scalars
+  const nm = buildNodeMap(components, wires, plugins);
+  const scalars: Record<string, number> = {};
+  for (const [key, nodeId] of nm.terminalNode) {
+    const v = dc.nodeVoltage[nodeId];
+    if (v !== undefined && isFinite(v)) {
+      scalars[key] = v;
+    }
+  }
+
+  return {
+    type: 'op',
+    traces: [],
+    scalars,
+    report: { converged: true, iterations: 1, finalDelta: 0, attempts: [] },
+    durationMs: performance.now() - start,
+  };
+}
 
 export function runAnalysis(
   components: CircuitComponent[],
@@ -1289,5 +1424,16 @@ export function runAnalysis(
     case 'disto': return runDisto(components, wires, plugins, config, opts);
     case 'four': return runFour(config);
     case 'temp': return runTemp(components, wires, plugins, config, opts);
+    case 'tran': return runTran(components, wires, plugins, config, opts);
+    case 'op': return runOp(components, wires, plugins, config, opts);
+    case 'sens': return _runSens(components, wires, plugins, config as SensConfig, opts);
+    default:
+      return {
+        type: 'op',
+        traces: [],
+        scalars: {},
+        report: { converged: false, iterations: 0, finalDelta: 0, attempts: [`Unknown analysis type: ${(config as any).type}`] },
+        durationMs: 0,
+      };
   }
 }
