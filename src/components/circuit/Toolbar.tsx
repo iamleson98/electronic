@@ -92,6 +92,8 @@ export function Toolbar() {
   const setShowRefdes = useEditor((s) => s.setShowRefdes);
   const showValues = useEditor((s) => s.showValues);
   const setShowValues = useEditor((s) => s.setShowValues);
+  const showNetColors = useEditor((s) => s.showNetColors);
+  const setShowNetColors = useEditor((s) => s.setShowNetColors);
   const activeTool = useEditor((s) => s.activeTool);
   const setActiveTool = useEditor((s) => s.setActiveTool);
 
@@ -746,6 +748,9 @@ export function Toolbar() {
             </DropdownMenuCheckboxItem>
             <DropdownMenuCheckboxItem checked={showPinElecTypes} onCheckedChange={setShowPinElecTypes}>
               Show Pin Electrical Types
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem checked={showNetColors} onCheckedChange={setShowNetColors}>
+              Color-Code Wires by Net
             </DropdownMenuCheckboxItem>
             <DropdownMenuSeparator className="bg-slate-700" />
             <DropdownMenuLabel className="text-slate-300">Units</DropdownMenuLabel>

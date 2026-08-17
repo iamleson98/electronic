@@ -4,8 +4,9 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import { getPlugin } from '@/lib/circuit/registry';
 import { getTerminalsForComponent, buildNodeMap } from '@/lib/circuit/engine';
-import { parseMeasLine, execMeas, type MeasCommand, type MeasResult } from '@/lib/circuit/measurement';
-import { Activity, BarChart3, AlertCircle, Crosshair, Table2 } from 'lucide-react';
+import { parseMeasLine, execMeas, computeFFT, type MeasCommand, type MeasResult } from '@/lib/circuit/measurement';
+import { computeTHD, downsampleSpectrum, type THDResult } from '@/lib/circuit/fourier';
+import { Activity, BarChart3, AlertCircle, Crosshair, Table2, Waves } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -24,12 +25,13 @@ export function ProbePanel() {
   const running = useEditor((s) => s.running);
   const speed = useEditor((s) => s.speed);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const spectrumCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   // ─── Cursor state for measurement readouts ────────────────────────────
   const [cursor, setCursor] = useState<CursorState>({ active: false, x: 0, traceIndex: 0 });
   const [cursorEnabled, setCursorEnabled] = useState(false);
-  const [activeTab, setActiveTab] = useState<'scope' | 'measurements' | 'meas'>('scope');
+  const [activeTab, setActiveTab] = useState<'scope' | 'measurements' | 'meas' | 'spectrum'>('scope');
 
   // ─── .meas commands ───────────────────────────────────────────────────
   const [measCommands, setMeasCommands] = useState<MeasCommand[]>([]);
@@ -271,7 +273,7 @@ export function ProbePanel() {
 
       {/* Tab bar */}
       <div className="flex border-b border-slate-800">
-        {(['scope', 'measurements', 'meas'] as const).map(tab => (
+        {(['scope', 'measurements', 'meas', 'spectrum'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -494,7 +496,255 @@ export function ProbePanel() {
             )}
           </div>
         )}
+
+        {activeTab === 'spectrum' && <SpectrumTab traces={traces} canvasRef={spectrumCanvasRef} />}
       </div>
+    </div>
+  );
+}
+
+// ─── Spectrum tab — FFT bar chart + THD/SNR/SINAD readout ────────────────────
+
+interface SpectrumTabProps {
+  traces: ReturnType<typeof useEditor.getState>['traces'];
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+}
+
+function SpectrumTab({ traces, canvasRef }: SpectrumTabProps) {
+  const [selectedTrace, setSelectedTrace] = useState(0);
+  const [maxHarmonics, setMaxHarmonics] = useState(10);
+
+  // Pick the active trace
+  const traceIdx = Math.min(selectedTrace, Math.max(0, traces.length - 1));
+  const trace = traces[traceIdx];
+
+  // Build a RealTrace suitable for computeFFT/computeTHD
+  const realTrace = trace && trace.samples.length >= 8 ? {
+    name: trace.label,
+    xValues: Float64Array.from(trace.samples.map(s => s.time)),
+    yValues: Float64Array.from(trace.samples.map(s => s.voltage)),
+    xLabel: 'Time (s)',
+    yLabel: 'Voltage (V)',
+  } : null;
+
+  const thdResult: THDResult | null = realTrace ? computeTHD(realTrace as any, maxHarmonics) : null;
+
+  // Draw the spectrum bar chart
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.save();
+    ctx.scale(dpr, dpr);
+
+    ctx.fillStyle = '#0a0f1c';
+    ctx.fillRect(0, 0, rect.width, rect.height);
+
+    // grid
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x < rect.width; x += 40) { ctx.moveTo(x, 0); ctx.lineTo(x, rect.height); }
+    for (let y = 0; y < rect.height; y += 24) { ctx.moveTo(0, y); ctx.lineTo(rect.width, y); }
+    ctx.stroke();
+
+    if (!thdResult || !realTrace) {
+      ctx.fillStyle = '#475569';
+      ctx.font = '11px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(
+        traces.length === 0
+          ? 'Place an Oscilloscope component to capture a waveform'
+          : 'Run the simulation to compute the FFT spectrum',
+        rect.width / 2,
+        rect.height / 2,
+      );
+      ctx.restore();
+      return;
+    }
+
+    // Re-derive the spectrum via computeFFT (kept separate from thdResult for chart)
+    // thdResult.harmonics holds the discrete peaks; for a continuous bar chart
+    // we downsample the raw spectrum.
+    const fullSpectrum = computeFFT(realTrace as any);
+    const downsampled = downsampleSpectrum(fullSpectrum.yValues, fullSpectrum.xValues, 48);
+
+    const padding = 8;
+    const chartW = rect.width - 2 * padding;
+    const chartH = rect.height - 2 * padding - 14; // leave 14px for x-axis label
+    let maxMag = 0;
+    for (const m of downsampled.mags) if (m > maxMag) maxMag = m;
+    if (maxMag <= 0) maxMag = 1;
+    const barW = chartW / downsampled.mags.length;
+
+    // Highlight harmonic frequencies with vertical markers
+    const harmonicFreqs = new Set(thdResult.harmonics.map(h => h.frequency));
+    const freqToX = (freq: number) => {
+      const fMin = Math.max(1, downsampled.freqs[0] || 1);
+      const fMax = downsampled.freqs[downsampled.freqs.length - 1] || fMin * 2;
+      const logMin = Math.log10(fMin);
+      const logMax = Math.log10(fMax);
+      if (logMax <= logMin) return padding;
+      const t = (Math.log10(Math.max(fMin, freq)) - logMin) / (logMax - logMin);
+      return padding + t * chartW;
+    };
+
+    // bars
+    for (let i = 0; i < downsampled.mags.length; i++) {
+      const m = downsampled.mags[i];
+      const h = (m / maxMag) * chartH;
+      const x = padding + i * barW;
+      const y = padding + chartH - h;
+      const isHarmonic = harmonicFreqs.has(downsampled.freqs[i]);
+      ctx.fillStyle = isHarmonic ? '#fbbf24' : '#22d3ee';
+      ctx.fillRect(x, y, Math.max(1, barW - 1), h);
+    }
+
+    // harmonic frequency labels (H1, H2, H3, ...)
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    for (const h of thdResult.harmonics) {
+      const x = freqToX(h.frequency);
+      ctx.strokeStyle = 'rgba(251, 191, 36, 0.3)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, padding);
+      ctx.lineTo(x, padding + chartH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#fbbf24';
+      ctx.fillText(`H${h.harmonic}`, x, padding + 1);
+    }
+
+    // axis label
+    ctx.fillStyle = '#475569';
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(
+      `Frequency (Hz) · fs=${(thdResult.sampleRate / 1000).toFixed(1)}kHz · Δf=${thdResult.frequencyResolution.toFixed(1)}Hz`,
+      rect.width / 2,
+      rect.height - 2,
+    );
+
+    ctx.restore();
+  }, [thdResult, realTrace, traces.length, canvasRef]);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="border-b border-slate-800 p-2">
+        <div className="mb-2 flex items-center gap-2">
+          <Waves size={12} className="text-cyan-400" />
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            FFT Spectrum + THD
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={traceIdx}
+            onChange={(e) => setSelectedTrace(parseInt(e.target.value))}
+            className="cursor-pointer flex-1 rounded border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200"
+            disabled={traces.length === 0}
+          >
+            {traces.length === 0 ? (
+              <option value={0}>No traces</option>
+            ) : (
+              traces.map((t, i) => (
+                <option key={i} value={i}>{t.label}</option>
+              ))
+            )}
+          </select>
+          <label className="flex items-center gap-1 text-[10px] text-slate-400">
+            Harms
+            <input
+              type="number"
+              min={2}
+              max={50}
+              value={maxHarmonics}
+              onChange={(e) => setMaxHarmonics(Math.min(50, Math.max(2, parseInt(e.target.value) || 10)))}
+              className="w-12 rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-xs text-slate-200"
+            />
+          </label>
+        </div>
+      </div>
+
+      {/* Bar chart */}
+      <div className="border-b border-slate-800 p-2">
+        <div className="relative h-44 rounded-md border border-slate-800 bg-[#0a0f1c]">
+          <canvas ref={canvasRef} className="h-full w-full" />
+        </div>
+      </div>
+
+      {/* THD / SNR / SINAD readout */}
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">
+        {!thdResult ? (
+          <div className="py-8 text-center text-xs text-slate-500">
+            {traces.length === 0
+              ? 'Place an Oscilloscope to capture a waveform.'
+              : 'Run the simulation (or pause after running) to compute the spectrum.'}
+          </div>
+        ) : (
+          <>
+            <div className="mb-3 grid grid-cols-2 gap-2">
+              <ReadoutCard label="Fundamental" value={formatFreq(thdResult.fundamentalFreq)} hint={`${thdResult.harmonics[0].magnitudeDb.toFixed(1)} dB`} />
+              <ReadoutCard label="THD" value={`${thdResult.thdPercent.toFixed(2)}%`} hint={`${thdResult.thdDb.toFixed(1)} dB`} accent={thdResult.thdPercent < 1 ? 'good' : thdResult.thdPercent < 5 ? 'warn' : 'bad'} />
+              <ReadoutCard label="SNR" value={`${thdResult.snrDb.toFixed(1)} dB`} />
+              <ReadoutCard label="SINAD" value={`${thdResult.sinadDb.toFixed(1)} dB`} />
+            </div>
+
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Harmonics</div>
+            <table className="w-full text-xs">
+              <thead className="text-[10px] uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th className="px-2 py-1 text-left">#</th>
+                  <th className="px-2 py-1 text-right">Freq</th>
+                  <th className="px-2 py-1 text-right">Mag</th>
+                  <th className="px-2 py-1 text-right">dB</th>
+                  <th className="px-2 py-1 text-right">% Fund</th>
+                </tr>
+              </thead>
+              <tbody>
+                {thdResult.harmonics.map(h => (
+                  <tr key={h.harmonic} className="border-t border-slate-800">
+                    <td className="px-2 py-1 text-slate-300">H{h.harmonic}</td>
+                    <td className="px-2 py-1 text-right font-mono text-slate-200">{formatFreq(h.frequency)}</td>
+                    <td className="px-2 py-1 text-right font-mono text-slate-400">{h.magnitude.toFixed(4)}</td>
+                    <td className="px-2 py-1 text-right font-mono text-cyan-300">{h.magnitudeDb.toFixed(1)}</td>
+                    <td className={`px-2 py-1 text-right font-mono ${h.harmonic === 1 ? 'text-amber-400' : 'text-slate-400'}`}>{h.percentOfFundamental.toFixed(2)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatFreq(hz: number): string {
+  if (hz >= 1e6) return `${(hz / 1e6).toFixed(2)} MHz`;
+  if (hz >= 1e3) return `${(hz / 1e3).toFixed(2)} kHz`;
+  return `${hz.toFixed(1)} Hz`;
+}
+
+function ReadoutCard({ label, value, hint, accent }: { label: string; value: string; hint?: string; accent?: 'good' | 'warn' | 'bad' }) {
+  const accentColor = accent === 'good' ? 'text-emerald-400' : accent === 'warn' ? 'text-amber-400' : accent === 'bad' ? 'text-red-400' : 'text-slate-100';
+  return (
+    <div className="rounded-md border border-slate-800 bg-slate-800/40 p-2">
+      <div className="text-[9px] uppercase tracking-wider text-slate-500">{label}</div>
+      <div className={`font-mono text-sm ${accentColor}`}>{value}</div>
+      {hint && <div className="font-mono text-[10px] text-slate-500">{hint}</div>}
     </div>
   );
 }

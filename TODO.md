@@ -98,14 +98,14 @@ This file tracks all remaining improvements.
 - [ ] **Focus rings on canvas elements** — Virtual focus state with dashed ring, Tab/Shift+Tab to cycle
 - [x] **ARIA live region** — Added aria-live="polite" for sim state announcements
 - [x] **Landmark roles** — Added `<main>`, `<nav>` in page.tsx
-- [ ] **Color-blind support** — Add icons (⚠/✓) alongside color-coded states
+- [x] **Color-blind support** — ERC errors now use ✕ (X) shape; warnings use ! (exclamation). Shape distinction works without color.
 - [x] **Skip to main content** — Added in layout.tsx
 
 ### Onboarding
 
-- [ ] **First-run tutorial** — Step-by-step walkthrough highlighting UI elements
+- [x] **First-run tutorial** — Step-by-step walkthrough highlighting UI elements (6 steps, SVG mask cutouts, localStorage-tracked)
 - [x] **Empty-state card** — Welcome card with "Load Example" + "Add Resistor" buttons
-- [ ] **Examples gallery with thumbnails** — Grid of auto-generated SVG previews, click to load
+- [x] **Examples gallery with thumbnails** — Grid of auto-generated SVG previews (via exportSchematicSVG), click to load
 - [x] **Keyboard shortcut discovery** — `?` key opens HelpDialog
 
 ---
@@ -115,7 +115,7 @@ This file tracks all remaining improvements.
 ### UI Polish
 
 - [x] **Simulation status panel** — Bottom bar showing node count, FPS, speed, sim time
-- [ ] **Net coloring** — Color-code nets (power=red, ground=black, signal=blue) via NetClasses
+- [x] **Net coloring** — Wires color-coded by net name (ground=slate, power=red, signal=cyan); user NetClass colors override; toolbar toggle
 - [ ] **"What's New" / changelog** — Badge Help button when new features are added
 - [x] **Tip of the Day** — Random tip toast on startup (sessionStorage, once per session)
 - [ ] **High-contrast theme** — For low-vision users
@@ -124,7 +124,7 @@ This file tracks all remaining improvements.
 
 ### Advanced Simulation
 
-- [ ] **Fourier THD/spectrum display** — Bar chart of harmonics + table with THD%, fundamental, SNR
+- [x] **Fourier THD/spectrum display** — Spectrum tab in ProbePanel: log-x bar chart with H1..H10 markers, table with THD%, SNR, SINAD, harmonic breakdown
 - [ ] **Real sparse solver** — CSR-based LU factorization (KLU-style) for 1000+ node circuits
 - [ ] **Adaptive timestep** — Wire `simOptions.method` into capacitor/inductor stamps (trap/Gear)
 - [x] **Wire in `memory.ts`** — cleanupComponentState called on deleteComponent (inline), orphaned sim state removed
@@ -132,7 +132,6 @@ This file tracks all remaining improvements.
 - [ ] **Move canvas rendering out of React** — Direct RAF loop reading from `useEditor.getState()`, bypass React for hot path
 - [ ] **Ring buffer for trace samples** — Replace `slice(-max)` with `Float64Array` + write index
 - [x] **Fix autosave to filter sim updates** — Only marks dirty on component/wire reference changes, not 60Hz simContext updates
-- [ ] **Net coloring** — Color-code nets (power=red, ground=black, signal=blue) via NetClasses
 - [ ] **What's New / changelog** — Badge Help button when new features are added
 
 ### Advanced Components

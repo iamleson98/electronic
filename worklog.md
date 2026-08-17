@@ -2402,3 +2402,148 @@ Stage Summary:
 - Auto-apply on startup: drizzle's migrate() runs pending migrations
 - Idempotent: __drizzle_migrations table prevents re-applying
 - Future schema changes: edit schema.ts → bun run db:generate → commit → deploy
+
+---
+Task ID: p2-batch-features
+Agent: main
+Task: Implement remaining high-value TODO items (net coloring, Fourier THD, examples gallery, color-blind icons, first-run tutorial)
+
+Work Log:
+- Five features in one batch — picked the highest-impact remaining items from TODO.md.
+
+1. NET COLORING (P2 UI Polish):
+   * New module `src/lib/circuit/net-colors.ts` (144 lines):
+     - `buildWireColorMap(wires, components, plugins, nodeMap, netClasses)` —
+       walks power/net-label components, derives each wire's net name via the
+       NodeMap, and assigns a color: ground → #475569 (slate), power (VCC/5V/3V3/
+       12V/VBAT/AVDD/...) → #ef4444 (red), signal → #22d3ee (cyan). User-defined
+       NetClass.color overrides the default palette.
+     - `getNetNameForWire(wire, components, plugins, nodeMap)` — returns the
+       human-readable net name (e.g. "VCC", "GND", "DATA") for tooltip display.
+     - POWER_TYPES set + GROUND_NAMES set + POWER_PATTERNS regex list cover
+       all standard power/ground net naming conventions.
+   * Wired into `src/components/circuit/CircuitCanvas.tsx`:
+     - Reads `netClasses` and `showNetColors` from the store.
+     - Calls `buildWireColorMap` once per render effect (after `buildNodeMap`).
+     - Replaces the hardcoded `#94a3b8` slate-gray wire color with the net color.
+     - Selected/hovered/active-node wires still use amber highlights (priority
+       over net color, so they remain visible when picked).
+     - Effect deps updated to include `netClasses, showNetColors`.
+   * Added `showNetColors` boolean flag + `setShowNetColors` setter to the editor
+     store. Defaults to `true` (visible out of the box).
+   * Added a "Color-Code Wires by Net" toggle in the Toolbar's Display dropdown
+     menu (next to Show Pin Numbers / Show Values).
+   * Upgraded `NetClassesDialog.tsx` to include a color picker column (native
+     `<input type="color">`) so users can assign custom colors per net class.
+
+2. FOURIER THD/SPECTRUM DISPLAY (P2 Advanced Simulation):
+   * New module `src/lib/circuit/fourier.ts` (220 lines):
+     - `computeTHD(trace, maxHarmonics=10)` — runs computeFFT, finds the
+       fundamental (strongest non-DC bin), walks out harmonics k=2..N, computes:
+         THD = sqrt(Σ Vn² for n≥2) / V1
+         THD% = THD × 100
+         THD-dB = 20·log10(THD)
+         SNR-dB = 10·log10(P_fundamental / P_noise)
+         SINAD-dB = 10·log10(P_fundamental / (P_noise + P_harmonics))
+       Returns `THDResult` with fundamental freq/mag, harmonics table (k, freq,
+       mag, dB, % of fundamental), and spectrum metadata.
+     - `downsampleSpectrum(mags, freqs, numBuckets=64)` — log-spaced bucketing
+       for bar-chart display (max per bucket).
+   * Added a new "Spectrum" tab to `src/components/circuit/ProbePanel.tsx`:
+     - Trace selector dropdown (multi-trace aware).
+     - "Harms" number input (2..50) for max harmonic count.
+     - Bar chart canvas: 48 log-spaced bars from ~1Hz to Nyquist, harmonic
+       frequencies highlighted in amber with dashed vertical markers + H1/H2/...
+       labels, frequency/samplerate/Δf axis label.
+     - Readout cards: Fundamental (with dB), THD (% + dB, color-coded green/amber/
+       red), SNR (dB), SINAD (dB).
+     - Harmonic table: H1..H10 with freq, mag, dB, % of fundamental.
+   * The `SpectrumTab` is a separate sub-component to keep the main ProbePanel
+     function manageable.
+
+3. EXAMPLES GALLERY WITH THUMBNAILS (P1 Onboarding):
+   * Replaced the static text-only EXAMPLES array in `HelpDialog.tsx` with a new
+     `ExamplesGallery` component:
+     - Imports `exampleCategories` from `examples.ts` and `exportSchematicSVG`
+       from `schematic-plot.ts`.
+     - Pre-computes (via useMemo) an inline SVG string for each example doc.
+     - Renders a 2/3-column grid of cards grouped by category (Basic Circuits,
+       Timers & Oscillators, Transistors & Switches, Op-Amps, etc.).
+     - Each card shows the SVG thumbnail on a #fafafa background (top 28×w full
+       area) + title + description below.
+     - Click → `clear()` + `loadDocument(ex.doc)` (single action, undoable).
+     - Hover state: amber border + slate-900 bg.
+   * Removed the old static EXAMPLES list (was 8 hardcoded entries — now uses
+     the real `exampleCategories` array, which has all 23+ examples).
+
+4. COLOR-BLIND SUPPORT (P1 Accessibility):
+   * `drawERCMarkers` in `src/lib/circuit/schematic-overlays.ts` now uses
+     different shapes for errors vs warnings (was both ✕ marks, only color
+     differed):
+       - Errors: red disc with white ✕ (X) — same as before.
+       - Warnings: amber disc with white ! (exclamation: tall rectangle + dot).
+     Shape distinction works without relying on red/amber color vision.
+
+5. FIRST-RUN TUTORIAL (P1 Onboarding):
+   * New component `src/components/circuit/FirstRunTutorial.tsx` (228 lines):
+     - Shows on first visit (no `circuit-lab.tutorial-completed` flag in
+       localStorage). Skips if user has previously dismissed it.
+     - 6-step walkthrough:
+       1. Welcome (centered)
+       2. Component Palette (highlight on left)
+       3. Canvas (highlight center)
+       4. Probe & Oscilloscope panel (highlight on right)
+       5. Run Simulation button (highlight)
+       6. Need More Help? (centered, mentions ?, Ctrl+K, Ctrl+J)
+     - Each step targets a CSS selector to find the element on the page; an
+       SVG mask cuts a "hole" in the dimmed backdrop around the highlighted
+       element so the user can see it.
+     - Tooltip positioned relative to the highlight (right/left/top/bottom/
+       center), with Back / Next / Skip buttons.
+     - Listens to resize/scroll to re-position.
+   * Wired into `src/app/page.tsx` next to `<TipOfTheDay />`.
+
+NEW TESTS (2 files, 36 new tests):
+- `tests/fourier-thd.test.ts` (22 tests):
+  * Empty/short/DC inputs return null
+  * Pure sine: THD < 2%, fundamental freq ≈ 1kHz
+  * Sine + 2nd harmonic (10%): THD 5-20%, H2 detected
+  * Sine + 3rd harmonic (30%): H3 detected
+  * Square wave: THD > 30%, odd harmonics dominate (H3, H5) > even (H2, H4)
+  * Clipped sine: THD > 15%
+  * Fundamental magnitude positive, THD-dB negative for low THD
+  * Custom maxHarmonics bounds respected
+  * Harmonics array includes H1 at 100%
+  * sampleRate, numSamples, frequencyResolution correct
+  * SNR > 0 for clean sine, SINAD ≤ SNR
+  * downsampleSpectrum: empty input, numBuckets default/param, monotonic
+    frequencies, max-of-bucket
+- `tests/net-colors.test.ts` (14 tests):
+  * Empty map for no wires
+  * Ground/power/5V/3V3/AGND recognized
+  * Unnamed signal nets → cyan
+  * User NetClass.color overrides default palette (for power and signal nets)
+  * Wires on different nodes get different colors
+  * Wires on same node share color
+  * getNetNameForWire: returns name for labeled net, null for unlabeled,
+    follows junction-unified nodes
+
+VERIFICATION:
+- Typecheck clean (`bun x tsc --noEmit`)
+- All 1505 tests pass across 65 files (was 1344 → +161 new tests: 36 in this
+  batch + 125 from schema-migrations)
+- Build succeeds (`NEXT_BUILD=true bun run build`)
+- All pre-existing examples still load + simulate cleanly
+
+Stage Summary:
+- 5 high-value features shipped in one batch:
+  1. Net coloring (visual wire classification by electrical role)
+  2. Fourier THD/spectrum tab (professional-grade distortion analysis)
+  3. Examples gallery with live SVG thumbnails (replaces static text cards)
+  4. Color-blind safe ERC icons (✕ for errors, ! for warnings)
+  5. First-run tutorial with SVG mask cutouts (6-step UI walkthrough)
+- 3 new files: net-colors.ts (144), fourier.ts (220), FirstRunTutorial.tsx (228)
+- 5 modified files: CircuitCanvas.tsx, ProbePanel.tsx, HelpDialog.tsx,
+  schematic-overlays.ts, page.tsx, store.ts, Toolbar.tsx, NetClassesDialog.tsx
+- 2 new test files: fourier-thd.test.ts (22), net-colors.test.ts (14)
+- TODO.md updated: 5 items moved from incomplete to complete

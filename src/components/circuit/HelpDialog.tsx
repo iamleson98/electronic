@@ -1,12 +1,15 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { HelpCircle, Keyboard, BookOpen, Lightbulb, Code } from 'lucide-react';
+import { exampleCategories, type ExampleEntry } from '@/lib/circuit/examples';
+import { exportSchematicSVG } from '@/lib/circuit/schematic-plot';
+import { useEditor } from '@/lib/circuit/store';
 
 interface Props { open: boolean; onClose: () => void; }
 
@@ -44,17 +47,6 @@ const GETTING_STARTED = [
   { step: 6, title: 'Switch to PCB', desc: 'Click "PCB Layout" at top. Click "Import" to bring your schematic in.' },
   { step: 7, title: '3D view', desc: 'Click "3D View" to see your board in 3D.' },
   { step: 8, title: 'Export', desc: 'Click "Gerbers" to download manufacturing files.' },
-];
-
-const EXAMPLES = [
-  { name: 'LED + Resistor', desc: 'Simple DC circuit: 5V → R → LED → GND' },
-  { name: '555 Astable Blink', desc: 'Classic 555 timer in astable mode' },
-  { name: 'RC Low-pass Filter', desc: 'Pulse source through RC filter with scope' },
-  { name: 'Transistor Switch', desc: 'NPN transistor as digital switch' },
-  { name: 'Arduino Blink', desc: 'Arduino blinking an LED on D2' },
-  { name: 'Op-Amp Inverting Amp', desc: 'Op-amp with gain -10' },
-  { name: 'NMOS Switch', desc: 'NMOS transistor switching an LED' },
-  { name: '7-Segment Counter', desc: 'Arduino driving a 7-segment display' },
 ];
 
 export function HelpDialog({ open, onClose }: Props) {
@@ -105,16 +97,7 @@ export function HelpDialog({ open, onClose }: Props) {
             </ScrollArea>
           </TabsContent>
           <TabsContent value="examples" className="mt-4">
-            <ScrollArea className="h-[60vh]">
-              <div className="grid grid-cols-2 gap-3">
-                {EXAMPLES.map(ex => (
-                  <div key={ex.name} className="p-3 rounded-md bg-slate-950 border border-slate-800">
-                    <h4 className="text-sm font-medium text-cyan-300">{ex.name}</h4>
-                    <p className="text-xs text-slate-400 mt-1">{ex.desc}</p>
-                  </div>
-                ))}
-              </div>
-            </ScrollArea>
+            <ExamplesGallery />
           </TabsContent>
           <TabsContent value="api" className="mt-4">
             <ScrollArea className="h-[60vh]">
@@ -154,5 +137,72 @@ circuitlab.getVoltage('r1:a')`}</pre>
         </Tabs>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ─── Examples gallery with live SVG thumbnails ───────────────────────────────
+
+function ExamplesGallery() {
+  const loadDocument = useEditor((s) => s.loadDocument);
+  const clear = useEditor((s) => s.clear);
+
+  // Pre-compute SVG thumbnails once per category (deterministic from examples.ts)
+  const thumbnails = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const cat of exampleCategories) {
+      for (const ex of cat.examples) {
+        try {
+          const svg = exportSchematicSVG(ex.doc);
+          // Strip the XML declaration so it can be inlined as data: URL or HTML
+          const cleaned = svg.replace(/^<\?xml[^>]*\?>\s*/, '');
+          map.set(`${cat.label}::${ex.name}`, cleaned);
+        } catch {
+          map.set(`${cat.label}::${ex.name}`, '');
+        }
+      }
+    }
+    return map;
+  }, []);
+
+  const handleLoad = (ex: ExampleEntry) => {
+    clear();
+    loadDocument(ex.doc);
+  };
+
+  return (
+    <ScrollArea className="h-[60vh]">
+      <div className="space-y-4">
+        {exampleCategories.map((cat) => (
+          <div key={cat.label}>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">{cat.label}</h3>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              {cat.examples.map((ex) => {
+                const thumb = thumbnails.get(`${cat.label}::${ex.name}`);
+                return (
+                  <button
+                    key={ex.name}
+                    onClick={() => handleLoad(ex)}
+                    className="cursor-pointer group overflow-hidden rounded-md border border-slate-800 bg-slate-950 text-left transition-colors hover:border-cyan-700 hover:bg-slate-900"
+                    title={`Load example: ${ex.name}`}
+                  >
+                    {/* Thumbnail */}
+                    <div
+                      className="h-28 w-full overflow-hidden border-b border-slate-800 bg-[#fafafa]"
+                      // Inline SVG is safe here — we generate it ourselves from the example docs
+                      dangerouslySetInnerHTML={{ __html: thumb || '<div class="flex h-full items-center justify-center text-slate-400 text-xs">No preview</div>' }}
+                    />
+                    {/* Title + description */}
+                    <div className="p-2">
+                      <h4 className="text-xs font-medium text-cyan-300 group-hover:text-cyan-200">{ex.name}</h4>
+                      <p className="mt-0.5 text-[10px] leading-tight text-slate-500">{ex.description}</p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </ScrollArea>
   );
 }

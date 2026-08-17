@@ -64,6 +64,7 @@ export function NetClassesDialog({ open, onClose }: { open: boolean; onClose: ()
                 <thead className="bg-slate-800 sticky top-0">
                   <tr>
                     <th className="px-2 py-1 text-left">Name</th>
+                    <th className="px-2 py-1 text-left">Color</th>
                     <th className="px-2 py-1 text-left">Trace (mm)</th>
                     <th className="px-2 py-1 text-left">Via Drill (mm)</th>
                     <th className="px-2 py-1 text-left">Clearance (mm)</th>
@@ -75,6 +76,15 @@ export function NetClassesDialog({ open, onClose }: { open: boolean; onClose: ()
                   {netClasses.map((nc) => (
                     <tr key={nc.id} className="border-t border-slate-800">
                       <td className="px-2 py-1 font-mono">{nc.name}</td>
+                      <td className="px-2 py-1">
+                        <input
+                          type="color"
+                          value={nc.color ?? '#22d3ee'}
+                          onChange={(e) => updateNetClass(nc.id, { color: e.target.value })}
+                          className="h-6 w-10 cursor-pointer rounded border border-slate-700 bg-slate-800"
+                          title="Wire color for this net class"
+                        />
+                      </td>
                       <td className="px-2 py-1">
                         <Input
                           type="number" defaultValue={nc.traceWidth ?? 0.25} step={0.05}

@@ -48,29 +48,44 @@ export function drawERCMarkers(
     const sp = gridToScreen(err.position.x, err.position.y);
     const isHover = hoveredError === err;
     const r = isHover ? 9 : 7;
+    const isError = err.severity === 'error';
     // outer halo
     ctx.beginPath();
     ctx.arc(sp.x, sp.y, r + 4, 0, Math.PI * 2);
-    ctx.fillStyle = err.severity === 'error'
+    ctx.fillStyle = isError
       ? (isHover ? 'rgba(239, 68, 68, 0.45)' : 'rgba(239, 68, 68, 0.25)')
       : (isHover ? 'rgba(251, 191, 36, 0.45)' : 'rgba(251, 191, 36, 0.25)');
     ctx.fill();
     // inner disc
     ctx.beginPath();
     ctx.arc(sp.x, sp.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = err.severity === 'error' ? '#dc2626' : '#f59e0b';
+    ctx.fillStyle = isError ? '#dc2626' : '#f59e0b';
     ctx.fill();
     ctx.strokeStyle = '#0f172a';
     ctx.lineWidth = 1.2;
     ctx.stroke();
-    // X mark
+    // Iconography (color-blind safe): errors use ✕ (X), warnings use ! (exclamation)
+    // — provides shape distinction independent of red/amber color coding.
     ctx.strokeStyle = '#fff';
+    ctx.fillStyle = '#fff';
     ctx.lineWidth = 1.4;
     ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(sp.x - 3, sp.y - 3); ctx.lineTo(sp.x + 3, sp.y + 3);
-    ctx.moveTo(sp.x + 3, sp.y - 3); ctx.lineTo(sp.x - 3, sp.y + 3);
-    ctx.stroke();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (isError) {
+      // X mark for errors
+      ctx.beginPath();
+      ctx.moveTo(sp.x - 3, sp.y - 3); ctx.lineTo(sp.x + 3, sp.y + 3);
+      ctx.moveTo(sp.x + 3, sp.y - 3); ctx.lineTo(sp.x - 3, sp.y + 3);
+      ctx.stroke();
+    } else {
+      // Exclamation mark for warnings — ! inside a triangle would be ideal but
+      // a tall rectangle + dot is more legible at this radius.
+      ctx.fillRect(sp.x - 0.8, sp.y - 4, 1.6, 5);
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y + 3, 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
     hits.push({ err, sx: sp.x, sy: sp.y });
   }
   return hits;

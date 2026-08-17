@@ -21,6 +21,7 @@ import { HelpDialog } from '@/components/circuit/HelpDialog';
 import { LibraryManagerDialog } from '@/components/pcb/LibraryManagerDialog';
 import { SimStatusBar } from '@/components/circuit/SimStatusBar';
 import { TipOfTheDay } from '@/components/circuit/TipOfTheDay';
+import { FirstRunTutorial } from '@/components/circuit/FirstRunTutorial';
 
 // Lazy-load heavy components to reduce initial bundle size.
 // three.js (~600KB) only loads when user enters 3D mode.
@@ -265,6 +266,7 @@ export default function Home() {
       <HelpDialog open={showHelp} onClose={() => setShowHelp(false)} />
       <LibraryManagerDialog open={showLibrary} onClose={() => setShowLibrary(false)} />
       <TipOfTheDay />
+      <FirstRunTutorial />
     </div>
   );
 }

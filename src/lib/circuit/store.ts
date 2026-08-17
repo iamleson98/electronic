@@ -128,6 +128,8 @@ interface EditorState {
   showRefdes: boolean;
   showValues: boolean;
   showTitleBlock: boolean;
+  /** color-code wires by net name (ground=gray, power=red, signal=cyan) */
+  showNetColors: boolean;
   /** UI theme: 'dark' (default) or 'light' */
   theme: 'dark' | 'light';
   /** Customizable hotkeys (overrides defaults). Keys are hotkey names, values are key strings. */
@@ -225,6 +227,7 @@ interface EditorState {
   setShowRefdes: (s: boolean) => void;
   setShowValues: (s: boolean) => void;
   setShowTitleBlock: (s: boolean) => void;
+  setShowNetColors: (s: boolean) => void;
   setTheme: (t: 'dark' | 'light') => void;
   setHotkey: (name: string, key: string) => void;
   resetHotkeys: () => void;
@@ -433,6 +436,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   showRefdes: true,
   showValues: true,
   showTitleBlock: false,
+  showNetColors: true,
   theme: 'dark',
   customHotkeys: {},
   activeTool: 'select',
@@ -1192,6 +1196,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   setUnits: (u) => set({ units: u }),
   setGridSize: (s) => set({ gridSize: s }),
   setShowPinNumbers: (s) => set({ showPinNumbers: s }),
+  setShowNetColors: (s) => set({ showNetColors: s }),
   setShowPinNames: (s) => set({ showPinNames: s }),
   setShowPinElecTypes: (s) => set({ showPinElecTypes: s }),
   setShowRefdes: (s) => set({ showRefdes: s }),

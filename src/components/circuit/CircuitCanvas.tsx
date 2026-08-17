@@ -6,6 +6,7 @@ import { useEditor } from '@/lib/circuit/store';
 import { getPlugin, getAllPlugins } from '@/lib/circuit/registry';
 import { computeWireCurrents, computeComponentCurrents } from '@/lib/circuit/engine';
 import { buildNodeMap } from '@/lib/circuit/engine';
+import { buildWireColorMap } from '@/lib/circuit/net-colors';
 import type { CircuitComponent, ComponentPlugin, TerminalDef, Vec2, Wire } from '@/lib/circuit/types';
 import { rotateTerminal } from '@/lib/circuit/components/draw';
 import {
@@ -87,6 +88,8 @@ export function CircuitCanvas() {
   const showRefdes = useEditor((s) => s.showRefdes);
   const showValues = useEditor((s) => s.showValues);
   const activeTool = useEditor((s) => s.activeTool);
+  const netClasses = useEditor((s) => s.netClasses);
+  const showNetColors = useEditor((s) => s.showNetColors ?? true);
 
   // Live ERC — auto-runs on every change, debounced. Disabled while simulating
   // so it doesn't fight the simulation loop for CPU.
@@ -226,6 +229,11 @@ export function CircuitCanvas() {
     // node should highlight, making it easy to see what connects to what.
     const pluginsMapForNodes = new Map(plugins.map((p) => [p.type, p]));
     const nodeMap = buildNodeMap(components, wires, pluginsMapForNodes);
+    // Per-wire color based on net name (ground=gray, power=red, signal=cyan,
+    // overridden by any user-defined NetClass.color)
+    const wireColorMap = showNetColors
+      ? buildWireColorMap(wires, components, pluginsMapForNodes, nodeMap, netClasses ?? [])
+      : new Map<string, string>();
     // Map: terminalKey ("compId:termId") -> nodeId
     // Map: nodeId -> Set of terminalKeys
     // Map: nodeId -> Set of wireIds
@@ -280,8 +288,12 @@ export function CircuitCanvas() {
       const isHover = hover.wireId === wire.id;
       const isOnActiveNode = activeWires.has(wire.id);
 
-      // wire — highlight all wires on the same electrical node
-      ctx.strokeStyle = isSelected ? '#fbbf24' : (isHover ? '#fde047' : (isOnActiveNode ? '#cbd5e1' : '#94a3b8'));
+      // wire — highlight all wires on the same electrical node.
+      // When showNetColors is enabled, the base color is the net's color
+      // (ground=gray, power=red, signal=cyan, or a user-defined NetClass color).
+      // Selected/hovered wires still use the amber highlight to stand out.
+      const netColor = wireColorMap.get(wire.id) ?? '#94a3b8';
+      ctx.strokeStyle = isSelected ? '#fbbf24' : (isHover ? '#fde047' : (isOnActiveNode ? '#cbd5e1' : netColor));
       ctx.lineWidth = isSelected ? 3.5 : (isHover ? 3 : (isOnActiveNode ? 2.5 : 2));
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
@@ -916,7 +928,7 @@ export function CircuitCanvas() {
     }
 
     ctx.restore();
-  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, use45Routing, running, gridToScreen, getTerminalPos, plugins, getRotateHandlePos, ercErrors, hoveredERC, units, sheets, hoveredSheetId, resolveEndpointPos]);
+  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, use45Routing, running, gridToScreen, getTerminalPos, plugins, getRotateHandlePos, ercErrors, hoveredERC, units, sheets, hoveredSheetId, resolveEndpointPos, netClasses, showNetColors]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
