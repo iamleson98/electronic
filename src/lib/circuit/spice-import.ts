@@ -494,8 +494,31 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
           registerTerminal(tokens[2], id, 'b');
           break;
         }
-        case 'X': {  // Sub-circuit call — skip (we don't expand subckts inline)
-          warnings.push(`Line ${lineNum + 1}: sub-circuit call "${tokens[0]}" skipped (subckts are not expanded inline)`);
+        case 'X': {  // Sub-circuit call — parse as a generic component with net connections
+          if (tokens.length < 4) {
+            warnings.push(`Line ${lineNum + 1}: X card needs at least nodes + model: "${line}"`);
+            continue;
+          }
+          const id = tokens[0];
+          // Last token is the subckt name, middle tokens are nodes
+          const nodeTokens = tokens.slice(1, -1);
+          const subcktName = tokens[tokens.length - 1];
+          // Create a generic component — the subckt's internal components are
+          // not expanded, but the external nodes are wired as terminals.
+          const plugin = getPlugin('connector');
+          const params: any = {};
+          if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
+          params.resistance = 0.001; // near-zero resistance passthrough
+          params.label = subcktName;
+          components.push({
+            id, type: 'connector', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
+          });
+          // Wire first two nodes as a/b terminals (simplified)
+          if (nodeTokens.length >= 2) {
+            registerTerminal(nodeTokens[0], id, 'a');
+            registerTerminal(nodeTokens[1], id, 'b');
+          }
+          warnings.push(`Line ${lineNum + 1}: sub-circuit "${subcktName}" imported as passthrough connector (nodes: ${nodeTokens.join(', ')})`);
           continue;
         }
         default:

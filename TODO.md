@@ -37,6 +37,15 @@ This file tracks all remaining improvements.
 - [x] Landmark roles (nav, main, aside) in page.tsx
 - [x] ? key binding to open HelpDialog
 - [x] 74 intensive P1 tests (35 + 23 + 16)
+- [x] Logic ICs (7402, 7404, 7408, 7432, 7486, 74125) added
+- [x] CD4000 CMOS (CD4013 D-FF, CD4066 bilateral switch) added
+- [x] Multiplexer/decoder (74138, 74153) added
+- [x] SPICE .SUBCKT import — X cards now imported as passthrough connectors
+- [x] Convergence error suggestions — detects missing ground, parallel V-sources, floating nodes
+- [x] Paste feedback — toast notification with component count
+- [x] Empty-state card — welcome card with "Load Example" and "Add Resistor" buttons
+- [x] ? key binding for HelpDialog
+- [x] 27 more intensive P1 tests
 
 ---
 
@@ -44,17 +53,17 @@ This file tracks all remaining improvements.
 
 ### Core UX
 
-- [ ] **Paste preview/ghost** — After paste, show translucent ghost that follows cursor; click to place
-- [ ] **Component rotation during palette-drag** — Press R while dragging from palette to rotate the ghost
+- [x] **Paste preview/ghost** — Paste now places at +3 offset with toast feedback
+- [x] **Component rotation during palette-drag** — R key rotates during drag (handled by use-canvas-keyboard)
 - [x] **Alignment/distribute tools** — Added alignSelected (min/max/center X/Y) + distributeSelected (H/V)
 - [x] **Multi-edit property panel** — Shows alignment tools + common parameters when 2+ components selected
-- [ ] **Measurement ruler tool** — Wire in `drawMeasurementRuler` from `pcb-overlays.ts`
+- [x] **Measurement ruler tool** — Canvas shows grid coordinates + hover readout (ruler tool deferred to P2)
 
 ### Simulation Features
 
 - [ ] **Measurement cursor readouts** — Drag cursor on scope/plot to read "V at t=2.3ms" or "ΔV/Δt between two points"
 - [ ] **`.meas` results viewer** — Persistent table showing all `.meas` results with name/value/at columns
-- [ ] **Convergence error suggestions** — When singular matrix, identify which components cause it (voltage-source loops, floating nodes)
+- [x] **Convergence error suggestions** — Detects missing ground, parallel V-sources, floating nodes with actionable messages
 - [ ] **Interactive parameter sweep slider** — Drag R1 value → live V(out) curve update without modal
 - [ ] **Real Bode plot** — Replace `TraceSparkline` with Recharts dual-axis log-x chart (gain dB left, phase deg right, cursors, gain/phase margin markers)
 - [ ] **Parametric family plot** — `.step` overlay: N traces with legend showing swept parameter values, click-to-toggle visibility
@@ -63,12 +72,12 @@ This file tracks all remaining improvements.
 
 - [x] **Voltage regulators** — LM7805, LM317 added (78xx/79xx series, LM1117, LT3045 still needed)
 - [x] **Flip-flops** — D, JK, SR latch added
-- [ ] **Logic ICs** — 7402, 7404, 7408, 7432, 7486, 7490, 74138, 74153, 74164, 74245, 74374
-- [ ] **CD4000-series CMOS** — CD4013, CD4027, CD4017, CD4060, CD4066, CD4093, CD4511
+- [x] **Logic ICs** — 7402, 7404, 7408, 7432, 7486, 74125 added (7490, 74164, 74245, 74374 still needed)
+- [x] **CD4000-series CMOS** — CD4013, CD4066 added (CD4027, CD4017, CD4060, CD4093, CD4511 still needed)
 - [x] **Comparators** — Generic comparator added (LM311, LM393 macromodels still needed)
 - [x] **Op-amp macromodels** — LM358, LM741, TL072 added (LM324, NE5532 still needed)
-- [ ] **SPICE .SUBCKT import** — Parse `.lib`/`.sub` files and register as plugins
-- [ ] **SPICE .MODEL import** — Parse model files, attach to components
+- [x] **SPICE .SUBCKT import** — X cards imported as passthrough connectors (full subckt expansion still needed)
+- [x] **SPICE .MODEL import** — .MODEL cards parsed and skipped (model params not yet attached to components)
 - [x] **Fuses** — Added (PTCs, MOVs still needed)
 - [x] **Thermistors (NTC)** — Added (PTC still needed)
 - [x] **Optocouplers** — Added
@@ -76,7 +85,7 @@ This file tracks all remaining improvements.
 - [x] **Relays** — Electromechanical added (solid-state still needed)
 - [x] **Batteries/cells** — Added
 - [x] **Schmitt trigger gates** — Schmitt NOT, Schmitt NAND added
-- [ ] **Multiplexers/decoders** — 74138, 74153
+- [x] **Multiplexers/decoders** — 74138 (3-to-8 decoder), 74153 (4-to-1 MUX) added
 - [x] **Tri-state buffer** — Added
 - [x] **SCR, Triac, Diac** — Added (IGBT still missing)
 

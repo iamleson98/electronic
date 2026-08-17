@@ -22,3 +22,5 @@ export { registerPlugin, getPlugin, getAllPlugins, getPluginsByCategory, hasPlug
 export type { ComponentPlugin } from '../types';
 // Register P1 components
 import './p1-components';
+// Register P1 logic ICs
+import './p1-logic';

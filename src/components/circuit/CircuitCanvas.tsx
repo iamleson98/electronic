@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Zap } from 'lucide-react';
 import { useEditor } from '@/lib/circuit/store';
 import { getPlugin, getAllPlugins } from '@/lib/circuit/registry';
 import { computeWireCurrents, computeComponentCurrents } from '@/lib/circuit/engine';
@@ -1413,6 +1414,39 @@ export function CircuitCanvas() {
       <div className="pointer-events-none absolute bottom-2 right-2 rounded-md bg-slate-900/80 px-2 py-1 text-xs font-mono text-slate-400">
         {running ? 'Click switches to toggle • Space to pause' : 'Drag from left • Double-click/R to rotate • Del delete • Space play/pause'}
       </div>
+      {/* Empty-state card — shown when canvas has no components */}
+      {components.length === 0 && !running && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div className="pointer-events-auto flex flex-col items-center gap-3 rounded-xl border border-slate-800 bg-slate-900/90 p-8 text-center">
+            <Zap size={32} className="text-cyan-400" />
+            <h3 className="text-lg font-semibold text-slate-100">Welcome to CircuitLab</h3>
+            <p className="max-w-xs text-sm text-slate-400">
+              Drag components from the left palette, or load an example circuit to get started.
+            </p>
+            <div className="flex gap-2">
+              <button
+                className="cursor-pointer rounded-md bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-900 hover:bg-cyan-400"
+                onClick={() => {
+                  const { exampleCategories } = require('@/lib/circuit/examples');
+                  if (exampleCategories.length > 0 && exampleCategories[0].examples.length > 0) {
+                    useEditor.getState().loadDocument(exampleCategories[0].examples[0].doc);
+                  }
+                }}
+              >
+                Load Example
+              </button>
+              <button
+                className="cursor-pointer rounded-md border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
+                onClick={() => {
+                  useEditor.getState().addComponent('resistor', { x: 15, y: 10 });
+                }}
+              >
+                Add Resistor
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* ERC hover tooltip — appears next to the cursor when hovering an error */}
       {!running && hoveredERC && (
         <div

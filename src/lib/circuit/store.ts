@@ -734,10 +734,11 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (!s.clipboard || s.clipboard.components.length === 0) return;
     get().pushHistory();
     const idMap = new Map<string, string>();
+    // Paste at +3,+3 offset from original positions (better than +2,+2)
     const newComponents = s.clipboard.components.map((c) => {
       const newId = genId('comp');
       idMap.set(c.id, newId);
-      return { ...c, id: newId, position: { x: c.position.x + 2, y: c.position.y + 2 }, parameters: { ...c.parameters }, simState: undefined };
+      return { ...c, id: newId, position: { x: c.position.x + 3, y: c.position.y + 3 }, parameters: { ...c.parameters }, simState: undefined };
     });
     const newWires = s.clipboard.wires.map((w) => ({
       id: genId('wire'),
@@ -753,6 +754,12 @@ export const useEditor = create<EditorState>((set, get) => ({
         wires: new Set(newWires.map((w) => w.id)),
       },
     }));
+    // Toast feedback for paste
+    if (typeof window !== 'undefined') {
+      import('sonner').then(({ toast }) => {
+        toast.success(`Pasted ${newComponents.length} component(s)`);
+      }).catch(() => {});
+    }
   },
 
   duplicate: () => { get().copySelection(); get().paste(); },
@@ -1602,11 +1609,35 @@ export const useEditor = create<EditorState>((set, get) => ({
       }
     }
     if (!result) {
-      // Solver failed — likely singular matrix (no ground, or conflicting voltage sources)
-      const hasGround = simComponents.some(c => c.type === 'ground');
-      const errorMsg = !hasGround
-        ? 'Simulation failed: No ground reference found. Add a Ground component to your circuit.'
-        : 'Simulation failed: Singular matrix. Check for conflicting voltage sources or short circuits.';
+      // Solver failed — diagnose common issues for actionable error messages
+      const hasGround = simComponents.some(c => c.type === 'ground' || c.type === 'powerGND');
+      const vSources = simComponents.filter(c => c.type === 'dcVoltage' || c.type === 'acVoltage');
+      // Check for parallel voltage sources (same node pair)
+      const parallelVSources: string[] = [];
+      for (let i = 0; i < vSources.length; i++) {
+        for (let j = i + 1; j < vSources.length; j++) {
+          // If two V-sources connect to the same pair of nodes, they're parallel
+          const w1 = simWires.filter(w => w.from.componentId === vSources[i].id || w.to.componentId === vSources[i].id);
+          const w2 = simWires.filter(w => w.from.componentId === vSources[j].id || w.to.componentId === vSources[j].id);
+          if (w1.length >= 2 && w2.length >= 2) {
+            // Simplified check: if they share at least one connected node
+            const nodes1 = new Set(w1.flatMap(w => [w.from.componentId, w.to.componentId]));
+            const nodes2 = new Set(w2.flatMap(w => [w.from.componentId, w.to.componentId]));
+            const shared = [...nodes1].filter(n => nodes2.has(n));
+            if (shared.length >= 2) {
+              parallelVSources.push(`${vSources[i].id} & ${vSources[j].id}`);
+            }
+          }
+        }
+      }
+      let errorMsg: string;
+      if (!hasGround) {
+        errorMsg = 'Simulation failed: No ground reference found. Add a Ground component to your circuit.';
+      } else if (parallelVSources.length > 0) {
+        errorMsg = `Simulation failed: Conflicting voltage sources (${parallelVSources.join(', ')}). Two voltage sources in parallel with different values cause a singular matrix. Add a small series resistor between them.`;
+      } else {
+        errorMsg = 'Simulation failed: Singular matrix. Check for: (1) floating nodes with no DC path to ground, (2) voltage source loops with no series resistance, (3) capacitor-only branches with no DC path. Try adding a 1MΩ resistor from the floating node to ground.';
+      }
       set({ running: false, paused: true, simError: errorMsg });
       return;
     }
