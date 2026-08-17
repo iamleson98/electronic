@@ -44,6 +44,9 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
+        <a href="#main-content" className="sr-only focus:not-sr-only focus:absolute focus:left-0 focus:top-0 focus:z-50 focus:rounded focus:bg-slate-800 focus:px-4 focus:py-2 focus:text-sm">
+          Skip to main content
+        </a>
         {children}
         <Toaster />
         <SonnerToaster richColors closeButton position="bottom-right" />

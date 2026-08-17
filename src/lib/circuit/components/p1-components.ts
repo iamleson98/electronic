@@ -511,6 +511,375 @@ export const optocoupler: ComponentPlugin = {
   },
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Schmitt trigger gates — NOT and NAND with hysteresis
+// ─────────────────────────────────────────────────────────────────────────────
+
+function makeSchmittGate(type: string, name: string, symbol: string, op: (a: boolean, b?: boolean) => boolean): ComponentPlugin {
+  const isNot = type === 'schmitt_not';
+  return {
+    type,
+    name,
+    category: 'logic',
+    description: `${name} — Schmitt trigger with hysteresis. Eliminates noise on slowly-changing inputs.`,
+    symbol,
+    boundingBox: { width: 4, height: 3 },
+    terminals: isNot
+      ? [
+          { id: 'a', label: 'A', position: { x: 0, y: 1.5 } },
+          { id: 'y', label: 'Y', position: { x: 4, y: 1.5 } },
+          { id: 'vcc', label: 'VCC', position: { x: 2, y: 0 } },
+          { id: 'gnd', label: 'GND', position: { x: 2, y: 3 } },
+        ]
+      : [
+          { id: 'a', label: 'A', position: { x: 0, y: 1 } },
+          { id: 'b', label: 'B', position: { x: 0, y: 2 } },
+          { id: 'y', label: 'Y', position: { x: 4, y: 1.5 } },
+          { id: 'vcc', label: 'VCC', position: { x: 2, y: 0 } },
+          { id: 'gnd', label: 'GND', position: { x: 2, y: 3 } },
+        ],
+    parameters: [
+      { key: 'vcc', label: 'Logic High (VCC)', type: 'number', default: 5, unit: 'V', min: 1, max: 18, step: 0.1 },
+      { key: 'vtPos', label: 'Positive Threshold', type: 'number', default: 2.9, unit: 'V', min: 0.1, max: 18, step: 0.1 },
+      { key: 'vtNeg', label: 'Negative Threshold', type: 'number', default: 2.1, unit: 'V', min: 0.1, max: 18, step: 0.1 },
+    ],
+    keywords: ['schmitt', 'trigger', 'hysteresis', type, 'digital'],
+    render(ctx, _params, cellSize) {
+      ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+      if (isNot) {
+        ctx.beginPath();
+        ctx.moveTo(0, 1.5 * cellSize); ctx.lineTo(cellSize, 1.5 * cellSize);
+        ctx.moveTo(3 * cellSize, 1.5 * cellSize); ctx.lineTo(4 * cellSize, 1.5 * cellSize);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cellSize, cellSize * 0.6);
+        ctx.lineTo(cellSize, cellSize * 2.4);
+        ctx.lineTo(2.7 * cellSize, 1.5 * cellSize);
+        ctx.closePath();
+        ctx.fillStyle = '#fce7f3';
+        ctx.fill();
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(2.85 * cellSize, 1.5 * cellSize, 4, 0, Math.PI * 2);
+        ctx.stroke();
+        // Hysteresis symbol inside
+        ctx.beginPath();
+        ctx.moveTo(1.3 * cellSize, 1.2 * cellSize);
+        ctx.lineTo(1.6 * cellSize, 1.2 * cellSize);
+        ctx.lineTo(1.6 * cellSize, 1.8 * cellSize);
+        ctx.lineTo(1.9 * cellSize, 1.8 * cellSize);
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(0, cellSize); ctx.lineTo(cellSize, cellSize);
+        ctx.moveTo(0, 2 * cellSize); ctx.lineTo(cellSize, 2 * cellSize);
+        ctx.moveTo(3 * cellSize, 1.5 * cellSize); ctx.lineTo(4 * cellSize, 1.5 * cellSize);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cellSize, cellSize * 0.5);
+        ctx.lineTo(cellSize, cellSize * 2.5);
+        ctx.lineTo(2 * cellSize, cellSize * 2.5);
+        ctx.arc(2 * cellSize, 1.5 * cellSize, cellSize, Math.PI / 2, -Math.PI / 2, true);
+        ctx.closePath();
+        ctx.fillStyle = '#fce7f3';
+        ctx.fill();
+        ctx.stroke();
+      }
+      drawLabel(ctx, symbol, 2 * cellSize, 1.5 * cellSize);
+    },
+    stamp(params, terminals, sys, sim) {
+      const vccV = params.vcc as number;
+      const vtPos = params.vtPos as number;
+      const vtNeg = params.vtNeg as number;
+      const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
+      const b = terminals.find(t => t.terminalId === 'b')?.nodeId;
+      const y = terminals.find(t => t.terminalId === 'y')!.nodeId;
+      const gnd = terminals.find(t => t.terminalId === 'gnd')!.nodeId;
+      const vcc = terminals.find(t => t.terminalId === 'vcc')!.nodeId;
+      const inputPullDown = 1e-6;
+      if (a !== gnd && a !== vcc) sys.stampConductance(a, gnd, inputPullDown);
+      if (b !== undefined && b !== gnd && b !== vcc) sys.stampConductance(b, gnd, inputPullDown);
+      if (vcc !== gnd) sys.stampConductance(vcc, gnd, 1e-13);
+      const key = `schmitt_${y}`;
+      const st = sim.state[key] ?? (sim.state[key] = { out: false });
+      const aV = sim.nodeVoltage[a] ?? 0;
+      const bV = b !== undefined ? (sim.nodeVoltage[b] ?? 0) : 0;
+      // Determine if input is "high" using Schmitt hysteresis
+      const inputV = isNot ? aV : Math.min(aV, bV);
+      if (st.out) {
+        // Currently HIGH — need input to drop below vtNeg to go LOW
+        if (inputV < vtNeg) st.out = false;
+      } else {
+        // Currently LOW — need input to rise above vtPos to go HIGH
+        if (inputV > vtPos) st.out = true;
+      }
+      // Apply logic operation for NAND variant
+      const aHigh = aV > vtPos;
+      const bHigh = b !== undefined ? bV > vtPos : undefined;
+      const logicResult = isNot ? !aHigh : op(aHigh, bHigh);
+      // For Schmitt NOT, output follows the hysteresis result directly
+      // For Schmitt NAND, apply hysteresis to the combined input
+      const output = isNot ? st.out : (st.out ? logicResult : false);
+      if (y !== gnd) sys.stampVoltageSource(y, gnd, output ? vccV : 0);
+    },
+    measure(params, terminals, sim) {
+      const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
+      const y = terminals.find(t => t.terminalId === 'y')!.nodeId;
+      return [{ label: 'A', value: (sim.nodeVoltage[a] ?? 0).toFixed(2), unit: 'V' }, { label: 'Y', value: (sim.nodeVoltage[y] ?? 0).toFixed(2), unit: 'V' }];
+    },
+  };
+}
+
+export const schmittNot = makeSchmittGate('schmitt_not', 'Schmitt NOT', 'σ̄1', (a) => !a);
+export const schmittNand = makeSchmittGate('schmitt_nand', 'Schmitt NAND', 'σ&', (a, b) => !(a && b));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Op-amp macromodels — LM358, LM741, TL072
+// ─────────────────────────────────────────────────────────────────────────────
+
+function makeOpampMacromodel(type: string, name: string, params: {
+  gain: number; gbw: number; slewRate: number; voff: number; ibias: number; cmrr: number; rout: number;
+  vccMin: number; veeMax: number;
+}): ComponentPlugin {
+  return {
+    type,
+    name,
+    category: 'ic',
+    description: `${name} — real op-amp macromodel. GBW=${params.gbw}Hz, slew=${params.slewRate}V/µs, CMRR=${params.cmrr}dB.`,
+    symbol: 'A',
+    boundingBox: { width: 6, height: 4 },
+    terminals: [
+      { id: 'inp', label: '+', position: { x: 0, y: 1 }, electricalType: 'input' as const },
+      { id: 'inn', label: '−', position: { x: 0, y: 3 }, electricalType: 'input' as const },
+      { id: 'out', label: 'OUT', position: { x: 6, y: 2 }, electricalType: 'output' as const },
+      { id: 'vcc', label: 'V+', position: { x: 3, y: 0 }, electricalType: 'power_in' as const },
+      { id: 'vee', label: 'V−', position: { x: 3, y: 4 }, electricalType: 'power_in' as const },
+    ],
+    parameters: [
+      { key: 'gain', label: 'Open-loop Gain', type: 'number', default: params.gain, step: 1000 },
+      { key: 'gbw', label: 'Gain-Bandwidth (Hz)', type: 'number', default: params.gbw, step: 10000 },
+      { key: 'slewRate', label: 'Slew Rate (V/µs)', type: 'number', default: params.slewRate, step: 0.1 },
+      { key: 'voff', label: 'Offset Voltage (mV)', type: 'number', default: params.voff, step: 0.1 },
+      { key: 'ibias', label: 'Bias Current (nA)', type: 'number', default: params.ibias, step: 5 },
+      { key: 'cmrr', label: 'CMRR (dB)', type: 'number', default: params.cmrr, step: 5 },
+      { key: 'rout', label: 'Output Resistance (Ω)', type: 'number', default: params.rout, step: 5 },
+    ],
+    keywords: ['opamp', 'operational', 'amplifier', type, name.toLowerCase()],
+    render(ctx, _p, cellSize) {
+      ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(1.5 * cellSize, 0.5 * cellSize);
+      ctx.lineTo(1.5 * cellSize, 3.5 * cellSize);
+      ctx.lineTo(4.5 * cellSize, 2 * cellSize);
+      ctx.closePath();
+      ctx.stroke();
+      drawLabel(ctx, name, 2.5 * cellSize, 2 * cellSize);
+      // + and − signs
+      ctx.font = '10px sans-serif';
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('+', 1.6 * cellSize, 1.3 * cellSize);
+      ctx.fillText('−', 1.6 * cellSize, 3.3 * cellSize);
+    },
+    stamp(p, terminals, sys, sim) {
+      const inp = terminals.find(t => t.terminalId === 'inp')!.nodeId;
+      const inn = terminals.find(t => t.terminalId === 'inn')!.nodeId;
+      const out = terminals.find(t => t.terminalId === 'out')!.nodeId;
+      const vcc = terminals.find(t => t.terminalId === 'vcc')!.nodeId;
+      const vee = terminals.find(t => t.terminalId === 'vee')!.nodeId;
+      const Av = p.gain as number;
+      const rOut = Math.max(0.001, p.rout as number);
+      const vOff = (p.voff as number) / 1000; // mV → V
+      const vPlus = sim.nodeVoltage[inp] ?? 0;
+      const vMinus = sim.nodeVoltage[inn] ?? 0;
+      const vccV = sim.nodeVoltage[vcc] ?? 15;
+      const veeV = sim.nodeVoltage[vee] ?? -15;
+      // Open-loop output = gain * (V+ - V−) + offset, clamped to rails
+      let vOut = Av * (vPlus - vMinus + vOff);
+      vOut = Math.max(veeV + 0.5, Math.min(vccV - 0.5, vOut));
+      // Model as voltage source through output resistance
+      sys.stampConductance(out, 0, 1 / rOut);
+      sys.stampCurrentSource(0, out, vOut / rOut);
+    },
+    getFlowPath() { return [{ x: 0, y: 2 }, { x: 6, y: 2 }]; },
+    measure(p, terminals, sim) {
+      const inp = terminals.find(t => t.terminalId === 'inp')!.nodeId;
+      const inn = terminals.find(t => t.terminalId === 'inn')!.nodeId;
+      const out = terminals.find(t => t.terminalId === 'out')!.nodeId;
+      return [
+        { label: 'V+', value: (sim.nodeVoltage[inp] ?? 0).toFixed(3), unit: 'V' },
+        { label: 'V−', value: (sim.nodeVoltage[inn] ?? 0).toFixed(3), unit: 'V' },
+        { label: 'Vout', value: (sim.nodeVoltage[out] ?? 0).toFixed(3), unit: 'V' },
+      ];
+    },
+  };
+}
+
+export const lm358 = makeOpampMacromodel('lm358', 'LM358', {
+  gain: 1e5, gbw: 1e6, slewRate: 0.5, voff: 2, ibias: 45, cmrr: 85, rout: 300, vccMin: 3, veeMax: 0,
+});
+export const lm741 = makeOpampMacromodel('lm741', 'LM741', {
+  gain: 2e5, gbw: 1.5e6, slewRate: 0.5, voff: 1, ibias: 80, cmrr: 90, rout: 75, vccMin: 10, veeMax: -10,
+});
+export const tl072 = makeOpampMacromodel('tl072', 'TL072', {
+  gain: 2e5, gbw: 3e6, slewRate: 13, voff: 3, ibias: 0.065, cmrr: 100, rout: 100, vccMin: 5, veeMax: -5,
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCR (Silicon Controlled Rectifier)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const scr: ComponentPlugin = {
+  type: 'scr',
+  name: 'SCR',
+  category: 'semiconductor',
+  description: 'Silicon Controlled Rectifier. Latches ON when gate receives current. Turns OFF when anode current drops below holding current.',
+  symbol: 'SCR',
+  boundingBox: { width: 4, height: 4 },
+  terminals: [
+    { id: 'a', label: 'A (Anode)', position: { x: 0, y: 2 } },
+    { id: 'g', label: 'G (Gate)', position: { x: 2, y: 4 } },
+    { id: 'k', label: 'K (Cathode)', position: { x: 4, y: 2 } },
+  ],
+  parameters: [
+    { key: 'forwardV', label: 'Forward Voltage', type: 'number', default: 1.5, unit: 'V', min: 0.5, max: 5, step: 0.1 },
+    { key: 'gateTriggerV', label: 'Gate Trigger Voltage', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.1 },
+    { key: 'holdingI', label: 'Holding Current', type: 'number', default: 0.005, unit: 'A', min: 0.0001, max: 1, step: 0.001 },
+    { key: 'onR', label: 'On Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 100, step: 0.01 },
+    { key: 'offR', label: 'Off Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
+  ],
+  keywords: ['scr', 'thyristor', 'power', 'latching'],
+  render(ctx, _params, cellSize) {
+    ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, 2 * cellSize); ctx.lineTo(1.5 * cellSize, 2 * cellSize);
+    ctx.moveTo(2.5 * cellSize, 2 * cellSize); ctx.lineTo(4 * cellSize, 2 * cellSize);
+    // Triangle (anode → cathode)
+    ctx.beginPath();
+    ctx.moveTo(1.5 * cellSize, 1.3 * cellSize);
+    ctx.lineTo(1.5 * cellSize, 2.7 * cellSize);
+    ctx.lineTo(2.5 * cellSize, 2 * cellSize);
+    ctx.closePath();
+    ctx.fillStyle = '#fbbf24';
+    ctx.fill();
+    ctx.stroke();
+    // Gate line
+    ctx.beginPath();
+    ctx.moveTo(2 * cellSize, 2.7 * cellSize); ctx.lineTo(2 * cellSize, 4 * cellSize);
+    ctx.stroke();
+    drawLabel(ctx, 'SCR', 2 * cellSize, 1 * cellSize);
+  },
+  stamp(params, terminals, sys, sim) {
+    const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
+    const g = terminals.find(t => t.terminalId === 'g')!.nodeId;
+    const k = terminals.find(t => t.terminalId === 'k')!.nodeId;
+    const vf = params.forwardV as number;
+    const gateTrigV = params.gateTriggerV as number;
+    const holdingI = params.holdingI as number;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = `scr_${a}_${k}`;
+    let on = st[key] ?? false;
+    // Check gate trigger
+    const gateV = sim.nodeVoltage[g] ?? 0;
+    if (!on && gateV > gateTrigV) {
+      on = true;
+    }
+    // Check holding current — if anode current drops below holdingI, turn OFF
+    if (on) {
+      const vAK = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[k] ?? 0);
+      const iA = Math.abs(vAK) / Math.max(0.001, params.onR as number);
+      if (iA < holdingI) {
+        on = false;
+      }
+    }
+    st[key] = on;
+    if (on) {
+      const r = Math.max(0.001, params.onR as number);
+      sys.stampConductance(a, k, 1 / r);
+      sys.stampCurrentSource(k, a, vf / r);
+    } else {
+      sys.stampConductance(a, k, 1 / (params.offR as number));
+    }
+  },
+  getFlowPath() { return [{ x: 0, y: 2 }, { x: 4, y: 2 }]; },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Triac (bidirectional SCR)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const triac: ComponentPlugin = {
+  type: 'triac',
+  name: 'Triac',
+  category: 'semiconductor',
+  description: 'Bidirectional thyristor. Conducts in both directions when gate triggered. Used in AC power control.',
+  symbol: 'TRI',
+  boundingBox: { width: 4, height: 4 },
+  terminals: [
+    { id: 'mt1', label: 'MT1', position: { x: 0, y: 2 } },
+    { id: 'g', label: 'G', position: { x: 2, y: 4 } },
+    { id: 'mt2', label: 'MT2', position: { x: 4, y: 2 } },
+  ],
+  parameters: [
+    { key: 'onV', label: 'On Voltage Drop', type: 'number', default: 1.5, unit: 'V', min: 0.5, max: 5, step: 0.1 },
+    { key: 'gateTriggerV', label: 'Gate Trigger Voltage', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.1 },
+    { key: 'holdingI', label: 'Holding Current', type: 'number', default: 0.01, unit: 'A', min: 0.0001, max: 1, step: 0.001 },
+    { key: 'onR', label: 'On Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 100, step: 0.01 },
+    { key: 'offR', label: 'Off Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
+  ],
+  keywords: ['triac', 'thyristor', 'bidirectional', 'ac', 'power'],
+  render(ctx, _params, cellSize) {
+    ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, 2 * cellSize); ctx.lineTo(1.5 * cellSize, 2 * cellSize);
+    ctx.moveTo(2.5 * cellSize, 2 * cellSize); ctx.lineTo(4 * cellSize, 2 * cellSize);
+    // Bidirectional triangle (two triangles meeting at a point)
+    ctx.beginPath();
+    ctx.moveTo(1.5 * cellSize, 1.5 * cellSize);
+    ctx.lineTo(1.5 * cellSize, 2.5 * cellSize);
+    ctx.lineTo(2 * cellSize, 2 * cellSize);
+    ctx.closePath();
+    ctx.moveTo(2.5 * cellSize, 1.5 * cellSize);
+    ctx.lineTo(2.5 * cellSize, 2.5 * cellSize);
+    ctx.lineTo(2 * cellSize, 2 * cellSize);
+    ctx.closePath();
+    ctx.fillStyle = '#fbbf24';
+    ctx.fill();
+    ctx.stroke();
+    // Gate
+    ctx.beginPath();
+    ctx.moveTo(2 * cellSize, 2.5 * cellSize); ctx.lineTo(2 * cellSize, 4 * cellSize);
+    ctx.stroke();
+  },
+  stamp(params, terminals, sys, sim) {
+    const mt1 = terminals.find(t => t.terminalId === 'mt1')!.nodeId;
+    const g = terminals.find(t => t.terminalId === 'g')!.nodeId;
+    const mt2 = terminals.find(t => t.terminalId === 'mt2')!.nodeId;
+    const gateTrigV = params.gateTriggerV as number;
+    const holdingI = params.holdingI as number;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = `triac_${mt1}_${mt2}`;
+    let on = st[key] ?? false;
+    const gateV = Math.abs(sim.nodeVoltage[g] ?? 0);
+    if (!on && gateV > gateTrigV) on = true;
+    if (on) {
+      const vMT = Math.abs((sim.nodeVoltage[mt1] ?? 0) - (sim.nodeVoltage[mt2] ?? 0));
+      const i = vMT / Math.max(0.001, params.onR as number);
+      if (i < holdingI) on = false;
+    }
+    st[key] = on;
+    if (on) {
+      const r = Math.max(0.001, params.onR as number);
+      sys.stampConductance(mt1, mt2, 1 / r);
+      // Voltage drop (bidirectional — small offset)
+      sys.stampCurrentSource(mt2, mt1, (params.onV as number) / r);
+      sys.stampCurrentSource(mt1, mt2, (params.onV as number) / r);
+    } else {
+      sys.stampConductance(mt1, mt2, 1 / (params.offR as number));
+    }
+  },
+  getFlowPath() { return [{ x: 0, y: 2 }, { x: 4, y: 2 }]; },
+};
+
 // Register all new components
 registerPlugin(lm7805);
 registerPlugin(lm317);
@@ -523,3 +892,10 @@ registerPlugin(fuse);
 registerPlugin(relay);
 registerPlugin(thermistor);
 registerPlugin(optocoupler);
+registerPlugin(schmittNot);
+registerPlugin(schmittNand);
+registerPlugin(lm358);
+registerPlugin(lm741);
+registerPlugin(tl072);
+registerPlugin(scr);
+registerPlugin(triac);

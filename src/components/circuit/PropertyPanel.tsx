@@ -24,10 +24,13 @@ export function PropertyPanel() {
   const selection = useEditor((s) => s.selection);
   const components = useEditor((s) => s.components);
   const wires = useEditor((s) => s.wires);
+  const multiSelection = useEditor((s) => s.multiSelection);
   const setParameter = useEditor((s) => s.setParameter);
   const rotateComponent = useEditor((s) => s.rotateComponent);
   const deleteComponent = useEditor((s) => s.deleteComponent);
   const setSelection = useEditor((s) => s.setSelection);
+  const alignSelected = useEditor((s) => s.alignSelected);
+  const distributeSelected = useEditor((s) => s.distributeSelected);
   const simContext = useEditor((s) => s.simContext);
   const running = useEditor((s) => s.running);
 
@@ -55,6 +58,87 @@ export function PropertyPanel() {
       return [];
     }
   }, [comp, plugin, simContext, components, wires]);
+
+  // Multi-edit mode: when 2+ components are selected, show common parameters
+  const multiCompIds = new Set(multiSelection.components);
+  if (selection.type === 'component' && selection.id) multiCompIds.add(selection.id);
+  const multiComps = components.filter(c => multiCompIds.has(c.id));
+  if (multiComps.length >= 2) {
+    // Find common parameters across all selected components
+    const firstPlugin = getPlugin(multiComps[0].type);
+    const commonParams: ParameterDef[] = [];
+    if (firstPlugin) {
+      for (const param of firstPlugin.parameters) {
+        const allHave = multiComps.every(c => {
+          const p = getPlugin(c.type);
+          return p && p.parameters.some(pp => pp.key === param.key && pp.type === param.type);
+        });
+        if (allHave) commonParams.push(param);
+      }
+    }
+    return (
+      <div className="flex h-full flex-col bg-slate-900" role="complementary" aria-label="Property panel">
+        <div className="border-b border-slate-800 p-3">
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Multi-Edit</h2>
+          <p className="mt-1 text-xs text-slate-500">{multiComps.length} components selected</p>
+        </div>
+        <div className="flex-1 overflow-y-auto p-3">
+          {/* Alignment tools */}
+          <div className="mb-4 space-y-2">
+            <Label className="text-xs text-slate-400">Alignment</Label>
+            <div className="grid grid-cols-3 gap-1">
+              <Button size="sm" variant="ghost" className="cursor-pointer text-xs" onClick={() => alignSelected('x', 'min')}>Left</Button>
+              <Button size="sm" variant="ghost" className="cursor-pointer text-xs" onClick={() => alignSelected('x', 'center')}>Center X</Button>
+              <Button size="sm" variant="ghost" className="cursor-pointer text-xs" onClick={() => alignSelected('x', 'max')}>Right</Button>
+              <Button size="sm" variant="ghost" className="cursor-pointer text-xs" onClick={() => alignSelected('y', 'min')}>Top</Button>
+              <Button size="sm" variant="ghost" className="cursor-pointer text-xs" onClick={() => alignSelected('y', 'center')}>Center Y</Button>
+              <Button size="sm" variant="ghost" className="cursor-pointer text-xs" onClick={() => alignSelected('y', 'max')}>Bottom</Button>
+            </div>
+          </div>
+          <div className="mb-4 space-y-2">
+            <Label className="text-xs text-slate-400">Distribute</Label>
+            <div className="grid grid-cols-2 gap-1">
+              <Button size="sm" variant="ghost" className="cursor-pointer text-xs" onClick={() => distributeSelected('x')} disabled={multiComps.length < 3}>Horizontal</Button>
+              <Button size="sm" variant="ghost" className="cursor-pointer text-xs" onClick={() => distributeSelected('y')} disabled={multiComps.length < 3}>Vertical</Button>
+            </div>
+          </div>
+          {/* Common parameters */}
+          {commonParams.length > 0 && (
+            <div className="space-y-3">
+              <Label className="text-xs text-slate-400">Common Parameters</Label>
+              {commonParams.map((param) => (
+                <div key={param.key}>
+                  <Label className="text-xs text-slate-300">{param.label}{param.unit ? ` (${param.unit})` : ''}</Label>
+                  {param.type === 'number' && (
+                    <Input
+                      type="number"
+                      className="mt-1 h-8 bg-slate-800"
+                      placeholder="varies"
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        if (isNaN(val)) return;
+                        for (const c of multiComps) {
+                          setParameter(c.id, param.key, val);
+                        }
+                      }}
+                    />
+                  )}
+                  {param.type === 'boolean' && (
+                    <Switch
+                      className="mt-1"
+                      onCheckedChange={(v) => {
+                        for (const c of multiComps) setParameter(c.id, param.key, v);
+                      }}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (!comp || !plugin) {
     return (

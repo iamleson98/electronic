@@ -156,6 +156,8 @@ interface EditorState {
   setMultiSelection: (sel: { components: Set<string>; wires: Set<string> }) => void;
   clearMultiSelection: () => void;
   moveSelectedComponents: (delta: { x: number; y: number }) => void;
+  alignSelected: (axis: 'x' | 'y', mode: 'min' | 'max' | 'center') => void;
+  distributeSelected: (axis: 'x' | 'y') => void;
   deleteSelected: () => void;
   mirrorSelected: (axis: 'x' | 'y') => void;
   rotateSelected: () => void;
@@ -625,6 +627,62 @@ export const useEditor = create<EditorState>((set, get) => ({
         ),
       };
     });
+  },
+
+  alignSelected: (axis: 'x' | 'y', mode: 'min' | 'max' | 'center') => {
+    const s = get();
+    const ids = new Set(s.multiSelection.components);
+    if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+    if (ids.size < 2) return;
+    s.pushHistory();
+    const selected = s.components.filter(c => ids.has(c.id));
+    if (selected.length < 2) return;
+    let target: number;
+    if (mode === 'min') {
+      target = axis === 'x' ? Math.min(...selected.map(c => c.position.x)) : Math.min(...selected.map(c => c.position.y));
+    } else if (mode === 'max') {
+      target = axis === 'x' ? Math.max(...selected.map(c => c.position.x)) : Math.max(...selected.map(c => c.position.y));
+    } else {
+      target = axis === 'x'
+        ? selected.reduce((sum, c) => sum + c.position.x, 0) / selected.length
+        : selected.reduce((sum, c) => sum + c.position.y, 0) / selected.length;
+    }
+    set((s) => ({
+      components: s.components.map(c => {
+        if (!ids.has(c.id)) return c;
+        if (axis === 'x') return { ...c, position: { ...c.position, x: target } };
+        return { ...c, position: { ...c.position, y: target } };
+      }),
+    }));
+  },
+
+  distributeSelected: (axis: 'x' | 'y') => {
+    const s = get();
+    const ids = new Set(s.multiSelection.components);
+    if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
+    if (ids.size < 3) return;
+    s.pushHistory();
+    const selected = s.components.filter(c => ids.has(c.id)).sort((a, b) =>
+      axis === 'x' ? a.position.x - b.position.x : a.position.y - b.position.y
+    );
+    if (selected.length < 3) return;
+    const first = selected[0];
+    const last = selected[selected.length - 1];
+    const start = axis === 'x' ? first.position.x : first.position.y;
+    const end = axis === 'x' ? last.position.x : last.position.y;
+    const step = (end - start) / (selected.length - 1);
+    const idToPos = new Map<string, number>();
+    selected.forEach((c, i) => {
+      idToPos.set(c.id, start + step * i);
+    });
+    set((s) => ({
+      components: s.components.map(c => {
+        const pos = idToPos.get(c.id);
+        if (pos === undefined) return c;
+        if (axis === 'x') return { ...c, position: { ...c.position, x: pos } };
+        return { ...c, position: { ...c.position, y: pos } };
+      }),
+    }));
   },
 
   deleteSelected: () => {

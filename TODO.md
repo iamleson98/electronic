@@ -24,7 +24,13 @@ This file tracks all remaining improvements.
 - [x] Flip-flops (D, JK, SR latch) added
 - [x] Comparator added
 - [x] Battery, fuse, relay, thermistor, optocoupler added
-- [x] 35 intensive P1 tests
+- [x] Schmitt trigger gates (NOT, NAND) added with hysteresis
+- [x] Op-amp macromodels (LM358, LM741, TL072) added with realistic params
+- [x] SCR and Triac (thyristor family) added
+- [x] Alignment/distribute tools added (align min/max/center, distribute H/V)
+- [x] Multi-edit property panel added (bulk-edit common parameters)
+- [x] ARIA labels + landmark roles added (skip-to-main, role=complementary)
+- [x] 58 intensive P1 tests (35 + 23)
 
 ---
 
@@ -34,8 +40,8 @@ This file tracks all remaining improvements.
 
 - [ ] **Paste preview/ghost** — After paste, show translucent ghost that follows cursor; click to place
 - [ ] **Component rotation during palette-drag** — Press R while dragging from palette to rotate the ghost
-- [ ] **Alignment/distribute tools** — Add "Align Left/Right/Center", "Distribute H/V" for multi-selected components
-- [ ] **Multi-edit property panel** — When 2+ components selected, show common parameters and allow bulk-edit
+- [x] **Alignment/distribute tools** — Added alignSelected (min/max/center X/Y) + distributeSelected (H/V)
+- [x] **Multi-edit property panel** — Shows alignment tools + common parameters when 2+ components selected
 - [ ] **Measurement ruler tool** — Wire in `drawMeasurementRuler` from `pcb-overlays.ts`
 
 ### Simulation Features
@@ -54,7 +60,7 @@ This file tracks all remaining improvements.
 - [ ] **Logic ICs** — 7402, 7404, 7408, 7432, 7486, 7490, 74138, 74153, 74164, 74245, 74374
 - [ ] **CD4000-series CMOS** — CD4013, CD4027, CD4017, CD4060, CD4066, CD4093, CD4511
 - [x] **Comparators** — Generic comparator added (LM311, LM393 macromodels still needed)
-- [ ] **Op-amp macromodels** — LM358, LM324, LM741, TL072, NE5532
+- [x] **Op-amp macromodels** — LM358, LM741, TL072 added (LM324, NE5532 still needed)
 - [ ] **SPICE .SUBCKT import** — Parse `.lib`/`.sub` files and register as plugins
 - [ ] **SPICE .MODEL import** — Parse model files, attach to components
 - [x] **Fuses** — Added (PTCs, MOVs still needed)
@@ -63,10 +69,10 @@ This file tracks all remaining improvements.
 - [ ] **Connectors, headers, test points** — For real schematics
 - [x] **Relays** — Electromechanical added (solid-state still needed)
 - [x] **Batteries/cells** — Added
-- [ ] **Schmitt trigger gates** — Debouncing, oscillators
+- [x] **Schmitt trigger gates** — Schmitt NOT, Schmitt NAND added
 - [ ] **Multiplexers/decoders** — 74138, 74153
 - [ ] **Tri-state buffer** — Digital buffer with enable
-- [ ] **SCR, Triac, Diac** — Thyristor family (diac/IGBT still missing)
+- [x] **SCR, Triac** — Added (Diac, IGBT still missing)
 
 ### Mobile / Touch
 
