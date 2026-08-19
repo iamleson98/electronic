@@ -1,7 +1,7 @@
 // Type definitions and shared constants for CircuitCanvas.
 import type { Vec2 } from '@/lib/circuit/types';
 
-export const CELL_SIZE = 24;
+export const CELL_SIZE = 18;
 
 export interface DragState {
   componentId: string;

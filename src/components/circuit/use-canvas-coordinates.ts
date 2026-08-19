@@ -72,7 +72,9 @@ export function useCanvasCoordinates(opts: {
         const pos = getTerminalPos(comp, t);
         const dx = pos.x - gx;
         const dy = pos.y - gy;
-        if (dx * dx + dy * dy < 0.5 * 0.5) {
+        // Increased snap radius: 1.5 grid units (was 0.5) — makes wire
+        // snapping much easier. At CELL_SIZE=18, this is ~27px radius.
+        if (dx * dx + dy * dy < 1.5 * 1.5) {
           return { componentId: comp.id, terminalId: t.id, pos };
         }
       }
@@ -85,7 +87,7 @@ export function useCanvasCoordinates(opts: {
         };
         const dx = pos.x - gx;
         const dy = pos.y - gy;
-        if (dx * dx + dy * dy < 0.5 * 0.5) {
+        if (dx * dx + dy * dy < 1.5 * 1.5) {
           return {
             componentId: `__sheet:${sheet.id}`,
             terminalId: `pin:${pin.id}`,

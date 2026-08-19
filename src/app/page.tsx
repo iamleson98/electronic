@@ -243,27 +243,27 @@ export default function Home() {
                   {useEditor.getState().running ? 'Simulation running' : 'Simulation stopped'}
                 </div>
                 <ResizablePanelGroup direction="horizontal">
-                  <ResizablePanel defaultSize={18} minSize={14} maxSize={28}>
+                  <ResizablePanel defaultSize={14} minSize={10} maxSize={28}>
                     <nav aria-label="Component palette" className="h-full min-h-0">
                       <ComponentPalette />
                     </nav>
                   </ResizablePanel>
                   <ResizableHandle withHandle />
-                  <ResizablePanel defaultSize={64} minSize={40}>
+                  <ResizablePanel defaultSize={72} minSize={40}>
                     <ResizablePanelGroup direction="vertical">
-                      <ResizablePanel defaultSize={70} minSize={30}>
+                      <ResizablePanel defaultSize={75} minSize={30}>
                         <main aria-label="Circuit canvas" className="h-full min-h-0">
                           <CircuitCanvas />
                         </main>
                       </ResizablePanel>
                       <ResizableHandle withHandle />
-                      <ResizablePanel defaultSize={30} minSize={15}>
+                      <ResizablePanel defaultSize={25} minSize={12}>
                         <ProbePanel />
                       </ResizablePanel>
                     </ResizablePanelGroup>
                   </ResizablePanel>
                   <ResizableHandle withHandle />
-                  <ResizablePanel defaultSize={18} minSize={14} maxSize={28}>
+                  <ResizablePanel defaultSize={14} minSize={10} maxSize={28}>
                     <PropertyPanel />
                   </ResizablePanel>
                 </ResizablePanelGroup>
