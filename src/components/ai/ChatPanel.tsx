@@ -125,6 +125,22 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Listen for external "ask AI" prompts (from ProbePanel, PropertyPanel, etc.)
+  // Fills the input and auto-sends after a short delay.
+  const sendRef = useRef<((text: string) => void) | null>(null);
+  useEffect(() => {
+    const onPrompt = (e: Event) => {
+      const prompt = (e as CustomEvent<string>).detail;
+      if (prompt && sendRef.current) {
+        sendRef.current(prompt);
+      } else if (prompt) {
+        setInput(prompt);
+      }
+    };
+    window.addEventListener('circuitlab:ai-prompt', onPrompt as EventListener);
+    return () => window.removeEventListener('circuitlab:ai-prompt', onPrompt as EventListener);
+  }, []);
+
   // AI provider + model selection state
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<'zai' | 'openai' | 'anthropic'>('zai');
@@ -499,6 +515,14 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
       setIsLoading(false);
     }
   }, [isLoading, components, wires, messages, autoApply, selectedProvider, selectedModel, applyCircuitUpdate, handleClientSideAction]);
+
+  // Keep sendRef in sync so the circuitlab:ai-prompt event listener can call it
+  useEffect(() => {
+    sendRef.current = (text: string) => {
+      if (!text.trim() || isLoading) return;
+      sendMessage(text);
+    };
+  }, [sendMessage, isLoading]);
 
   const applyPendingDiff = useCallback((msgId: string) => {
     // Find the message FIRST (outside the setMessages updater — React updaters

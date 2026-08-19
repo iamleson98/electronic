@@ -146,6 +146,21 @@ export default function Home() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // Listen for "ask AI" events from other panels (ProbePanel, PropertyPanel, etc.)
+  // Opens the AI panel and pre-fills the prompt.
+  useEffect(() => {
+    const onAskAI = (e: Event) => {
+      const prompt = (e as CustomEvent<string>).detail;
+      setShowAI(true);
+      // Small delay to let the panel render, then dispatch the prompt
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('circuitlab:ai-prompt', { detail: prompt }));
+      }, 100);
+    };
+    window.addEventListener('circuitlab:ask-ai', onAskAI as EventListener);
+    return () => window.removeEventListener('circuitlab:ask-ai', onAskAI as EventListener);
+  }, []);
+
   const handleShare = () => {
     const doc = useEditor.getState().serialize();
     const url = createShareURL(doc);

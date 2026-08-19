@@ -6,7 +6,7 @@ import { getPlugin } from '@/lib/circuit/registry';
 import { getTerminalsForComponent, buildNodeMap } from '@/lib/circuit/engine';
 import { parseMeasLine, execMeas, computeFFT, type MeasCommand, type MeasResult } from '@/lib/circuit/measurement';
 import { computeTHD, downsampleSpectrum, type THDResult } from '@/lib/circuit/fourier';
-import { Activity, BarChart3, AlertCircle, Crosshair, Waves } from 'lucide-react';
+import { Activity, BarChart3, AlertCircle, Crosshair, Waves, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -23,6 +23,7 @@ export function ProbePanel() {
   const traces = useEditor((s) => s.traces);
   const running = useEditor((s) => s.running);
   const speed = useEditor((s) => s.speed);
+  const simError = useEditor((s) => s.simError);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const spectrumCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -271,6 +272,21 @@ export function ProbePanel() {
             title="Toggle measurement cursor"
           >
             <Crosshair size={12} />
+          </button>
+          {/* Ask AI why the voltage is wrong */}
+          <button
+            onClick={() => {
+              const prompt = simError
+                ? `The simulation is failing with this error: "${simError}". Diagnose the root cause and explain how to fix it.`
+                : readout
+                  ? `The voltage at ${readout.label} is ${readout.voltage.toFixed(3)}V at t=${(readout.time * 1000).toFixed(2)}ms. Is this expected? If not, diagnose why and suggest a fix.`
+                  : 'Run a diagnosis on my circuit and tell me if the voltages are correct.';
+              window.dispatchEvent(new CustomEvent('circuitlab:ask-ai', { detail: prompt }));
+            }}
+            className="cursor-pointer rounded p-1 text-slate-500 hover:text-cyan-300"
+            title="Ask AI to diagnose this circuit"
+          >
+            <Sparkles size={12} />
           </button>
         </div>
       </div>

@@ -5,7 +5,7 @@ import { useEditor } from '@/lib/circuit/store';
 import { getPlugin } from '@/lib/circuit/registry';
 import { buildNodeMap, getTerminalsForComponent } from '@/lib/circuit/engine';
 import type { ParameterDef } from '@/lib/circuit/types';
-import { RotateCw, Trash2, X, Info } from 'lucide-react';
+import { RotateCw, Trash2, X, Info, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -207,6 +207,23 @@ export function PropertyPanel() {
         >
           <Trash2 size={12} className="mr-1" />
           Delete
+        </Button>
+      </div>
+
+      {/* Ask AI to explain this component */}
+      <div className="border-b border-slate-800 p-2">
+        <Button
+          size="sm"
+          variant="outline"
+          className="w-full cursor-pointer border-cyan-700 bg-cyan-950/40 text-cyan-300 hover:bg-cyan-900/50"
+          onClick={() => {
+            const prompt = `Explain component ${comp.id} (${plugin.name}). What does it do, how does it work, and what should I watch out for? Also check if its current parameter values are appropriate for this circuit.`;
+            window.dispatchEvent(new CustomEvent('circuitlab:ask-ai', { detail: prompt }));
+          }}
+          title="Ask AI to explain this component"
+        >
+          <Sparkles size={12} className="mr-1" />
+          Ask AI to explain
         </Button>
       </div>
 

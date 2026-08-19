@@ -34,6 +34,7 @@ import { serializeDocumentTool, exportKiCadNetlistTool, loadDocumentTool } from 
 import { diagnoseCircuitTool } from './diagnostic-tools';
 import { kbLookupTool, kbSearchTool, kbListByCategoryTool, kbRelatedTool, kbListCategoriesTool } from './kb-tools';
 import { simulateWhatIfTool } from './whatif-tools';
+import { simulateSweepTool } from './sweep-tools';
 
 export const TOOLS: Tool[] = [
   // Circuit Building
@@ -73,6 +74,7 @@ export const TOOLS: Tool[] = [
   // AI-Powered Diagnosis & Teaching
   diagnoseCircuitTool,
   simulateWhatIfTool,
+  simulateSweepTool,
 
   // Knowledge Base
   kbLookupTool,

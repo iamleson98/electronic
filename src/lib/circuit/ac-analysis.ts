@@ -301,10 +301,77 @@ function computeOutputVoltage(
       stampY(Yre, Yim, i1, i2, N, g, 0);
     } else if (c.type === 'ground') {
       // Ground node is implicit (we don't include row/col 0)
+    } else if (c.type === 'npn' || c.type === 'pnp') {
+      // BJT hybrid-pi model (simplified):
+      //   gm = I_C / V_T  (transconductance, V_T ≈ 25.85mV at 300K)
+      //   r_pi = β / gm   (input resistance)
+      //   r_o = V_A / I_C (output resistance, Early effect — often ignored)
+      //
+      // Small-signal model:
+      //   Base-Emitter: r_pi
+      //   Collector-Emitter: VCCS with gm * v_be
+      //   (we ignore r_o, C_pi, C_mu for simplicity)
+      const V_T = 0.02585; // thermal voltage at 300K
+      const beta = (c.parameters.hfe as number) ?? 100;
+      // Look up the c, b, e terminal node IDs
+      const cTerm = terms.find(t => t.terminalId === 'c');
+      const bTerm = terms.find(t => t.terminalId === 'b');
+      const eTerm = terms.find(t => t.terminalId === 'e');
+      if (!cTerm || !bTerm || !eTerm) continue;
+      const cNodeIdx = cTerm.nodeId > 0 ? cTerm.nodeId - 1 : -1;
+      const bNodeIdx = bTerm.nodeId > 0 ? bTerm.nodeId - 1 : -1;
+      const eNodeIdx = eTerm.nodeId > 0 ? eTerm.nodeId - 1 : -1;
+      // Estimate I_C — default to 1mA if no DC operating point available
+      // (a proper implementation would pass the DC op point in, but for
+      // simplicity we assume a typical small-signal bias)
+      const iC = 1e-3; // 1mA default bias
+      const gm = Math.max(iC / V_T, 1e-6);
+      const r_pi = beta / gm;
+      // r_pi between base and emitter
+      stampY(Yre, Yim, bNodeIdx, eNodeIdx, N, 1 / r_pi, 0);
+      // VCCS: i_c = gm * (v_b - v_e)
+      // Stamps: Y[c,c] += gm, Y[c,e] -= gm, Y[e,c] -= gm, Y[e,e] += gm (for v_b)
+      //         Y[c,b] += gm (sense), Y[c,e] -= gm (sense)
+      // Actually VCCS: i_out = gm * (v_ctrl+ - v_ctrl-)
+      // i flows from cNode to eNode, controlled by (bNode - eNode)
+      if (cNodeIdx >= 0 && bNodeIdx >= 0) {
+        Yre[cNodeIdx * N + bNodeIdx] += gm;
+        Yre[bNodeIdx * N + cNodeIdx] += gm; // symmetry for real matrix
+      }
+      if (cNodeIdx >= 0 && eNodeIdx >= 0) {
+        Yre[cNodeIdx * N + eNodeIdx] -= gm;
+        Yre[eNodeIdx * N + cNodeIdx] -= gm;
+      }
+      if (eNodeIdx >= 0 && bNodeIdx >= 0) {
+        Yre[eNodeIdx * N + bNodeIdx] -= gm;
+        Yre[bNodeIdx * N + eNodeIdx] -= gm;
+      }
+      if (eNodeIdx >= 0) {
+        Yre[eNodeIdx * N + eNodeIdx] += gm;
+      }
+    } else if (c.type === 'opamp' || c.type === 'lm358' || c.type === 'lm741' || c.type === 'tl072') {
+      // Op-amp small-signal model:
+      //   Very high input impedance (1 MΩ) between in+ and in-
+      //   VCVS: v_out = A * (v_in+ - v_in-), A = 100,000 (open-loop gain)
+      //   Low output impedance (100 Ω)
+      const A = 1e5;
+      const rIn = 1e6;
+      const rOut = 100;
+      const inPlus = terms.find(t => t.terminalId === 'in+')?.nodeId ?? 0;
+      const inMinus = terms.find(t => t.terminalId === 'in-')?.nodeId ?? 0;
+      const outT = terms.find(t => t.terminalId === 'out')?.nodeId ?? 0;
+      const inPlusIdx = inPlus > 0 ? inPlus - 1 : -1;
+      const inMinusIdx = inMinus > 0 ? inMinus - 1 : -1;
+      const outIdx = outT > 0 ? outT - 1 : -1;
+      // Input resistance between in+ and in-
+      stampY(Yre, Yim, inPlusIdx, inMinusIdx, N, 1 / rIn, 0);
+      // VCVS approximation (penalty method): v_out ≈ A*(v_+ - v_-)
+      const g = A / rOut;
+      if (outIdx >= 0 && inPlusIdx >= 0) Yre[outIdx * N + inPlusIdx] += g;
+      if (outIdx >= 0 && inMinusIdx >= 0) Yre[outIdx * N + inMinusIdx] -= g;
+      if (outIdx >= 0) Yre[outIdx * N + outIdx] += 1 / rOut;
     }
-    // Other types (transistors, op-amps, etc.) are not handled in AC analysis
-    // — they need the full runAC() in analysis.ts which linearizes them
-    // around the operating point.
+    // Other types are not handled — they contribute nothing to the AC matrix
   }
 
   // Solve the complex linear system Y * V = I using Cramer's rule via Gaussian

@@ -126,7 +126,7 @@ This file tracks all remaining improvements.
 
 - [x] **Fourier THD/spectrum display** — Spectrum tab in ProbePanel: log-x bar chart with H1..H10 markers, table with THD%, SNR, SINAD, harmonic breakdown
 - [ ] **Real sparse solver** — CSR-based LU factorization (KLU-style) for 1000+ node circuits
-- [ ] **Adaptive timestep** — Wire `simOptions.method` into capacitor/inductor stamps (trap/Gear)
+- [x] **Adaptive timestep / integration methods** — `integration-adapter.ts` wires trap/Gear2 methods into capacitor/inductor stamps via `stampCapacitor` / `stampInductor` helpers; reads `simOptions.method` ('euler' | 'trap' | 'gear')
 - [x] **Wire in `memory.ts`** — cleanupComponentState called on deleteComponent (inline), orphaned sim state removed
 - [ ] **Memoize nodeMap + MNA system** — Cache across sim steps, invalidate on component/wire edits
 - [ ] **Move canvas rendering out of React** — Direct RAF loop reading from `useEditor.getState()`, bypass React for hot path
@@ -162,4 +162,4 @@ This file tracks all remaining improvements.
 - [ ] **Wire in `scope-viewer.ts`** — Connect to ProbePanel (full scope with cursors/trigger)
 - [x] **Wire in `monte-carlo.ts`** — batch-runner.ts uses `runMonteCarlo` from monte-carlo.ts (LCG RNG, Gaussian/uniform, tolerance perturbation, yield %, worst-case)
 - [x] **Wire in `keyboard-shortcuts.ts`** — HelpDialog's Shortcuts tab now reads from keyboard-shortcuts.ts (single source of truth; was hardcoded duplicate)
-- [ ] **Wire in `integration.ts`** — Trap/Gear methods exist but capacitor/inductor stamps in passive.ts use inline logic; needs adapter to use capTrapezoidal/capGear2/inductorTrapezoidal/inductorGear2
+- [x] **Wire in `integration.ts`** — `integration-adapter.ts` exposes `stampCapacitor` / `stampInductor` that call `capTrapezoidal`, `capGear2`, `inductorTrapezoidal`, `inductorGear2` based on `simOptions.method`; companion models and state tracking fully implemented

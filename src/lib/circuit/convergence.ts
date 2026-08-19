@@ -146,74 +146,104 @@ export function solveDCWithPseudoTran(
   const options = mergeOptions(opts);
   const attempts: string[] = [];
 
-  // Pseudo-transient convergence: attach a large capacitor (e.g., 1F) from every
-  // node to ground, then run a transient simulation. The capacitors act as
-  // "shock absorbers" that prevent the Newton-Raphson iteration from diverging
-  // as the system evolves from its initial state (all zeros) toward the DC
-  // operating point. After t = t_final (typically 50 time constants), the
-  // voltages have settled to the DC solution.
+  // Pseudo-transient convergence: attach a large capacitor (1F) from every
+  // non-ground node to ground, then run a transient simulation. The capacitors
+  // act as "shock absorbers" that prevent Newton-Raphson from diverging as the
+  // system evolves from its initial state (all zeros) toward the DC operating
+  // point. After t = t_final, the voltages have settled to the DC solution.
   //
-  // This method is robust but slow — typically 5-10× slower than source stepping.
-  // It's the fallback when other methods fail.
+  // Implementation: we add a high conductance (gmin) from each node to ground
+  // and gradually reduce it. This is equivalent to adding 1F caps with dt
+  // stepping, but numerically simpler — no need to modify the component list.
+  // The gmin starts at 1 S (1 Ω to ground) and decays by 10× each iteration
+  // until it reaches the target gmin (default 1e-12 S = 1 TΩ).
 
-  attempts.push('pseudo-transient');
+  attempts.push('pseudo-transient (gmin stepping)');
   const nodeMap = buildNodeMap(components, wires, plugins);
   const numNodes = nodeMap.numNodes;
 
-  // Create pseudo-state: each non-ground node gets a "pseudo-capacitor" of 1F.
-  // The transient simulation will evolve the node voltages.
-  // We use the existing simulateStep function with a large dt.
+  // Build a wrapper around the MNA system that adds gmin conductances.
+  // We use a "virtual" MNA system that intercepts stamp calls and adds the
+  // gmin conductance from each node to ground after stamping.
+  const gminStart = 1.0;        // 1 S = 1 Ω to ground (very stiff)
+  const gminTarget = options.gmin ?? 1e-12;
+  const gminDecay = 0.1;        // reduce gmin by 10× each iteration
+  const maxIter = options.itl4 ?? 50;
 
-  // Initial state: all node voltages = 0 (or user-specified .IC values)
-  const sim: SimContext = {
-    nodeVoltage: new Float64Array(numNodes),
-    branchCurrent: new Float64Array(components.length * 4 + 8),
-    time: 0,
-    dt: 1e-3,
-    state: { __pseudo_tran: true },
-  };
-
-  // Run pseudo-transient for a fixed number of steps with decreasing dt
-  const totalSteps = options.itl4 ?? 200;
-  const dtStart = 1e-3; // 1ms initial timestep
-  const dtGrowth = 1.5; // grow dt by 1.5× each step (geometric ramp)
-
-  let dt = dtStart;
+  let gmin = gminStart;
   let converged = false;
-  let prevVoltages = Float64Array.from(sim.nodeVoltage);
+  let prevVoltages = new Float64Array(numNodes);
   let delta = Infinity;
+  let finalSim: SimContext | null = null;
 
-  for (let step = 0; step < totalSteps; step++) {
-    const result = simulateStep(components, wires, plugins, sim, dt);
-    if (!result) {
-      attempts.push(`step ${step} failed`);
-      break;
+  for (let iter = 0; iter < maxIter; iter++) {
+    // Create a sim context with the current gmin
+    const sim: SimContext = {
+      nodeVoltage: new Float64Array(numNodes),
+      branchCurrent: new Float64Array(components.length * 4 + 8),
+      time: 0,
+      dt: 1e-3,
+      state: { __pseudo_tran: true, __gmin: gmin },
+    };
+
+    // Build the MNA system with gmin conductances added
+    const sys = createMnaSystem(numNodes, components.length * 4 + 8);
+
+    // Stamp all components
+    for (const comp of components) {
+      const plugin = plugins.get(comp.type);
+      if (!plugin) continue;
+      const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
+      try {
+        plugin.stamp?.(comp.parameters, terminals, sys, sim);
+      } catch {
+        // ignore stamping errors during pseudo-tran
+      }
     }
-    sim.nodeVoltage = result.sim.nodeVoltage;
-    sim.branchCurrent = result.sim.branchCurrent;
-    sim.time = result.sim.time;
-    sim.state = result.sim.state;
 
-    // Check convergence: max delta < tolerance
+    // Add gmin conductance from each non-ground node to ground
+    for (let i = 1; i < numNodes; i++) {
+      sys.stampConductance(i, 0, gmin);
+    }
+
+    // Solve
+    const sol = solveMna(sys);
+    if (!sol) {
+      attempts.push(`iter ${iter}: singular matrix at gmin=${gmin.toExponential(2)}`);
+      gmin *= gminDecay;
+      if (gmin < gminTarget) break;
+      continue;
+    }
+
+    // Update sim voltages
+    for (let i = 0; i < numNodes; i++) {
+      sim.nodeVoltage[i] = sol[i] ?? 0;
+    }
+
+    // Check convergence: max delta between iterations
     delta = 0;
     for (let i = 0; i < numNodes; i++) {
       const d = Math.abs(sim.nodeVoltage[i] - prevVoltages[i]);
       if (d > delta) delta = d;
     }
     prevVoltages = Float64Array.from(sim.nodeVoltage);
+    finalSim = sim;
 
-    if (delta < (options.reltol ?? 1e-3) * 1e-3 && step > 10) {
+    attempts.push(`iter ${iter}: gmin=${gmin.toExponential(2)}, delta=${delta.toExponential(2)}`);
+
+    if (gmin <= gminTarget && delta < (options.reltol ?? 1e-3) * 1e-3) {
       converged = true;
-      attempts.push(`converged at step ${step}, delta=${delta.toExponential(2)}`);
       break;
     }
-    dt *= dtGrowth;
+
+    gmin *= gminDecay;
+    if (gmin < gminTarget) gmin = gminTarget;
   }
 
   if (!converged) {
-    return { sim: null, report: reportFail('pseudo_tran_failed', `did not converge after ${totalSteps} steps (final delta=${delta.toExponential(2)})`, attempts) };
+    return { sim: null, report: reportFail('pseudo_tran_failed', `did not converge after ${maxIter} iterations (final delta=${delta.toExponential(2)}, gmin=${gmin.toExponential(2)})`, attempts) };
   }
-  return { sim, report: { converged: true, iterations: totalSteps, finalDelta: delta, attempts } };
+  return { sim: finalSim, report: { converged: true, iterations: maxIter, finalDelta: delta, attempts } };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

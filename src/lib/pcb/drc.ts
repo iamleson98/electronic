@@ -15,6 +15,7 @@
 // - Starved thermal (pad with insufficient thermal connections)
 
 import type { Footprint, Trace, Via, Ratsnest, Pad, BoardOutline, CopperLayer } from './types';
+import type { NetClass } from '../circuit/types';
 
 export interface DRCError {
   type: 'clearance' | 'short' | 'unrouted' | 'outside_board' | 'overlap' |
@@ -60,8 +61,31 @@ export function runDRC(
   ratsnest: Ratsnest[],
   board: BoardOutline,
   config: DRCConfig = DEFAULT_DRC_CONFIG,
+  netClasses?: NetClass[],
 ): DRCError[] {
   const errors: DRCError[] = [];
+
+  // Build a net → NetClass lookup for per-net rules
+  const netToClass = new Map<string, NetClass>();
+  if (netClasses) {
+    for (const nc of netClasses) {
+      for (const netName of nc.nets) {
+        netToClass.set(netName, nc);
+      }
+    }
+  }
+
+  // Helper: get the effective clearance for a net (uses NetClass if defined)
+  const getClearance = (netName: string): number => {
+    const nc = netToClass.get(netName);
+    if (nc?.clearance != null) return nc.clearance;
+    return config.minClearance;
+  };
+  const getTraceWidth = (netName: string): number => {
+    const nc = netToClass.get(netName);
+    if (nc?.traceWidth != null) return nc.traceWidth;
+    return config.minTraceWidth;
+  };
 
   // 1. Check unrouted nets
   const routedNets = new Set<string>();
@@ -133,7 +157,9 @@ export function runDRC(
       if (a.net === b.net) continue; // same net, OK
       const dist = segToSegDistance(a.start, a.end, b.start, b.end);
       const minDist = dist - (a.width + b.width) / 2;
-      if (minDist < config.minClearance) {
+      // Use the MAX of both nets' required clearance (stricter rule wins)
+      const requiredClearance = Math.max(getClearance(a.net), getClearance(b.net));
+      if (minDist < requiredClearance) {
         const mid = {
           x: (a.start.x + a.end.x + b.start.x + b.end.x) / 4,
           y: (a.start.y + a.end.y + b.start.y + b.end.y) / 4,
@@ -258,14 +284,15 @@ export function runDRC(
     }
   }
 
-  // 10. Check minimum trace width
+  // 10. Check minimum trace width (per-net-class)
   for (const trace of traces) {
-    if (trace.width < config.minTraceWidth) {
+    const requiredWidth = getTraceWidth(trace.net);
+    if (trace.width < requiredWidth) {
       const midSeg = trace.segments[Math.floor(trace.segments.length / 2)];
       errors.push({
         type: 'min_width',
         severity: 'warning',
-        message: `Trace on net "${trace.net}" width ${trace.width.toFixed(3)}mm < minimum ${config.minTraceWidth}mm`,
+        message: `Trace on net "${trace.net}" width ${trace.width.toFixed(3)}mm < minimum ${requiredWidth.toFixed(3)}mm${netToClass.has(trace.net) ? ` (NetClass: ${netToClass.get(trace.net)!.name})` : ''}`,
         position: midSeg ? { x: (midSeg.start.x + midSeg.end.x) / 2, y: (midSeg.start.y + midSeg.end.y) / 2 } : { x: 0, y: 0 },
         layer: trace.layer,
       });

@@ -7,7 +7,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { HelpCircle, Keyboard, BookOpen, Lightbulb, Code, Sparkles } from 'lucide-react';
+import { HelpCircle, Keyboard, BookOpen, Lightbulb, Code, Sparkles, GraduationCap, Search } from 'lucide-react';
 import { exampleCategories, type ExampleEntry } from '@/lib/circuit/examples';
 import { exportSchematicSVG } from '@/lib/circuit/schematic-plot';
 import { useEditor } from '@/lib/circuit/store';
@@ -16,6 +16,14 @@ import {
   getAllCategories,
   formatShortcut,
 } from '@/lib/circuit/keyboard-shortcuts';
+import {
+  KB_ARTICLES,
+  KB_CATEGORIES,
+  getArticle,
+  searchArticles,
+  getArticlesByCategory,
+  type KBArticle,
+} from '@/lib/ai/knowledge/knowledge-base';
 
 interface Props { open: boolean; onClose: () => void; }
 
@@ -129,14 +137,15 @@ export function HelpDialog({ open, onClose }: Props) {
           </DialogTitle>
         </DialogHeader>
         <Tabs defaultValue={hasUnseen ? 'whatsnew' : 'shortcuts'} className="w-full">
-          <TabsList className="grid w-full grid-cols-5 bg-slate-950">
+          <TabsList className="grid w-full grid-cols-6 bg-slate-950">
             <TabsTrigger value="whatsnew" className="data-[state=active]:bg-slate-700 text-xs">
               <Sparkles size={12} className="mr-1" /> What's New
               {hasUnseen && <Badge variant="secondary" className="ml-1 h-4 px-1 text-[9px] bg-amber-500 text-slate-900">new</Badge>}
             </TabsTrigger>
             <TabsTrigger value="shortcuts" className="data-[state=active]:bg-slate-700 text-xs"><Keyboard size={12} className="mr-1" /> Shortcuts</TabsTrigger>
-            <TabsTrigger value="guide" className="data-[state=active]:bg-slate-700 text-xs"><BookOpen size={12} className="mr-1" /> Getting Started</TabsTrigger>
+            <TabsTrigger value="guide" className="data-[state=active]:bg-slate-700 text-xs"><BookOpen size={12} className="mr-1" /> Guide</TabsTrigger>
             <TabsTrigger value="examples" className="data-[state=active]:bg-slate-700 text-xs"><Lightbulb size={12} className="mr-1" /> Examples</TabsTrigger>
+            <TabsTrigger value="knowledge" className="data-[state=active]:bg-slate-700 text-xs"><GraduationCap size={12} className="mr-1" /> Learn</TabsTrigger>
             <TabsTrigger value="api" className="data-[state=active]:bg-slate-700 text-xs"><Code size={12} className="mr-1" /> API</TabsTrigger>
           </TabsList>
           <TabsContent value="whatsnew" className="mt-4">
@@ -193,6 +202,9 @@ export function HelpDialog({ open, onClose }: Props) {
           </TabsContent>
           <TabsContent value="examples" className="mt-4">
             <ExamplesGallery />
+          </TabsContent>
+          <TabsContent value="knowledge" className="mt-4">
+            <KnowledgeBaseBrowser />
           </TabsContent>
           <TabsContent value="api" className="mt-4">
             <ScrollArea className="h-[60vh]">
@@ -299,5 +311,149 @@ function ExamplesGallery() {
         ))}
       </div>
     </ScrollArea>
+  );
+}
+
+// ─── Knowledge Base Browser ──────────────────────────────────────────────────
+
+function KnowledgeBaseBrowser() {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeCategory, setActiveCategory] = useState<string | null>(null);
+
+  const searchResults = useMemo(() => {
+    if (searchQuery.trim()) {
+      return searchArticles(searchQuery, 20);
+    }
+    if (activeCategory) {
+      return getArticlesByCategory(activeCategory as KBArticle['category']);
+    }
+    return KB_ARTICLES;
+  }, [searchQuery, activeCategory]);
+
+  const selectedArticle = selectedId ? getArticle(selectedId) : null;
+
+  if (selectedArticle) {
+    return <ArticleReader article={selectedArticle} onBack={() => setSelectedId(null)} />;
+  }
+
+  return (
+    <div className="flex h-[60vh] gap-3">
+      {/* Sidebar: search + categories */}
+      <div className="w-56 shrink-0 space-y-3">
+        <div className="relative">
+          <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-500" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => { setSearchQuery(e.target.value); setActiveCategory(null); }}
+            placeholder="Search articles..."
+            className="w-full rounded border border-slate-700 bg-slate-900 py-1.5 pl-7 pr-2 text-xs text-slate-200 placeholder:text-slate-500"
+          />
+        </div>
+        <div className="space-y-0.5">
+          <button
+            className={`w-full cursor-pointer rounded px-2 py-1 text-left text-xs ${!activeCategory && !searchQuery ? 'bg-cyan-500/20 text-cyan-300' : 'text-slate-400 hover:bg-slate-800'}`}
+            onClick={() => { setActiveCategory(null); setSearchQuery(''); }}
+          >
+            All Articles ({KB_ARTICLES.length})
+          </button>
+          {KB_CATEGORIES.map(cat => {
+            const count = getArticlesByCategory(cat.id).length;
+            return (
+              <button
+                key={cat.id}
+                className={`w-full cursor-pointer rounded px-2 py-1 text-left text-xs ${activeCategory === cat.id ? 'bg-cyan-500/20 text-cyan-300' : 'text-slate-400 hover:bg-slate-800'}`}
+                onClick={() => { setActiveCategory(cat.id); setSearchQuery(''); }}
+              >
+                {cat.icon} {cat.label} ({count})
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Main: article list */}
+      <div className="min-w-0 flex-1">
+        <ScrollArea className="h-full">
+          <div className="space-y-2">
+            {searchResults.length === 0 ? (
+              <div className="py-8 text-center text-xs text-slate-500">
+                No articles found for &quot;{searchQuery}&quot;
+              </div>
+            ) : (
+              searchResults.map(article => (
+                <button
+                  key={article.id}
+                  onClick={() => setSelectedId(article.id)}
+                  className="block w-full cursor-pointer rounded-md border border-slate-800 bg-slate-950 p-3 text-left transition-colors hover:border-cyan-700 hover:bg-slate-900"
+                >
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-medium text-cyan-300">{article.title}</h4>
+                    <span className="text-[10px] text-slate-500">{article.category}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-400">{article.summary}</p>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {article.tags.slice(0, 4).map(tag => (
+                      <span key={tag} className="rounded bg-slate-800 px-1.5 py-0.5 text-[9px] text-slate-400">{tag}</span>
+                    ))}
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+        </ScrollArea>
+      </div>
+    </div>
+  );
+}
+
+function ArticleReader({ article, onBack }: { article: KBArticle; onBack: () => void }) {
+  return (
+    <div className="flex h-[60vh] flex-col">
+      <button
+        onClick={onBack}
+        className="mb-3 flex cursor-pointer items-center gap-1 text-xs text-slate-400 hover:text-cyan-300"
+      >
+        ← Back to Knowledge Base
+      </button>
+      <ScrollArea className="flex-1">
+        <div className="rounded-md border border-slate-800 bg-slate-950 p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-cyan-300">{article.title}</h3>
+            <span className="text-[10px] uppercase tracking-wider text-slate-500">{article.category}</span>
+          </div>
+          <p className="mb-4 text-sm text-slate-400">{article.summary}</p>
+          <div className="mb-4 flex flex-wrap gap-1">
+            {article.tags.map(tag => (
+              <span key={tag} className="rounded bg-slate-800 px-2 py-0.5 text-[10px] text-slate-400">{tag}</span>
+            ))}
+          </div>
+          <div className="prose prose-invert max-w-none">
+            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-slate-300">{article.body}</pre>
+          </div>
+          {article.related && article.related.length > 0 && (
+            <div className="mt-6 border-t border-slate-800 pt-4">
+              <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Related Articles</h4>
+              <div className="flex flex-wrap gap-2">
+                {article.related.map(rid => {
+                  const r = getArticle(rid);
+                  if (!r) return null;
+                  return (
+                    <button
+                      key={rid}
+                      onClick={() => { /* navigation handled by parent state */ }}
+                      className="cursor-pointer rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300 hover:border-cyan-700"
+                    >
+                      {r.title}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </ScrollArea>
+    </div>
   );
 }
