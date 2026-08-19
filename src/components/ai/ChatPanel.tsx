@@ -98,9 +98,9 @@ interface CircuitSnapshot {
 const SUGGESTED_PROMPTS = [
   'Build an LED blinker with a 555 timer',
   'Create an RC low-pass filter and verify the cutoff frequency',
-  'Build a common-emitter amplifier and measure the gain',
-  'Explain the current circuit',
-  'Run physics validation on my circuit',
+  'Why doesn\'t my circuit work? Diagnose it',
+  'Explain Ohm\'s Law and how it applies to my circuit',
+  'What if I changed R1 to 10k? Compare the results',
 ];
 
 // Tools that mutate the circuit (require undo checkpoint)
@@ -305,11 +305,21 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     };
     setMessages(prev => [...prev, userMsg, loadingMsg]);
 
-    // Capture circuit snapshot
+    // Capture circuit snapshot + live sim state for the AI
+    const editorState = useEditor.getState();
     const circuitSnapshot: CircuitSnapshot = {
       components: JSON.parse(JSON.stringify(components)),
       wires: JSON.parse(JSON.stringify(wires)),
     };
+    const simContext = editorState.simContext ? {
+      nodeVoltage: Array.from(editorState.simContext.nodeVoltage),
+      branchCurrent: Array.from(editorState.simContext.branchCurrent),
+      time: editorState.simContext.time,
+      dt: editorState.simContext.dt,
+    } : null;
+    const simError = editorState.simError || null;
+    const simRunning = editorState.running;
+    const selectedComponentId = editorState.selection?.type === 'component' ? editorState.selection.id : null;
 
     // Build message history for the API
     const apiMessages = [
@@ -327,6 +337,10 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
         body: JSON.stringify({
           messages: apiMessages,
           circuit: circuitSnapshot,
+          simContext,
+          simError,
+          simRunning,
+          selectedComponentId,
           provider: selectedProvider,
           model: selectedModel,
         }),
@@ -501,6 +515,12 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     ));
   }, [messages, applyCircuitUpdate]);
 
+  const dismissPendingDiff = useCallback((msgId: string) => {
+    setMessages(prev => prev.map(m =>
+      m.id === msgId ? { ...m, pendingDiff: undefined } : m
+    ));
+  }, []);
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -648,6 +668,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
               key={msg.id}
               message={msg}
               onApplyDiff={() => applyPendingDiff(msg.id)}
+              onDismissDiff={() => dismissPendingDiff(msg.id)}
               onUndo={() => undo()}
             />
           ))}
@@ -683,7 +704,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
   );
 }
 
-function MessageBubble({ message, onApplyDiff, onUndo }: { message: ChatMessage; onApplyDiff: () => void; onUndo: () => void }) {
+function MessageBubble({ message, onApplyDiff, onDismissDiff, onUndo }: { message: ChatMessage; onApplyDiff: () => void; onDismissDiff: () => void; onUndo: () => void }) {
   if (message.role === 'user') {
     return (
       <div className="flex justify-end">
@@ -737,7 +758,7 @@ function MessageBubble({ message, onApplyDiff, onUndo }: { message: ChatMessage;
                 <CheckCircle2 className="mr-1 h-3 w-3" />
                 Apply changes
               </Button>
-              <Button size="sm" variant="outline" onClick={() => { /* dismiss */ }} className="h-7 border-slate-700 text-xs">
+              <Button size="sm" variant="outline" onClick={onDismissDiff} className="h-7 border-slate-700 text-xs">
                 Dismiss
               </Button>
             </div>

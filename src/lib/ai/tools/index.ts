@@ -13,6 +13,9 @@
 //   - erc-annotation-tools.ts         (ERC, reannotate)
 //   - search-tools.ts                 (find component)
 //   - document-tools.ts               (serialize, export netlist, load doc)
+//   - diagnostic-tools.ts             (AI root-cause diagnosis)
+//   - kb-tools.ts                     (knowledge base lookup/search)
+//   - whatif-tools.ts                 (non-mutating what-if simulation)
 
 import type { Tool, ToolContext } from './types';
 export type { Tool, ToolContext, ToolResult } from './types';
@@ -28,6 +31,9 @@ import { setBoardSizeTool, setDefaultTraceWidthTool, setActiveLayerTool, addCopp
 import { runERCTool, reannotateTool } from './erc-annotation-tools';
 import { findComponentTool } from './search-tools';
 import { serializeDocumentTool, exportKiCadNetlistTool, loadDocumentTool } from './document-tools';
+import { diagnoseCircuitTool } from './diagnostic-tools';
+import { kbLookupTool, kbSearchTool, kbListByCategoryTool, kbRelatedTool, kbListCategoriesTool } from './kb-tools';
+import { simulateWhatIfTool } from './whatif-tools';
 
 export const TOOLS: Tool[] = [
   // Circuit Building
@@ -63,6 +69,17 @@ export const TOOLS: Tool[] = [
   pauseSimulationTool,
   resetSimulationTool,
   setSimulationSpeedTool,
+
+  // AI-Powered Diagnosis & Teaching
+  diagnoseCircuitTool,
+  simulateWhatIfTool,
+
+  // Knowledge Base
+  kbLookupTool,
+  kbSearchTool,
+  kbListByCategoryTool,
+  kbRelatedTool,
+  kbListCategoriesTool,
 
   // Examples & Export
   listExamplesTool,

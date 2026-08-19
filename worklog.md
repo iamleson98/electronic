@@ -2781,3 +2781,119 @@ Stage Summary:
 - 30+ unused imports removed across 14 files
 - ESLint config: added scoped overrides for scripts/ and tests/
 - All 1555 tests still pass; build still succeeds
+
+---
+Task ID: ai-teaching-engine-v1
+Agent: main
+Task: Deep research + build AI-powered teaching/diagnosis engine + electronics knowledge base
+
+Work Log:
+- Conducted deep research via two subagents:
+  1. AI assistant audit: found 41 tools but NO knowledge base, NO root-cause diagnosis, NO what-if simulation, NO live context passing, broken dismiss button, 20-iteration cap too low.
+  2. Simulation/PCB audit: found fake sparse solver, dead trap/Gear2 integration, broken pseudo-transient, AC analysis doesn't handle transistors, PCB router shove is single-axis, diff pair is stub, 4/6-layer stacks are cosmetic, Gerber missing paste/inner/outline.
+
+- Implemented the highest-impact AI improvements (P0 differentiators):
+
+1. ELECTRONICS KNOWLEDGE BASE (24 articles):
+   * New module `src/lib/ai/knowledge/knowledge-base.ts` (~2000 lines)
+   * 24 structured articles across 8 categories:
+     - Core Concepts: Ohm's Law, KVL/KCL, Voltage Divider, Capacitor Basics, Inductor Basics
+     - Semiconductors: Diode Basics, LED Current Limiting, BJT Transistors, MOSFETs
+     - ICs: Op-Amps, 555 Timer
+     - Troubleshooting: Floating Node, Missing Ground, Convergence Issues, Parallel Voltage Sources
+     - Design Patterns: Decoupling, Transistor Switch, Flyback Diode
+     - PCB: Layout Fundamentals, Ground Planes
+     - Analysis: DC Operating Point, AC Analysis, Transient Analysis
+   * Each article: id, title, category, tags, summary, body (markdown with ASCII art), related, seeAlso
+   * Search functions: getArticle, searchArticles (ranked free-text), getArticlesByCategory, getRelatedArticles, getAllTags
+   * Articles include worked examples, formulas, common mistakes, and "when X doesn't apply" sections
+
+2. AI DIAGNOSE TOOL (root-cause analysis):
+   * New module `src/lib/ai/tools/diagnostic-tools.ts` (~480 lines)
+   * `diagnoseCircuit()` runs 8 checks:
+     1. Missing ground (critical)
+     2. Floating nodes / unconnected terminals (error)
+     3. Parallel voltage sources (critical)
+     4. Full ERC (9 rule types from erc.ts — was a 2-rule stub)
+     5. Physics validation (KCL, Ohm, power laws)
+     6. Missing decoupling caps near ICs (warning)
+     7. LED without current-limiting resistor (error)
+     8. Short circuits (V+ directly to GND)
+   * Returns ranked DiagnosisResult: issues with severity, category, title, description, affectedComponents, suggestedFix, kbArticles, confidence
+   * Overall health: healthy / warnings / errors / critical
+   * Each issue links to relevant KB articles for learning
+
+3. KNOWLEDGE BASE TOOLS (5 tools for the AI):
+   * `kb.lookup` — get article by ID (full body)
+   * `kb.search` — free-text search (ranked, up to 5 results)
+   * `kb.listByCategory` — list articles in a category
+   * `kb.related` — get related articles
+   * `kb.listCategories` — list all categories with counts
+
+4. SIMULATE.WHATIF TOOL (non-mutating exploration):
+   * New module `src/lib/ai/tools/whatif-tools.ts` (~210 lines)
+   * Clones the circuit, applies parameter modifications, runs a sim, returns V/I at probe points, DISCARDS the clone
+   * Does NOT trigger circuit_update — lets the AI answer "what if R1 were 10k?" without proposing a change
+
+5. ENRICHED AI CONTEXT (live sim state):
+   * Updated `src/app/api/ai/chat/stream/route.ts`:
+     - RequestBody now accepts: simContext, simError, simRunning, selectedComponentId
+     - New `buildContextPreamble()` injects a system message with:
+       * Circuit summary (component count, type breakdown)
+       * Simulation state (running/stopped, sim time, node count)
+       * Simulation error (if any — CRITICAL for diagnosis)
+       * Selected component (if any — for "explain this")
+     - The AI can now see the live circuit state WITHOUT calling simulate.run first
+   * Updated `src/components/ai/ChatPanel.tsx` to capture and send:
+     - Live simContext (node voltages, branch currents, time, dt)
+     - simError (current error string)
+     - simRunning (bool)
+     - selectedComponentId (from store.selection)
+
+6. IMPROVED SYSTEM PROMPT (teacher personality):
+   * Rewrote SYSTEM_PROMPT with dual role: Engineer + Teacher
+   * Instructions for: diagnosing problems, explaining concepts, what-if analysis
+   * Teaching guidelines: explain WHY, use analogies, cite KB, suggest improvements, be encouraging
+   - Response style: concise but complete, use formatting
+
+7. FIXED BROKEN DISMISS BUTTON:
+   * ChatPanel.tsx line 740: `onClick={() => { /* dismiss */ }}` → `onClick={onDismissDiff}`
+   * Added `dismissPendingDiff` callback that clears `pendingDiff` on the message
+   * Added `onDismissDiff` prop to MessageBubble component
+
+8. INCREASED TOOL-CALL CAP:
+   * Stream route: MAX_ITERATIONS 20 → 50
+   * Allows building complex circuits (Arduino clock with 30+ components needs ~40 tool calls)
+
+9. UPDATED SUGGESTED PROMPTS:
+   * New prompts include: "Why doesn't my circuit work? Diagnose it", "Explain Ohm's Law", "What if I changed R1 to 10k?"
+
+NEW TESTS (26 tests in `tests/ai-knowledge-diagnostic.test.ts`):
+- diagnoseCircuit: 9 tests
+  * Missing ground detection
+  * LED without resistor detection
+  * LED with resistor (no false positive)
+  * Parallel voltage sources detection
+  * Missing decoupling cap detection
+  * Decoupling cap present (no false positive)
+  * Healthy circuit returns "healthy"
+  * Issues sorted by severity (critical first)
+  * Component/wire counts correct
+- Knowledge Base: 17 tests
+  * ≥20 articles, every article has required fields
+  * Unique IDs, getArticle by ID, searchArticles ranked
+  * Category coverage (all 8 categories have articles)
+  * Related articles, tags sorted
+  * Coverage of beginner/troubleshooting/PCB/analysis topics
+
+VERIFICATION:
+- Typecheck clean
+- All 1581 tests pass across 68 files (was 1555 → +26 new)
+- Build succeeds (NEXT_BUILD=true)
+
+Stage Summary:
+- 4 new files: knowledge-base.ts (~2000 lines), diagnostic-tools.ts (~480 lines), kb-tools.ts (~180 lines), whatif-tools.ts (~210 lines)
+- 3 modified files: tools/index.ts (register new tools), api/ai/chat/stream/route.ts (enriched context + system prompt + 50-iter cap), ChatPanel.tsx (live state capture + dismiss fix + new prompts)
+- 1 new test file: ai-knowledge-diagnostic.test.ts (26 tests)
+- AI now has: 24-article knowledge base, root-cause diagnosis engine, non-mutating what-if simulation, live circuit context, teacher-personality system prompt
+- Total AI tools: 41 → 48 (added ai.diagnose, simulate.whatIf, kb.lookup, kb.search, kb.listByCategory, kb.related, kb.listCategories)
