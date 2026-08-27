@@ -14,6 +14,7 @@ import type {
 import { createMnaSystem, solveMna } from './solver';
 import { createSparseMnaSystem, solveSparse, shouldUseSparseSolver, asMnaSystem } from './sparse-klu';
 import { stateKey } from './state-keys';
+import { getRegistryVersion } from './registry';
 
 export interface NodeMap {
   /** key = `${componentId}:${terminalId}` -> node id (0 = ground) */
@@ -50,7 +51,39 @@ export function expandBusVector(name: string): string[] {
  * Build a node map by union-find over all terminal connections.
  * Any terminal connected to a `ground` plugin's terminal becomes node 0.
  */
+/**
+ * Build the node map (union-find over terminals + wires).
+ *
+ * MEMOIZED: the live simulation loop and the canvas render both call this
+ * several times per frame with the SAME component/wire array references
+ * (all store mutations replace the arrays immutably), so the result is cached
+ * on (components, wires) identity + the plugin-registry generation. The cache
+ * holds a single entry — the hot path is one circuit — and any topology edit
+ * produces new array references, invalidating it automatically.
+ */
 export function buildNodeMap(components: CircuitComponent[], wires: Wire[], plugins: Map<string, ComponentPlugin>): NodeMap {
+  const regVersion = getRegistryVersion();
+  if (
+    nodeMapCache &&
+    nodeMapCache.components === components &&
+    nodeMapCache.wires === wires &&
+    nodeMapCache.registryVersion === regVersion
+  ) {
+    return nodeMapCache.map;
+  }
+  const map = buildNodeMapUncached(components, wires, plugins);
+  nodeMapCache = { components, wires, registryVersion: regVersion, map };
+  return map;
+}
+
+let nodeMapCache: {
+  components: CircuitComponent[];
+  wires: Wire[];
+  registryVersion: number;
+  map: NodeMap;
+} | null = null;
+
+function buildNodeMapUncached(components: CircuitComponent[], wires: Wire[], plugins: Map<string, ComponentPlugin>): NodeMap {
   const terminalNode = new Map<string, number>();
   const parent: number[] = [0]; // node 0 is ground
 

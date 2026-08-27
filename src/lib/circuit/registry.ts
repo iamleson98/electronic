@@ -5,6 +5,8 @@
 import type { ComponentPlugin } from './types';
 
 const registry = new Map<string, ComponentPlugin>();
+/** Bumped on every (re-)registration — used to invalidate nodeMap caches. */
+let registryVersion = 0;
 const categoryOrder: Record<string, number> = {
   io: 0,        // input/output (switches, LEDs)
   source: 1,    // power sources
@@ -22,6 +24,12 @@ export function registerPlugin(plugin: ComponentPlugin) {
   // Built-in plugins are registered at module load and re-registering them
   // with identical data is a no-op.
   registry.set(plugin.type, plugin);
+  registryVersion++;
+}
+
+/** Current registry generation — changes whenever a plugin is (re-)registered. */
+export function getRegistryVersion(): number {
+  return registryVersion;
 }
 
 export function getPlugin(type: string): ComponentPlugin | undefined {
