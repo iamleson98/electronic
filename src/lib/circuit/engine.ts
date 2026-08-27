@@ -1114,7 +1114,8 @@ export function simulateStep(
   }
   const maxExtras = components.length * 4 + 8 + declaredExtras;
 
-  // Use the sparse solver for circuits > 80 nodes — much faster for big designs.
+  // Use the sparse (triplet + Markowitz LU) solver for circuits > 80 unknowns —
+  // O(nnz) memory and O(flops) factorization keep large designs fast.
   // Below that threshold, the dense solver wins (less overhead per stamp).
   const useSparse = shouldUseSparseSolver(numNodes - 1, maxExtras);
   const sparseSys = useSparse ? createSparseMnaSystem(numNodes - 1, maxExtras) : null;
@@ -1196,6 +1197,7 @@ export function simulateStep(
 
   // Stamp all components
   sys.nextExtra = numNodes - 1; // reset extra counter; extra vars start at index (numNodes-1)
+  if (sparseSys) sparseSys.clearStamps(); // reset triplet buffer + RHS for fresh stamping
   for (const comp of components) {
     const plugin = plugins.get(comp.type);
     if (!plugin || !plugin.stamp) continue;
@@ -1211,19 +1213,27 @@ export function simulateStep(
   // build a smaller system to avoid singular cols
   const actualSize = sys.nextExtra;
   if (actualSize < sys.size) {
-    // shrink
-    const newA = new Float64Array(actualSize * actualSize);
-    const newZ = new Float64Array(actualSize);
-    for (let r = 0; r < actualSize; r++) {
-      for (let c = 0; c < actualSize; c++) {
-        newA[r * actualSize + c] = sys.A[r * sys.size + c];
+    if (sparseSys) {
+      // Sparse path: drop anything outside the used block (O(nnz)) — no dense
+      // copy is involved. Stamps never touch unused extras, so this is a pure
+      // truncation of triplets + RHS.
+      sparseSys.truncate(actualSize);
+      sys.numExtra = actualSize - (numNodes - 1);
+    } else {
+      // shrink
+      const newA = new Float64Array(actualSize * actualSize);
+      const newZ = new Float64Array(actualSize);
+      for (let r = 0; r < actualSize; r++) {
+        for (let c = 0; c < actualSize; c++) {
+          newA[r * actualSize + c] = sys.A[r * sys.size + c];
+        }
+        newZ[r] = sys.z[r];
       }
-      newZ[r] = sys.z[r];
+      sys.A = newA;
+      sys.z = newZ;
+      sys.size = actualSize;
+      sys.numExtra = actualSize - (numNodes - 1);
     }
-    sys.A = newA;
-    sys.z = newZ;
-    sys.size = actualSize;
-    sys.numExtra = actualSize - (numNodes - 1);
   }
 
   const x = useSparse && sparseSys ? solveSparse(sparseSys) : solveMna(sys);
