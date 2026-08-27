@@ -7,6 +7,7 @@
 import type { ComponentPlugin } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
+import { stateKey } from '../state-keys';
 
 // ----- Voltmeter -----
 const voltmeter: ComponentPlugin = {
@@ -77,20 +78,20 @@ const ammeter: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, 'A', cellSize, 1.5 * cellSize);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     // 0V voltage source acts as short circuit with measurable current
     const branchIdx = sys.stampVoltageSource(p, n, 0);
     // Store branch index on sim.state for later retrieval in measure()
     const st = sim.state.__global ?? (sim.state.__global = {});
-    st[`ammeter_${p}_${n}`] = branchIdx;
+    st[stateKey('ammeter', comp, p, n)] = branchIdx;
   },
-  measure(params, terminals, sim) {
+  measure(params, terminals, sim, comp) {
     const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     const st = sim.state.__global ?? {};
-    const branchIdx = st[`ammeter_${p}_${n}`];
+    const branchIdx = st[stateKey('ammeter', comp, p, n)];
     // stampVoltageSource returns the RAW matrix index of the extra variable;
     // sim.branchCurrent is indexed RELATIVE to the first extra variable
     // (branchCurrent[i] = x[numNodes-1+i]). Convert before reading, like the
@@ -205,7 +206,7 @@ const arduino: ComponentPlugin = {
       ctx.fillText(p, w - cellSize * 0.3, y * cellSize);
     });
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const vccV = params.vcc as number;
     const sketch = params.sketch as string;
     const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
@@ -220,7 +221,7 @@ const arduino: ComponentPlugin = {
       if (node !== gnd) sys.stampConductance(node, gnd, 1e-6);
     });
     // sketch
-    const key = 'arduino_' + terminals.find((t) => t.terminalId === 'd2')!.nodeId;
+    const key = stateKey('arduino', comp, terminals.find((t) => t.terminalId === 'd2')!.nodeId);
     const st = sim.state[key] ?? (sim.state[key] = { outHigh: false });
     if (sketch === 'blink') {
       const period = 1; // 1s

@@ -1,9 +1,27 @@
-// Keys built from NODE ids (npn_1_2_3, 7seg_..., gate_...) cannot be
-// attributed to a component here and are left alone.
+// All per-component sim-state keys are now keyed by component id:
+// `prefix_<id>` with an optional trailing suffix (_i, _dir, _ib, _clk, ...).
+// Sub-circuit internals are keyed `prefix_<instanceId>.<innerId>`.
+// Legacy node-based keys (`npn_1_2_3`, `led_1_2`) are pure-numeric after the
+// prefix and are preserved.
 
 // State-key prefixes that embed a component id: `prefix_${id}` with an
 // optional trailing suffix (_i, _dir, _ib, ...).
-const COMP_ID_STATE_PREFIXES = ['cap', 'ind', 'vcsw', 'xfmr_branch', 'ff'];
+const COMP_ID_STATE_PREFIXES = [
+  // passives & switches
+  'cap', 'ind', 'vcsw', 'xfmr_branch', 'ff', 'xfmr', 'tline',
+  // semiconductors
+  'diode', 'dio', 'zener', 'led', 'npn', 'pnp', 'nmos', 'pmos',
+  'bjt', 'mos', 'jfet', 'bsim3', 'bsim4',
+  // ICs & digital
+  't555', 'gate', 'schmitt', 'cd4013', 'cd4026', '7seg',
+  'vco', 'xtal', 'osc', 'cmp',
+  // protection / power
+  'fuse', 'scr', 'triac', 'diac', 'tl431', 'lm385', 'lm336', 'icl8069',
+  'pd', 'pt', 'solar', 'ammeter', 'arduino', 'arduinoReal',
+];
+
+// Optional suffixes appended to state keys (`npn_<id>_ib`, `mos_<id>_vgs`, ...).
+const STATE_KEY_SUFFIX = '_i|_dir|_ib|_clk|_vgs|_vds|_vbs|_vbe|_vce|_a|_b|_branch|_compiled';
 
 /**
  * Remove __global sim-state entries that reference deleted components.
@@ -14,6 +32,9 @@ const COMP_ID_STATE_PREFIXES = ['cap', 'ind', 'vcsw', 'xfmr_branch', 'ff'];
  *   - via the genId pattern `prefix_<base36-ts>_<counter>` embedded anywhere
  *     (`other_<id>`, ...).
  *
+ * Sub-circuit internal ids are dotted (`<instanceId>.<innerId>`): the key is
+ * kept while the parent instance still exists.
+ *
  * The old substring match (`key.includes('_' + id)`) also wiped keys of
  * OTHER components whose ids shared a prefix — deleting `comp_x_5`
  * destroyed `cap_comp_x_51`'s state. Full-id matching makes that collision
@@ -23,6 +44,13 @@ export function cleanupComponentState(sim: any, components: any[]): number {
   if (!sim || !sim.state || !sim.state.__global) return 0;
   const globalState = sim.state.__global;
   const validIds = new Set(components.map(c => c.id));
+  const idIsLive = (id: string): boolean => {
+    if (validIds.has(id)) return true;
+    // sub-circuit internal: `<instanceId>.<innerId>` — live while the
+    // instance is (also allow one level of nesting: `a.b.c`).
+    const root = id.split('.')[0];
+    return root !== id && validIds.has(root);
+  };
   // genId pattern: prefix_base36timestamp_counter (timestamp >= 6 chars)
   const idPattern = /(?:^|_)([a-z][a-z0-9]*_[a-z0-9]{6,}_\d+)(?=_|$)/gi;
   let removed = 0; const keysToDelete: string[] = [];
@@ -31,11 +59,11 @@ export function cleanupComponentState(sim: any, components: any[]): number {
     // (a) known state prefix + arbitrary-format id
     for (const prefix of COMP_ID_STATE_PREFIXES) {
       if (!key.startsWith(`${prefix}_`)) continue;
-      const m = key.slice(prefix.length + 1).match(/^(.+?)(?:_i|_dir|_ib|_clk|_vgs|_vds|_vbs|_vbe|_vce|_a|_b|_branch)?$/);
+      const m = key.slice(prefix.length + 1).match(new RegExp(`^(.+?)(?:${STATE_KEY_SUFFIX})?$`));
       if (m) {
         const id = m[1];
         // pure-numeric ids are legacy node-pair keys — keep them
-        if (!/^\d+(_\d+)*$/.test(id) && !validIds.has(id)) {
+        if (!/^\d+(_\d+)*$/.test(id) && !idIsLive(id)) {
           keysToDelete.push(key); removed++;
           continue outer;
         }
@@ -45,13 +73,41 @@ export function cleanupComponentState(sim: any, components: any[]): number {
     idPattern.lastIndex = 0;
     let m2: RegExpExecArray | null;
     while ((m2 = idPattern.exec(key)) !== null) {
-      if (!validIds.has(m2[1])) {
+      if (!idIsLive(m2[1])) {
         keysToDelete.push(key); removed++;
         break;
       }
     }
   }
   for (const key of keysToDelete) delete globalState[key];
+
+  // Second pass: the TOP-LEVEL state namespace. It hosts both per-component
+  // simState entries (stateMap[comp.id], relinked by the engine each step)
+  // and prefixed keys from plugins that write sim.state[key] directly
+  // (t555_, gate_, vco_, xtal_, cd4026_, schmitt_, arduino_...). Without
+  // this pass those entries orphan forever when a component is deleted.
+  const topLevelPrefixes = ['t555', 'gate', 'vco', 'xtal', 'cd4026', 'schmitt', 'arduino', 'arduinoReal'];
+  for (const key of Object.keys(sim.state)) {
+    if (key.startsWith('__')) continue;          // __global, __gmin, ...
+    if (key === '__global') continue;
+    let handled = false;
+    for (const prefix of topLevelPrefixes) {
+      if (!key.startsWith(`${prefix}_`)) continue;
+      const m = key.slice(prefix.length + 1).match(new RegExp(`^(.+?)(?:${STATE_KEY_SUFFIX})?$`));
+      if (m) {
+        const id = m[1];
+        if (!/^\d+([_=].*)?$/.test(id) && !idIsLive(id)) { delete sim.state[key]; removed++; }
+      }
+      handled = true;
+      break;
+    }
+    if (handled) continue;
+    // bare comp-id entries from the engine's stateMap relinking: delete when
+    // the id is a generated id that is no longer present.
+    idPattern.lastIndex = 0;
+    const bare = idPattern.exec(key);
+    if (bare && !idIsLive(bare[1])) { delete sim.state[key]; removed++; }
+  }
   return removed;
 }
 export function compactTraces(traces: any[], maxSamples: number): number { let removed = 0; for (const t of traces) { if (t.samples.length > maxSamples) { const excess = t.samples.length - maxSamples; t.samples = t.samples.slice(-maxSamples); removed += excess; } } return removed; }

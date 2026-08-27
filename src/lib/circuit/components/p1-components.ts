@@ -5,6 +5,7 @@
 import type { ComponentPlugin } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
+import { stateKey } from '../state-keys';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Voltage Regulators — LM7805, LM317
@@ -242,7 +243,7 @@ export const comparator: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, 'CMP', 2.5 * cellSize, 2 * cellSize);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const inp = terminals.find(t => t.terminalId === 'inp')?.nodeId ?? 0;
     const inn = terminals.find(t => t.terminalId === 'inn')?.nodeId ?? 0;
     const out = terminals.find(t => t.terminalId === 'out')?.nodeId ?? 0;
@@ -250,7 +251,7 @@ export const comparator: ComponentPlugin = {
     const vMinus = sim.nodeVoltage[inn] ?? 0;
     const isHigh = vPlus > vMinus;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `cmp_${out}`;
+    const key = stateKey('cmp', comp, out);
     const prevHigh = st[key] ?? isHigh;
     // Hysteresis (1mV)
     const currentHigh = prevHigh ? vPlus > vMinus - 0.001 : vPlus > vMinus + 0.001;
@@ -351,11 +352,11 @@ export const fuse: ComponentPlugin = {
     ctx.moveTo(3.5 * cellSize, cellSize); ctx.lineTo(4 * cellSize, cellSize);
     ctx.stroke();
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const b = terminals.find(t => t.terminalId === 'b')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `fuse_${a}_${b}`;
+    const key = stateKey('fuse', comp, a, b);
     const blown = st[key] ?? false;
     if (!blown) {
       const r = Math.max(0.001, params.resistance as number);
@@ -635,7 +636,7 @@ function makeSchmittGate(type: string, name: string, symbol: string, op: (a: boo
       }
       drawLabel(ctx, symbol, 2 * cellSize, 1.5 * cellSize);
     },
-    stamp(params, terminals, sys, sim) {
+    stamp(params, terminals, sys, sim, comp) {
       const vccV = params.vcc as number;
       const vtPos = params.vtPos as number;
       const vtNeg = params.vtNeg as number;
@@ -648,7 +649,7 @@ function makeSchmittGate(type: string, name: string, symbol: string, op: (a: boo
       if (a !== gnd && a !== vcc) sys.stampConductance(a, gnd, inputPullDown);
       if (b !== undefined && b !== gnd && b !== vcc) sys.stampConductance(b, gnd, inputPullDown);
       if (vcc !== gnd) sys.stampConductance(vcc, gnd, 1e-13);
-      const key = `schmitt_${y}`;
+      const key = stateKey('schmitt', comp, y);
       // Per-input Schmitt state (like a real 74HC14/74HC132: hysteresis acts
       // on each input independently, then the gate logic applies).
       const st = sim.state[key] ?? (sim.state[key] = { a: false, b: false });
@@ -810,7 +811,7 @@ export const scr: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, 'SCR', 2 * cellSize, 1 * cellSize);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const g = terminals.find(t => t.terminalId === 'g')!.nodeId;
     const k = terminals.find(t => t.terminalId === 'k')!.nodeId;
@@ -818,7 +819,7 @@ export const scr: ComponentPlugin = {
     const gateTrigV = params.gateTriggerV as number;
     const holdingI = params.holdingI as number;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `scr_${a}_${k}`;
+    const key = stateKey('scr', comp, a, k);
     let on = st[key] ?? false;
     // Gate trigger: the gate-cathode junction is what fires an SCR — compare
     // V(g)−V(k), not V(g) to ground (an elevated cathode never triggered).
@@ -899,14 +900,14 @@ export const triac: ComponentPlugin = {
     ctx.moveTo(2 * cellSize, 2.5 * cellSize); ctx.lineTo(2 * cellSize, 4 * cellSize);
     ctx.stroke();
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const mt1 = terminals.find(t => t.terminalId === 'mt1')!.nodeId;
     const g = terminals.find(t => t.terminalId === 'g')!.nodeId;
     const mt2 = terminals.find(t => t.terminalId === 'mt2')!.nodeId;
     const gateTrigV = params.gateTriggerV as number;
     const holdingI = params.holdingI as number;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `triac_${mt1}_${mt2}`;
+    const key = stateKey('triac', comp, mt1, mt2);
     let on = st[key] ?? false;
     // Gate trigger referenced to MT1 (gate current flows gate→MT1)
     const vG = Math.abs((sim.nodeVoltage[g] ?? 0) - (sim.nodeVoltage[mt1] ?? 0));
@@ -1139,13 +1140,13 @@ export const diac: ComponentPlugin = {
     ctx.fill();
     ctx.stroke();
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const b = terminals.find(t => t.terminalId === 'b')!.nodeId;
     const vAB = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[b] ?? 0);
     const bv = params.breakoverV as number;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `diac_${a}_${b}`;
+    const key = stateKey('diac', comp, a, b);
     const prevOn = st[key] ?? false;
     // Hysteresis: turns on above breakover, stays on until current drops
     const on = prevOn ? Math.abs(vAB) > 0.5 : Math.abs(vAB) > bv;

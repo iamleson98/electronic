@@ -302,7 +302,7 @@ const arduinoReal: ComponentPlugin = {
     ctx.arc(4 * cellSize, 10 * cellSize, 3, 0, Math.PI * 2);
     ctx.fill();
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const vccV = params.vcc as number;
     const sketchSrc = params.sketch as string;
     const clockMode = (params.clockMode as boolean) ?? false;
@@ -384,7 +384,9 @@ const arduinoReal: ComponentPlugin = {
     }
 
     // ── Normal sketch mode ──────────────────────────────────────────────
-    const key = `arduinoReal_${terminals.map(t => `${t.terminalId}=${t.nodeId}`).join('_')}`;
+    const key = comp?.id
+      ? `arduinoReal_${comp.id}`
+      : `arduinoReal_${terminals.map(t => `${t.terminalId}=${t.nodeId}`).join('_')}`;
     let st = sim.state[key] as ArduinoFirmwareState | undefined;
     if (!st) {
       st = {

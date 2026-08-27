@@ -1,9 +1,10 @@
 // Semiconductors & ICs: diode, NPN/PNP BJT, NMOS/PMOS MOSFET, ideal op-amp, 555 timer,
 // logic gates, voltmeter, ammeter, oscilloscope.
 
-import type { ComponentPlugin } from '../types';
+import type { ComponentPlugin, CircuitComponent } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
+import { stateKey } from '../state-keys';
 
 // ----- Diode -----
 const diode: ComponentPlugin = {
@@ -46,13 +47,13 @@ const diode: ComponentPlugin = {
     ctx.lineWidth = 2;
     ctx.stroke();
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
     const vf = params.forwardV as number;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `diode_${a}_${k}`;
+    const key = stateKey('diode', comp, a, k);
     const prevOn = st[key] ?? false;
     // simple threshold model with hysteresis to avoid oscillation
     const on = prevOn ? v > vf - 0.1 : v > vf;
@@ -164,7 +165,7 @@ const npn: ComponentPlugin = {
       { x: 3, y: 4 },
     ];
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
@@ -175,7 +176,7 @@ const npn: ComponentPlugin = {
     const vbe = sim.nodeVoltage[b] - sim.nodeVoltage[e];
     const vce = sim.nodeVoltage[c] - sim.nodeVoltage[e];
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `npn_${c}_${b}_${e}`;
+    const key = stateKey('npn', comp, c, b, e);
     const prevOn = st[key] ?? false;
     // Previous step's actual base current (through the b-e voltage source).
     // This is the right signal for "is the external circuit still driving
@@ -232,12 +233,12 @@ const npn: ComponentPlugin = {
       sys.stampConductance(e, c, 10);
     }
   },
-  step(params, terminals, sim) {
+  step(params, terminals, sim, instance) {
     const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `npn_${c}_${b}_${e}`;
+    const key = stateKey('npn', instance, c, b, e);
     const branchIdx = st[key + '_branch'] as number;
     if (branchIdx == null || branchIdx < 0) {
       st[key + '_ib'] = 0;
@@ -431,7 +432,7 @@ const timer555: ComponentPlugin = {
   //      555 oscillates at visible speed. The external RC components are
   //      still wired (for visual authenticity) but the 555 uses its internal
   //      timing model.
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const vcc = params.vcc as number;
     const vccNode = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
     const gndNode = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
@@ -461,7 +462,7 @@ const timer555: ComponentPlugin = {
       sys.stampConductance(rstPin, vccNode, inputPullDown);
     }
 
-    const key = stateKey555(terminals);
+    const key = stateKey555(terminals, comp);
     const st = sim.state[key] ?? (sim.state[key] = { ff: false, outHigh: false, prevV: 0, prevT: -1 });
     const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
     const dis = terminals.find((t) => t.terminalId === 'dis')!.nodeId;
@@ -534,7 +535,7 @@ const timer555: ComponentPlugin = {
     const trig = terminals.find((t) => t.terminalId === 'trig')!.nodeId;
     const rst = terminals.find((t) => t.terminalId === 'rst')!.nodeId;
     const ctrl = terminals.find((t) => t.terminalId === 'ctrl')!.nodeId;
-    const key = stateKey555(terminals);
+    const key = stateKey555(terminals, instance);
     const st = sim.state[key] ?? (sim.state[key] = { ff: false, outHigh: false });
     const vThr = sim.nodeVoltage[thr];
     const vTrig = sim.nodeVoltage[trig];
@@ -550,9 +551,9 @@ const timer555: ComponentPlugin = {
     }
     st.outHigh = st.ff;
   },
-  measure(params, terminals, sim) {
+  measure(params, terminals, sim, comp) {
     const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
-    const key = stateKey555(terminals);
+    const key = stateKey555(terminals, comp);
     const st = sim.state[key];
     return [
       { label: 'Vout', value: sim.nodeVoltage[out].toFixed(3), unit: 'V' },
@@ -561,8 +562,12 @@ const timer555: ComponentPlugin = {
   },
 };
 
-// State key for 555 timer (stable across steps)
-function stateKey555(terminals: { terminalId: string; nodeId: number }[]): string {
+// State key for 555 timer (stable across steps).
+// Keyed by component id so state survives node renumbering on topology edits;
+// the terminal-id/node-id fallback only applies to hand-built stamps without
+// a component reference (legacy tests).
+function stateKey555(terminals: { terminalId: string; nodeId: number }[], comp?: CircuitComponent): string {
+  if (comp?.id) return `t555_${comp.id}`;
   return 't555_' + terminals.map(t => `${t.terminalId}=${t.nodeId}`).join('_');
 }
 
@@ -640,7 +645,7 @@ function makeLogicGate(type: string, name: string, symbol: string, op: (a: boole
       }
       drawLabel(ctx, symbol, 2 * cellSize, 1.5 * cellSize);
     },
-    stamp(params, terminals, sys, sim) {
+    stamp(params, terminals, sys, sim, comp) {
       const vccV = params.vcc as number;
       const thresh = params.threshold as number;
       const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
@@ -657,7 +662,7 @@ function makeLogicGate(type: string, name: string, symbol: string, op: (a: boole
       // Power pin: ultra-tiny leak for matrix conditioning.
       if (vcc !== gnd) sys.stampConductance(vcc, gnd, 1e-13);
 
-      const key = `gate_${y}`;
+      const key = stateKey('gate', comp, y);
       const st = sim.state[key] ?? (sim.state[key] = { out: false });
       const aHigh = sim.nodeVoltage[a] > thresh;
       const bHigh = b !== undefined ? sim.nodeVoltage[b] > thresh : undefined;
@@ -742,14 +747,14 @@ const zener: ComponentPlugin = {
     ctx.lineWidth = 1.5;
     ctx.stroke();
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k]; // V(A) - V(K)
     const vf = params.forwardV as number;
     const vz = params.zenerV as number;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `zener_${a}_${k}`;
+    const key = stateKey('zener', comp, a, k);
     const prevMode = st[key] ?? 'off'; // 'off' | 'forward' | 'reverse'
     // Forward biased: V(A) > V(K) + Vf
     // Reverse breakdown: V(K) > V(A) + Vz  (i.e., V = V(A)-V(K) < -Vz)

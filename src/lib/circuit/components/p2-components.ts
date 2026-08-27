@@ -2,6 +2,7 @@
 import type { ComponentPlugin } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
+import { stateKey } from '../state-keys';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TL431 — Adjustable shunt voltage reference
@@ -33,14 +34,14 @@ export const tl431: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, 'TL431', 2 * cellSize, 2 * cellSize);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const c = terminals.find(t => t.terminalId === 'c')!.nodeId;
     const ref = terminals.find(t => t.terminalId === 'ref')!.nodeId;
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const refV = params.refV as number;
     const refVoltage = sim.nodeVoltage[ref] ?? 0;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `tl431_${c}_${a}`;
+    const key = stateKey('tl431', comp, c, a);
     // If REF > refV, TL431 conducts (pulls cathode toward anode)
     const on = refVoltage > refV;
     st[key] = on;
@@ -90,7 +91,7 @@ export const lm385: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, 'REF', 2 * cellSize, cellSize - 12);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const k = terminals.find(t => t.terminalId === 'k')!.nodeId;
     const refV = params.refV as number;
@@ -100,7 +101,7 @@ export const lm385: ComponentPlugin = {
     // orientation (mirror the lm336/icl8069 stamps in this file).
     const v = (sim.nodeVoltage[k] ?? 0) - (sim.nodeVoltage[a] ?? 0);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `lm385_${a}_${k}`;
+    const key = stateKey('lm385', comp, a, k);
     const prevOn = st[key] ?? false;
     const on = prevOn ? v > refV - 0.05 : v > refV;
     st[key] = on;
@@ -322,13 +323,13 @@ export const lm336: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, '2.5V', 2 * cellSize, cellSize - 12);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const k = terminals.find(t => t.terminalId === 'k')!.nodeId;
     const refV = params.refV as number;
     const v = (sim.nodeVoltage[k] ?? 0) - (sim.nodeVoltage[a] ?? 0);  // reverse-biased
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `lm336_${a}_${k}`;
+    const key = stateKey('lm336', comp, a, k);
     const on = v > refV;
     st[key] = on;
     if (on) {
@@ -390,13 +391,13 @@ export const icl8069: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, '1.2V', 2 * cellSize, cellSize - 12);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const k = terminals.find(t => t.terminalId === 'k')!.nodeId;
     const refV = params.refV as number;
     const v = (sim.nodeVoltage[k] ?? 0) - (sim.nodeVoltage[a] ?? 0);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `icl8069_${a}_${k}`;
+    const key = stateKey('icl8069', comp, a, k);
     const on = v > refV;
     st[key] = on;
     if (on) {
@@ -595,7 +596,7 @@ export const photodiode: ComponentPlugin = {
       ctx.stroke();
     }
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const k = terminals.find(t => t.terminalId === 'k')!.nodeId;
     // Photo-current flows from cathode → anode internally (i.e., conventional current from anode to cathode externally when reverse-biased).
@@ -616,14 +617,14 @@ export const photodiode: ComponentPlugin = {
     sys.stampCurrentSource(k, a, totalCurrent);
     // Record state for measure
     const st = sim.state.__global ?? (sim.state.__global = {});
-    st[`pd_${a}_${k}`] = { photocurrent: totalCurrent, lux };
+    st[stateKey('pd', comp, a, k)] = { photocurrent: totalCurrent, lux };
   },
-  measure(params, terminals, sim) {
+  measure(params, terminals, sim, comp) {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const k = terminals.find(t => t.terminalId === 'k')!.nodeId;
     const v = (sim.nodeVoltage[k] ?? 0) - (sim.nodeVoltage[a] ?? 0);
     const st = sim.state.__global ?? {};
-    const key = `pd_${a}_${k}`;
+    const key = stateKey('pd', comp, a, k);
     const i = (st[key]?.photocurrent ?? 0) as number;
     return [
       { label: 'V_R', value: v.toFixed(2), unit: 'V' },
@@ -696,7 +697,7 @@ export const phototransistor: ComponentPlugin = {
       ctx.stroke();
     }
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const c = terminals.find(t => t.terminalId === 'c')!.nodeId;
     const e = terminals.find(t => t.terminalId === 'e')!.nodeId;
     const hfe = params.hfe as number;
@@ -710,14 +711,14 @@ export const phototransistor: ComponentPlugin = {
     sys.stampConductance(c, e, 1e-6);
     sys.stampCurrentSource(c, e, iC);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    st[`pt_${c}_${e}`] = { iC, iBase, lux };
+    st[stateKey('pt', comp, c, e)] = { iC, iBase, lux };
   },
-  measure(params, terminals, sim) {
+  measure(params, terminals, sim, comp) {
     const c = terminals.find(t => t.terminalId === 'c')!.nodeId;
     const e = terminals.find(t => t.terminalId === 'e')!.nodeId;
     const v = (sim.nodeVoltage[c] ?? 0) - (sim.nodeVoltage[e] ?? 0);
     const st = sim.state.__global ?? {};
-    const key = `pt_${c}_${e}`;
+    const key = stateKey('pt', comp, c, e);
     const iC = (st[key]?.iC ?? 0) as number;
     return [
       { label: 'V_CE', value: v.toFixed(2), unit: 'V' },
@@ -783,7 +784,7 @@ export const solarCell: ComponentPlugin = {
       ctx.stroke();
     }
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const p = terminals.find(t => t.terminalId === 'p')!.nodeId;
     const n = terminals.find(t => t.terminalId === 'n')!.nodeId;
     // Voltage scales with sqrt(lux/1000) — typical PV characteristic
@@ -805,14 +806,14 @@ export const solarCell: ComponentPlugin = {
     sys.stampVoltageSource(m, n, vEffective); // V(m) − V(n) = vEff
     sys.stampConductance(p, m, 1 / rTotal);   // series R between p and the internal node
     const st = sim.state.__global ?? (sim.state.__global = {});
-    st[`solar_${p}_${n}`] = { vEffective, iMax: iscEff, lux };
+    st[stateKey('solar', comp, p, n)] = { vEffective, iMax: iscEff, lux };
   },
-  measure(params, terminals, sim) {
+  measure(params, terminals, sim, comp) {
     const p = terminals.find(t => t.terminalId === 'p')!.nodeId;
     const n = terminals.find(t => t.terminalId === 'n')!.nodeId;
     const v = (sim.nodeVoltage[p] ?? 0) - (sim.nodeVoltage[n] ?? 0);
     const st = sim.state.__global ?? {};
-    const key = `solar_${p}_${n}`;
+    const key = stateKey('solar', comp, p, n);
     const vEff = (st[key]?.vEffective ?? 0) as number;
     return [
       { label: 'V_out', value: v.toFixed(3), unit: 'V' },
@@ -862,7 +863,7 @@ export const crystalOscillator: ComponentPlugin = {
     ctx.moveTo(5 * cellSize, 2 * cellSize); ctx.lineTo(6 * cellSize, 2 * cellSize);
     ctx.stroke();
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const vcc = terminals.find(t => t.terminalId === 'vcc')!.nodeId;
     const gnd = terminals.find(t => t.terminalId === 'gnd')!.nodeId;
     const out = terminals.find(t => t.terminalId === 'out')!.nodeId;
@@ -889,13 +890,13 @@ export const crystalOscillator: ComponentPlugin = {
     // Minimal VCC load
     sys.stampConductance(vcc, gnd, 1e-6);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    st[`osc_${out}`] = { freq, enabled, vOut };
+    st[stateKey('osc', comp, out)] = { freq, enabled, vOut };
   },
-  measure(params, terminals, sim) {
+  measure(params, terminals, sim, comp) {
     const out = terminals.find(t => t.terminalId === 'out')!.nodeId;
     const v = sim.nodeVoltage[out] ?? 0;
     const st = sim.state.__global ?? {};
-    const key = `osc_${out}`;
+    const key = stateKey('osc', comp, out);
     const enabled = (st[key]?.enabled ?? false) as boolean;
     const freq = params.frequency as number;
     const freqStr = freq >= 1e6 ? `${(freq / 1e6).toFixed(2)} MHz` :

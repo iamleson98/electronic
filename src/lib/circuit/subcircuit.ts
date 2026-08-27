@@ -100,9 +100,10 @@ export function createSubCircuitPlugin(def: SubCircuitDefinition): ComponentPlug
         ctx.fillText(pin.label, labelX, y);
       }
     },
-    stamp(params, terminals, sys, sim) {
+    stamp(params, terminals, sys, sim, comp) {
       // 1. Map parent terminals (this sub-circuit instance) to internal nodes
       //    Each pin on the parent sub-circuit becomes a "named node" inside.
+      const instancePrefix = comp ? `${comp.id}.` : '';
       const parentPinToNode = new Map<string, number>();
       for (const t of terminals) parentPinToNode.set(t.terminalId, t.nodeId);
 
@@ -245,7 +246,11 @@ export function createSubCircuitPlugin(def: SubCircuitDefinition): ComponentPlug
           nodeId: termNode.get(`${comp.id}:${t.id}`) ?? 0,
         }));
         try {
-          plugin.stamp(overriddenParams, internalTerminals, sys, sim);
+          // Prefix internal component ids with the sub-circuit instance id so
+          // that two instances of the same sub-circuit keep independent
+          // per-component sim state (e.g. `amp1.Q1` vs `amp2.Q1`).
+          const instance: CircuitComponent = { ...comp, id: `${instancePrefix}${comp.id}` };
+          plugin.stamp(overriddenParams, internalTerminals, sys, sim, instance);
         } catch (e) {
           console.error(`sub-circuit stamp error in ${comp.type} (${comp.id}):`, e);
         }
@@ -253,6 +258,7 @@ export function createSubCircuitPlugin(def: SubCircuitDefinition): ComponentPlug
     },
     step(params, terminals, sim, instance) {
       // Re-dispatch step to internal components with proper terminal mapping
+      const instancePrefix = instance ? `${instance.id}.` : '';
       const internalPlugins = new Map<string, ComponentPlugin>();
       for (const c of def.document.components) {
         const p = getPlugin(c.type);
@@ -270,7 +276,8 @@ export function createSubCircuitPlugin(def: SubCircuitDefinition): ComponentPlug
         if (!plugin || !plugin.step) continue;
         const internalTerms = getInternalTerminals(comp, plugin, internalNodeMap);
         try {
-          plugin.step(comp.parameters, internalTerms, sim, comp);
+          const inner: CircuitComponent = { ...comp, id: `${instancePrefix}${comp.id}` };
+          plugin.step(comp.parameters, internalTerms, sim, inner);
         } catch (e) {
           console.error(`sub-circuit step error in ${comp.type} (${comp.id}):`, e);
         }

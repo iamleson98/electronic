@@ -1,9 +1,10 @@
 // Additional semiconductors: PNP BJT, NMOS/PMOS MOSFETs, op-amp with power rails,
 // 7-segment display, VCO, crystal oscillator, transformer, speaker, photoresistor.
 
-import type { ComponentPlugin } from '../types';
+import type { ComponentPlugin, CircuitComponent } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
+import { stateKey } from '../state-keys';
 
 // ----- PNP BJT (mirror of NPN) -----
 const pnp: ComponentPlugin = {
@@ -85,7 +86,7 @@ const pnp: ComponentPlugin = {
       { x: 3, y: 4 },
     ];
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
@@ -96,7 +97,7 @@ const pnp: ComponentPlugin = {
     const veb = sim.nodeVoltage[e] - sim.nodeVoltage[b];
     const vec = sim.nodeVoltage[e] - sim.nodeVoltage[c];
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `pnp_${e}_${b}_${c}`;
+    const key = stateKey('pnp', comp, e, b, c);
     const prevOn = st[key] ?? false;
     // Previous step's actual base current (through the e-b voltage source).
     // Used to detect when external drive is removed (see NPN comment).
@@ -130,12 +131,12 @@ const pnp: ComponentPlugin = {
       sys.stampConductance(c, e, 10);
     }
   },
-  step(params, terminals, sim) {
+  step(params, terminals, sim, instance) {
     const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `pnp_${e}_${b}_${c}`;
+    const key = stateKey('pnp', instance, e, b, c);
     const branchIdx = st[key + '_branch'] as number;
     if (branchIdx == null || branchIdx < 0) {
       st[key + '_ib'] = 0;
@@ -231,7 +232,7 @@ const nmos: ComponentPlugin = {
       { x: 3, y: 4 },
     ];
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
     const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
     const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
@@ -240,7 +241,7 @@ const nmos: ComponentPlugin = {
     const vgs = sim.nodeVoltage[g] - sim.nodeVoltage[s];
     const vds = sim.nodeVoltage[d] - sim.nodeVoltage[s];
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `nmos_${d}_${g}_${s}`;
+    const key = stateKey('nmos', comp, d, g, s);
     const prevOn = st[key] ?? false;
     const on = prevOn ? vgs > vth - 0.2 : vgs > vth;
     st[key] = on;
@@ -352,7 +353,7 @@ const pmos: ComponentPlugin = {
       { x: 3, y: 4 },
     ];
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
     const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
     const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
@@ -364,7 +365,7 @@ const pmos: ComponentPlugin = {
     const vsg = sim.nodeVoltage[s] - sim.nodeVoltage[g];
     const vsd = sim.nodeVoltage[s] - sim.nodeVoltage[d];
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `pmos_${s}_${g}_${d}`;
+    const key = stateKey('pmos', comp, s, g, d);
     const prevOn = st[key] ?? false;
     const on = prevOn ? vsg > vthMag - 0.2 : vsg > vthMag;
     st[key] = on;
@@ -596,15 +597,15 @@ const sevenSegment: ComponentPlugin = {
       ctx.shadowBlur = 0;
     }
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const threshold = params.threshold as number;
     const com = terminals.find((t) => t.terminalId === 'com')!.nodeId;
     const comV = sim.nodeVoltage[com] ?? 0;
     const rSeg = 220; // internal segment resistance (Ω)
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const stateKey = `7seg_${terminals.map(t => t.nodeId).join('_')}`;
-    if (!st[stateKey]) st[stateKey] = {};
-    const segStates = st[stateKey] as Record<string, boolean>;
+    const key = stateKey('7seg', comp, ...terminals.map(t => t.nodeId));
+    if (!st[key]) st[key] = {};
+    const segStates = st[key] as Record<string, boolean>;
 
     // Multiplexing support: when com is HIGH (≥ VCC/2), the display is INACTIVE.
     // Retain the last latched segment states (don't update). This allows
@@ -640,12 +641,12 @@ const sevenSegment: ComponentPlugin = {
     // into a different store, so the rendered digit could disagree with the
     // electrical loading stamped into the matrix.
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `7seg_${terminals.map(t => t.nodeId).join('_')}`;
+    const key = stateKey('7seg', instance, ...terminals.map(t => t.nodeId));
     instance.simState.__7seg = (st[key] ?? {}) as Record<string, boolean>;
   },
-  measure(params, terminals, sim) {
+  measure(params, terminals, sim, comp) {
     const st = (sim.state as any).__global ?? {};
-    const key = `7seg_${terminals.map(t => t.nodeId).join('_')}`;
+    const key = stateKey('7seg', comp, ...terminals.map(t => t.nodeId));
     const segState = (st[key] || {}) as Record<string, boolean>;
     const onSegs = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].filter(s => segState[s]).join('');
     return [{ label: 'ON', value: onSegs || '—', unit: '' }];
@@ -693,7 +694,7 @@ const vco: ComponentPlugin = {
     ctx.textBaseline = 'middle';
     ctx.fillText('VCO', 2 * cellSize, 1.5 * cellSize);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const vccV = params.vcc as number;
     const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
     const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
@@ -704,7 +705,7 @@ const vco: ComponentPlugin = {
     // compute frequency
     const vIn = sim.nodeVoltage[vin];
     const freq = Math.max(0.001, (params.baseFreq as number) + (params.sensitivity as number) * vIn);
-    const key = `vco_${out}`;
+    const key = stateKey('vco', comp, out);
     const st = sim.state[key] ?? (sim.state[key] = { phase: 0 });
     // advance phase
     st.phase = (st.phase + freq * sim.dt) % 1;
@@ -763,12 +764,12 @@ const crystal: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, formatFreq(params.frequency as number), 0, -14);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const freq = params.frequency as number;
     const vccV = params.vcc as number;
     const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
     const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
-    const key = `xtal_${out}`;
+    const key = stateKey('xtal', comp, out);
     const st = sim.state[key] ?? (sim.state[key] = { phase: 0 });
     st.phase = (st.phase + freq * sim.dt) % 1;
     const high = st.phase < 0.5;
@@ -789,6 +790,13 @@ function formatFreq(f: number): string {
   if (f >= 1e6) return `${(f / 1e6).toFixed(2)}M`;
   if (f >= 1e3) return `${(f / 1e3).toFixed(2)}k`;
   return f.toFixed(0);
+}
+
+// State key for the CD4026 counter — keyed by component id (survives node
+// renumbering); terminal-id/node-id fallback only for hand-built stamps.
+function cd4026Key(terminals: { terminalId: string; nodeId: number }[], comp?: CircuitComponent): string {
+  if (comp?.id) return `cd4026_${comp.id}`;
+  return 'cd4026_' + terminals.map(t => `${t.terminalId}=${t.nodeId}`).join('_');
 }
 
 // ----- Transformer (1:1 ideal, configurable turns ratio) -----
@@ -1134,7 +1142,7 @@ const cd4026: ComponentPlugin = {
       ctx.fillText(s, i * cellSize, (h / cellSize - 0.3) * cellSize);
     }
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const vccV = params.vcc as number;
     const maxCount = params.maxCount as number;
     const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
@@ -1154,7 +1162,7 @@ const cd4026: ComponentPlugin = {
     }
 
     // Persistent state for this counter instance
-    const key = `cd4026_${terminals.map(t => `${t.terminalId}=${t.nodeId}`).join('_')}`;
+    const key = cd4026Key(terminals, comp);
     const st = sim.state[key] ?? (sim.state[key] = { count: 0, prevClkV: -1, initialized: false });
 
     // Read clock and reset inputs (from previous step's solution)
@@ -1202,8 +1210,8 @@ const cd4026: ComponentPlugin = {
       sys.stampVoltageSource(coNode, gnd, coHigh ? vccV : 0);
     }
   },
-  measure(params, terminals, sim) {
-    const key = `cd4026_${terminals.map(t => `${t.terminalId}=${t.nodeId}`).join('_')}`;
+  measure(params, terminals, sim, comp) {
+    const key = cd4026Key(terminals, comp);
     const st = sim.state[key] ?? { count: 0, prevClk: false };
     return [
       { label: 'Count', value: String(st.count), unit: '' },

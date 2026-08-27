@@ -12,6 +12,7 @@
 import type { ComponentPlugin } from '../types';
 import { registerPlugin } from '../registry';
 import { drawLabel } from './draw';
+import { stateKey } from '../state-keys';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Expression parser for behavioral sources
@@ -454,14 +455,14 @@ export const coupledInductor: ComponentPlugin = {
     // Primary self-/magnetizing inductance (companion model, backward Euler)
     const dt = Math.max(sim.dt, 1e-12);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `xfmr_${p1}_${p2}_${s1}_${s2}`;
+    const key = stateKey('xfmr', comp, p1, p2, s1, s2);
     const i1Prev = st[key] ?? 0;
     const g1 = dt / L1;
     sys.stampConductance(p1, p2, g1);
     sys.stampCurrentSource(p1, p2, i1Prev);
     // Update i1 in step()
   },
-  step(params, terminals, sim) {
+  step(params, terminals, sim, instance) {
     const p1 = terminals.find((t) => t.terminalId === 'p1')!.nodeId;
     const p2 = terminals.find((t) => t.terminalId === 'p2')!.nodeId;
     const s1 = terminals.find((t) => t.terminalId === 's1')!.nodeId;
@@ -469,7 +470,7 @@ export const coupledInductor: ComponentPlugin = {
     const L1 = Math.max(1e-12, params.L1 as number);
     const dt = Math.max(sim.dt, 1e-12);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `xfmr_${p1}_${p2}_${s1}_${s2}`;
+    const key = stateKey('xfmr', instance, p1, p2, s1, s2);
     const i1Prev = st[key] ?? 0;
     const v = sim.nodeVoltage[p1] - sim.nodeVoltage[p2];
     st[key] = i1Prev + (v / L1) * dt;

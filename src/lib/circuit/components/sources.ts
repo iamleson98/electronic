@@ -4,6 +4,7 @@
 import type { ComponentPlugin } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
+import { stateKey } from '../state-keys';
 
 // ----- DC Voltage Source -----
 const dcVoltage: ComponentPlugin = {
@@ -437,14 +438,14 @@ const led: ComponentPlugin = {
     ctx.stroke();
     void vf; void seriesR;
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const vf = params.forwardV as number;
     const r = Math.max(0.01, params.seriesR as number);
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `led_${a}_${k}`;
+    const key = stateKey('led', comp, a, k);
     const prevOn = st[key] ?? false;
     // threshold model with hysteresis (matches diode behavior)
     const on = prevOn ? v > vf - 0.1 : v > vf;

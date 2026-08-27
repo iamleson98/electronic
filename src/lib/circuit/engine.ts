@@ -13,6 +13,7 @@ import type {
 } from './types';
 import { createMnaSystem, solveMna } from './solver';
 import { createSparseMnaSystem, solveSparse, shouldUseSparseSolver, asMnaSystem } from './sparse-klu';
+import { stateKey } from './state-keys';
 
 export interface NodeMap {
   /** key = `${componentId}:${terminalId}` -> node id (0 = ground) */
@@ -291,8 +292,8 @@ export function computeWireCurrents(
       const threshold = (comp.parameters.threshold as number) ?? 2.0;
       const rSeg = 220;
       const st = sim.state.__global ?? {};
-      const stateKey = `7seg_${terms.map(t => t.nodeId).join('_')}`;
-      const segStates = (st[stateKey] ?? {}) as Record<string, boolean>;
+      const stateKey7 = stateKey('7seg', comp, ...terms.map(t => t.nodeId));
+      const segStates = (st[stateKey7] ?? {}) as Record<string, boolean>;
       for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
         const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
         const v = sim.nodeVoltage[segNode] - sim.nodeVoltage[com];
@@ -590,7 +591,7 @@ export function computeComponentCurrents(
         ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
         : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
       const st = sim.state.__global ?? {};
-      const on = st[`${comp.type}_${a}_${k}`] ?? false;
+      const on = st[stateKey(comp.type, comp, a, k)] ?? false;
       const i = on ? Math.max(0, (v - vf) / r) : 0;
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(k, (nodeCurrentOut.get(k) ?? 0) - i);
@@ -605,7 +606,7 @@ export function computeComponentCurrents(
       const rOn = Math.max(0.001, (comp.parameters.onR as number) ?? 1);
       const rOff = Math.max(1e3, (comp.parameters.offR as number) ?? 1e7);
       const st = sim.state.__global ?? {};
-      const mode = st[`zener_${a}_${k}`] ?? 'off';
+      const mode = st[stateKey('zener', comp, a, k)] ?? 'off';
       let i: number;
       if (mode === 'forward') {
         i = (v - vf) / rOn;
@@ -662,8 +663,8 @@ export function computeComponentCurrents(
       const threshold = (comp.parameters.threshold as number) ?? 2.0;
       const rSeg = 220;
       const st = sim.state.__global ?? {};
-      const stateKey = `7seg_${terms.map(t => t.nodeId).join('_')}`;
-      const segStates = (st[stateKey] ?? {}) as Record<string, boolean>;
+      const stateKey7 = stateKey('7seg', comp, ...terms.map(t => t.nodeId));
+      const segStates = (st[stateKey7] ?? {}) as Record<string, boolean>;
       for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
         const segNode = terms.find((t) => t.terminalId === seg)?.nodeId ?? 0;
         const v = sim.nodeVoltage[segNode] - sim.nodeVoltage[com];
@@ -703,7 +704,7 @@ export function computeComponentCurrents(
       if (comp.type === 'coupledInductor') {
         const s1n = terms.find((t) => t.terminalId === 's1')?.nodeId ?? 0;
         const s2n = terms.find((t) => t.terminalId === 's2')?.nodeId ?? 0;
-        i += (st[`xfmr_${p1}_${p2}_${s1n}_${s2n}`] as number) ?? 0;
+        i += (st[stateKey('xfmr', comp, p1, p2, s1n, s2n)] as number) ?? 0;
       }
       // reflected secondary current
       const branchIdx = st[`xfmr_branch_${comp.id}`] as number | undefined;
@@ -843,7 +844,7 @@ export function computeComponentCurrents(
         ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
         : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
       const st = sim.state.__global ?? {};
-      const on = st[`${comp.type}_${a}_${k}`] ?? false;
+      const on = st[stateKey(comp.type, comp, a, k)] ?? false;
       current = on ? Math.max(0, (v - vf) / r) : 0;
     } else if (comp.type === 'zener') {
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
@@ -854,7 +855,7 @@ export function computeComponentCurrents(
       const rOn = Math.max(0.001, (comp.parameters.onR as number) ?? 1);
       const rOff = Math.max(1e3, (comp.parameters.offR as number) ?? 1e7);
       const st = sim.state.__global ?? {};
-      const mode = st[`zener_${a}_${k}`] ?? 'off';
+      const mode = st[stateKey('zener', comp, a, k)] ?? 'off';
       if (mode === 'forward') {
         current = (v - vf) / rOn;
       } else if (mode === 'reverse') {

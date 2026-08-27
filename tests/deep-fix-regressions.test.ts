@@ -307,7 +307,7 @@ describe('Ammeter branch-current indexing', () => {
       { terminalId: 'p', nodeId: r!.nodeMap.terminalNode.get('A1:p')! },
       { terminalId: 'n', nodeId: r!.nodeMap.terminalNode.get('A1:n')! },
     ];
-    const m = plugin.measure!({}, terms, r!.sim);
+    const m = plugin.measure!({}, terms, r!.sim, comps[1]);
     const i = parseFloat(m[0].value);
     expect(i).toBeCloseTo(5, 1); // 5 mA — was 0 before the index fix
   });

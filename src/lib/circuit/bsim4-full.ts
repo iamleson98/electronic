@@ -33,6 +33,7 @@
 import type { ComponentPlugin, ParameterDef } from './types';
 import { registerPlugin } from './registry';
 import { thermalVoltage } from './sim-options';
+import { stateKey } from './state-keys';
 import {
   BSIM3Params,
   DEFAULT_BSIM3_PARAMS,
@@ -797,7 +798,7 @@ function makeBSIM4Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
       ctx.font = `${Math.floor(cellSize * 0.3)}px ui-monospace, monospace`;
       ctx.fillText('BSIM4', 1.5 * cellSize, -0.3 * cellSize);
     },
-    stamp: (params, terminals, sys, sim) => {
+    stamp: (params, terminals, sys, sim, comp) => {
       const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
       const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
@@ -805,7 +806,7 @@ function makeBSIM4Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
       const p = buildParams(params);
       // Read previous-step voltages (Newton-Raphson iteration)
       const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = `bsim4_${d}_${g}_${s}_${b}`;
+      const key = stateKey('bsim4', comp, d, g, s, b);
       const vGSguess = isNmos ? (st[key + '_vgs'] ?? 2) : -(st[key + '_vgs'] ?? 2);
       const vDSguess = isNmos ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? 1);
       const vBSguess = isNmos ? (st[key + '_vbs'] ?? 0) : -(st[key + '_vbs'] ?? 0);
@@ -859,13 +860,13 @@ function makeBSIM4Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
         stampCap(b, d, op.cbd, vBSguess - vDSguess);
       }
     },
-    step: (params, terminals, sim) => {
+    step: (params, terminals, sim, instance) => {
       const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
       const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
       const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
       const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = `bsim4_${d}_${g}_${s}_${b}`;
+      const key = stateKey('bsim4', instance, d, g, s, b);
       // Save Vgs/Vds/Vbs (NMOS convention) for next iteration's stamp
       st[key + '_vgs'] = sim.nodeVoltage[g] - sim.nodeVoltage[s];
       st[key + '_vds'] = sim.nodeVoltage[d] - sim.nodeVoltage[s];

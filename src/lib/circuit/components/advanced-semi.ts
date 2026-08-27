@@ -15,6 +15,7 @@ import type { ComponentPlugin } from '../types';
 import { registerPlugin } from '../registry';
 import { drawLabel } from './draw';
 import { thermalVoltage, tempScaleIs } from '../sim-options';
+import { stateKey } from '../state-keys';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shockley diode — full model
@@ -65,7 +66,7 @@ export const diodeShockley: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, `Is=${(params.Is as number).toExponential(1)}`, 0, -16);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const Is = params.Is as number;
@@ -74,7 +75,7 @@ export const diodeShockley: ComponentPlugin = {
     const Vt = thermalVoltage(27);   // 27°C default
     // Get current voltage (initial guess = 0.7V if not yet solved)
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `dio_${a}_${k}`;
+    const key = stateKey('dio', comp, a, k);
     const vGuess = st[key] ?? 0.7;
     // Newton-Raphson linearization around current guess
     const v = vGuess;
@@ -96,11 +97,11 @@ export const diodeShockley: ComponentPlugin = {
     sys.stampConductance(a, k, Gtotal);
     sys.stampCurrentSource(a, k, Ieq);
   },
-  step(params, terminals, sim) {
+  step(params, terminals, sim, instance) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    st[`dio_${a}_${k}`] = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+    st[stateKey('dio', instance, a, k)] = sim.nodeVoltage[a] - sim.nodeVoltage[k];
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
   measure(params, terminals, sim) {
@@ -180,7 +181,7 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       ctx.fillStyle = '#cbd5e1'; ctx.fill();
       drawLabel(ctx, isNpn ? 'NPN' : 'PNP', 2 * cellSize, 0);
     },
-    stamp(params, terminals, sys, sim) {
+    stamp(params, terminals, sys, sim, comp) {
       const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
       const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
       const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
@@ -191,7 +192,7 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       const Vt = thermalVoltage(27);
       // Get previous voltages
       const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = `bjt_${c}_${b}_${e}`;
+      const key = stateKey('bjt', comp, c, b, e);
       const vBEguess = isNpn ? (st[key + '_vbe'] ?? 0.7) : -(st[key + '_vbe'] ?? 0.7);
       const vCEguess = isNpn ? (st[key + '_vce'] ?? 0.2) : -(st[key + '_vce'] ?? 0.2);
       // Ebers-Moll simplified:
@@ -227,12 +228,12 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       sys.stampCurrentSource(c, e, sign * IcEq);
       sys.stampCurrentSource(b, e, sign * IbEq);
     },
-    step(params, terminals, sim) {
+    step(params, terminals, sim, instance) {
       const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
       const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
       const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
       const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = `bjt_${c}_${b}_${e}`;
+      const key = stateKey('bjt', instance, c, b, e);
       st[key + '_vbe'] = sim.nodeVoltage[b] - sim.nodeVoltage[e];
       st[key + '_vce'] = sim.nodeVoltage[c] - sim.nodeVoltage[e];
     },
@@ -324,7 +325,7 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
       ctx.beginPath(); ctx.moveTo(2 * cellSize, 3 * cellSize); ctx.lineTo(0, 4 * cellSize); ctx.stroke();
       drawLabel(ctx, isNmos ? 'NMOS' : 'PMOS', 2 * cellSize, 0);
     },
-    stamp(params, terminals, sys, sim) {
+    stamp(params, terminals, sys, sim, comp) {
       const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
       const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
@@ -338,7 +339,7 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
       const Rs = params.Rs as number;
       // Get previous voltages
       const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = `mos_${d}_${g}_${s}_${b}`;
+      const key = stateKey('mos', comp, d, g, s, b);
       // Work in MAGNITUDES for region classification (NMOS: identity; PMOS:
       // negate the signed stored values). The old code mixed a magnitude
       // vGSguess with the SIGNED (negative) PMOS Vth, so any biased PMOS fell
@@ -402,13 +403,13 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
       const Ieq = Id - gm * vGSguess - gds * vDSguess;
       sys.stampCurrentSource(dEff, sEff, sign * Ieq);
     },
-    step(params, terminals, sim) {
+    step(params, terminals, sim, instance) {
       const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
       const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
       const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
       const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = `mos_${d}_${g}_${s}_${b}`;
+      const key = stateKey('mos', instance, d, g, s, b);
       st[key + '_vgs'] = sim.nodeVoltage[g] - sim.nodeVoltage[s];
       st[key + '_vds'] = sim.nodeVoltage[d] - sim.nodeVoltage[s];
       st[key + '_vbs'] = sim.nodeVoltage[b] - sim.nodeVoltage[s];
@@ -479,14 +480,14 @@ function makeJFET(type: 'n' | 'p'): ComponentPlugin {
       ctx.fillStyle = '#cbd5e1'; ctx.fill();
       drawLabel(ctx, isN ? 'NJF' : 'PJF', 2 * cellSize, 0);
     },
-    stamp(params, terminals, sys, sim) {
+    stamp(params, terminals, sys, sim, comp) {
       const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
       const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
       const Vp = params.Vp as number;
       const Idss = params.Idss as number;
       const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = `jfet_${d}_${g}_${s}`;
+      const key = stateKey('jfet', comp, d, g, s);
       const vGSguess = isN ? (st[key + '_vgs'] ?? 0) : -(st[key + '_vgs'] ?? 0);
       const vDSguess = isN ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? 1);
       const vov = 1 - vGSguess / Vp;
@@ -515,12 +516,12 @@ function makeJFET(type: 'n' | 'p'): ComponentPlugin {
       const Ieq = Id - gm * vGSguess - gds * vDSguess;
       sys.stampCurrentSource(d, s, sign * Ieq);
     },
-    step(params, terminals, sim) {
+    step(params, terminals, sim, instance) {
       const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
       const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
       const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = `jfet_${d}_${g}_${s}`;
+      const key = stateKey('jfet', instance, d, g, s);
       st[key + '_vgs'] = sim.nodeVoltage[g] - sim.nodeVoltage[s];
       st[key + '_vds'] = sim.nodeVoltage[d] - sim.nodeVoltage[s];
     },

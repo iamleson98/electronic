@@ -4,6 +4,7 @@
 import type { ComponentPlugin } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
+import { stateKey } from '../state-keys';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 7400-series logic ICs — hex inverters, quad gates
@@ -150,7 +151,7 @@ registerPlugin({
     ctx.lineTo(cellSize, 2.5 * cellSize);
     ctx.stroke();
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const d = terminals.find(t => t.terminalId === 'd')!.nodeId;
     const clk = terminals.find(t => t.terminalId === 'clk')!.nodeId;
     const set = terminals.find(t => t.terminalId === 'set')!.nodeId;
@@ -160,7 +161,7 @@ registerPlugin({
     const vccV = params.vcc as number;
     const thresh = params.threshold as number;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `cd4013_${q}_${qbar}`;
+    const key = stateKey('cd4013', comp, q, qbar);
     const clkPrev = st[`${key}_clk`] ?? 0;
     const clkNow = sim.nodeVoltage[clk] ?? 0;
     if ((sim.nodeVoltage[set] ?? 0) > thresh) st[key] = true;

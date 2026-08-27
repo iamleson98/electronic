@@ -22,6 +22,7 @@
 import type { CircuitComponent, Wire, ComponentPlugin, SimContext } from './types';
 import { buildNodeMap, getTerminalsForComponent, computeComponentCurrents, computeWireCurrents } from './engine';
 import { getPlugin } from './registry';
+import { stateKey } from './state-keys';
 
 export interface PhysicsViolation {
   law: string;           // e.g. "KCL", "Series Current", "Diode Forward Law"
@@ -207,7 +208,7 @@ export function validatePhysics(
       ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
       : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
     const st = sim.state.__global ?? {};
-    const on = st[`${comp.type}_${aNode}_${kNode}`] ?? false;
+    const on = st[stateKey(comp.type, comp, aNode, kNode)] ?? false;
     const actualI = Math.abs(compCurrents.get(comp.id) ?? 0);
     if (on) {
       // Should have current ≈ (V - Vf) / R
@@ -257,9 +258,7 @@ export function validatePhysics(
     if (!plugin) continue;
     const terms = getTerminalsForComponent(comp, plugin, nodeMap);
     const st = sim.state.__global ?? {};
-    const key = comp.type === 'npn'
-      ? `npn_${terms.find(t => t.terminalId === 'c')?.nodeId}_${terms.find(t => t.terminalId === 'b')?.nodeId}_${terms.find(t => t.terminalId === 'e')?.nodeId}`
-      : `pnp_${terms.find(t => t.terminalId === 'e')?.nodeId}_${terms.find(t => t.terminalId === 'b')?.nodeId}_${terms.find(t => t.terminalId === 'c')?.nodeId}`;
+    const key = stateKey(comp.type, comp);
     const prevIb = (st[key + '_ib'] as number) ?? 0;
     const ic = Math.abs(compCurrents.get(comp.id) ?? 0);
     if (prevIb < TOL.current && ic > 0.0001) { // < 1nA base drive but > 0.1mA collector
@@ -357,8 +356,8 @@ export function validatePhysics(
         const rSeg = 220;
         const threshold = (comp.parameters.threshold as number) ?? 2.0;
         const st = sim.state.__global ?? {};
-        const stateKey = `7seg_${terms.map(t => t.nodeId).join('_')}`;
-        const segStates = (st[stateKey] ?? {}) as Record<string, boolean>;
+        const segKey = stateKey('7seg', comp, ...terms.map(t => t.nodeId));
+        const segStates = (st[segKey] ?? {}) as Record<string, boolean>;
         const prevOn = segStates[seg] ?? false;
         const on = prevOn ? segV > threshold * 0.5 : segV > threshold;
         if (on) {
@@ -414,8 +413,8 @@ export function validatePhysics(
     if (!plugin) continue;
     const terms = getTerminalsForComponent(comp, plugin, nodeMap);
     const st = sim.state.__global ?? {};
-    const stateKey = `7seg_${terms.map(t => t.nodeId).join('_')}`;
-    const segStates = (st[stateKey] ?? {}) as Record<string, boolean>;
+    const segKey = stateKey('7seg', comp, ...terms.map(t => t.nodeId));
+    const segStates = (st[segKey] ?? {}) as Record<string, boolean>;
     for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
       const segNode = terms.find(t => t.terminalId === seg)?.nodeId ?? 0;
       const segI = Math.abs(compCurrents.get(comp.id) ?? 0); // approximate
@@ -452,7 +451,9 @@ export function validatePhysics(
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
     const terms = getTerminalsForComponent(comp, plugin, nodeMap);
-    const key = `cd4026_${terms.map(t => `${t.terminalId}=${t.nodeId}`).join('_')}`;
+    const key = comp.id
+      ? `cd4026_${comp.id}`
+      : `cd4026_${terms.map(t => `${t.terminalId}=${t.nodeId}`).join('_')}`;
     const st = sim.state[key] ?? { count: 0 };
     const maxCount = comp.parameters.maxCount as number;
     const vccV = comp.parameters.vcc as number;

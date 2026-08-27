@@ -18,6 +18,7 @@ import {
 import { mergeOptions, type SimOptions, type ConvergenceReport, toKelvin } from './sim-options';
 import { thermalVoltage } from './sim-options';
 import { runSens as _runSens, type SensConfig } from './sensitivity';
+import { stateKey } from './state-keys';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Trace data types (returned from analyses)
@@ -174,7 +175,7 @@ function buildACSystemAtFrequency(
         : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
       const rOff = Math.max(1e3, (comp.parameters.offR as number) ?? 1e7);
       const st = (dcOp.state as any).__global ?? {};
-      const on = st[`${comp.type}_${a}_${k}`] ?? vAK > vf;
+      const on = st[stateKey(comp.type, comp, a, k)] ?? vAK > vf;
       const g = on ? 1 / rOn : 1 / rOff;
       cStampConductance(sys, a, k, { re: g, im: 0 });
       // Junction capacitance Cjo if present
@@ -196,7 +197,7 @@ function buildACSystemAtFrequency(
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
       const isNpn = comp.type === 'npn';
       const st = (dcOp.state as any).__global ?? {};
-      const ibKey = isNpn ? `npn_${c}_${b}_${e}_ib` : `pnp_${e}_${b}_${c}_ib`;
+      const ibKey = stateKey(isNpn ? 'npn' : 'pnp', comp, isNpn ? c : e, b, isNpn ? e : c) + '_ib';
       const ib = Math.abs((st[ibKey] as number) ?? 0);
       const hfe = (comp.parameters.hfe as number) ?? 100;
       const Ic = ib * hfe;
@@ -719,7 +720,7 @@ export function runPZ(
     if (!plugin?.stamp) continue;
     const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
     try {
-      plugin.stamp(comp.parameters, terminals, sys, dcOp);
+      plugin.stamp(comp.parameters, terminals, sys, dcOp, comp);
     } catch {
       // a plugin that cannot stamp linearized DC is simply skipped
     }

@@ -251,7 +251,7 @@ export function solveDCWithPseudoTran(
       if (!plugin) continue;
       const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
       try {
-        plugin.stamp?.(comp.parameters, terminals, sys, sim);
+        plugin.stamp?.(comp.parameters, terminals, sys, sim, comp);
       } catch {
         // ignore stamping errors during pseudo-tran
       }
