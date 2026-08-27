@@ -423,6 +423,161 @@ export const nandGateC = makeNandGateUnit('C');
 export const nandGateD = makeNandGateUnit('D');
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Multi-unit families, generalized: 7402 (quad NOR) and 7404 (hex inverter).
+// Same pattern as the 7400 sample — each unit is its own plugin type sharing a
+// `units` array; components group into one refdes via refdes + unit fields and
+// the ERC's unused-unit check fires when a family is only partially placed.
+//
+// Real pinouts:
+//   7402 quad NOR:  A: 1Y=1, 1A=2, 1B=3   B: 2Y=4, 2A=5, 2B=6
+//                   C: 3Y=10, 3A=9, 3B=8  D: 4Y=13, 4A=12, 4B=11   (VCC=14, GND=7)
+//   7404 hex NOT:   A: 1A=1, 1Y=2  B: 2A=3, 2Y=4  C: 3A=5, 3Y=6
+//                   D: 4A=9, 4Y=8  E: 5A=11, 5Y=10 F: 6A=13, 6Y=12 (VCC=14, GND=7)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type GateKind = 'nand' | 'nor' | 'not';
+
+/** pin numbers in plugin terminal order: in1, in2, out (nand/nor) or in1, out (not) */
+interface UnitPinout {
+  in1?: string;
+  in2?: string;
+  out: string;
+}
+
+function gateTruth(kind: GateKind, v1: number, v2: number): number {
+  const a = v1 > 2.5;
+  const b = v2 > 2.5;
+  switch (kind) {
+    case 'nand': return a && b ? 0 : 5;
+    case 'nor': return a || b ? 0 : 5;
+    case 'not': return a ? 0 : 5;
+  }
+}
+
+function makeMultiUnitGate(
+  family: string,
+  partName: string,
+  kind: GateKind,
+  unitsList: string[],
+  pinouts: Record<string, UnitPinout>,
+  datasheet: string,
+): ComponentPlugin[] {
+  const isNot = kind === 'not';
+  return unitsList.map((unit) => {
+    const pins = pinouts[unit];
+  if (!pins) throw new Error(`missing pinout for ${family} unit ${unit}`);
+    const plugin: ComponentPlugin = {
+      type: `${family}_${unit}`,
+      name: `${partName} (Unit ${unit})`,
+      category: 'logic',
+      description: `${partName} ${isNot ? 'inverter' : kind === 'nand' ? 'NAND gate' : 'NOR gate'}, unit ${unit}. Place all ${unitsList.length} units to form a ${family}.`,
+      symbol: isNot ? '1' : kind === 'nand' ? '&' : '≥1',
+      boundingBox: { width: 4, height: isNot ? 3 : 4 },
+      units: unitsList,
+      terminals: isNot
+        ? [
+            { id: 'in1', label: 'A', position: { x: 0, y: 1 }, electricalType: 'input', number: pins.in1 },
+            { id: 'out', label: 'Y', position: { x: 4, y: 1 }, electricalType: 'output', number: pins.out },
+            { id: 'vcc', label: 'VCC', position: { x: 2, y: 0 }, electricalType: 'power_in', number: '14', hidden: true },
+            { id: 'gnd', label: 'GND', position: { x: 2, y: 3 }, electricalType: 'power_in', number: '7', hidden: true },
+          ]
+        : [
+            { id: 'in1', label: 'A', position: { x: 0, y: 1 }, electricalType: 'input', number: pins.in1 },
+            { id: 'in2', label: 'B', position: { x: 0, y: 3 }, electricalType: 'input', number: pins.in2 },
+            { id: 'out', label: 'Y', position: { x: 4, y: 2 }, electricalType: 'output', number: pins.out },
+            { id: 'vcc', label: 'VCC', position: { x: 2, y: 0 }, electricalType: 'power_in', number: '14', hidden: true },
+            { id: 'gnd', label: 'GND', position: { x: 2, y: 4 }, electricalType: 'power_in', number: '7', hidden: true },
+          ],
+      parameters: [],
+      keywords: [kind, family, 'logic', 'gate'],
+      defaultFootprint: isNot ? 'DIP-14' : 'DIP-14',
+      datasheet,
+      ...(isNot ? {} : { pinSwapGroups: [['in1', 'in2']] as string[][] }),
+      render(ctx, _params, cellSize) {
+        ctx.save();
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 1.5;
+        const w = 4 * cellSize;
+        const h = (isNot ? 3 : 4) * cellSize;
+        const r = h * 0.4;
+        if (isNot) {
+          // triangle + bubble
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(w * 0.62, h / 2);
+          ctx.lineTo(0, h);
+          ctx.closePath();
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(w * 0.62 + cellSize * 0.15, h / 2, cellSize * 0.15, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(0, cellSize); ctx.lineTo(-cellSize * 0.3, cellSize);
+          ctx.moveTo(w * 0.62 + cellSize * 0.3, h / 2); ctx.lineTo(w, h / 2);
+          ctx.stroke();
+        } else {
+          // OR/NOR body (curved back, pointed front) + bubble for the inverted output
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.quadraticCurveTo(w * 0.55, 0, w * 0.62, h / 2);
+          ctx.quadraticCurveTo(w * 0.55, h, 0, h);
+          ctx.quadraticCurveTo(w * 0.18, h / 2, 0, 0);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(w * 0.62 + cellSize * 0.15, h / 2, cellSize * 0.15, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(0, cellSize); ctx.lineTo(-cellSize * 0.3, cellSize);
+          ctx.moveTo(0, h - cellSize); ctx.lineTo(-cellSize * 0.3, h - cellSize);
+          ctx.moveTo(w * 0.62 + cellSize * 0.3, h / 2); ctx.lineTo(w, h / 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      },
+      stamp(params, terminals, sys, sim) {
+        const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
+        if (out === 0) return; // unwired output: stamping to node 0 would be singular
+        const in1 = terminals.find((t) => t.terminalId === 'in1')!.nodeId;
+        const in2 = isNot ? 0 : terminals.find((t) => t.terminalId === 'in2')!.nodeId;
+        const v1 = sim.nodeVoltage[in1] ?? 0;
+        const v2 = isNot ? 0 : sim.nodeVoltage[in2] ?? 0;
+        sys.stampVoltageSource(out, 0, gateTruth(kind, v1, v2));
+      },
+      getFlowPath() {
+        return isNot ? [{ x: 0, y: 1 }, { x: 4, y: 1 }] : [{ x: 0, y: 2 }, { x: 4, y: 2 }];
+      },
+    };
+    return plugin;
+  });
+}
+
+// 7402: quad 2-input NOR — units A..D
+export const nor7402Units = makeMultiUnitGate(
+  '7402', '7402 NOR Gate', 'nor', ['A', 'B', 'C', 'D'],
+  {
+    A: { in1: '2', in2: '3', out: '1' },
+    B: { in1: '5', in2: '6', out: '4' },
+    C: { in1: '9', in2: '8', out: '10' },
+    D: { in1: '12', in2: '11', out: '13' },
+  },
+  'https://www.ti.com/lit/ds/symlink/sn74ls02.pdf',
+);
+
+// 7404: hex inverter — units A..F
+export const not7404Units = makeMultiUnitGate(
+  '7404', '7404 Inverter', 'not', ['A', 'B', 'C', 'D', 'E', 'F'],
+  {
+    A: { in1: '1', out: '2' },
+    B: { in1: '3', out: '4' },
+    C: { in1: '5', out: '6' },
+    D: { in1: '9', out: '8' },
+    E: { in1: '11', out: '10' },
+    F: { in1: '13', out: '12' },
+  },
+  'https://www.ti.com/lit/ds/symlink/sn74ls04.pdf',
+);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Register everything
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -437,3 +592,5 @@ registerPlugin(nandGateA);
 registerPlugin(nandGateB);
 registerPlugin(nandGateC);
 registerPlugin(nandGateD);
+for (const p of nor7402Units) registerPlugin(p);
+for (const p of not7404Units) registerPlugin(p);

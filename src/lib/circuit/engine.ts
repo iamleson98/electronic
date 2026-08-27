@@ -778,6 +778,7 @@ export function computeComponentCurrents(
                comp.type === 'nor' || comp.type === 'xor' || comp.type === 'not' ||
                comp.type === '7400_A' || comp.type === '7400_B' ||
                comp.type === '7400_C' || comp.type === '7400_D' ||
+               comp.type.startsWith('7402_') || comp.type.startsWith('7404_') ||
                comp.type === 'arduino' || comp.type === 'arduinoReal' || comp.type === 'raspberryPi') {
       const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId ?? 0;
       if (vccNode > 0) {

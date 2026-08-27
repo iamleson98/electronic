@@ -132,14 +132,14 @@ This file tracks all remaining improvements.
 - [ ] **Move canvas rendering out of React** — Direct RAF loop reading from `useEditor.getState()`, bypass React for hot path
 - [x] **Ring buffer for trace samples** — `SampleRingBuffer` class with fixed-capacity Float64Array + write index; O(1) push, O(1) last(), chronological iteration
 - [x] **Fix autosave to filter sim updates** — Only marks dirty on component/wire reference changes, not 60Hz simContext updates
-- [ ] **Refactorize reuse in sparse solver** — KLU-style: reuse the pivot sequence across Newton iterations/time steps (values change, structure doesn't); currently each solve re-factors
+- [x] **Refactorize reuse in sparse solver** — KLU-style pivot-order reuse: structure-signature cache (merged CSR) + fixed-pivot numeric refactorization (no Markowitz search/buckets), cached-triplet-sort skip, weak-pivot fallback to full factorization; ~40-70% faster repeated solves, residual check still guards every solve
 
 ### Advanced Components
 
 - [x] **PLL** — 74HC4046: VCO (fmin..fmax linear in control voltage, phase-integrated) + sequential PFD with charge-pump output, time-guarded stamps (LM565 still needed)
 - [x] **ADC/DAC** — 8-bit ADC (4 MSB outputs + VREF + VCC/GND), 8-bit DAC (4 digital inputs + VREF + VOUT + GND)
 - [x] **Active crystal oscillator** — 4-pin active oscillator (VCC/GND/OUT/EN), square wave at rated frequency, EN gate
-- [ ] **Multi-unit IC support** — Extend beyond 7400 sample (7402, 7404, etc. as multi-unit)
+- [x] **Multi-unit IC support** — Generalized multi-unit factory: 7402 quad NOR (units A-D) + 7404 hex inverter (units A-F) with real pin numbers, hidden power pins, unwired-output-safe stamps; ERC unused-unit check works across the families
 - [x] **Voltage references** — TL431 (adjustable shunt), LM336 (2.5V), LM385 (1.2V), ICL8069 (1.2V bandgap)
 - [x] **Hall-effect sensors, IMUs** — Hall done (IMUs still needed): A1302-style linear ratiometric `hallLinear` (Vout = Q·Vcc/5 + S·Vcc/5·B, 25 mV/mT, rail clamps, 1 Ω Thevenin out) + US1881-style `hallSwitch` (Bop/Brp hysteresis, open-drain ron, optional internal 10 kΩ pull-up)
 - [x] **Photodiode, phototransistor, solar cell** — Photodiode (responsivity × lux × area), NPN phototransistor (hFE × photo-base current), Solar cell (V_oc × √(lux/1000) Thevenin)

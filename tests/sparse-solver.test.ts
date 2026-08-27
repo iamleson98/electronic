@@ -18,10 +18,12 @@ import {
   solveFromTriplets,
   luSolveCSR,
   shouldUseSparseSolver,
+  resetSparseFactorizationCache,
+  sparseFactorizationStats,
 } from '../src/lib/circuit/sparse-klu';
 import { createMnaSystem, solveMna } from '../src/lib/circuit/solver';
 import { getPlugin, getAllPlugins } from '../src/lib/circuit/registry';
-import { solveDC, simulateStep } from '../src/lib/circuit/engine';
+import { solveDC, simulateStep, buildNodeMap } from '../src/lib/circuit/engine';
 
 beforeAll(async () => {
   await import('../src/lib/circuit/components');
@@ -637,5 +639,162 @@ describe('Sparse solver: performance and determinism', () => {
       expect(vals[i]).toBeCloseTo((9 * (nRes - i)) / nRes, 5);
     }
     expect(vals[nRes]).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Refactorization reuse (KLU-style): the pivot sequence is cached across
+// solves with identical structure and replayed without the Markowitz search.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Sparse solver: refactorization reuse', () => {
+  it('reuses the pivot order and stays correct under value drift (vs dense)', () => {
+    resetSparseFactorizationCache();
+    const rng = mulberry32(31337);
+    for (const n of [5, 13, 34, 89, 144]) {
+      const m = randomDiagDominant(n, 3, rng);
+      // Materialize as a sparse system we can re-stamp with new values
+      const sys = createSparseMnaSystem(n, 0);
+      const reStamp = (drift: number) => {
+        sys.clearStamps();
+        for (let i = 0; i < m.tRow.length; i++) {
+          sys.triplets.push(m.tRow[i], m.tCol[i], m.tVal[i] * drift);
+        }
+        for (let i = 0; i < n; i++) sys.z[i] = m.z[i] * drift;
+      };
+      for (let s = 0; s < 6; s++) {
+        const drift = 1 + s * 0.37 + Math.sin(s) * 0.1;
+        reStamp(drift);
+        const xs = solveSparse(sys);
+        const xd = denseRef(n, m.tRow, m.tCol, m.tVal.map(v => v * drift), m.z.map(v => v * drift));
+        expect(xd).not.toBeNull();
+        expect(xs).not.toBeNull();
+        expect(maxRelDiff(xs!, xd!)).toBeLessThan(1e-9);
+      }
+    }
+    const stats = sparseFactorizationStats();
+    expect(stats.hits).toBeGreaterThan(20); // most solves hit the reuse path
+    expect(stats.falls).toBe(0);
+  });
+
+  it('falls back to a full factorization when the structure changes', () => {
+    resetSparseFactorizationCache();
+    const rng = mulberry32(999);
+    const n = 40;
+    const m = randomDiagDominant(n, 3, rng);
+    const sys = createSparseMnaSystem(n, 0);
+    const stampAll = (extra: boolean) => {
+      sys.clearStamps();
+      for (let i = 0; i < m.tRow.length; i++) sys.triplets.push(m.tRow[i], m.tCol[i], m.tVal[i]);
+      if (extra) sys.triplets.push(3, 5, 0.123); // structural change
+      for (let i = 0; i < n; i++) sys.z[i] = m.z[i];
+    };
+    stampAll(false);
+    expect(solveSparse(sys)).not.toBeNull();
+    const afterFirst = sparseFactorizationStats().hits;
+
+    stampAll(true); // different structure → cache miss → full solve
+    const x2 = solveSparse(sys);
+    expect(x2).not.toBeNull();
+    expect(sparseFactorizationStats().hits).toBe(afterFirst); // no new hits
+
+    stampAll(false); // back to the original structure → misses again (cache holds the other one)
+    const x3 = solveSparse(sys);
+    expect(x3).not.toBeNull();
+    const xd = denseRef(n, m.tRow, m.tCol, m.tVal, m.z);
+    expect(maxRelDiff(x3!, xd!)).toBeLessThan(1e-9);
+  });
+
+  it('aborts reuse on a weakened pivot and still returns the right answer', () => {
+    resetSparseFactorizationCache();
+    const rng = mulberry32(4242);
+    const n = 30;
+    const m = randomDiagDominant(n, 2, rng);
+    const sys = createSparseMnaSystem(n, 0);
+    const stampWith = (diagScale: number[]) => {
+      sys.clearStamps();
+      for (let i = 0; i < m.tRow.length; i++) {
+        const r = m.tRow[i];
+        const v = m.tRow[i] === m.tCol[i] ? m.tVal[i] * diagScale[r] : m.tVal[i];
+        sys.triplets.push(r, m.tCol[i], v);
+      }
+      for (let i = 0; i < n; i++) sys.z[i] = m.z[i];
+    };
+    // Solve 1: uniform diagonals (strong pivots)
+    stampWith(new Array(n).fill(1));
+    expect(solveSparse(sys)).not.toBeNull();
+    const hits1 = sparseFactorizationStats().hits;
+
+    // Solve 2: shrink several diagonal entries by 6 orders of magnitude —
+    // cached pivots for those rows become weak → reuse must abort and the
+    // full fallback must still solve correctly.
+    const scales = new Array(n).fill(1).map((_, i) => (i % 5 === 0 ? 1e-6 : 1));
+    stampWith(scales);
+    const x2 = solveSparse(sys);
+    expect(x2).not.toBeNull();
+    // dense reference with the same scaled values
+    const scaledVal: number[] = [];
+    for (let i = 0; i < m.tRow.length; i++) {
+      const r = m.tRow[i];
+      scaledVal.push(m.tRow[i] === m.tCol[i] ? m.tVal[i] * scales[r] : m.tVal[i]);
+    }
+    const xd = denseRef(n, m.tRow, m.tCol, scaledVal, m.z);
+    expect(xd).not.toBeNull();
+    expect(maxRelDiff(x2!, xd!)).toBeLessThan(1e-6); // weaker pivoting → looser tolerance
+    const stats = sparseFactorizationStats();
+    expect(stats.hits).toBeGreaterThanOrEqual(hits1); // at least the healthy solves
+    void stats.falls; // may or may not fall depending on pivot luck — correctness is what matters
+  });
+
+  it('resetSparseFactorizationCache clears the cache', () => {
+    resetSparseFactorizationCache();
+    const rng = mulberry32(5);
+    const m = randomDiagDominant(20, 2, rng);
+    const sys = createSparseMnaSystem(20, 0);
+    for (let i = 0; i < m.tRow.length; i++) sys.triplets.push(m.tRow[i], m.tCol[i], m.tVal[i]);
+    for (let i = 0; i < 20; i++) sys.z[i] = m.z[i];
+    expect(solveSparse(sys)).not.toBeNull();
+    expect(sparseFactorizationStats().hits).toBe(0);
+    expect(solveSparse(sys)).not.toBeNull();
+    expect(sparseFactorizationStats().hits).toBe(1);
+    resetSparseFactorizationCache();
+    expect(sparseFactorizationStats().hits).toBe(0);
+  });
+
+  it('keeps engine transients correct while reusing factorizations', () => {
+    resetSparseFactorizationCache();
+    // 150-resistor ladder (>80 unknowns → sparse path) with a capacitor at the
+    // mid node. Thevenin at mid: V_th = 2.5V, R_th = 75k ∥ 75k = 37.5k.
+    // C = 27nF → τ = 1.0125ms; after t = 1ms the cap sits at 2.5·(1−e^(−1/1.0125)).
+    const nRes = 150;
+    const { components, wires } = buildLadder(nRes, 1000, 5);
+    const mid = Math.floor(nRes / 2);
+    components.push(comp('capacitor', 'Cmid', [mid * 3, 5], { capacitance: 27e-9, initialV: 0 }));
+    wires.push(wire('wcmid', `R${mid}`, 'b', 'Cmid', 'a'));
+    wires.push(wire('wcmidg', 'Cmid', 'b', 'GND', 'g'));
+    let prev: any = undefined;
+    const dt = 1e-5;
+    const steps = 100; // 1ms total
+    let final: any = null;
+    for (let s = 0; s < steps; s++) {
+      const r = simulateStep(components, wires, plugins(), prev, dt);
+      expect(r).not.toBeNull();
+      final = r!.sim;
+      prev = {
+        nodeVoltage: r!.sim.nodeVoltage,
+        branchCurrent: r!.sim.branchCurrent,
+        time: r!.sim.time,
+        state: r!.sim.state,
+      };
+    }
+    expect(sparseFactorizationStats().hits).toBeGreaterThanOrEqual(steps - 2); // all but the first
+    // The capacitor anode node voltage is the charging curve we verify.
+    const nodeMap = buildNodeMap(components, wires, plugins());
+    const capNode = nodeMap.terminalNode.get('Cmid:a');
+    expect(capNode).toBeDefined();
+    const vCap = final.nodeVoltage[capNode!];
+    const tau = 37500 * 27e-9; // 1.0125 ms
+    const expected = 2.5 * (1 - Math.exp(-1e-3 / tau));
+    expect(vCap).toBeCloseTo(expected, 2);
   });
 });

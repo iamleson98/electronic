@@ -234,34 +234,185 @@ function stampCCVS(sys: SparseMnaSystem, a: number, b: number, extraIndex: numbe
 // solveSparse — entry point used by the engine.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * KLU-style refactorization reuse.
+ *
+ * Across Newton iterations and time steps the matrix STRUCTURE is almost
+ * always identical (same components, same stamps — only the VALUES change:
+ * companion models, switch states…). The pivot order discovered by the
+ * Markowitz search depends only on the structure, so it can be REUSED:
+ *
+ *   - solve 1 (new structure): full symbolic+numeric factorization, cache
+ *     (rowPerm, colPerm) keyed on the merged CSR structure.
+ *   - solve 2..N (same structure): numeric refactorization along the cached
+ *     pivot order — no Markowitz search, no count buckets, no bucket
+ *     maintenance on fill/cancel. The elimination arithmetic is identical.
+ *
+ * Safety: a cached pivot that has become numerically weak (|pv| below
+ * REUSE_TAU × its column max) aborts the reuse path and falls back to a
+ * fresh full factorization; the O(nnz) residual check remains the final
+ * arbiter on every solve either way.
+ */
+interface FactorizationCache {
+  size: number;
+  /** merged CSR structure the cached pivot order belongs to */
+  rowPtr: Int32Array | null;
+  cols: Int32Array | null;
+  rowPerm: Int32Array | null;
+  colPerm: Int32Array | null;
+  /** stats: how many solves hit the reuse path (exposed for tests/benchmarks) */
+  reuseHits: number;
+  reuseFalls: number;
+}
+
+const factorizationCache: FactorizationCache = {
+  size: -1,
+  rowPtr: null,
+  cols: null,
+  rowPerm: null,
+  colPerm: null,
+  reuseHits: 0,
+  reuseFalls: 0,
+};
+
+/** Test/benchmark hook: reset the reuse cache + counters. */
+export function resetSparseFactorizationCache(): void {
+  factorizationCache.size = -1;
+  factorizationCache.rowPtr = null;
+  factorizationCache.cols = null;
+  factorizationCache.rowPerm = null;
+  factorizationCache.colPerm = null;
+  factorizationCache.reuseHits = 0;
+  factorizationCache.reuseFalls = 0;
+}
+
+/** Test/benchmark hook: reuse-path statistics. */
+export function sparseFactorizationStats(): { hits: number; falls: number } {
+  return { hits: factorizationCache.reuseHits, falls: factorizationCache.reuseFalls };
+}
+
+function structuresEqual(
+  rowPtr: Int32Array, cols: Int32Array,
+  cachedRowPtr: Int32Array, cachedCols: Int32Array,
+): boolean {
+  if (rowPtr.length !== cachedRowPtr.length || cols.length !== cachedCols.length) return false;
+  for (let i = 0; i < rowPtr.length; i++) if (rowPtr[i] !== cachedRowPtr[i]) return false;
+  for (let i = 0; i < cols.length; i++) if (cols[i] !== cachedCols[i]) return false;
+  return true;
+}
+
 export function solveSparse(sys: SparseMnaSystem): Float64Array | null {
   const n = sys.size;
   if (n === 0) return new Float64Array(0);
   const t = sys.triplets;
-  return solveFromTriplets(n, t.row, t.col, t.val, t.count, sys.z);
+
+  const merged = mergeTriplets(n, t.row, t.col, t.val, t.count);
+  const { rowPtr, cols, vals, rowC, rowV } = merged;
+
+  // ── reuse path: same structure as the cached factorization ──
+  if (
+    factorizationCache.rowPerm && factorizationCache.colPerm &&
+    factorizationCache.rowPtr && factorizationCache.cols &&
+    factorizationCache.size === n &&
+    structuresEqual(rowPtr, cols, factorizationCache.rowPtr, factorizationCache.cols)
+  ) {
+    const r = luSolveCore(n, rowPtr, cols, vals, sys.z, rowC, rowV, {
+      rowPerm: factorizationCache.rowPerm,
+      colPerm: factorizationCache.colPerm,
+    });
+    if (r) {
+      factorizationCache.reuseHits++;
+      return r.x;
+    }
+    // pivot went bad → rebuild merge (core consumed the row lists) and fall through
+    factorizationCache.reuseFalls++;
+    const fresh = mergeTriplets(n, t.row, t.col, t.val, t.count);
+    const r2 = luSolveCore(n, fresh.rowPtr, fresh.cols, fresh.vals, sys.z, fresh.rowC, fresh.rowV);
+    if (r2) {
+      factorizationCache.size = n;
+      factorizationCache.rowPtr = fresh.rowPtr;
+      factorizationCache.cols = fresh.cols;
+      factorizationCache.rowPerm = r2.rowPerm;
+      factorizationCache.colPerm = r2.colPerm;
+    }
+    return r2 ? r2.x : null;
+  }
+
+  // ── full path: Markowitz factorization from scratch ──
+  const r = luSolveCore(n, rowPtr, cols, vals, sys.z, rowC, rowV);
+  if (r) {
+    factorizationCache.size = n;
+    factorizationCache.rowPtr = rowPtr;
+    factorizationCache.cols = cols;
+    factorizationCache.rowPerm = r.rowPerm;
+    factorizationCache.colPerm = r.colPerm;
+  }
+  return r ? r.x : null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Triplet merge — sort + duplicate merge + CSR flatten. Shared by all paths.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface MergedTriplets {
+  rowPtr: Int32Array;
+  cols: Int32Array;
+  vals: Float64Array;
+  rowC: number[][];
+  rowV: number[][];
 }
 
 /**
- * Solve a square system given as raw triplets (with duplicates — they are
- * merged). Exported for testing against the dense solver on arbitrary
- * matrices.
+ * Cached sort order for the triplet buffer. When the engine re-stamps the
+ * same circuit, the (row, col) sequence of the triplets is identical — the
+ * previously computed sorted index is still a valid sort, and validating it
+ * is O(nnz) versus O(nnz·log nnz) for re-sorting with a comparator.
+ * Validation is self-sufficient: a monotone walk over the cached idx IS a
+ * proof that idx sorts the current contents.
  */
-export function solveFromTriplets(
+const sortCache = {
+  rowArr: null as Int32Array | null,
+  colArr: null as Int32Array | null,
+  count: -1,
+  idx: null as Int32Array | null,
+};
+
+function sortedTripletIndex(
+  tRow: Int32Array | number[],
+  tCol: Int32Array | number[],
+  count: number,
+): Int32Array {
+  if (
+    sortCache.idx && sortCache.rowArr === tRow && sortCache.colArr === tCol &&
+    sortCache.count === count && count > 0
+  ) {
+    let ok = true;
+    for (let i = 1; i < count; i++) {
+      const a = sortCache.idx[i - 1];
+      const b = sortCache.idx[i];
+      const ra = tRow[a], rb = tRow[b];
+      if (ra > rb || (ra === rb && tCol[a] > tCol[b])) { ok = false; break; }
+    }
+    if (ok) return sortCache.idx;
+  }
+  const idx = new Int32Array(count);
+  for (let i = 0; i < count; i++) idx[i] = i;
+  idx.sort((a, b) => tRow[a] - tRow[b] || tCol[a] - tCol[b]);
+  sortCache.rowArr = tRow as Int32Array;
+  sortCache.colArr = tCol as Int32Array;
+  sortCache.count = count;
+  sortCache.idx = idx;
+  return idx;
+}
+
+function mergeTriplets(
   n: number,
   tRow: Int32Array | number[],
   tCol: Int32Array | number[],
   tVal: Float64Array | number[],
   count: number,
-  z: Float64Array,
-): Float64Array | null {
-  if (n === 0) return new Float64Array(0);
-
-  // ── 1. Sort triplets by (row, col) and merge duplicates ──
-  // Int32Array#sort with a comparator is stable enough for our purpose —
-  // duplicates of the same (row, col) are summed regardless of order.
-  const idx = new Int32Array(count);
-  for (let i = 0; i < count; i++) idx[i] = i;
-  idx.sort((a, b) => tRow[a] - tRow[b] || tCol[a] - tCol[b]);
+): MergedTriplets {
+  const idx = sortedTripletIndex(tRow, tCol, count);
 
   const rowC: number[][] = new Array(n);
   const rowV: number[][] = new Array(n);
@@ -305,7 +456,27 @@ export function solveFromTriplets(
   }
   rowPtr[n] = p;
 
-  return luSolveCSR(n, rowPtr, cols, vals, z, rowC, rowV);
+  return { rowPtr, cols, vals, rowC, rowV };
+}
+
+/**
+ * Solve a square system given as raw triplets (with duplicates — they are
+ * merged). Exported for testing against the dense solver on arbitrary
+ * matrices. Always runs a FULL factorization (no reuse cache) so tests
+ * exercise the from-scratch path deterministically.
+ */
+export function solveFromTriplets(
+  n: number,
+  tRow: Int32Array | number[],
+  tCol: Int32Array | number[],
+  tVal: Float64Array | number[],
+  count: number,
+  z: Float64Array,
+): Float64Array | null {
+  if (n === 0) return new Float64Array(0);
+  const { rowPtr, cols, vals, rowC, rowV } = mergeTriplets(n, tRow, tCol, tVal, count);
+  const r = luSolveCore(n, rowPtr, cols, vals, z, rowC, rowV);
+  return r ? r.x : null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -326,19 +497,55 @@ const PIVOT_ABS_FLOOR = 1e-14;
 const PIVOT_SEARCH_COLS = 4;
 /** relative residual tolerance for the solution sanity check */
 const RESIDUAL_TOL = 1e-4;
+/**
+ * Relative strength a REUSED pivot must retain vs its column max for the
+ * fixed-pivot refactorization to stay on the fast path. Looser than the
+ * fresh-search TAU (0.05): the residual check backstops gross failures.
+ */
+const REUSE_TAU = 1e-3;
 
+export interface LuSolveResult {
+  x: Float64Array;
+  rowPerm: Int32Array;
+  colPerm: Int32Array;
+}
+
+export interface PivotOrder {
+  rowPerm: Int32Array;
+  colPerm: Int32Array;
+}
+
+/** Back-compat wrapper: solve and return only the solution vector. */
 export function luSolveCSR(
   n: number,
   rowPtr: Int32Array,
   cols: Int32Array,
   vals: Float64Array,
   z: Float64Array,
-  /** optional pre-split rows (rowC[r] = sorted cols, rowV[r] = values); when
-   * omitted they are rebuilt from the CSR arrays */
   rowC?: number[][],
   rowV?: number[][],
 ): Float64Array | null {
-  if (n === 0) return new Float64Array(0);
+  const r = luSolveCore(n, rowPtr, cols, vals, z, rowC, rowV);
+  return r ? r.x : null;
+}
+
+/**
+ * Core factor-and-solve. When `pivotOrder` is provided (KLU-style reuse),
+ * the Markowitz search and its count buckets are skipped entirely and the
+ * cached pivot sequence is replayed; any numerically weak pivot aborts with
+ * null so the caller can fall back to a fresh full factorization.
+ */
+function luSolveCore(
+  n: number,
+  rowPtr: Int32Array,
+  cols: Int32Array,
+  vals: Float64Array,
+  z: Float64Array,
+  rowC?: number[][],
+  rowV?: number[][],
+  pivotOrder?: PivotOrder,
+): LuSolveResult | null {
+  if (n === 0) return { x: new Float64Array(0), rowPerm: new Int32Array(0), colPerm: new Int32Array(0) };
 
   // ── dynamic active-submatrix structures ──
   if (!rowC || !rowV) {
@@ -361,8 +568,9 @@ export function luSolveCSR(
   // scanning all n columns every step. Columns whose count drops to 0 leave
   // the bucket structure entirely (they can never be pivoted) and re-enter
   // if later fill brings them back — this keeps the scan lists clean.
+  // SKIPPED entirely on the fixed-pivot reuse path (no search = no buckets).
+  const useMarkowitz = !pivotOrder;
   const buckets: number[][] = new Array(n + 1);
-  for (let b = 0; b <= n; b++) buckets[b] = [];
   const bucketIdx = new Int32Array(n); // current bucket (== active count)
   const bucketPos = new Int32Array(n); // position inside that bucket array
   const colInBucket = new Uint8Array(n);
@@ -394,7 +602,10 @@ export function luSolveCSR(
       bucketAdd(c, cnt);
     }
   };
-  for (let c = 0; c < n; c++) bucketAdd(c, colRows[c].length);
+  if (useMarkowitz) {
+    for (let b = 0; b <= n; b++) buckets[b] = [];
+    for (let c = 0; c < n; c++) bucketAdd(c, colRows[c].length);
+  }
 
   const rowActive = new Uint8Array(n).fill(1);
   const colActive = new Uint8Array(n).fill(1);
@@ -438,61 +649,86 @@ export function luSolveCSR(
     lPtr[k] = lRow.length;
     uPtr[k] = uCol.length;
 
-    // ── pivot search: lazy Markowitz ──
-    // Scan columns in increasing active-count order; within a column pick
-    // the sparsest numerically-acceptable row; keep the best (min Markowitz
-    // cost) over the first few columns examined.
-    let bestRow = -1;
-    let bestCol = -1;
-    let bestCost = Infinity;
-    let scanned = 0;
-    for (let cnt = 0; cnt <= n && scanned < PIVOT_SEARCH_COLS; cnt++) {
-      const bkt = buckets[cnt];
-      for (let bi = 0; bi < bkt.length && scanned < PIVOT_SEARCH_COLS; bi++) {
-        const c = bkt[bi];
-        if (!colActive[c]) continue;
-        const rows = colRows[c];
-        if (rows.length === 0) continue;
-        let colMax = 0;
-        for (const r of rows) {
-          const v = Math.abs(getVal(r, c));
-          if (v > colMax) colMax = v;
-        }
-        if (colMax < PIVOT_ABS_FLOOR || !isFinite(colMax)) continue; // numerically empty
-        let candRow = -1;
-        let candRC = Infinity;
-        let candAbs = -1;
-        for (const r of rows) {
-          const v = Math.abs(getVal(r, c));
-          if (v >= TAU * colMax) {
-            const rc = rowC[r].length;
-            if (rc < candRC || (rc === candRC && v > candAbs)) {
-              candRow = r;
-              candRC = rc;
-              candAbs = v;
+    let pr: number;
+    let pc: number;
+    if (pivotOrder) {
+      // ── fixed pivot order (KLU-style reuse) ──
+      pr = pivotOrder.rowPerm[k];
+      pc = pivotOrder.colPerm[k];
+      if (pr < 0 || pr >= n || pc < 0 || pc >= n) return null; // stale order
+      if (!rowActive[pr] || !colActive[pc]) return null; // order incompatible with structure
+      const prowCols0 = rowC[pr];
+      const pIdx0 = prowCols0.indexOf(pc);
+      if (pIdx0 < 0) return null; // structure drifted under the cached order
+      const pv0 = rowV[pr][pIdx0];
+      if (!isFinite(pv0) || Math.abs(pv0) < PIVOT_ABS_FLOOR) return null;
+      // Numerical-stability guard: the cached pivot must still dominate its
+      // column reasonably (looser than the fresh-search TAU — the residual
+      // check backstops gross failures).
+      let colMax = 0;
+      for (const r of colRows[pc]) {
+        const v = Math.abs(getVal(r, pc));
+        if (v > colMax) colMax = v;
+      }
+      if (Math.abs(pv0) < REUSE_TAU * colMax) return null;
+    } else {
+      // ── pivot search: lazy Markowitz ──
+      // Scan columns in increasing active-count order; within a column pick
+      // the sparsest numerically-acceptable row; keep the best (min Markowitz
+      // cost) over the first few columns examined.
+      let bestRow = -1;
+      let bestCol = -1;
+      let bestCost = Infinity;
+      let scanned = 0;
+      for (let cnt = 0; cnt <= n && scanned < PIVOT_SEARCH_COLS; cnt++) {
+        const bkt = buckets[cnt];
+        for (let bi = 0; bi < bkt.length && scanned < PIVOT_SEARCH_COLS; bi++) {
+          const c = bkt[bi];
+          if (!colActive[c]) continue;
+          const rows = colRows[c];
+          if (rows.length === 0) continue;
+          let colMax = 0;
+          for (const r of rows) {
+            const v = Math.abs(getVal(r, c));
+            if (v > colMax) colMax = v;
+          }
+          if (colMax < PIVOT_ABS_FLOOR || !isFinite(colMax)) continue; // numerically empty
+          let candRow = -1;
+          let candRC = Infinity;
+          let candAbs = -1;
+          for (const r of rows) {
+            const v = Math.abs(getVal(r, c));
+            if (v >= TAU * colMax) {
+              const rc = rowC[r].length;
+              if (rc < candRC || (rc === candRC && v > candAbs)) {
+                candRow = r;
+                candRC = rc;
+                candAbs = v;
+              }
             }
           }
+          if (candRow < 0) continue;
+          const cost = (candRC - 1) * (cnt - 1);
+          if (cost < bestCost) {
+            bestCost = cost;
+            bestRow = candRow;
+            bestCol = c;
+          }
+          scanned++;
+          if (bestCost === 0) break;
         }
-        if (candRow < 0) continue;
-        const cost = (candRC - 1) * (cnt - 1);
-        if (cost < bestCost) {
-          bestCost = cost;
-          bestRow = candRow;
-          bestCol = c;
-        }
-        scanned++;
         if (bestCost === 0) break;
       }
-      if (bestCost === 0) break;
+      if (bestRow < 0) return null; // singular active submatrix
+      pr = bestRow;
+      pc = bestCol;
     }
-    if (bestRow < 0) return null; // singular active submatrix
 
     // ── extract the pivot row ──
-    const pr = bestRow;
-    const pc = bestCol;
     const prowCols = rowC[pr];
     const prowVals = rowV[pr];
     const pIdx = prowCols.indexOf(pc);
+    if (pIdx < 0) return null;
     const pv = prowVals[pIdx];
     if (!isFinite(pv) || pv === 0) return null;
 
@@ -519,7 +755,7 @@ export function luSolveCSR(
     removeFromArr(colRows[pc], pr);
     const rowsInPc = colRows[pc].slice();
     colRows[pc] = [];
-    bucketRemove(pc);
+    if (useMarkowitz) bucketRemove(pc);
     colActive[pc] = 0;
 
     rowPerm[k] = pr;
@@ -534,7 +770,7 @@ export function luSolveCSR(
     for (const c of prowCols) {
       if (c === pc) continue; // already retired
       removeFromArr(colRows[c], pr);
-      bucketMove(c, colRows[c].length);
+      if (useMarkowitz) bucketMove(c, colRows[c].length);
     }
 
     // ── eliminate: row_r := row_r − f · pivot_row, for rows holding pc ──
@@ -568,7 +804,7 @@ export function luSolveCSR(
           outC.push(cb);
           outV.push(v);
           colRows[cb].push(r);
-          bucketMove(cb, colRows[cb].length);
+          if (useMarkowitz) bucketMove(cb, colRows[cb].length);
           b++;
         } else {
           const v = rv[a] - f * prowMergeVals[b];
@@ -578,7 +814,7 @@ export function luSolveCSR(
           } else {
             // exact structural cancellation — keep the structure tight
             removeFromArr(colRows[ca], r);
-            bucketMove(ca, colRows[ca].length);
+            if (useMarkowitz) bucketMove(ca, colRows[ca].length);
           }
           a++;
           b++;
@@ -594,7 +830,7 @@ export function luSolveCSR(
         outC.push(cb);
         outV.push(-f * prowMergeVals[b]);
         colRows[cb].push(r);
-        bucketMove(cb, colRows[cb].length);
+        if (useMarkowitz) bucketMove(cb, colRows[cb].length);
         b++;
       }
       rowC[r] = outC;
@@ -670,7 +906,7 @@ export function luSolveCSR(
   const scale = Math.max(1, maxB, maxAx);
   if (maxRes > RESIDUAL_TOL * scale) return null;
 
-  return x;
+  return { x, rowPerm, colPerm };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
