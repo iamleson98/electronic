@@ -1,19 +1,30 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { useEditor } from '@/lib/circuit/store';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useEditor, type ProbeTrace } from '@/lib/circuit/store';
 import { getPlugin } from '@/lib/circuit/registry';
 import { getTerminalsForComponent, buildNodeMap } from '@/lib/circuit/engine';
 import { parseMeasLine, execMeas, computeFFT, type MeasCommand, type MeasResult } from '@/lib/circuit/measurement';
 import { computeTHD, downsampleSpectrum, type THDResult } from '@/lib/circuit/fourier';
-import { Activity, BarChart3, AlertCircle, Crosshair, Waves, Sparkles } from 'lucide-react';
+import {
+  applyCoupling, computeCursorDeltas, computeMeasurements, computeTimeWindow, computeVoltageWindow,
+  createDefaultScopeConfig, formatDuration, formatFrequency, formatTimebase, formatVoltage,
+  formatVoltageScale, getVoltageAtTime, mapTimeToX, mapVoltageToY, mapXToTime, meanVoltage,
+  pickDefaultVoltageScale, refitVoltageScale, stepPreset, SCOPE_H_DIVS, SCOPE_V_DIVS,
+  TIMEBASE_PRESETS, VOLTAGE_SCALE_PRESETS, type ScopeChannel, type ScopeConfig,
+} from '@/lib/circuit/scope-viewer';
+import { Activity, BarChart3, AlertCircle, Crosshair, Waves, Sparkles, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
-interface CursorState {
-  active: boolean;
-  x: number; // pixel position on canvas
-  traceIndex: number;
+/** User-adjustable per-channel scope settings, keyed by trace componentId. */
+interface ScopeChannelSettings {
+  voltageScale: number;   // V/div (steps through VOLTAGE_SCALE_PRESETS)
+  voltageOffset: number;  // voltage pinned to the grid's vertical center (V)
+  coupling: 'DC' | 'AC';  // AC removes the channel's DC component (mean)
+  visible: boolean;
+  /** true once the user changes scale/offset — disables the grow-only refit */
+  touched: boolean;
 }
 
 export function ProbePanel() {
@@ -28,9 +39,13 @@ export function ProbePanel() {
   const spectrumCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // ─── Cursor state for measurement readouts ────────────────────────────
-  const [cursor, setCursor] = useState<CursorState>({ active: false, x: 0, traceIndex: 0 });
-  const [cursorEnabled, setCursorEnabled] = useState(false);
+  // ─── Oscilloscope (scope-viewer) state ────────────────────────────────
+  // Deliberately panel-local React state (NOT the editor store): scope view
+  // settings must never mark the document dirty, enter undo/redo history or
+  // autosave. ProbePanel stays mounted, so this survives tab switches.
+  const [scopeConfig, setScopeConfig] = useState<ScopeConfig>(() => createDefaultScopeConfig());
+  const [channelSettings, setChannelSettings] = useState<Record<string, ScopeChannelSettings>>({});
+  const [selectedChannel, setSelectedChannel] = useState(0);
   const [activeTab, setActiveTab] = useState<'scope' | 'measurements' | 'meas' | 'spectrum'>('scope');
 
   // ─── .meas commands ───────────────────────────────────────────────────
@@ -70,145 +85,70 @@ export function ProbePanel() {
     }
   }
 
-  // ─── Compute cursor readout values ───────────────────────────────────
-  const cursorReadout = useCallback(() => {
-    if (!cursorEnabled || !cursor.active || traces.length === 0) return null;
-    const trace = traces[cursor.traceIndex] || traces[0];
-    if (!trace || trace.samples.length < 2) return null;
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const rect = canvas.getBoundingClientRect();
-    const padding = 8;
-    const tMin = trace.samples[0].time;
-    const tMax = trace.samples[trace.samples.length - 1].time;
-    const tRange = Math.max(1e-6, tMax - tMin);
-    // Convert pixel X to time
-    const t = tMin + ((cursor.x - padding) / (rect.width - 2 * padding)) * tRange;
-    // Find nearest sample
-    let nearest = trace.samples[0];
-    let minDist = Infinity;
-    for (const s of trace.samples) {
-      const d = Math.abs(s.time - t);
-      if (d < minDist) { minDist = d; nearest = s; }
-    }
-    // Compute V range
-    let vMin = Infinity, vMax = -Infinity;
-    for (const s of trace.samples) {
-      if (s.voltage < vMin) vMin = s.voltage;
-      if (s.voltage > vMax) vMax = s.voltage;
-    }
-    return { time: nearest.time, voltage: nearest.voltage, label: trace.label, color: trace.color, vMin, vMax };
-  }, [cursor, cursorEnabled, traces]);
-
-  // ─── Draw scope with traces + cursor ─────────────────────────────────
+  // ─── Scope: seed / grow-fit per-channel V/div ───────────────────────
+  // The first time a trace produces a real signal (≥2 samples) we pick a
+  // V/div preset that fits it. Untouched channels are re-fitted upward only
+  // (grow-only) so a ramping signal stays on screen; once the user turns a
+  // scale/offset knob the channel is "touched" and never auto-adjusted again.
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    canvas.style.width = `${rect.width}px`;
-    canvas.style.height = `${rect.height}px`;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.save();
-    ctx.scale(dpr, dpr);
-
-    ctx.fillStyle = '#0a0f1c';
-    ctx.fillRect(0, 0, rect.width, rect.height);
-
-    // grid
-    ctx.strokeStyle = '#1e293b';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let x = 0; x < rect.width; x += 30) { ctx.moveTo(x, 0); ctx.lineTo(x, rect.height); }
-    for (let y = 0; y < rect.height; y += 24) { ctx.moveTo(0, y); ctx.lineTo(rect.width, y); }
-    ctx.stroke();
-    ctx.strokeStyle = '#334155';
-    ctx.beginPath();
-    ctx.moveTo(0, rect.height / 2);
-    ctx.lineTo(rect.width, rect.height / 2);
-    ctx.stroke();
-
-    if (traces.length === 0) {
-      ctx.fillStyle = '#475569';
-      ctx.font = '11px ui-monospace, monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('Place an Oscilloscope component to capture waveforms', rect.width / 2, rect.height / 2 - 8);
-      ctx.fillText('Probes measure voltage across their + and - terminals', rect.width / 2, rect.height / 2 + 10);
-    }
-
-    const padding = 8;
-    for (let ti = 0; ti < traces.length; ti++) {
-      const trace = traces[ti];
-      if (trace.samples.length < 2) continue;
-      const samples = trace.samples;
-      const tMin = samples[0].time;
-      const tMax = samples[samples.length - 1].time;
-      const tRange = Math.max(1e-6, tMax - tMin);
-      let vMin = Infinity, vMax = -Infinity;
-      for (const s of samples) { if (s.voltage < vMin) vMin = s.voltage; if (s.voltage > vMax) vMax = s.voltage; }
-      const vPad = Math.max(0.5, (vMax - vMin) * 0.15);
-      vMin -= vPad; vMax += vPad;
-      const vRange = Math.max(1e-6, vMax - vMin);
-
-      ctx.strokeStyle = trace.color;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      for (let i = 0; i < samples.length; i++) {
-        const s = samples[i];
-        const x = padding + ((s.time - tMin) / tRange) * (rect.width - 2 * padding);
-        const y = padding + (1 - (s.voltage - vMin) / vRange) * (rect.height - 2 * padding);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setChannelSettings((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const t of traces) {
+        const cs = next[t.componentId];
+        if (cs?.touched || t.samples.length < 2) continue;
+        let vMin = Infinity, vMax = -Infinity;
+        for (const s of t.samples) {
+          if (s.voltage < vMin) vMin = s.voltage;
+          if (s.voltage > vMax) vMax = s.voltage;
+        }
+        if (!cs) {
+          next[t.componentId] = {
+            voltageScale: pickDefaultVoltageScale(vMin, vMax),
+            voltageOffset: 0,
+            coupling: 'DC',
+            visible: true,
+            touched: false,
+          };
+          changed = true;
+        } else {
+          const fitted = refitVoltageScale(cs.voltageScale, vMin, vMax, cs.voltageOffset);
+          if (fitted !== cs.voltageScale) {
+            next[t.componentId] = { ...cs, voltageScale: fitted };
+            changed = true;
+          }
+        }
       }
-      ctx.stroke();
+      return changed ? next : prev;
+    });
+  }, [traces]);
 
-      ctx.fillStyle = trace.color;
-      ctx.font = 'bold 10px ui-monospace, monospace';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillText(trace.label, padding + 4, padding + 4 + ti * 14);
-    }
+  const updateChannelSetting = useCallback((componentId: string, patch: Partial<ScopeChannelSettings>) => {
+    setChannelSettings((prev) => {
+      const base: ScopeChannelSettings = prev[componentId] ?? {
+        voltageScale: 1, voltageOffset: 0, coupling: 'DC', visible: true, touched: true,
+      };
+      const merged = { ...base, ...patch };
+      // any explicit scale/offset change freezes the auto-refit for this channel
+      if (patch.voltageScale !== undefined || patch.voltageOffset !== undefined) merged.touched = true;
+      return { ...prev, [componentId]: merged };
+    });
+  }, []);
 
-    // Draw cursor line + readout
-    if (cursorEnabled && cursor.active) {
-      ctx.strokeStyle = '#f59e0b';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(cursor.x, 0);
-      ctx.lineTo(cursor.x, rect.height);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      // Readout box
-      const readout = cursorReadout();
-      if (readout) {
-        const text = `${readout.label}: t=${(readout.time * 1000).toFixed(3)}ms V=${readout.voltage.toFixed(3)}V`;
-        ctx.font = '10px ui-monospace, monospace';
-        const tw = ctx.measureText(text).width;
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-        ctx.fillRect(cursor.x + 4, 4, tw + 8, 16);
-        ctx.fillStyle = readout.color;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.fillText(text, cursor.x + 8, 7);
-      }
-    }
-    ctx.restore();
-  }, [traces, simContext, cursor, cursorEnabled, cursorReadout]);
-
-  // ─── Handle mouse move on canvas for cursor ─────────────────────────
-  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!cursorEnabled) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    setCursor({ active: true, x: e.clientX - rect.left, traceIndex: 0 });
-  };
-  const handleCanvasMouseLeave = () => {
-    setCursor((c) => ({ ...c, active: false }));
-  };
+  // ─── Cursor-A readout (feeds the header "Ask AI" prompt) ───────────
+  // Pure computation — no canvas access — evaluated for the selected channel.
+  const scopeReadout = useMemo(() => {
+    if (!scopeConfig.cursorA.enabled) return null;
+    const idx = traces.length > 0 ? Math.min(selectedChannel, traces.length - 1) : -1;
+    const trace = idx >= 0 ? traces[idx] : null;
+    if (!trace || trace.samples.length === 0) return null;
+    const cs = channelSettings[trace.componentId];
+    const coupled = applyCoupling(trace.samples, cs?.coupling ?? 'DC');
+    const v = getVoltageAtTime(coupled, scopeConfig.cursorA.time);
+    if (v === null) return null;
+    return { label: trace.label, color: trace.color, time: scopeConfig.cursorA.time, voltage: v };
+  }, [scopeConfig.cursorA, traces, selectedChannel, channelSettings]);
 
   // ─── .meas handlers ──────────────────────────────────────────────────
   const handleAddMeas = () => {
@@ -243,12 +183,6 @@ export function ProbePanel() {
   const hasCircuit = components.length > 0;
   const hasGround = components.some((c) => c.type === 'ground');
   const hasSource = components.some((c) => ['dcVoltage', 'acVoltage', 'pulseSource', 'currentSource', 'arduino', 'arduinoReal', 'raspberryPi', 'vco', 'crystal', 'timer555'].includes(c.type));
-  // Compute cursor readout in an effect (avoids accessing canvasRef during render).
-  const [readout, setReadout] = useState<ReturnType<typeof cursorReadout>>(null);
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setReadout(cursorReadout());
-  }, [cursorReadout, cursor, cursorEnabled, traces]);
 
   return (
     <div className="flex h-full flex-col bg-slate-900" role="complementary" aria-label="Probe and oscilloscope panel">
@@ -265,11 +199,12 @@ export function ProbePanel() {
               {running && ` · ${speed}×`}
             </span>
           )}
-          {/* Cursor toggle */}
+          {/* Cursor A toggle */}
           <button
-            onClick={() => setCursorEnabled(!cursorEnabled)}
-            className={`cursor-pointer rounded p-1 ${cursorEnabled ? 'bg-amber-500/20 text-amber-400' : 'text-slate-500 hover:text-slate-300'}`}
-            title="Toggle measurement cursor"
+            onClick={() => setScopeConfig((s) => ({ ...s, cursorA: { ...s.cursorA, enabled: !s.cursorA.enabled } }))}
+            aria-pressed={scopeConfig.cursorA.enabled}
+            className={`cursor-pointer rounded p-1 ${scopeConfig.cursorA.enabled ? 'bg-amber-500/20 text-amber-400' : 'text-slate-500 hover:text-slate-300'}`}
+            title="Toggle cursor A"
           >
             <Crosshair size={12} />
           </button>
@@ -278,8 +213,8 @@ export function ProbePanel() {
             onClick={() => {
               const prompt = simError
                 ? `The simulation is failing with this error: "${simError}". Diagnose the root cause and explain how to fix it.`
-                : readout
-                  ? `The voltage at ${readout.label} is ${readout.voltage.toFixed(3)}V at t=${(readout.time * 1000).toFixed(2)}ms. Is this expected? If not, diagnose why and suggest a fix.`
+                : scopeReadout
+                  ? `The voltage at ${scopeReadout.label} is ${scopeReadout.voltage.toFixed(3)}V at t=${(scopeReadout.time * 1000).toFixed(2)}ms. Is this expected? If not, diagnose why and suggest a fix.`
                   : 'Run a diagnosis on my circuit and tell me if the voltages are correct.';
               window.dispatchEvent(new CustomEvent('circuitlab:ask-ai', { detail: prompt }));
             }}
@@ -309,32 +244,17 @@ export function ProbePanel() {
       <div className="flex min-h-0 flex-1 flex-col">
         {activeTab === 'scope' && (
           <>
-            {/* Oscilloscope */}
-            <div className="border-b border-slate-800 p-2">
-              <div className="mb-1 flex items-center justify-between px-1">
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-                  <BarChart3 size={10} className="mr-1 inline" />
-                  Waveform {cursorEnabled && '· Cursor ON'}
-                </span>
-                <span className="text-[10px] text-slate-500">{traces.length} channel{traces.length !== 1 ? 's' : ''}</span>
-              </div>
-              <div className="relative h-40 rounded-md border border-slate-800 bg-[#0a0f1c]">
-                <canvas
-                  ref={canvasRef}
-                  className="h-full w-full"
-                  onMouseMove={handleCanvasMouseMove}
-                  onMouseLeave={handleCanvasMouseLeave}
-                />
-                {/* Cursor readout overlay */}
-                {cursorEnabled && readout && (
-                  <div className="absolute right-2 top-2 rounded border border-slate-700 bg-slate-900/90 px-2 py-1 font-mono text-[10px]">
-                    <span style={{ color: readout.color }}>{readout.label}</span>
-                    <span className="text-slate-400"> · t={(readout.time * 1000).toFixed(3)}ms</span>
-                    <span className="text-slate-200"> · V={readout.voltage.toFixed(3)}V</span>
-                  </div>
-                )}
-              </div>
-            </div>
+            {/* Oscilloscope — div-based scope UI driven by scope-viewer */}
+            <ScopeTab
+              traces={traces}
+              scopeConfig={scopeConfig}
+              setScopeConfig={setScopeConfig}
+              channelSettings={channelSettings}
+              updateChannelSetting={updateChannelSetting}
+              selectedChannel={selectedChannel}
+              setSelectedChannel={setSelectedChannel}
+              canvasRef={canvasRef}
+            />
 
             {/* Parameter sweep slider */}
             <div className="border-b border-slate-800 p-2">
@@ -520,6 +440,495 @@ export function ProbePanel() {
         {activeTab === 'spectrum' && <SpectrumTab traces={traces} canvasRef={spectrumCanvasRef} />}
       </div>
     </div>
+  );
+}
+
+// ─── Scope tab — real oscilloscope UI driven by scope-viewer ────────────────
+
+interface ScopeTabProps {
+  traces: ProbeTrace[];
+  scopeConfig: ScopeConfig;
+  setScopeConfig: React.Dispatch<React.SetStateAction<ScopeConfig>>;
+  channelSettings: Record<string, ScopeChannelSettings>;
+  updateChannelSetting: (componentId: string, patch: Partial<ScopeChannelSettings>) => void;
+  selectedChannel: number;
+  setSelectedChannel: React.Dispatch<React.SetStateAction<number>>;
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
+}
+
+function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, updateChannelSetting, selectedChannel, setSelectedChannel, canvasRef }: ScopeTabProps) {
+  const a = scopeConfig.cursorA;
+  const b = scopeConfig.cursorB;
+  const trig = scopeConfig.trigger;
+
+  // Derived channel view models: store traces + per-channel user settings.
+  const channels: ScopeChannel[] = useMemo(() => traces.map((t) => {
+    const cs = channelSettings[t.componentId];
+    return {
+      id: t.componentId,
+      label: t.label,
+      color: t.color,
+      samples: t.samples,
+      visible: cs?.visible ?? true,
+      voltageScale: cs?.voltageScale ?? 1,
+      voltageOffset: cs?.voltageOffset ?? 0,
+      coupling: cs?.coupling ?? 'DC',
+    };
+  }), [traces, channelSettings]);
+
+  const traceIdx = traces.length > 0 ? Math.min(selectedChannel, traces.length - 1) : 0;
+  const selected = channels[traceIdx];
+
+  // Center the newest sample mid-screen (scope convention: trigger point at
+  // the center of the graticule), then span ±5 divisions of timebase.
+  const centerTime = useMemo(() => {
+    let latest = 0;
+    for (const t of traces) {
+      const s = t.samples;
+      if (s.length > 0) latest = Math.max(latest, s[s.length - 1].time);
+    }
+    return latest;
+  }, [traces]);
+
+  const timeWindow = useMemo(
+    () => computeTimeWindow(scopeConfig.timebase, centerTime),
+    [scopeConfig.timebase, centerTime],
+  );
+
+  // ─── Canvas rendering (div-based, replaces the old auto-fit drawing) ────
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const { cursorA, cursorB, trigger, timebase, maxSamples, showGrid } = scopeConfig;
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    const W = rect.width;
+    const H = rect.height;
+
+    ctx.fillStyle = '#0a0f1c';
+    ctx.fillRect(0, 0, W, H);
+
+    // Standard scope graticule: 10 × 8 divisions with subtle lines, a slightly
+    // stronger center crosshair and minor ticks along the center axes.
+    if (showGrid) {
+      const divX = W / SCOPE_H_DIVS;
+      const divY = H / SCOPE_V_DIVS;
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 0; i <= SCOPE_H_DIVS; i++) {
+        const x = Math.round(i * divX) + 0.5;
+        ctx.moveTo(x, 0); ctx.lineTo(x, H);
+      }
+      for (let j = 0; j <= SCOPE_V_DIVS; j++) {
+        const y = Math.round(j * divY) + 0.5;
+        ctx.moveTo(0, y); ctx.lineTo(W, y);
+      }
+      ctx.stroke();
+      const cx = Math.round(W / 2) + 0.5;
+      const cy = Math.round(H / 2) + 0.5;
+      ctx.strokeStyle = '#334155';
+      ctx.beginPath();
+      ctx.moveTo(cx, 0); ctx.lineTo(cx, H);
+      ctx.moveTo(0, cy); ctx.lineTo(W, cy);
+      ctx.stroke();
+      ctx.beginPath();
+      for (let i = 1; i < SCOPE_H_DIVS * 5; i++) {
+        if (i % 5 === 0) continue;
+        const x = Math.round(i * (divX / 5)) + 0.5;
+        ctx.moveTo(x, cy - 2); ctx.lineTo(x, cy + 2);
+      }
+      for (let j = 1; j < SCOPE_V_DIVS * 5; j++) {
+        if (j % 5 === 0) continue;
+        const y = Math.round(j * (divY / 5)) + 0.5;
+        ctx.moveTo(cx - 2, y); ctx.lineTo(cx + 2, y);
+      }
+      ctx.stroke();
+    }
+
+    if (channels.length === 0) {
+      ctx.fillStyle = '#475569';
+      ctx.font = '11px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Place an Oscilloscope component to capture waveforms', W / 2, H / 2 - 8);
+      ctx.fillText('Probes measure voltage across their + and - terminals', W / 2, H / 2 + 10);
+    }
+
+    // Traces: shared X mapping (time window), per-channel Y mapping
+    // (V/div + offset); AC coupling removes the channel mean first.
+    for (const ch of channels) {
+      if (!ch.visible || ch.samples.length < 2) continue;
+      const samples = ch.samples.length > maxSamples ? ch.samples.slice(-maxSamples) : ch.samples;
+      const coupled = applyCoupling(samples, ch.coupling);
+      const vWin = computeVoltageWindow(ch.voltageScale, ch.voltageOffset);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, W, H); // clip the trace to the graticule
+      ctx.clip();
+      ctx.strokeStyle = ch.color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let i = 0; i < coupled.length; i++) {
+        const x = mapTimeToX(coupled[i].time, timeWindow, 0, W);
+        const y = mapVoltageToY(coupled[i].voltage, vWin, 0, H);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Trigger level marker: drawn through the source channel's Y mapping so it
+    // tracks that channel's V/div / offset / coupling. Display only — traces
+    // keep streaming continuously regardless of the trigger state.
+    const trigCh = channels[trigger.source];
+    if (trigCh) {
+      const vWin = computeVoltageWindow(trigCh.voltageScale, trigCh.voltageOffset);
+      const level = trigger.level - (trigCh.coupling === 'AC' ? meanVoltage(trigCh.samples) : 0);
+      const y = mapVoltageToY(level, vWin, 0, H);
+      if (y >= 0 && y <= H) {
+        ctx.strokeStyle = '#fb923c';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(0, Math.round(y) + 0.5);
+        ctx.lineTo(W, Math.round(y) + 0.5);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // slope arrow at the left edge (▲ rising / ▼ falling)
+        ctx.fillStyle = '#fb923c';
+        ctx.beginPath();
+        const s = 5;
+        if (trigger.edge === 'rising') {
+          ctx.moveTo(4, y - s);
+          ctx.lineTo(4 + s * 0.8, y + s * 0.6);
+          ctx.lineTo(4 - s * 0.8, y + s * 0.6);
+        } else {
+          ctx.moveTo(4, y + s);
+          ctx.lineTo(4 + s * 0.8, y - s * 0.6);
+          ctx.lineTo(4 - s * 0.8, y - s * 0.6);
+        }
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
+
+    // Channel label boxes along the left edge: "CHn <V/div> <s/div>"
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    let boxY = 4;
+    for (let i = 0; i < channels.length; i++) {
+      const ch = channels[i];
+      if (!ch.visible) continue;
+      const text = `CH${i + 1} ${formatVoltageScale(ch.voltageScale)} ${formatTimebase(timebase)}`;
+      const tw = ctx.measureText(text).width;
+      ctx.fillStyle = 'rgba(10, 15, 28, 0.85)';
+      ctx.fillRect(4, boxY, tw + 10, 14);
+      ctx.strokeStyle = ch.color;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(4.5, boxY + 0.5, tw + 9, 13);
+      ctx.fillStyle = ch.color;
+      ctx.fillText(text, 9, boxY + 2);
+      boxY += 17;
+    }
+
+    // A/B cursors: A solid amber, B dashed cyan, with a flag label at the top.
+    const drawCursorLine = (time: number, color: string, dashed: boolean, label: string) => {
+      const x = mapTimeToX(time, timeWindow, 0, W);
+      if (x < -1 || x > W + 1) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      if (dashed) ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(Math.round(x) + 0.5, 0);
+      ctx.lineTo(Math.round(x) + 0.5, H);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      ctx.font = 'bold 9px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(label, x, 2);
+    };
+    if (cursorA.enabled) drawCursorLine(cursorA.time, '#f59e0b', false, 'A');
+    if (cursorB.enabled) drawCursorLine(cursorB.time, '#22d3ee', true, 'B');
+
+    ctx.restore();
+  }, [channels, scopeConfig, timeWindow, canvasRef]);
+
+  useEffect(() => { draw(); }, [draw]);
+  // Redraw when the canvas (re)mounts or resizes — covers tab switches, which
+  // remount the canvas without changing any draw dependency.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ro = new ResizeObserver(() => draw());
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [canvasRef, draw]);
+
+  // ─── Cursor dragging (pointer events) ──────────────────────────────────
+  const dragRef = useRef<'A' | 'B' | null>(null);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!a.enabled && !b.enabled) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    // grab the nearest enabled cursor within 10 px
+    let best: 'A' | 'B' | null = null;
+    let bestDist = 10;
+    if (a.enabled) {
+      const d = Math.abs(mapTimeToX(a.time, timeWindow, 0, rect.width) - px);
+      if (d <= bestDist) { best = 'A'; bestDist = d; }
+    }
+    if (b.enabled) {
+      const d = Math.abs(mapTimeToX(b.time, timeWindow, 0, rect.width) - px);
+      if (d <= bestDist) { best = 'B'; bestDist = d; }
+    }
+    if (best) {
+      dragRef.current = best;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    }
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const key = dragRef.current;
+    if (!key) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const t = mapXToTime(e.clientX - rect.left, timeWindow, 0, rect.width);
+    setScopeConfig((s) =>
+      key === 'A'
+        ? { ...s, cursorA: { ...s.cursorA, time: t } }
+        : { ...s, cursorB: { ...s.cursorB, time: t } },
+    );
+  };
+
+  const endDrag = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      // pointer capture may already have been released
+    }
+  };
+
+  // ─── Toolbar actions ───────────────────────────────────────────────────
+  const stepTimebase = (dir: 1 | -1) =>
+    setScopeConfig((s) => ({ ...s, timebase: stepPreset(TIMEBASE_PRESETS, s.timebase, dir) }));
+
+  const stepVoltsPerDiv = (dir: 1 | -1) => {
+    if (!selected) return;
+    updateChannelSetting(selected.id, { voltageScale: stepPreset(VOLTAGE_SCALE_PRESETS, selected.voltageScale, dir) });
+  };
+
+  const stepOffset = (dir: 1 | -1) => {
+    if (!selected) return;
+    // quarter-division steps keep the control useful at every V/div
+    const next = selected.voltageOffset + dir * (selected.voltageScale / 4);
+    updateChannelSetting(selected.id, { voltageOffset: Math.max(-1000, Math.min(1000, next)) });
+  };
+
+  const toggleCoupling = () => {
+    if (!selected) return;
+    updateChannelSetting(selected.id, { coupling: selected.coupling === 'DC' ? 'AC' : 'DC' });
+  };
+
+  const toggleCursor = (key: 'A' | 'B') =>
+    setScopeConfig((s) => {
+      const cur = key === 'A' ? s.cursorA : s.cursorB;
+      // drop a newly-enabled cursor at the window center ("now")
+      const time = cur.enabled ? cur.time : (timeWindow.tStart + timeWindow.tEnd) / 2;
+      return key === 'A'
+        ? { ...s, cursorA: { ...cur, enabled: !cur.enabled, time } }
+        : { ...s, cursorB: { ...cur, enabled: !cur.enabled, time } };
+    });
+
+  const nudgeCursor = (key: 'A' | 'B', dir: 1 | -1) =>
+    setScopeConfig((s) => {
+      // 0.1 division per press — fine enough for 1/Δt frequency measurements
+      const step = s.timebase / 10;
+      return key === 'A'
+        ? { ...s, cursorA: { ...s.cursorA, time: s.cursorA.time + dir * step } }
+        : { ...s, cursorB: { ...s.cursorB, time: s.cursorB.time + dir * step } };
+    });
+
+  // ─── Readouts ──────────────────────────────────────────────────────────
+  // Cursor readouts: Δt, 1/Δt and the (coupling-adjusted) voltage of the
+  // selected channel at each cursor position.
+  const cursorData = useMemo(() => {
+    if (!a.enabled && !b.enabled) return null;
+    const samples = selected ? applyCoupling(selected.samples, selected.coupling) : [];
+    const vA = a.enabled ? getVoltageAtTime(samples, a.time) : null;
+    const vB = b.enabled ? getVoltageAtTime(samples, b.time) : null;
+    const deltas = a.enabled && b.enabled ? computeCursorDeltas(a.time, b.time) : null;
+    return { vA, vB, deltas };
+  }, [a.enabled, a.time, b.enabled, b.time, selected]);
+
+  // Live measurements for the selected channel (coupling applied, so AC shows
+  // the coupled waveform's stats — Vavg ≈ 0, Vpp unchanged).
+  const measurements = useMemo(
+    () => (selected ? computeMeasurements(applyCoupling(selected.samples, selected.coupling)) : []),
+    [selected],
+  );
+
+  return (
+    <div className="border-b border-slate-800 p-2">
+      <div className="mb-1 flex items-center justify-between px-1">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+          <BarChart3 size={10} className="mr-1 inline" />
+          Waveform {(a.enabled || b.enabled) && '· Cursors ON'}
+        </span>
+        <span className="text-[10px] text-slate-500">{traces.length} channel{traces.length !== 1 ? 's' : ''}</span>
+      </div>
+
+      {/* Compact scope toolbar */}
+      <div className="mb-1.5 space-y-1">
+        {/* Row 1: timebase + trigger status */}
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-[9px] uppercase tracking-wider text-slate-500">Time</span>
+          <ToolBtn label="Decrease timebase (finer)" onClick={() => stepTimebase(-1)}>−</ToolBtn>
+          <span className="w-[84px] text-center font-mono text-[10px] text-slate-200" aria-live="polite">{formatTimebase(scopeConfig.timebase)}</span>
+          <ToolBtn label="Increase timebase (coarser)" onClick={() => stepTimebase(1)}>+</ToolBtn>
+          <span className="ml-auto flex items-center gap-1 font-mono text-[10px]" title="Trigger — display only; traces stream continuously">
+            <Zap size={10} className={trig.armed ? 'text-orange-400' : 'text-slate-600'} aria-hidden="true" />
+            <span className={trig.armed ? 'text-orange-400' : 'text-slate-500'}>{trig.armed ? 'ARMED' : 'IDLE'}</span>
+            <span className="text-slate-600">·</span>
+            <span className="text-slate-400">{`CH${trig.source + 1}`}</span>
+            <span className="text-slate-600">·</span>
+            <span className="text-slate-400">{trig.edge === 'rising' ? '↑' : '↓'}</span>
+            <span className="text-slate-600">·</span>
+            <span className="text-slate-400">{formatVoltage(trig.level)}</span>
+          </span>
+        </div>
+
+        {/* Row 2: selected-channel vertical controls */}
+        <div className="flex flex-wrap items-center gap-1">
+          <select
+            value={traceIdx}
+            onChange={(e) => setSelectedChannel(parseInt(e.target.value, 10))}
+            disabled={traces.length === 0}
+            aria-label="Selected channel"
+            className="cursor-pointer rounded border border-slate-700 bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-200"
+          >
+            {traces.length === 0 ? (
+              <option value={0}>No traces</option>
+            ) : (
+              traces.map((t, i) => (
+                <option key={t.componentId} value={i}>{`CH${i + 1}: ${t.label}`}</option>
+              ))
+            )}
+          </select>
+          <ToolBtn label="Decrease volts per division" onClick={() => stepVoltsPerDiv(-1)} disabled={!selected}>−</ToolBtn>
+          <span className="w-[84px] text-center font-mono text-[10px] text-slate-200" aria-live="polite">{selected ? formatVoltageScale(selected.voltageScale) : '—'}</span>
+          <ToolBtn label="Increase volts per division" onClick={() => stepVoltsPerDiv(1)} disabled={!selected}>+</ToolBtn>
+          <ToolBtn
+            label={selected?.coupling === 'AC' ? 'Switch coupling to DC' : 'Switch coupling to AC (removes DC offset)'}
+            onClick={toggleCoupling}
+            disabled={!selected}
+            active={selected?.coupling === 'AC'}
+          >
+            {selected?.coupling ?? 'DC'}
+          </ToolBtn>
+          <span className="text-[9px] uppercase tracking-wider text-slate-500" title="Vertical offset — voltage at screen center">Ofs</span>
+          <ToolBtn label="Decrease vertical offset" onClick={() => stepOffset(-1)} disabled={!selected}>−</ToolBtn>
+          <span className="w-[70px] text-center font-mono text-[10px] text-slate-200" aria-live="polite">{selected ? formatVoltage(selected.voltageOffset) : '—'}</span>
+          <ToolBtn label="Increase vertical offset" onClick={() => stepOffset(1)} disabled={!selected}>+</ToolBtn>
+        </div>
+
+        {/* Row 3: A/B cursors */}
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-[9px] uppercase tracking-wider text-slate-500">Cursors</span>
+          <ToolBtn label="Toggle cursor A" onClick={() => toggleCursor('A')} active={a.enabled}>A</ToolBtn>
+          <ToolBtn label="Move cursor A left (0.1 div)" onClick={() => nudgeCursor('A', -1)} disabled={!a.enabled}>◀</ToolBtn>
+          <ToolBtn label="Move cursor A right (0.1 div)" onClick={() => nudgeCursor('A', 1)} disabled={!a.enabled}>▶</ToolBtn>
+          <ToolBtn label="Toggle cursor B" onClick={() => toggleCursor('B')} active={b.enabled}>B</ToolBtn>
+          <ToolBtn label="Move cursor B left (0.1 div)" onClick={() => nudgeCursor('B', -1)} disabled={!b.enabled}>◀</ToolBtn>
+          <ToolBtn label="Move cursor B right (0.1 div)" onClick={() => nudgeCursor('B', 1)} disabled={!b.enabled}>▶</ToolBtn>
+        </div>
+      </div>
+
+      {/* Graticule canvas: 10 × 8 divisions, pointer-draggable A/B cursors */}
+      <div className="relative h-48 rounded-md border border-slate-800 bg-[#0a0f1c]">
+        <canvas
+          ref={canvasRef}
+          className="h-full w-full touch-none"
+          aria-label="Oscilloscope waveform display"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        />
+      </div>
+
+      {/* Cursor readout row */}
+      <div className="mt-1 rounded border border-slate-800 bg-slate-800/40 px-2 py-1 font-mono text-[10px]">
+        {cursorData ? (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+            {selected && <span style={{ color: selected.color }}>{selected.label}</span>}
+            {a.enabled && <span className="text-amber-400">tA={formatDuration(a.time)}</span>}
+            {cursorData.vA !== null && <span className="text-slate-200">VA={formatVoltage(cursorData.vA)}</span>}
+            {b.enabled && <span className="text-cyan-300">tB={formatDuration(b.time)}</span>}
+            {cursorData.vB !== null && <span className="text-slate-200">VB={formatVoltage(cursorData.vB)}</span>}
+            {cursorData.deltas && <span className="text-slate-300">Δt={formatDuration(cursorData.deltas.dt)}</span>}
+            {cursorData.deltas?.freq != null && <span className="text-cyan-300">1/Δt={formatFrequency(cursorData.deltas.freq)}</span>}
+          </div>
+        ) : (
+          <span className="text-slate-500">Enable cursor A/B to measure Δt, 1/Δt and voltages</span>
+        )}
+      </div>
+
+      {/* Measurements row (selected channel) */}
+      {scopeConfig.showMeasurements && measurements.length > 0 && (
+        <div className="mt-1 grid grid-cols-5 gap-1">
+          {measurements.map((m) => (
+            <div key={m.name} className="rounded bg-slate-950/60 px-1 py-1 text-center" title={`${m.name} — selected channel`}>
+              <div className="text-[9px] uppercase tracking-wider text-slate-500">{m.name}</div>
+              <div className="font-mono text-[10px] text-slate-100">{m.value.toFixed(3)}<span className="text-slate-500"> V</span></div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Tiny keyboard-accessible toolbar button used by the scope controls. */
+function ToolBtn({ children, label, onClick, disabled, active }: {
+  children: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  active?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      aria-pressed={active}
+      disabled={disabled}
+      onClick={onClick}
+      className={`cursor-pointer rounded border px-1.5 py-0.5 font-mono text-[10px] leading-none transition-colors ${
+        active
+          ? 'border-amber-500/50 bg-amber-500/20 text-amber-300'
+          : 'border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-slate-100'
+      } disabled:cursor-not-allowed disabled:opacity-40`}
+    >
+      {children}
+    </button>
   );
 }
 

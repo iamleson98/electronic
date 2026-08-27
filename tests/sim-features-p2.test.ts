@@ -17,7 +17,10 @@ describe('Simulation Features', () => {
   it('ProbePanel has cursor toggle and tab system', async () => {
     const fs = await import('fs/promises');
     const source = await fs.readFile('./src/components/circuit/ProbePanel.tsx', 'utf-8');
-    expect(source).toContain('cursorEnabled');
+    // Updated for the scope-viewer integration: the old single `cursorEnabled`
+    // flag was replaced by A/B cursors on the ScopeConfig.
+    expect(source).toContain('cursorA');
+    expect(source).toContain('cursorB');
     expect(source).toContain('Crosshair');
     expect(source).toContain('activeTab');
     expect(source).toContain("'scope'");
@@ -28,8 +31,12 @@ describe('Simulation Features', () => {
   it('ProbePanel has measurement cursor readout logic', async () => {
     const fs = await import('fs/promises');
     const source = await fs.readFile('./src/components/circuit/ProbePanel.tsx', 'utf-8');
-    expect(source).toContain('cursorReadout');
-    expect(source).toContain('handleCanvasMouseMove');
+    // Updated for the scope-viewer integration: A/B cursor readouts use
+    // getVoltageAtTime / computeCursorDeltas and pointer-event dragging.
+    expect(source).toContain('scopeReadout');
+    expect(source).toContain('getVoltageAtTime');
+    expect(source).toContain('computeCursorDeltas');
+    expect(source).toContain('handlePointerDown');
     // Cursor line drawn on canvas
     expect(source).toContain('setLineDash');
   });
