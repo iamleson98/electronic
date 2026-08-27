@@ -1,50 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { desc, eq, like, and } from 'drizzle-orm';
 import { getDb } from '@/lib/db';
-import { savedCircuits } from '@/lib/schema';
+import { createCircuit, listCircuits, withTagList } from '@/lib/circuits-service';
 import { createCircuitSchema } from '@/lib/validation-schemas';
 
 // GET /api/circuits — list saved circuits with pagination + optional filters.
 // Query params: ?cursor=<id>&limit=<n>&search=<text>&tag=<text>&isExample=<bool>
+//
+// `tag`   → exact, case-insensitive match against the normalized circuit_tags
+//           rows (no more "power" matching "superpower").
+// `search`→ FTS5 MATCH over name+description+tags with prefix matching on the
+//           last term; falls back to the legacy name LIKE filter if the FTS
+//           query fails. See src/lib/circuits-service.ts (listCircuits).
 export async function GET(req?: NextRequest) {
   try {
     const url = req?.url ?? 'http://localhost/api/circuits';
     const { searchParams } = new URL(url);
-    const limit = Math.min(100, Math.max(1, Number(searchParams.get('limit') ?? 50)));
-    const search = searchParams.get('search');
-    const tag = searchParams.get('tag');
-    const isExample = searchParams.get('isExample');
+    const limit = Number(searchParams.get('limit') ?? 50);
 
-    const conditions: any[] = [];
-    if (search) conditions.push(like(savedCircuits.name, `%${search}%`));
-    if (tag) conditions.push(like(savedCircuits.tags, `%${tag}%`));
-    if (isExample === 'true') conditions.push(eq(savedCircuits.isExample, true));
-    if (isExample === 'false') conditions.push(eq(savedCircuits.isExample, false));
+    const result = await listCircuits(await getDb(), {
+      search: searchParams.get('search'),
+      tag: searchParams.get('tag'),
+      isExample: searchParams.get('isExample'),
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
 
-    const where = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const db = await getDb();
-    const query = db
-      .select({
-        id: savedCircuits.id,
-        name: savedCircuits.name,
-        description: savedCircuits.description,
-        tags: savedCircuits.tags,
-        isExample: savedCircuits.isExample,
-        createdAt: savedCircuits.createdAt,
-        updatedAt: savedCircuits.updatedAt,
-      })
-      .from(savedCircuits)
-      .orderBy(desc(savedCircuits.updatedAt))
-      .limit(limit + 1); // +1 to check if there are more
-
-    const circuits = where ? await query.where(where) : await query;
-
-    const hasMore = circuits.length > limit;
-    const items = hasMore ? circuits.slice(0, limit) : circuits;
-    const nextCursor = hasMore ? items[items.length - 1]?.id : null;
-
-    return NextResponse.json({ circuits: items, nextCursor });
+    return NextResponse.json(result);
   } catch (err) {
     console.error('[API] GET /api/circuits error:', err);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
@@ -52,6 +32,8 @@ export async function GET(req?: NextRequest) {
 }
 
 // POST /api/circuits — create a new saved circuit.
+// The TEXT `tags` column, the normalized `circuit_tags` rows and the
+// `circuits_fts` index entry are written atomically (one libsql write batch).
 export async function POST(req: NextRequest) {
   try {
     // Validate content-type
@@ -78,19 +60,16 @@ export async function POST(req: NextRequest) {
 
     const data = parseResult.data;
 
-    const db = await getDb();
-    const [circuit] = await db
-      .insert(savedCircuits)
-      .values({
-        name: data.name,
-        description: data.description,
-        document: data.document,
-        tags: data.tags,
-        isExample: data.isExample,
-      })
-      .returning();
+    const circuit = await createCircuit(await getDb(), {
+      name: data.name,
+      description: data.description,
+      document: data.document,
+      tags: data.tags,
+      isExample: data.isExample,
+    });
 
-    return NextResponse.json({ circuit }, { status: 201 });
+    // `tagList` is an added field; all pre-existing fields are unchanged.
+    return NextResponse.json({ circuit: withTagList(circuit) }, { status: 201 });
   } catch (err) {
     console.error('[API] POST /api/circuits error:', err);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

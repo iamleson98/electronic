@@ -25,6 +25,8 @@ interface SavedCircuit {
   name: string;
   description: string;
   tags: string;
+  /** Parsed tags from the server (added field; falls back to `tags` if absent). */
+  tagList?: string[];
   isExample: boolean;
   createdAt: string;
   updatedAt: string;
@@ -237,9 +239,21 @@ export function MyCircuitsDialog({ open, onClose }: { open: boolean; onClose: ()
                       {c.description && (
                         <p className="text-xs text-slate-400 mt-0.5 line-clamp-2">{c.description}</p>
                       )}
-                      <div className="flex items-center gap-2 mt-1.5 text-[10px] text-slate-500">
+                      <div className="flex flex-wrap items-center gap-1.5 mt-1.5 text-[10px] text-slate-500">
                         <span>{new Date(c.updatedAt).toLocaleDateString()} {new Date(c.updatedAt).toLocaleTimeString()}</span>
-                        {c.tags && <span>• {c.tags}</span>}
+                        {c.tagList && c.tagList.length > 0 ? (
+                          c.tagList.map((t) => (
+                            <Badge
+                              key={t}
+                              variant="outline"
+                              className="h-4 px-1.5 text-[9px] leading-none border-slate-700 bg-slate-800/60 text-slate-400"
+                            >
+                              {t}
+                            </Badge>
+                          ))
+                        ) : (
+                          c.tags && <span>• {c.tags}</span>
+                        )}
                       </div>
                     </div>
                     <div className="flex gap-1">

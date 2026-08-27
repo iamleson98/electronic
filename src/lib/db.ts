@@ -14,6 +14,11 @@
 // Migrations live in ./drizzle/. The __drizzle_migrations table tracks applied
 // migrations so each only runs once (idempotent across deploys).
 //
+// After applying pending migrations, runMigrations() also rebuilds the derived
+// tag/FTS indexes (circuit_tags + circuits_fts) from the TEXT `tags` column —
+// see src/lib/circuits-service.ts. That backfill is idempotent and doubles as
+// a self-heal: the TEXT column is the source of truth.
+//
 // During `next build`, returns a no-op stub — the real DB is only needed at
 // runtime when API routes handle requests.
 
@@ -22,6 +27,7 @@ import { drizzle } from 'drizzle-orm/libsql';
 import { migrate } from 'drizzle-orm/libsql/migrator';
 import { resolve } from 'node:path';
 import { savedCircuits } from './schema';
+import { rebuildTagsAndFts } from './circuits-service';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config — read env vars lazily so tests can override them.
@@ -75,6 +81,17 @@ export async function runMigrations(): Promise<void> {
     }
     const db = createDrizzleDb();
     await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    // Backfill/self-heal the derived tag + FTS tables from the TEXT tags
+    // column (idempotent — delete + reinsert per circuit; see
+    // circuits-service.ts). Best-effort: a failure here must not break
+    // startup — reads degrade to LIKE filters and the next deploy retries.
+    if (globalForDb.__libsqlClient) {
+      try {
+        await rebuildTagsAndFts(globalForDb.__libsqlClient);
+      } catch (backfillErr) {
+        console.error('[db] tags/FTS backfill failed (will retry next start):', backfillErr);
+      }
+    }
     globalForDb.__migrationsApplied = true;
     if (process.env.NODE_ENV !== 'production') {
       globalForDb.__drizzleDb = db;

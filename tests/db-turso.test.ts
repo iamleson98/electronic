@@ -9,6 +9,8 @@ import { getDb, dbReady } from '../src/lib/db';
 import { savedCircuits } from '../src/lib/schema';
 import { eq } from 'drizzle-orm';
 import { createClient } from '@libsql/client';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -74,7 +76,7 @@ describe('db.ts: migration-based schema creation', () => {
   });
 
   it('re-running init does not duplicate migrations (idempotent)', async () => {
-    await getDb();  // first init — applies migration
+    await getDb();  // first init — applies migrations
     // Re-call getDb() WITHOUT clearing the cache — should return the same
     // promise and NOT re-apply migrations.
     await getDb();
@@ -83,8 +85,27 @@ describe('db.ts: migration-based schema creation', () => {
     if (client) {
       const result = await client.execute('SELECT COUNT(*) as count FROM __drizzle_migrations');
       const count = (result.rows[0] as any).count;
-      expect(count).toBe(1);  // still only 1 migration
+      // One row per migration file in drizzle/meta/_journal.json — re-running
+      // init must not duplicate them (was hardcoded 1 before 0001_tags_fts).
+      const journal = JSON.parse(
+        readFileSync(resolve(process.cwd(), 'drizzle/meta/_journal.json'), 'utf8'),
+      );
+      expect(count).toBe(journal.entries.length);
     }
+  });
+
+  it('applies the tags/FTS migration (circuit_tags + circuits_fts exist)', async () => {
+    const db = await getDb();
+    const g = globalThis as any;
+    const client = g.__libsqlClient;
+    if (client) {
+      const result = await client.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('circuit_tags','circuits_fts')",
+      );
+      const names = result.rows.map((r: any) => r.name).sort();
+      expect(names).toEqual(['circuit_tags', 'circuits_fts']);
+    }
+    expect(db).toBeDefined();
   });
 
   it('can perform CRUD operations on the migrated table', async () => {

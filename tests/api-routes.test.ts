@@ -37,6 +37,21 @@ beforeAll(async () => {
   `);
   await client.execute('CREATE INDEX IF NOT EXISTS saved_circuits_name_idx ON saved_circuits (name)');
   await client.execute('CREATE INDEX IF NOT EXISTS saved_circuits_updated_at_idx ON saved_circuits (updated_at)');
+  // Derived tag/FTS tables (mirrors drizzle/0001_tags_fts.sql; the service
+  // also creates them lazily via ensureDerivedTables).
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS circuit_tags (
+      id TEXT PRIMARY KEY NOT NULL,
+      circuit_id TEXT NOT NULL,
+      tag TEXT NOT NULL,
+      FOREIGN KEY (circuit_id) REFERENCES saved_circuits(id) ON UPDATE no action ON DELETE cascade
+    )
+  `);
+  await client.execute('CREATE UNIQUE INDEX IF NOT EXISTS circuit_tags_circuit_id_tag_idx ON circuit_tags (circuit_id, tag)');
+  await client.execute('CREATE INDEX IF NOT EXISTS circuit_tags_tag_idx ON circuit_tags (tag)');
+  await client.execute("CREATE VIRTUAL TABLE IF NOT EXISTS circuits_fts USING fts5(name, description, tags, circuit_id UNINDEXED)");
+  await client.execute('DELETE FROM circuits_fts');
+  await client.execute('DELETE FROM circuit_tags');
   await client.execute('DELETE FROM saved_circuits');
 });
 
@@ -55,6 +70,24 @@ describe('API: GET /api/circuits', () => {
     const data = await res.json();
     expect(data.circuits).toBeDefined();
     expect(Array.isArray(data.circuits)).toBe(true);
+  });
+
+  it('returns tagList alongside the legacy tags field', async () => {
+    const req = makeReq('http://localhost/api/circuits', 'POST', {
+      name: 'TagList Shape',
+      document: '{}',
+      tags: 'alpha, Beta',
+      isExample: false,
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(201);
+
+    const listRes = await GET(makeReq('http://localhost/api/circuits', 'GET'));
+    const data = await listRes.json();
+    const found = data.circuits.find((c: any) => c.name === 'TagList Shape');
+    expect(found).toBeDefined();
+    expect(found.tags).toBe('alpha, Beta'); // legacy field, unchanged
+    expect(found.tagList).toEqual(['alpha', 'Beta']); // added field
   });
 });
 
@@ -162,6 +195,94 @@ describe('API: DELETE /api/circuits/[id]', () => {
     const req = makeReq(`http://localhost/api/circuits/${inserted.id}`, 'DELETE');
     const res = await DELETE(req, { params: Promise.resolve({ id: inserted.id }) });
     expect(res.status).toBe(204);
+  });
+});
+
+describe('API: tag/FTS derived-table sync through the routes', () => {
+  it('POST populates circuit_tags and circuits_fts', async () => {
+    const req = makeReq('http://localhost/api/circuits', 'POST', {
+      name: 'Sync Me',
+      description: 'synced description',
+      document: '{}',
+      tags: 'power, supply',
+      isExample: false,
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(201);
+    const { circuit } = await res.json();
+
+    const tags = await client.execute({
+      sql: 'SELECT tag FROM circuit_tags WHERE circuit_id = ? ORDER BY tag',
+      args: [circuit.id],
+    });
+    expect(tags.rows.map((r) => r.tag)).toEqual(['power', 'supply']);
+
+    const fts = await client.execute({
+      sql: 'SELECT name, description, tags FROM circuits_fts WHERE circuit_id = ?',
+      args: [circuit.id],
+    });
+    expect(fts.rows[0]).toMatchObject({
+      name: 'Sync Me',
+      description: 'synced description',
+      tags: 'power, supply',
+    });
+  });
+
+  it('PUT replaces circuit_tags and re-indexes FTS', async () => {
+    const req = makeReq('http://localhost/api/circuits', 'POST', {
+      name: 'Before Sync Update',
+      document: '{}',
+      tags: 'old',
+      isExample: false,
+    });
+    const { circuit } = await (await POST(req)).json();
+
+    const putRes = await PUT(
+      makeReq(`http://localhost/api/circuits/${circuit.id}`, 'PUT', {
+        name: 'After Sync Update',
+        tags: 'new, shiny',
+      }),
+      { params: Promise.resolve({ id: circuit.id }) },
+    );
+    expect(putRes.status).toBe(200);
+
+    const tags = await client.execute({
+      sql: 'SELECT tag FROM circuit_tags WHERE circuit_id = ? ORDER BY tag',
+      args: [circuit.id],
+    });
+    expect(tags.rows.map((r) => r.tag)).toEqual(['new', 'shiny']);
+
+    const fts = await client.execute({
+      sql: 'SELECT name, tags FROM circuits_fts WHERE circuit_id = ?',
+      args: [circuit.id],
+    });
+    expect(fts.rows[0]).toMatchObject({ name: 'After Sync Update', tags: 'new, shiny' });
+  });
+
+  it('DELETE removes circuit_tags and circuits_fts rows', async () => {
+    const req = makeReq('http://localhost/api/circuits', 'POST', {
+      name: 'Delete Sync',
+      document: '{}',
+      tags: 'gone',
+      isExample: false,
+    });
+    const { circuit } = await (await POST(req)).json();
+
+    const res = await DELETE(makeReq(`http://localhost/api/circuits/${circuit.id}`, 'DELETE'), {
+      params: Promise.resolve({ id: circuit.id }),
+    });
+    expect(res.status).toBe(204);
+
+    const tags = await client.execute({
+      sql: 'SELECT COUNT(*) as n FROM circuit_tags WHERE circuit_id = ?',
+      args: [circuit.id],
+    });
+    const fts = await client.execute({
+      sql: 'SELECT COUNT(*) as n FROM circuits_fts WHERE circuit_id = ?',
+      args: [circuit.id],
+    });
+    expect(Number((tags.rows[0] as any).n)).toBe(0);
+    expect(Number((fts.rows[0] as any).n)).toBe(0);
   });
 });
 
