@@ -3,6 +3,10 @@
 // Shift+R (free rotate), Ctrl+Z/Y (undo/redo), Ctrl+C/V/D (copy/paste/duplicate),
 // Ctrl+A (select all), Ctrl+F (find), N (no-connect), Space (play/pause),
 // \ (45° routing toggle), Escape (cancel/clear).
+// A11y: while a placement draft is active, arrow keys nudge it, Enter places,
+// Shift+Enter places-and-repeats, R rotates the draft, Esc cancels. Tab /
+// Shift+Tab cycles virtual focus through components and wires (the focused
+// item is the selection, so Delete/R/X/PropertyPanel all work on it).
 
 import { useEffect } from 'react';
 import { useEditor } from '@/lib/circuit/store';
@@ -24,6 +28,49 @@ export function useCanvasKeyboard(opts: {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
+
+      // ── Keyboard placement mode (a11y) — takes priority over everything ────
+      const st = useEditor.getState();
+      if (st.placementDraft) {
+        const step = e.shiftKey ? 5 : 1; // Shift = fast nudge
+        switch (e.key) {
+          case 'ArrowUp':
+          case 'ArrowDown':
+          case 'ArrowLeft':
+          case 'ArrowRight': {
+            e.preventDefault();
+            const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+            const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+            useEditor.getState().nudgePlacement(dx, dy);
+            return;
+          }
+          case 'Enter':
+            e.preventDefault();
+            useEditor.getState().confirmPlacement(e.shiftKey);
+            return;
+          case 'r':
+          case 'R':
+            e.preventDefault();
+            useEditor.getState().rotatePlacement();
+            return;
+          case 'Escape':
+            e.preventDefault();
+            useEditor.getState().cancelPlacement();
+            return;
+        }
+      }
+
+      // ── Virtual focus cycling (a11y): Tab / Shift+Tab ──────────────────────
+      if (e.key === 'Tab') {
+        // Only intercept when the canvas itself (not a dialog/input) has DOM
+        // focus — otherwise we'd trap Tab inside the app.
+        const canvasEl = (target as HTMLElement).closest?.('[role="application"]') as HTMLElement | null;
+        if (canvasEl) {
+          e.preventDefault();
+          useEditor.getState().focusCycle(e.shiftKey ? -1 : 1);
+          return;
+        }
+      }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (running) return;

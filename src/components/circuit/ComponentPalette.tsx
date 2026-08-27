@@ -31,7 +31,7 @@ const categoryIcons: Record<string, React.ComponentType<{ size?: number; classNa
 
 export function ComponentPalette() {
   const [query, setQuery] = useState('');
-  const addComponent = useEditor((s) => s.addComponent);
+  const startPlacement = useEditor((s) => s.startPlacement);
   const running = useEditor((s) => s.running);
   // Re-fetch the plugin list when a new plugin is registered at runtime
   // (e.g. from the Symbol Editor or Sub-Circuit dialog). Without this the
@@ -107,7 +107,16 @@ export function ComponentPalette() {
                       }}
                       onClick={() => {
                         if (running) return;
-                        addComponent(plugin.type, { x: 8, y: 8 });
+                        // Enter keyboard placement mode: the ghost appears on
+                        // the canvas, arrows move it, Enter places, Esc cancels.
+                        // (Also mouse-friendly: clicking the canvas places there.)
+                        startPlacement(plugin.type, { x: 8, y: 8 });
+                        // Focus the canvas so arrow keys/Enter land on it —
+                        // keeps the flow fully keyboard-operable.
+                        requestAnimationFrame(() => {
+                          const canvas = document.querySelector('[role="application"]') as HTMLElement | null;
+                          canvas?.focus();
+                        });
                       }}
                       disabled={running}
                       title={running ? 'Pause simulation to add components' : `${plugin.name} — ${plugin.description}`}

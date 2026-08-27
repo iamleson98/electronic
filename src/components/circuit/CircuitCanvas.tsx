@@ -75,6 +75,7 @@ export function CircuitCanvas() {
   const showGrid = useEditor((s) => s.showGrid);
   const snapToGrid = useEditor((s) => s.snapToGrid);
   const wireDraft = useEditor((s) => s.wireDraft);
+  const placementDraftActive = useEditor((s) => s.placementDraft);
   // KiCad-parity new state
   const noConnects = useEditor((s) => s.noConnects);
   const drawings = useEditor((s) => s.drawings);
@@ -301,6 +302,21 @@ export function CircuitCanvas() {
       for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
       ctx.stroke();
 
+      // Virtual-keyboard focus ring for wires (a11y): dashed bbox around the
+      // selected (= focused) wire — matches the component focus ring style.
+      if (isSelected) {
+        ctx.save();
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.5;
+        const xs = path.map((p: { x: number; y: number }) => p.x);
+        const ys = path.map((p: { x: number; y: number }) => p.y);
+        const minX = Math.min(...xs), maxX = Math.max(...xs);
+        const minY = Math.min(...ys), maxY = Math.max(...ys);
+        ctx.strokeRect(minX - 6, minY - 6, (maxX - minX) + 12, (maxY - minY) + 12);
+        ctx.restore();
+      }
+
       // draw wire segment midpoint handles (only when not running, for editing)
       if (!running) {
         for (let i = 0; i < path.length - 1; i++) {
@@ -443,6 +459,19 @@ export function CircuitCanvas() {
         ctx.beginPath();
         ctx.rect(-2, -2, plugin.boundingBox.width * CELL_SIZE + 4, plugin.boundingBox.height * CELL_SIZE + 4);
         ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+      // Virtual-keyboard focus ring (a11y): a dashed outer ring marks the
+      // focused item — visually distinct from the solid amber selection
+      // halo and the cyan multi-select ring. Tab/Shift+Tab moves it.
+      if (isSelected) {
+        ctx.save();
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.rect(-6, -6, plugin.boundingBox.width * CELL_SIZE + 12, plugin.boundingBox.height * CELL_SIZE + 12);
         ctx.stroke();
         ctx.restore();
       }
@@ -714,6 +743,40 @@ export function CircuitCanvas() {
       }
     }
 
+    // ---- Keyboard-placement ghost (a11y) ----
+    // Rendered at 50% opacity with a dashed sky-blue ring; arrows move it,
+    // Enter places, Shift+Enter places-and-repeats, Esc cancels.
+    const placementDraft = useEditor.getState().placementDraft;
+    if (placementDraft) {
+      const ghostPlugin = getPlugin(placementDraft.type);
+      if (ghostPlugin) {
+        const gOrigin = gridToScreen(placementDraft.position.x, placementDraft.position.y);
+        ctx.save();
+        ctx.translate(gOrigin.x, gOrigin.y);
+        ctx.scale(zoom, zoom);
+        const gCx = ghostPlugin.boundingBox.width / 2;
+        const gCy = ghostPlugin.boundingBox.height / 2;
+        ctx.translate(gCx * CELL_SIZE, gCy * CELL_SIZE);
+        ctx.rotate((placementDraft.rotation * Math.PI) / 2);
+        ctx.translate(-gCx * CELL_SIZE, -gCy * CELL_SIZE);
+        // dashed placement ring
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(-2, -2, ghostPlugin.boundingBox.width * CELL_SIZE + 4, ghostPlugin.boundingBox.height * CELL_SIZE + 4);
+        ctx.setLineDash([]);
+        // semi-transparent body
+        ctx.globalAlpha = 0.5;
+        const ghostParams: Record<string, any> = {};
+        for (const p of ghostPlugin.parameters) ghostParams[p.key] = p.default;
+        try {
+          ghostPlugin.render(ctx, ghostParams, CELL_SIZE, undefined, undefined);
+        } catch { /* ghost render is best-effort */ }
+        ctx.globalAlpha = 1;
+        ctx.restore();
+      }
+    }
+
     // ---- No-Connect markers (red X on intentionally unused pins) ----
     for (const nc of noConnects) {
       const comp = components.find((c) => c.id === nc.componentId);
@@ -939,6 +1002,17 @@ export function CircuitCanvas() {
     // middle or right button: pan
     if (e.button === 1 || e.button === 2) {
       panRef.current = { start: { x: sx, y: sy }, origin: { ...pan } };
+      return;
+    }
+
+    // Placement mode (keyboard placement / palette click): a canvas click
+    // moves the draft to the clicked grid cell and confirms it there.
+    const draftNow = useEditor.getState().placementDraft;
+    if (draftNow) {
+      const snapOn = useEditor.getState().snapToGrid;
+      const target = snapOn ? { x: Math.round(g.x), y: Math.round(g.y) } : g;
+      useEditor.getState().nudgePlacement(target.x - draftNow.position.x, target.y - draftNow.position.y);
+      useEditor.getState().confirmPlacement(false);
       return;
     }
 
@@ -1419,6 +1493,9 @@ export function CircuitCanvas() {
       {/* status overlay */}
       <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-slate-900/80 px-2 py-1 text-xs font-mono text-slate-400">
         ({cursor.x.toFixed(1)}, {cursor.y.toFixed(1)})  zoom: {zoom.toFixed(2)}x  {running ? '▶ running' : '⏸ paused'}
+        {placementDraftActive && (
+          <span className="ml-2 text-sky-300">· Placing {placementDraftActive.type} — arrows move, Enter place, Shift+Enter repeat, R rotate, Esc cancel</span>
+        )}
         {running && <span className="ml-2 text-amber-300">· click switches to toggle</span>}
         {!running && ercErrors.length > 0 && (
           <span className="ml-2">

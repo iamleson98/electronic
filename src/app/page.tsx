@@ -47,6 +47,8 @@ export default function Home() {
   const [showLibrary, setShowLibrary] = useState(false);
   const [showAI, setShowAI] = useState(false);
   const [hasUnseenChangelog, setHasUnseenChangelog] = useState(false);
+  // Screen-reader announcements (keyboard focus cycling / placement mode)
+  const announcement = useEditor((s) => s.announcement);
 
   // "What's New" badge — visible on the Help button when there's an unseen changelog entry.
   useEffect(() => {
@@ -238,9 +240,12 @@ export default function Home() {
             <>
               <Toolbar />
               <div className="min-h-0 flex-1" id="main-content">
-                {/* ARIA live region for screen reader announcements */}
+                {/* ARIA live region for screen reader announcements.
+                    Shows the store's `announcement` (set by keyboard focus
+                    cycling / placement) when present, else the sim state. */}
                 <div aria-live="polite" className="sr-only">
-                  {useEditor.getState().running ? 'Simulation running' : 'Simulation stopped'}
+                  {announcement ??
+                    (useEditor.getState().running ? 'Simulation running' : 'Simulation stopped')}
                 </div>
                 <ResizablePanelGroup direction="horizontal">
                   <ResizablePanel defaultSize={14} minSize={10} maxSize={28}>

@@ -27,6 +27,13 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
   { key: 'Esc', description: 'Cancel wire / deselect', category: 'editing', implemented: true },
   { key: 'Double-click', description: 'Rotate component on double-click', category: 'editing', implemented: true },
 
+  // Accessibility (keyboard-only operation)
+  { key: 'Tab / Shift+Tab', description: 'Cycle keyboard focus between components and wires', category: 'editing', implemented: true },
+  { key: 'Arrows (placing)', description: 'Move placement ghost (Shift = 5 cells)', category: 'editing', implemented: true },
+  { key: 'Enter (placing)', description: 'Place component at ghost position (Shift+Enter = place and repeat)', category: 'editing', implemented: true },
+  { key: 'R (placing)', description: 'Rotate placement ghost', category: 'editing', implemented: true },
+  { key: 'Esc (placing)', description: 'Cancel placement', category: 'editing', implemented: true },
+
   // History
   { key: 'Ctrl+Z', description: 'Undo', category: 'history', implemented: true },
   { key: 'Ctrl+Shift+Z', description: 'Redo', category: 'history', implemented: true },

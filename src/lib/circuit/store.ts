@@ -102,6 +102,10 @@ interface EditorState {
   snapToGrid: boolean;
   // wire draft
   wireDraft: { from: { componentId: string; terminalId: string }; cursor: { x: number; y: number } } | null;
+  // keyboard placement draft (a11y): type + pending position + rotation
+  placementDraft: { type: string; position: { x: number; y: number }; rotation: number } | null;
+  /** Screen-reader announcement (rendered into the ARIA live region). */
+  announcement: string | null;
 
   // ── New KiCad-parity document state ──────────────────────────────────────
   sheets: HierarchicalSheet[];
@@ -239,6 +243,16 @@ interface EditorState {
   updateWireCursor: (cursor: { x: number; y: number }) => void;
   cancelWire: () => void;
   completeWire: (to: { componentId: string; terminalId: string }) => void;
+  // keyboard placement (a11y)
+  startPlacement: (type: string, position: { x: number; y: number }) => void;
+  nudgePlacement: (dx: number, dy: number) => void;
+  rotatePlacement: () => void;
+  confirmPlacement: (repeat?: boolean) => void;
+  cancelPlacement: () => void;
+  /** Move the virtual keyboard focus (Tab / Shift+Tab) among components/wires. */
+  focusCycle: (dir: 1 | -1) => void;
+  /** Set the screen-reader announcement. */
+  announce: (msg: string) => void;
   setWireWaypoints: (id: string, waypoints: { x: number; y: number }[]) => void;
   toggleSwitch: (id: string) => void;
   // find/replace
@@ -418,6 +432,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   showGrid: true,
   snapToGrid: true,
   wireDraft: null,
+  placementDraft: null,
+  announcement: null,
   // new doc state
   sheets: [],
   netClasses: [],
@@ -1260,6 +1276,96 @@ export const useEditor = create<EditorState>((set, get) => ({
   startWire: (from, cursor) => set({ wireDraft: { from, cursor } }),
   updateWireCursor: (cursor) => set((s) => (s.wireDraft ? { wireDraft: { ...s.wireDraft, cursor } } : {})),
   cancelWire: () => set({ wireDraft: null }),
+
+  // ── Keyboard placement (a11y) ─────────────────────────────────────────────
+  startPlacement: (type, position) => {
+    set({
+      placementDraft: { type, position: { ...position }, rotation: 0 },
+      announcement: `Placing ${type}. Arrow keys move, Enter places, Escape cancels.`,
+    });
+  },
+  nudgePlacement: (dx, dy) => {
+    set((s) => s.placementDraft ? {
+      placementDraft: {
+        ...s.placementDraft,
+        position: {
+          x: Math.max(0, s.placementDraft.position.x + dx),
+          y: Math.max(0, s.placementDraft.position.y + dy),
+        },
+      },
+    } : {});
+  },
+  rotatePlacement: () => {
+    set((s) => s.placementDraft ? {
+      placementDraft: { ...s.placementDraft, rotation: ((s.placementDraft.rotation + 1) % 4) as 0 | 1 | 2 | 3 },
+    } : {});
+  },
+  confirmPlacement: (repeat = false) => {
+    const draft = get().placementDraft;
+    if (!draft) return;
+    // addComponent pushes history, assigns refdes, selects the new part.
+    const id = get().addComponent(draft.type, draft.position);
+    // apply the draft rotation to the freshly placed part
+    const rot = draft.rotation as 0 | 1 | 2 | 3;
+    if (rot !== 0) {
+      set((s) => ({
+        components: s.components.map((c) =>
+          c.id === id ? { ...c, rotation: rot } : c,
+        ),
+      }));
+    }
+    if (repeat) {
+      // Shift+Enter: keep placing — offset the next draft so instances
+      // don't stack on top of each other.
+      set({
+        placementDraft: { ...draft, position: { x: draft.position.x + 3, y: draft.position.y + 3 }, rotation: 0 },
+        announcement: `Placed ${draft.type}. Continue placing — arrow keys move, Enter places.`,
+      });
+    } else {
+      set({ placementDraft: null, announcement: `Placed ${draft.type}.` });
+    }
+  },
+  cancelPlacement: () => set({ placementDraft: null, announcement: 'Placement cancelled.' }),
+
+  // ── Virtual keyboard focus (a11y): Tab / Shift+Tab cycling ────────────────
+  // Reuses `selection` as the focus target so every selection-based shortcut
+  // (Delete, R, X, PropertyPanel) works on the focused item for free.
+  focusCycle: (dir) => {
+    const s = get();
+    const items: { type: 'component' | 'wire'; id: string }[] = [
+      ...s.components.map((c) => ({ type: 'component' as const, id: c.id })),
+      ...s.wires.map((w) => ({ type: 'wire' as const, id: w.id })),
+    ];
+    if (items.length === 0) return;
+    const cur = s.selection && s.selection.type !== 'group' && s.selection.type !== 'sheet'
+      ? items.findIndex((it) => it.type === s.selection!.type && it.id === s.selection!.id)
+      : -1;
+    const next = cur === -1
+      ? (dir === 1 ? 0 : items.length - 1)
+      : (cur + dir + items.length) % items.length;
+    const target = items[next];
+    // Human-readable announcement: "R1 resistor, 2 of 12 components"
+    let label = target.id;
+    let kind: string = target.type;
+    if (target.type === 'component') {
+      const c = s.components.find((x) => x.id === target.id);
+      if (c) {
+        label = c.refdes ?? c.id;
+        kind = c.type;
+      }
+    }
+    const compCount = s.components.length;
+    const wireCount = s.wires.length;
+    const pos = target.type === 'component' ? next + 1 : next - compCount + 1;
+    set({
+      selection: { type: target.type, id: target.id },
+      multiSelection: { components: new Set(), wires: new Set() },
+      announcement: `${label} ${kind}, ${pos} of ${target.type === 'component' ? compCount : wireCount} ${target.type}s`,
+    });
+  },
+
+  announce: (msg) => set({ announcement: msg }),
+
   completeWire: (to) => {
     const draft = get().wireDraft;
     if (!draft) return;
@@ -1429,6 +1535,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       lastAnalysisResult: null,
       physicsViolations: [],
       wireDraft: null,
+      placementDraft: null,
     });
   },
 
@@ -1459,6 +1566,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       lastAnalysisResult: null,
       physicsViolations: [],
       wireDraft: null,
+      placementDraft: null,
       past: [],
       future: [],
     });
@@ -1749,6 +1857,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       physicsViolations: [],
       traces: [],
       wireDraft: null,
+      placementDraft: null,
     }));
   },
 
