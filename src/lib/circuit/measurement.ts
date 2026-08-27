@@ -18,7 +18,7 @@ import { runFour } from './analysis';
 // .meas parser
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type MeasType = 'FIND' | 'WHEN' | 'AVG' | 'MIN' | 'MAX' | 'PP' | 'RMS' | 'DELAY' | 'PARAM';
+export type MeasType = 'FIND' | 'WHEN' | 'AVG' | 'MIN' | 'MAX' | 'PP' | 'RMS' | 'DELAY' | 'PARAM' | 'TRIG';
 export type MeasMode = 'dc' | 'ac' | 'tran';
 
 export interface MeasCommand {
@@ -57,15 +57,31 @@ export interface MeasResult {
  *   .meas tran t_prop TRIG V(in)=2.5 TARG V(out)=2.5
  */
 export function parseMeasLine(line: string): MeasCommand | null {
-  // strip leading ".meas " and mode
-  const m = line.match(/^\.meas\s+(dc|ac|tran)\s+(\w+)\s+(FIND|WHEN|AVG|MIN|MAX|PP|RMS|DELAY|PARAM)\s+(.+)$/i);
+  // strip leading ".meas " and mode. TRIG is accepted as a leading keyword and
+  // normalized to DELAY (`.meas tran t TRIG V(a)=x TARG V(b)=y` is the
+  // documented SPICE delay form — it previously failed to parse at all).
+  const m = line.match(/^\.meas\s+(dc|ac|tran)\s+(\w+)\s+(FIND|WHEN|AVG|MIN|MAX|PP|RMS|DELAY|PARAM|TRIG)\s+(.+)$/i);
   if (!m) return null;
   const mode = m[1].toLowerCase() as MeasMode;
   const name = m[2];
-  const type = m[3].toUpperCase() as MeasType;
+  const rawType = m[3].toUpperCase();
+  const type = (rawType === 'TRIG' ? 'DELAY' : rawType) as MeasType;
   const rest = m[4];
 
   const cmd: MeasCommand = { mode, name, type, expr: rest };
+
+  // TRIG-form delay: `TRIG V(a)=x TARG V(b)=y` — the TRIG keyword was
+  // consumed as the type, so the expressions are parsed from `rest` directly.
+  if (rawType === 'TRIG') {
+    const suffix = '[+-]?[\\d.]+(?:[eE][+-]?\\d+)?(?:meg|k|mil|m|u|µ|n|p|f|t|g)?s?';
+    const tm = rest.match(new RegExp(`^(\\S+)\\s*=\\s*(${suffix})\\s+TARG\\s+(\\S+)\\s*=\\s*(${suffix})`, 'i'));
+    if (tm) {
+      cmd.trigExpr = tm[1];
+      cmd.trigVal = parseNumberWithSuffix(tm[2]);
+      cmd.targExpr = tm[3];
+      cmd.targVal = parseNumberWithSuffix(tm[4]);
+    }
+  }
 
   // Extract WHEN clause (for FIND...WHEN)
   const whenMatch = rest.match(/^(.+?)\s+WHEN\s+(.+)$/i);
@@ -226,6 +242,12 @@ export function execMeas(
       // Evaluate a parameter expression (e.g., 2*gain)
       const v = parseFloat(cmd.expr);
       return { name: cmd.name, value: isNaN(v) ? 0 : v };
+    }
+    case 'TRIG':
+    default: {
+      // 'TRIG' is normalized to DELAY at parse time; unreachable via the
+      // parser but kept for type completeness.
+      return { name: cmd.name, value: 0 };
     }
   }
 }

@@ -270,10 +270,12 @@ registerPlugin({
     const sel = (s2 ? 4 : 0) + (s1 ? 2 : 0) + (s0 ? 1 : 0);
     // 74138 outputs are active-low: selected output = 0, all others = VCC.
     // All 8 outputs (y0..y7) — the old loop only covered 6, so select
-    // values 6 and 7 lit no output at all.
+    // values 6 and 7 lit no output at all. Unconnected outputs (node 0)
+    // are skipped like every other logic plugin — stamping them created an
+    // all-zero matrix row and a singular system.
     for (let i = 0; i < 8; i++) {
       const yt = terminals.find(t => t.terminalId === `y${i}`);
-      if (yt) sys.stampVoltageSource(yt.nodeId, 0, i === sel ? 0 : vccV);
+      if (yt && yt.nodeId !== 0) sys.stampVoltageSource(yt.nodeId, 0, i === sel ? 0 : vccV);
     }
   },
 });
@@ -318,7 +320,8 @@ registerPlugin({
     const dNode = terminals.find(t => t.terminalId === `d${sel}`);
     const dVal = dNode ? (sim.nodeVoltage[dNode.nodeId] ?? 0) : 0;
     const y = terminals.find(t => t.terminalId === 'y')!.nodeId;
-    // Output follows selected input (pass-through with threshold)
-    sys.stampVoltageSource(y, 0, dVal > thresh ? vccV : 0);
+    // Output follows selected input (pass-through with threshold); skip an
+    // unconnected output (node 0) — stamping it makes the matrix singular.
+    if (y !== 0) sys.stampVoltageSource(y, 0, dVal > thresh ? vccV : 0);
   },
 });
