@@ -8,7 +8,7 @@
 // optional trailing suffix (_i, _dir, _ib, ...).
 const COMP_ID_STATE_PREFIXES = [
   // passives & switches
-  'cap', 'ind', 'vcsw', 'xfmr_branch', 'ff', 'xfmr', 'tline',
+  'cap', 'ind', 'vcsw', 'xfmr_branch', 'ff', 'xfmr', 'tline', 'tlineRLGC',
   // semiconductors
   'diode', 'dio', 'zener', 'led', 'npn', 'pnp', 'nmos', 'pmos',
   'bjt', 'mos', 'jfet', 'bsim3', 'bsim4',
@@ -20,8 +20,9 @@ const COMP_ID_STATE_PREFIXES = [
   'pd', 'pt', 'solar', 'ammeter', 'arduino', 'arduinoReal',
 ];
 
-// Optional suffixes appended to state keys (`npn_<id>_ib`, `mos_<id>_vgs`, ...).
-const STATE_KEY_SUFFIX = '_i|_dir|_ib|_clk|_vgs|_vds|_vbs|_vbe|_vce|_a|_b|_branch|_compiled';
+// Optional suffixes appended to state keys (`npn_<id>_ib`, `mos_<id>_vgs`,
+// `tline_<id>_J`, `tlineRLGC_<id>_nodes`, ...).
+const STATE_KEY_SUFFIX = '_i|_dir|_ib|_clk|_vgs|_vds|_vbs|_vbe|_vce|_a|_b|_branch|_compiled|_J|_nodes';
 
 /**
  * Remove __global sim-state entries that reference deleted components.

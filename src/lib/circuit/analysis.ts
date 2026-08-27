@@ -145,6 +145,85 @@ function buildACSystemAtFrequency(
       // Y = 1/(jωL) = -j/(ωL)
       const g = -1 / (omega * L);
       cStampConductance(sys, a, b, { re: 0, im: g });
+    } else if (comp.type === 'transLineLossless' || comp.type === 'transLineLossy') {
+      // Uniform transmission line — exact 2-port Y-matrix. Previously the
+      // tlines fell through this chain entirely (only gmin connected them).
+      //   γ = sqrt((R+jωL)(G+jωC)),  Z0 = sqrt((R+jωL)/(G+jωC))
+      //   Y11 = Y22 = 1/(Z0·tanh(γl)),  Y12 = Y21 = −1/(Z0·sinh(γl))
+      // (lossless: R=G=0 → γ=jω√(LC), Z0=√(L/C), purely imaginary tanh/sinh)
+      const a1 = terms.find((t) => t.terminalId === 'a1')?.nodeId ?? 0;
+      const a2 = terms.find((t) => t.terminalId === 'a2')?.nodeId ?? 0;
+      const b1 = terms.find((t) => t.terminalId === 'b1')?.nodeId ?? 0;
+      const b2 = terms.find((t) => t.terminalId === 'b2')?.nodeId ?? 0;
+      let R = 0, L = 0, G = 0, C = 0, len = 0;
+      if (comp.type === 'transLineLossless') {
+        const Z0 = Math.max(1e-3, comp.parameters.Z0 as number);
+        const Td = Math.max(1e-15, comp.parameters.Td as number);
+        // Z0 = √(L/C) and Td = len·√(LC) → pick C=1, L=Z0², len = Td/√(LC) = Td
+        L = Z0 * Z0; C = 1; len = Td;
+      } else {
+        R = Math.max(0, comp.parameters.RperLen as number);
+        L = Math.max(0, comp.parameters.LperLen as number);
+        G = Math.max(0, comp.parameters.GperLen as number);
+        C = Math.max(0, comp.parameters.CperLen as number);
+        len = Math.max(0, comp.parameters.length as number);
+      }
+      // Series impedance z = R + jωL; shunt admittance y = G + jωC.
+      const zRe = R, zIm = omega * L;
+      const yRe = G, yIm = omega * C;
+      // γ = sqrt(z·y)
+      const zyRe = zRe * yRe - zIm * yIm;
+      const zyIm = zRe * yIm + zIm * yRe;
+      const gammaMag = Math.sqrt(Math.sqrt(zyRe * zyRe + zyIm * zyIm));
+      const gammaArg = Math.atan2(zyIm, zyRe) / 2;
+      const gRe = gammaMag * Math.cos(gammaArg);
+      const gIm = gammaMag * Math.sin(gammaArg);
+      // γl
+      const glRe = gRe * len, glIm = gIm * len;
+      // Z0 = sqrt(z/y)
+      const zyDivDen = yRe * yRe + yIm * yIm;
+      const zOverYRe = (zRe * yRe + zIm * yIm) / (zyDivDen || 1e-30);
+      const zOverYIm = (zIm * yRe - zRe * yIm) / (zyDivDen || 1e-30);
+      const z0Mag = Math.sqrt(Math.sqrt(zOverYRe * zOverYRe + zOverYIm * zOverYIm));
+      const z0Arg = Math.atan2(zOverYIm, zOverYRe) / 2;
+      const z0Re = z0Mag * Math.cos(z0Arg);
+      const z0Im = z0Mag * Math.sin(z0Arg);
+      // tanh(γl) and sinh(γl) for complex γl = x + jy:
+      //   tanh(x+jy) = [sinh(2x) + j·sin(2y)] / [cosh(2x) + cos(2y)]
+      //   sinh(x+jy) = sinh(x)cos(y) + j·cosh(x)sin(y)
+      const twoX = 2 * glRe, twoY = 2 * glIm;
+      const tanhDen = Math.cosh(twoX) + Math.cos(twoY);
+      let tanhRe = 0, tanhIm = 0, sinhRe = 0, sinhIm = 0;
+      if (Math.abs(tanhDen) > 1e-300) {
+        tanhRe = Math.sinh(twoX) / tanhDen;
+        tanhIm = Math.sin(twoY) / tanhDen;
+      }
+      sinhRe = Math.sinh(glRe) * Math.cos(glIm);
+      sinhIm = Math.cosh(glRe) * Math.sin(glIm);
+      // Y11 = 1/(Z0·tanh(γl)); Y12 = −1/(Z0·sinh(γl))
+      const div = (nRe: number, nIm: number, dRe: number, dIm: number) => {
+        const den = dRe * dRe + dIm * dIm;
+        if (den < 1e-300) return { re: 0, im: 0 };
+        return { re: (nRe * dRe + nIm * dIm) / den, im: (nIm * dRe - nRe * dIm) / den };
+      };
+      const z0TanhRe = z0Re * tanhRe - z0Im * tanhIm;
+      const z0TanhIm = z0Re * tanhIm + z0Im * tanhRe;
+      const z0SinhRe = z0Re * sinhRe - z0Im * sinhIm;
+      const z0SinhIm = z0Re * sinhIm + z0Im * sinhRe;
+      const y11 = div(1, 0, z0TanhRe, z0TanhIm);
+      const y12 = div(-1, 0, z0SinhRe, z0SinhIm);
+      // Stamp the 2-port admittances:
+      //   I_a1 = Y11·V_a1 + Y12·V_b1   (referenced to a2/b2)
+      //   I_b1 = Y21·V_a1 + Y22·V_b1
+      // cStampVCCS drives g·(V(c)−V(d)) from n1 to n2 — exactly the Y12 term.
+      const g11 = y11, g12 = y12;
+      // Port A self term
+      cStampConductance(sys, a1, a2, g11);
+      // Port B self term
+      cStampConductance(sys, b1, b2, g11); // Y22 = Y11 for a uniform line
+      // Coupling: I_a1 += Y12·(V_b1 − V_b2); I_b1 += Y12·(V_a1 − V_a2)
+      cStampVCCS(sys, a1, a2, b1, b2, g12);
+      cStampVCCS(sys, b1, b2, a1, a2, g12); // Y21 = Y12 (reciprocal)
     } else if (comp.type === 'dcVoltage' || comp.type === 'acVoltage' || comp.type === 'pulseSource') {
       // In small-signal (phasor) analysis EVERY independent voltage source must
       // be stamped — a 0 V source is a short, which is exactly why supply rails
@@ -710,7 +789,12 @@ export function runPZ(
   // TypeError and runPZ crashed on any real circuit.)
   const nodeMap = buildNodeMap(components, wires, plugins);
   const numNodes = nodeMap.numNodes;
-  const maxExtras = components.length * 4 + 8;
+  let declaredExtras = 0;
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (plugin?.extraVars) declaredExtras += plugin.extraVars(comp.parameters);
+  }
+  const maxExtras = components.length * 4 + 8 + declaredExtras;
   const sys = createMnaSystem(numNodes - 1, maxExtras);
   sys.nextExtra = numNodes - 1;
 

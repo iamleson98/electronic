@@ -228,11 +228,18 @@ export function solveDCWithPseudoTran(
   let delta = Infinity;
   let finalSim: SimContext | null = null;
 
+  let declaredExtras = 0;
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (plugin?.extraVars) declaredExtras += plugin.extraVars(comp.parameters);
+  }
+  const extraBudget = components.length * 4 + 8 + declaredExtras;
+
   for (let iter = 0; iter < maxIter; iter++) {
     // Create a sim context with the current gmin
     const sim: SimContext = {
       nodeVoltage: new Float64Array(numNodes),
-      branchCurrent: new Float64Array(components.length * 4 + 8),
+      branchCurrent: new Float64Array(extraBudget),
       time: 0,
       dt: 1e-3,
       state: { __pseudo_tran: true, __gmin: gmin },
@@ -242,7 +249,7 @@ export function solveDCWithPseudoTran(
     // node count (matrix index of node k is k−1) — passing numNodes created
     // a phantom never-stamped row/column and made the matrix singular on
     // every iteration, so pseudo-transient could never succeed.
-    const sys = createMnaSystem(numNonGround, components.length * 4 + 8);
+    const sys = createMnaSystem(numNonGround, extraBudget);
     sys.nextExtra = numNonGround;
 
     // Stamp all components

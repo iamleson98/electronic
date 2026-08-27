@@ -497,6 +497,16 @@ export interface ComponentPlugin {
     sim?: SimContext,
     instance?: CircuitComponent,
   ) => Vec2[];
+
+  /**
+   * Optional: declare how many EXTRA unknowns (beyond voltage sources /
+   * normal branch currents) this component's stamp will allocate via
+   * `system.addExtra()`. The engine sizes the MNA matrix from this; without
+   * it, components that allocate many extras (e.g. a discretized
+   * transmission line with N internal nodes) can silently overflow the
+   * pre-allocated matrix.
+   */
+  extraVars?: (params: Record<string, any>) => number;
 }
 
 // ----- MNA system interface -----

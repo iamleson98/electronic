@@ -479,16 +479,55 @@ export const coupledInductor: ComponentPlugin = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Lossless transmission line (T element)
-//   Models pure delay: V(out,t) = V(in, t - Td)
-//   Td = length * sqrt(L*C) — for ideal line, delay = electrical length / c
+// Lossless transmission line (SPICE T element) — Bergeron / method of
+// characteristics (Dommel). Each port is stamped as its characteristic
+// admittance Y0 = 1/Z0 in parallel with a history CURRENT source computed
+// from the far port's voltage/current at t − Td:
+//
+//   i_a(t) = Y0·v_a(t) − J_a(t),   J_a(t) = Y0·v_b(t−Td) + i_b(t−Td)
+//   i_b(t) = Y0·v_b(t) − J_b(t),   J_b(t) = Y0·v_a(t−Td) + i_a(t−Td)
+//
+// (i_a / i_b flow INTO the line at each port.) This models the full two-port
+// physics: matched terminations show no reflection, mismatched loads reflect
+// with Γ = (RL−Z0)/(RL+Z0), and an open far end doubles the incident voltage.
+// The old model (ideal delayed voltage source + input shunt) had zero output
+// impedance, no return path, and no reflections. History is interpolated at
+// t − Td so the delay is not quantized to whole timesteps.
 // ─────────────────────────────────────────────────────────────────────────────
+
+interface TlineSample { t: number; va: number; ia: number; vb: number; ib: number }
+
+function tlineHistoryAt(history: TlineSample[], t: number): TlineSample | null {
+  // history is ordered by increasing t; find the sample at time `t` with
+  // linear interpolation between the two bracketing samples.
+  if (history.length === 0 || t < history[0].t) return null;
+  let lo = 0;
+  let hi = history.length - 1;
+  if (t >= history[hi].t) return history[hi];
+  // binary search for the bracketing pair
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (history[mid].t <= t) lo = mid; else hi = mid;
+  }
+  const a = history[lo];
+  const b = history[hi];
+  const span = b.t - a.t;
+  if (span <= 0) return a;
+  const f = (t - a.t) / span;
+  return {
+    t,
+    va: a.va + (b.va - a.va) * f,
+    ia: a.ia + (b.ia - a.ia) * f,
+    vb: a.vb + (b.vb - a.vb) * f,
+    ib: a.ib + (b.ib - a.ib) * f,
+  };
+}
 
 export const transLineLossless: ComponentPlugin = {
   type: 'transLineLossless',
   name: 'Lossless Transmission Line',
   category: 'passive',
-  description: 'Ideal lossless transmission line (SPICE T element). Pure time delay = Z0 * length.',
+  description: 'Ideal lossless transmission line (SPICE T element). Bergeron model: pure delay Td with characteristic impedance Z0 at both ports, full reflection physics.',
   symbol: 'T',
   boundingBox: { width: 6, height: 2 },
   terminals: [
@@ -516,36 +555,75 @@ export const transLineLossless: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, 'T', 3 * cellSize, cellSize);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a1 = terminals.find((t) => t.terminalId === 'a1')!.nodeId;
     const a2 = terminals.find((t) => t.terminalId === 'a2')!.nodeId;
     const b1 = terminals.find((t) => t.terminalId === 'b1')!.nodeId;
     const b2 = terminals.find((t) => t.terminalId === 'b2')!.nodeId;
     const Z0 = Math.max(1e-3, params.Z0 as number);
     const Td = Math.max(1e-15, params.Td as number);
-    // For DC analysis (or very low freq), the line is transparent: just stamp Z0 between a1-b1 and a2-b2.
-    // For transient: we need a delay buffer — use historical voltages.
+    const Y0 = 1 / Z0;
+
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `tline_${a1}_${b1}`;
-    if (!st[key]) st[key] = [];
-    const history = st[key] as number[];
-    const now = sim.time;
-    // Find voltage that arrived Td ago
-    // (linear search — for long sims this would be slow, but adequate for short sim)
-    let vDelayed = 0;
-    for (let i = history.length - 2; i >= 0; i -= 2) {
-      if (history[i] <= now - Td) {
-        vDelayed = history[i + 1];
-        break;
-      }
-    }
-    // append current voltage to history
-    history.push(now, sim.nodeVoltage[a1] - sim.nodeVoltage[a2]);
-    if (history.length > 10000) history.splice(0, history.length - 10000);
-    // stamp ideal: V(b1) - V(b2) = vDelayed (ideal delay)
-    sys.stampVoltageSource(b1, b2, vDelayed);
-    // also stamp Z0 input impedance at a1
-    sys.stampConductance(a1, a2, 1 / Z0);
+    const key = stateKey('tline', comp, a1, b1);
+    const history = (st[key] as TlineSample[] | undefined) ?? (st[key] = [] as TlineSample[]);
+
+    // History sources from the far ports at t − Td (zero before any wave arrives).
+    const old = tlineHistoryAt(history, sim.time - Td);
+    const Ja = old ? Y0 * old.vb + old.ib : 0; // injects INTO a1
+    const Jb = old ? Y0 * old.va + old.ia : 0; // injects INTO b1
+
+    // Port A: Y0 from a1 to a2, source Ja from a2 to a1 (into a1)
+    sys.stampConductance(a1, a2, Y0);
+    sys.stampCurrentSource(a2, a1, Ja);
+    // Port B: Y0 from b1 to b2, source Jb from b2 to b1 (into b1)
+    sys.stampConductance(b1, b2, Y0);
+    sys.stampCurrentSource(b2, b1, Jb);
+
+    // Stash the history sources so step() can reconstruct this step's port
+    // currents (i = Y0·v − J) from the FRESH solution.
+    st[key + '_J'] = { Ja, Jb, t: sim.time };
+  },
+  step(params, terminals, sim, instance) {
+    const a1 = terminals.find((t) => t.terminalId === 'a1')!.nodeId;
+    const a2 = terminals.find((t) => t.terminalId === 'a2')!.nodeId;
+    const b1 = terminals.find((t) => t.terminalId === 'b1')!.nodeId;
+    const b2 = terminals.find((t) => t.terminalId === 'b2')!.nodeId;
+    const Z0 = Math.max(1e-3, params.Z0 as number);
+    const Td = Math.max(1e-15, params.Td as number);
+    const Y0 = 1 / Z0;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = stateKey('tline', instance, a1, b1);
+    const history = (st[key] as TlineSample[] | undefined) ?? (st[key] = [] as TlineSample[]);
+    const Jst = st[key + '_J'] as { Ja: number; Jb: number; t: number } | undefined;
+    if (!Jst) return;
+
+    // Record the solved port quantities for future delayed lookups.
+    const va = sim.nodeVoltage[a1] - sim.nodeVoltage[a2];
+    const vb = sim.nodeVoltage[b1] - sim.nodeVoltage[b2];
+    history.push({ t: sim.time, va, ia: Y0 * va - Jst.Ja, vb, ib: Y0 * vb - Jst.Jb });
+    // trim history that can never be looked up again (keep one sample below
+    // t − Td for interpolation)
+    const cutoff = sim.time - Td;
+    let drop = 0;
+    while (drop + 1 < history.length && history[drop + 1].t <= cutoff) drop++;
+    if (drop > 0) history.splice(0, drop);
+    // hard cap against unbounded growth (e.g. Td shorter than dt)
+    if (history.length > 4096) history.splice(0, history.length - 4096);
+  },
+  measure(params, terminals, sim, comp) {
+    const a1 = terminals.find((t) => t.terminalId === 'a1')!.nodeId;
+    const a2 = terminals.find((t) => t.terminalId === 'a2')!.nodeId;
+    const b1 = terminals.find((t) => t.terminalId === 'b1')!.nodeId;
+    const b2 = terminals.find((t) => t.terminalId === 'b2')!.nodeId;
+    const va = sim.nodeVoltage[a1] - sim.nodeVoltage[a2];
+    const vb = sim.nodeVoltage[b1] - sim.nodeVoltage[b2];
+    return [
+      { label: 'Va', value: va.toFixed(3), unit: 'V' },
+      { label: 'Vb', value: vb.toFixed(3), unit: 'V' },
+      { label: 'Z0', value: (params.Z0 as number).toFixed(1), unit: 'Ω' },
+      { label: 'Td', value: ((params.Td as number) * 1e9).toFixed(3), unit: 'ns' },
+    ];
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 6, y: 1 }]; },
 };
@@ -558,9 +636,37 @@ export const transLineLossless: ComponentPlugin = {
 //   - Shunt conductance G per unit length (dielectric loss)
 //   - Shunt capacitance C per unit length
 //
-// The line is discretized into N lumped segments (each segment = R/2 + L + C + G + R/2,
-// the "Π-section" model). N defaults to 8 segments; more = more accurate but slower.
+// The line is discretized into N cascaded Π-sections: each segment has a
+// series R+L branch (combined backward-Euler companion — the series R is
+// folded into the inductor companion analytically, avoiding an internal
+// node per segment) and shunt C+G at the junctions (C/2 at the ports,
+// C per junction inside). The N−1 internal junction nodes are allocated as
+// MNA extras (declared via `extraVars` so the engine sizes the matrix
+// correctly). The return conductor (a2–b2) is ideal — per the SPICE LTRA
+// convention R models the full loop resistance.
+//
+// The old stamp put R and L companions in PARALLEL between the same node
+// pair, dropped every history source (a purely resistive ladder with no
+// delay or charge storage), halved the DC resistance, and silently
+// overflowed the pre-allocated matrix for segments > ~4·components.
 // ─────────────────────────────────────────────────────────────────────────────
+
+interface LossyTlineState {
+  /** series-branch current per segment (previous step) */
+  iSer: number[];
+  /** junction voltages vs. return conductor (previous step), length N+1 */
+  vSh: number[];
+}
+
+function lossyTlineParams(params: Record<string, any>) {
+  const R = Math.max(0, (params.RperLen as number) ?? 0.1);
+  const L = Math.max(0, (params.LperLen as number) ?? 250e-9);
+  const G = Math.max(0, (params.GperLen as number) ?? 1e-9);
+  const C = Math.max(0, (params.CperLen as number) ?? 100e-12);
+  const length = Math.max(0, (params.length as number) ?? 0.1);
+  const N = Math.max(1, Math.min(64, Math.floor((params.segments as number) ?? 8)));
+  return { R, L, G, C, length, N };
+}
 
 export const transLineLossy: ComponentPlugin = {
   type: 'transLineLossy',
@@ -607,76 +713,131 @@ export const transLineLossy: ComponentPlugin = {
     }
     drawLabel(ctx, 'TL', 4 * cellSize, cellSize);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a1 = terminals.find((t) => t.terminalId === 'a1')!.nodeId;
     const a2 = terminals.find((t) => t.terminalId === 'a2')!.nodeId;
     const b1 = terminals.find((t) => t.terminalId === 'b1')!.nodeId;
     const b2 = terminals.find((t) => t.terminalId === 'b2')!.nodeId;
-    const R = (params.RperLen as number) ?? 0.1;
-    const L = (params.LperLen as number) ?? 250e-9;
-    const G = (params.GperLen as number) ?? 1e-9;
-    const C = (params.CperLen as number) ?? 100e-12;
-    const length = (params.length as number) ?? 0.1;
-    const N = Math.max(1, Math.floor((params.segments as number) ?? 8));
+    const { R, L, G, C, length, N } = lossyTlineParams(params);
 
-    // Per-segment values
-    const rSeg = R * length / N;
-    const lSeg = L * length / N;
-    const gSeg = G * length / N;
-    const cSeg = C * length / N;
+    const rSeg = (R * length) / N;
+    const lSeg = (L * length) / N;
+    // Π-section shunts: half at each port, full at internal junctions.
+    const cPort = (C * length) / (2 * N);
+    const cJunction = (C * length) / N;
+    const gPort = (G * length) / (2 * N);
+    const gJunction = (G * length) / N;
 
-    // Build N Π-sections, each: a --[R/2 + L]-- node --[R/2]-- b, with C and G to ground.
-    // For DC (dt=0), inductors are shorts and capacitors are opens — line is just R total.
-    // For transient, use companion models: L → resistor R_L = L/dt in series with voltage source,
-    // C → resistor R_C = dt/C in parallel with current source.
+    const dt = Math.max(sim.dt ?? 1e-4, 1e-12);
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = stateKey('tlineRLGC', comp, a1, b1);
+    const state = (st[key] as LossyTlineState | undefined) ??
+      (st[key] = { iSer: new Array<number>(N).fill(0), vSh: new Array<number>(N + 1).fill(0) } as LossyTlineState);
 
-    const dt = sim.dt ?? 1e-4;
-    const isTransient = dt > 0 && sim.time > 0;
+    // Series R+L combined companion (backward Euler):
+    //   L·di/dt = v − R·i  →  i_n = (i_{n−1} + (dt/L)·v_n) / (1 + dt·R/L)
+    //   Norton: gEq = (dt/L)/denom, iEq = i_{n−1}/denom
+    const denom = 1 + (dt * rSeg) / Math.max(lSeg, 1e-18);
+    const gSeries = lSeg > 0 ? dt / lSeg / denom : lSeg === 0 && rSeg > 0 ? 1 / rSeg : 0;
+    // pure-R case (L=0): plain conductance; pure-L case (R=0): gEq = dt/L.
 
-    // Walk N segments, allocating intermediate node IDs as we go
-    let prevNode = a1;
-    const groundNode = a2; // we'll reference b2 as the return path
+    // Junction node ids: 0 = a1 (real), 1..N−1 = internal extras, N = b1 (real).
+    // addExtra() returns a MATRIX index; the stamp helpers take NODE ids and
+    // subtract 1 internally — so a virtual junction node's id is extraIdx + 1
+    // (pseudo ids start at numNodes, above every real node id, so they never
+    // collide). Their solved voltages are readable in step() from
+    // sim.branchCurrent at (pseudoId − 1 − numNonGround).
+    const junctions: number[] = [a1];
+    for (let i = 1; i < N; i++) junctions.push(sys.addExtra() + 1);
+    junctions.push(b1);
+    st[key + '_nodes'] = junctions;
+
     for (let i = 0; i < N; i++) {
-      const isLast = i === N - 1;
-      const nextNode = isLast ? b1 : sys.addExtra(); // internal node for intermediate segments
-      // Actually we can't use addExtra for internal signal nodes — they need to be real nodes.
-      // For simplicity, use the b1 node as the end of the chain (single-segment approximation
-      // when N=1, or R-C ladder when N>1 — we'll approximate by stamping series R+L and shunt C+G
-      // at each segment boundary).
-
-      // Series R/2 from prevNode to midpoint
-      if (rSeg > 0) {
-        sys.stampConductance(prevNode, nextNode, 2 / rSeg); // R/2 each side = R total, conductance = 2/R for half
+      const p = junctions[i];
+      const q = junctions[i + 1];
+      // series branch (return current flows through the return conductor)
+      sys.stampConductance(p, q, gSeries);
+      sys.stampCurrentSource(p, q, (state.iSer[i] ?? 0) / denom);
+      // shunt at junction i (port junctions get C/2, G/2)
+      const cThis = i === 0 ? cPort : cJunction;
+      const gThis = i === 0 ? gPort : gJunction;
+      if (gThis > 0) sys.stampConductance(p, a2, gThis);
+      if (cThis > 0) {
+        const gC = cThis / dt;
+        sys.stampConductance(p, a2, gC);
+        // capacitor companion: injects (C/dt)·vPrev back into p
+        sys.stampCurrentSource(a2, p, gC * (state.vSh[i] ?? 0));
       }
-      // Series L (transient only — for DC, inductor is short, so skip)
-      if (isTransient && lSeg > 0) {
-        const rL = lSeg / dt; // companion model: R = L/dt
-        sys.stampConductance(prevNode, nextNode, 1 / rL);
-        // Voltage source offset from previous current — approximated by skipping for simplicity
-      }
-
-      // Shunt C and G to ground (a2 path)
-      if (isLast) {
-        // Last segment: shunt to b2 (which is the return node)
-        if (gSeg > 0) sys.stampConductance(nextNode, b2, gSeg);
-        if (isTransient && cSeg > 0) {
-          const rC = dt / cSeg; // companion: R = dt/C
-          sys.stampConductance(nextNode, b2, 1 / rC);
-        }
-      } else {
-        // Intermediate: shunt to a2 (return path)
-        if (gSeg > 0) sys.stampConductance(nextNode, groundNode, gSeg);
-        if (isTransient && cSeg > 0) {
-          const rC = dt / cSeg;
-          sys.stampConductance(nextNode, groundNode, 1 / rC);
-        }
-      }
-
-      prevNode = nextNode;
+    }
+    // final shunt at b1
+    if (gPort > 0) sys.stampConductance(b1, a2, gPort);
+    if (cPort > 0) {
+      const gC = cPort / dt;
+      sys.stampConductance(b1, a2, gC);
+      sys.stampCurrentSource(a2, b1, gC * (state.vSh[N] ?? 0));
     }
 
-    // Also stamp b2 to a2 (return path) as a wire (0Ω = high conductance)
+    // Ideal return conductor (loop R lives in the series branches).
     sys.stampConductance(a2, b2, 1e6);
+  },
+  step(params, terminals, sim, instance) {
+    const a1 = terminals.find((t) => t.terminalId === 'a1')!.nodeId;
+    const a2 = terminals.find((t) => t.terminalId === 'a2')!.nodeId;
+    const b1 = terminals.find((t) => t.terminalId === 'b1')!.nodeId;
+    const { R, L, length, N } = lossyTlineParams(params);
+    const rSeg = (R * length) / N;
+    const lSeg = (L * length) / N;
+    const dt = Math.max(sim.dt ?? 1e-4, 1e-12);
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = stateKey('tlineRLGC', instance, a1, b1);
+    const state = (st[key] as LossyTlineState | undefined) ??
+      (st[key] = { iSer: new Array<number>(N).fill(0), vSh: new Array<number>(N + 1).fill(0) } as LossyTlineState);
+    const junctions = st[key + '_nodes'] as number[] | undefined;
+    if (!junctions || junctions.length !== N + 1) return;
+
+    // Same companion values used in stamp().
+    const denom = 1 + (dt * rSeg) / Math.max(lSeg, 1e-18);
+    const gSeries = lSeg > 0 ? dt / lSeg / denom : lSeg === 0 && rSeg > 0 ? 1 / rSeg : 0;
+
+    // Junction voltages: ports are real nodes; internal junctions were
+    // stamped as extras — their solved values live in sim.branchCurrent at
+    // (pseudoId − 1 − numNonGround), mirroring the ammeter's indexing.
+    const numNonGround = sim.nodeVoltage.length - 1;
+    const vJunction = new Array<number>(N + 1);
+    for (let i = 0; i <= N; i++) {
+      if (i === 0 || i === N) {
+        const node = i === 0 ? a1 : b1;
+        vJunction[i] = sim.nodeVoltage[node] - sim.nodeVoltage[a2];
+      } else {
+        const rel = (junctions[i] - 1) - numNonGround;
+        vJunction[i] = rel >= 0 && rel < sim.branchCurrent.length ? sim.branchCurrent[rel] : (state.vSh[i] ?? 0);
+      }
+    }
+
+    // Series-branch currents from the solved voltages: i = gSeries·ΔV + iPrev/denom.
+    const iSerNew = new Array<number>(N);
+    for (let i = 0; i < N; i++) {
+      iSerNew[i] = gSeries * (vJunction[i] - vJunction[i + 1]) + (state.iSer[i] ?? 0) / denom;
+    }
+    state.vSh = vJunction;
+    state.iSer = iSerNew;
+  },
+  measure(params, terminals, sim, comp) {
+    const a1 = terminals.find((t) => t.terminalId === 'a1')!.nodeId;
+    const a2 = terminals.find((t) => t.terminalId === 'a2')!.nodeId;
+    const b1 = terminals.find((t) => t.terminalId === 'b1')!.nodeId;
+    const b2 = terminals.find((t) => t.terminalId === 'b2')!.nodeId;
+    const va = sim.nodeVoltage[a1] - sim.nodeVoltage[a2];
+    const vb = sim.nodeVoltage[b1] - sim.nodeVoltage[b2];
+    return [
+      { label: 'Va', value: va.toFixed(3), unit: 'V' },
+      { label: 'Vb', value: vb.toFixed(3), unit: 'V' },
+      { label: 'Segs', value: String(lossyTlineParams(params).N), unit: '' },
+    ];
+  },
+  extraVars(params) {
+    const { N } = lossyTlineParams(params);
+    return Math.max(0, N - 1);
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 8, y: 1 }]; },
 };

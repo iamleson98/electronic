@@ -1072,7 +1072,14 @@ export function simulateStep(
 ): StepResult | null {
   const nodeMap = buildNodeMap(components, wires, plugins);
   const numNodes = nodeMap.numNodes; // includes ground (0)
-  const maxExtras = components.length * 4 + 8;
+  // Per-component extra-variable demand (e.g. a discretized transmission
+  // line with N internal junction nodes) — plugins declare it via extraVars().
+  let declaredExtras = 0;
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (plugin?.extraVars) declaredExtras += plugin.extraVars(comp.parameters);
+  }
+  const maxExtras = components.length * 4 + 8 + declaredExtras;
 
   // Use the sparse solver for circuits > 80 nodes — much faster for big designs.
   // Below that threshold, the dense solver wins (less overhead per stamp).
