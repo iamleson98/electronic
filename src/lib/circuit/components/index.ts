@@ -26,3 +26,7 @@ import './p1-components';
 import './p1-logic';
 // Register P2 components
 import './p2-components';
+// Register P3 analog/discrete components
+import './p3-components';
+// Register P3 logic ICs
+import './p3-logic';

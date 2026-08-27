@@ -11,10 +11,14 @@ const COMP_ID_STATE_PREFIXES = [
   'cap', 'ind', 'vcsw', 'xfmr_branch', 'ff', 'xfmr', 'tline', 'tlineRLGC',
   // semiconductors
   'diode', 'dio', 'zener', 'led', 'npn', 'pnp', 'nmos', 'pmos',
-  'bjt', 'mos', 'jfet', 'bsim3', 'bsim4',
+  'bjt', 'mos', 'jfet', 'bsim3', 'bsim4', 'igbt',
   // ICs & digital
   't555', 'gate', 'schmitt', 'cd4013', 'cd4026', '7seg',
   'vco', 'xtal', 'osc', 'cmp',
+  'cd4027', 'cd4017', 'cd4060', 'cd4093', 'cd4511',
+  'ic7490', 'ic74164', 'ic74374', 'pll4046',
+  // op-amp macromodels key saturation state as `opamp_<type>_<id>`
+  'opamp_lm324', 'opamp_ne5532',
   // protection / power
   'fuse', 'scr', 'triac', 'diac', 'tl431', 'lm385', 'lm336', 'icl8069',
   'pd', 'pt', 'solar', 'ammeter', 'arduino', 'arduinoReal',
