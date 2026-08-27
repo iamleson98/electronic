@@ -94,8 +94,8 @@ This file tracks all remaining improvements.
 ### Accessibility
 
 - [x] **Canvas ARIA labels** — role="application", aria-label, tabIndex added
-- [ ] **Keyboard-only component placement** — Click palette → placement mode → arrow keys → Enter to place
-- [ ] **Focus rings on canvas elements** — Virtual focus state with dashed ring, Tab/Shift+Tab to cycle
+- [x] **Keyboard-only component placement** — Placement mode with ghost preview; arrows nudge (Shift = 5), Enter places, Shift+Enter repeats, R rotates, Esc cancels; click-to-place also works
+- [x] **Focus rings on canvas elements** — Dashed sky-blue ring on the focused component/wire; Tab/Shift+Tab cycles (canvas focus only); SR announcements via aria-live
 - [x] **ARIA live region** — Added aria-live="polite" for sim state announcements
 - [x] **Landmark roles** — Added `<main>`, `<nav>` in page.tsx
 - [x] **Color-blind support** — ERC errors now use ✕ (X) shape; warnings use ! (exclamation). Shape distinction works without color.
@@ -128,7 +128,7 @@ This file tracks all remaining improvements.
 - [ ] **Real sparse solver** — CSR-based LU factorization (KLU-style) for 1000+ node circuits
 - [x] **Adaptive timestep / integration methods** — `integration-adapter.ts` wires trap/Gear2 methods into capacitor/inductor stamps via `stampCapacitor` / `stampInductor` helpers; reads `simOptions.method` ('euler' | 'trap' | 'gear')
 - [x] **Wire in `memory.ts`** — cleanupComponentState called on deleteComponent (inline), orphaned sim state removed
-- [ ] **Memoize nodeMap + MNA system** — Cache across sim steps, invalidate on component/wire edits
+- [x] **Memoize nodeMap** — Identity-keyed cache (components/wires refs + registry generation); invalidates on any topology edit
 - [ ] **Move canvas rendering out of React** — Direct RAF loop reading from `useEditor.getState()`, bypass React for hot path
 - [x] **Ring buffer for trace samples** — `SampleRingBuffer` class with fixed-capacity Float64Array + write index; O(1) push, O(1) last(), chronological iteration
 - [x] **Fix autosave to filter sim updates** — Only marks dirty on component/wire reference changes, not 60Hz simContext updates
