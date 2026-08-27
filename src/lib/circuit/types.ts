@@ -473,6 +473,7 @@ export interface ComponentPlugin {
     params: Record<string, any>,
     terminals: { terminalId: string; nodeId: number }[],
     sim: SimContext,
+    comp?: CircuitComponent,
   ) => { label: string; value: string; unit?: string }[];
 
   /**

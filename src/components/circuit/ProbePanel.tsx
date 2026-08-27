@@ -60,7 +60,7 @@ export function ProbePanel() {
       if (!plugin || !plugin.measure) continue;
       const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
       try {
-        const m = plugin.measure(comp.parameters, terminals, simContext);
+        const m = plugin.measure(comp.parameters, terminals, simContext, comp);
         if (m && m.length > 0) {
           measurements.push({ componentId: comp.id, name: plugin.name, symbol: plugin.symbol, items: m });
         }

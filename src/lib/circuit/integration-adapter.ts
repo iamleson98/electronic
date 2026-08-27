@@ -143,7 +143,10 @@ export function stampInductor(
   }
 
   sys.stampConductance(a, b, gEq);
-  sys.stampCurrentSource(b, a, iEq);
+  // The inductor companion source carries iEq from a to b through the element
+  // (same direction as the inductor current). This mirrors passive.ts's
+  // backward-Euler stamp — stamping (b, a) would invert the source.
+  sys.stampCurrentSource(a, b, iEq);
   st[key] = newState;
 }
 
@@ -158,22 +161,25 @@ export function updateCapacitorState(
   sim: SimContext,
   compId: string,
   method: IntegrationMethod = 'euler',
+  C: number = 1e-6,
 ): void {
   const st = sim.state.__global ?? (sim.state.__global = {});
   const key = `cap_${compId}`;
   const state: ReactiveState = st[key] ?? { vPrev: 0 };
   const vNow = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[b] ?? 0);
+  const vPrev = state.vPrev ?? vNow;
+  const dt = Math.max(sim.dt, 1e-12);
 
   if (method === 'gear') {
     // Gear-2 needs vPrev and vPrev2
-    state.vPrev2 = state.vPrev;
+    state.vPrev2 = vPrev;
   }
   state.vPrev = vNow;
-  // For trap, we also need iPrev — compute it from the cap equation:
-  // i = C * dV/dt ≈ C * (vNow - vPrev) / dt (approximate for state tracking)
   if (method === 'trap') {
-    const dt = Math.max(sim.dt, 1e-12);
-    state.iPrev = 0; // trap handles this via the companion model; exact iPrev not needed
+    // Trapezoidal state update: i_n = (2C/dt)·(v_n − v_{n−1}) − i_{n−1}.
+    // Zeroing iPrev here would silently degrade trap to plain Euler.
+    const iPrev = state.iPrev ?? 0;
+    state.iPrev = (2 * C / dt) * (vNow - vPrev) - iPrev;
   }
   st[key] = state;
 }
@@ -187,19 +193,26 @@ export function updateInductorState(
   sim: SimContext,
   compId: string,
   method: IntegrationMethod = 'euler',
+  L: number = 1e-3,
 ): void {
   const st = sim.state.__global ?? (sim.state.__global = {});
   const key = `ind_${compId}`;
   const state: ReactiveState = st[key] ?? { vPrev: 0, iPrev: 0 };
   const vNow = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[b] ?? 0);
+  const dt = Math.max(sim.dt, 1e-12);
+  const LSafe = Math.max(L, 1e-15);
 
   if (method === 'gear') {
     state.iPrev2 = state.iPrev;
+    // Gear-2: i_n = (4·i_{n−1} − i_{n−2})/3 + (2dt/3L)·v_n
+    state.iPrev = (4 * (state.iPrev ?? 0) - (state.iPrev2 ?? 0)) / 3 + (2 * dt / (3 * LSafe)) * vNow;
+  } else if (method === 'trap') {
+    // Trapezoidal: i_n = i_{n−1} + (dt/2L)·(v_n + v_{n−1})
+    state.iPrev = (state.iPrev ?? 0) + (dt / (2 * LSafe)) * (vNow + (state.vPrev ?? 0));
+  } else {
+    // Backward Euler: i_n = i_{n−1} + (dt/L)·v_n
+    state.iPrev = (state.iPrev ?? 0) + (dt / LSafe) * vNow;
   }
-  // For inductor: i_n = i_{n-1} + (dt/L) * V_n (backward Euler state update)
-  // The exact L is stored in the plugin; we approximate using the conductance
-  // that was stamped. For state tracking, we use the voltage:
-  state.iPrev = (state.iPrev ?? 0) + (sim.dt / 1) * vNow; // L=1 placeholder; plugin should override
   state.vPrev = vNow;
   st[key] = state;
 }

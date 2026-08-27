@@ -1654,7 +1654,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       const plugin = plugins.get('oscilloscope');
       if (!plugin) continue;
       const terminals = getTerminalsForComponent(comp, plugin, result.nodeMap);
-      const measurements = plugin.measure(comp.parameters, terminals, result.sim);
+      const measurements = plugin.measure(comp.parameters, terminals, result.sim, comp);
       const v = parseFloat(measurements[0]?.value ?? '0');
       // .PRINT directive: if printNodes is set, log matching node voltages to console
       if (s.simOptions.printNodes && s.simOptions.printNodes.length > 0) {

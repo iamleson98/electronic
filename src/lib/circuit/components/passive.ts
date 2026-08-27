@@ -224,11 +224,13 @@ const inductor: ComponentPlugin = {
     // Now update iPrev for the next step's stamp()
     st[key] = iCurr;
   },
-  measure(params, terminals, sim) {
+  measure(params, terminals, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `ind_${a}_${b}`;
+    const st = sim.state.__global ?? {};
+    // step() stores the current under `ind_${compId}` — the old node-pair key
+    // never matched, so the readout was always stuck at 0.
+    const key = comp ? `ind_${comp.id}` : `ind_${a}_${b}`;
     const i = st[key] ?? 0;
     return [
       { label: 'V', value: (sim.nodeVoltage[a] - sim.nodeVoltage[b]).toFixed(3), unit: 'V' },

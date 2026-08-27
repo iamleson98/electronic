@@ -53,7 +53,7 @@ export function PropertyPanel() {
       }
       const nodeMap = buildNodeMap(components, wires, plugins);
       const terms = getTerminalsForComponent(comp, plugin, nodeMap);
-      return plugin.measure(comp.parameters, terms, simContext);
+      return plugin.measure(comp.parameters, terms, simContext, comp);
     } catch {
       return [];
     }

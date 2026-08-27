@@ -233,9 +233,10 @@ export function computeWireCurrents(
     const i = compCurrents.get(comp.id) ?? 0;
 
     if (comp.type === 'resistor' || comp.type === 'capacitor' || comp.type === 'inductor' ||
-        comp.type === 'led' || comp.type === 'diode' || comp.type === 'switch' || comp.type === 'pushButton') {
+        comp.type === 'led' || comp.type === 'diode' || comp.type === 'zener' ||
+        comp.type === 'switch' || comp.type === 'pushButton') {
       const t1Id = 'a';
-      const t2Id = comp.type === 'led' || comp.type === 'diode' ? 'k' : 'b';
+      const t2Id = comp.type === 'led' || comp.type === 'diode' || comp.type === 'zener' ? 'k' : 'b';
       const n1 = terms.find((t) => t.terminalId === t1Id)?.nodeId ?? 0;
       const n2 = terms.find((t) => t.terminalId === t2Id)?.nodeId ?? 0;
       nodeCurrentOut.set(n1, (nodeCurrentOut.get(n1) ?? 0) + i);
@@ -417,7 +418,7 @@ function computeTerminalCurrent(
     const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
     const termNode = terms.find((t) => t.terminalId === terminalId)?.nodeId ?? 0;
     return (termNode === a) ? -compCurrent : compCurrent;
-  } else if (comp.type === 'led' || comp.type === 'diode') {
+  } else if (comp.type === 'led' || comp.type === 'diode' || comp.type === 'zener') {
     // Same as resistor: compCurrent > 0 = current flows a→k (forward).
     // At 'a': -I (enters component). At 'k': +I (exits component).
     const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
@@ -591,6 +592,29 @@ export function computeComponentCurrents(
       const st = sim.state.__global ?? {};
       const on = st[`${comp.type}_${a}_${k}`] ?? false;
       const i = on ? Math.max(0, (v - vf) / r) : 0;
+      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
+      nodeCurrentOut.set(k, (nodeCurrentOut.get(k) ?? 0) - i);
+    } else if (comp.type === 'zener') {
+      // Mirror the zener stamp's piecewise model (semiconductors.ts) so the
+      // current readout includes the companion source, not just G*v.
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
+      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+      const vf = (comp.parameters.forwardV as number) || 0.7;
+      const vz = (comp.parameters.zenerV as number) || 3.3;
+      const rOn = Math.max(0.001, (comp.parameters.onR as number) ?? 1);
+      const rOff = Math.max(1e3, (comp.parameters.offR as number) ?? 1e7);
+      const st = sim.state.__global ?? {};
+      const mode = st[`zener_${a}_${k}`] ?? 'off';
+      let i: number;
+      if (mode === 'forward') {
+        i = (v - vf) / rOn;
+      } else if (mode === 'reverse') {
+        // In breakdown the element current (a→k) is (v + vz)/rOn.
+        i = (v + vz) / rOn;
+      } else {
+        i = v / rOff;
+      }
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(k, (nodeCurrentOut.get(k) ?? 0) - i);
     } else if (comp.type === 'switch' || comp.type === 'pushButton') {
@@ -798,6 +822,23 @@ export function computeComponentCurrents(
       const st = sim.state.__global ?? {};
       const on = st[`${comp.type}_${a}_${k}`] ?? false;
       current = on ? Math.max(0, (v - vf) / r) : 0;
+    } else if (comp.type === 'zener') {
+      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+      const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
+      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+      const vf = (comp.parameters.forwardV as number) || 0.7;
+      const vz = (comp.parameters.zenerV as number) || 3.3;
+      const rOn = Math.max(0.001, (comp.parameters.onR as number) ?? 1);
+      const rOff = Math.max(1e3, (comp.parameters.offR as number) ?? 1e7);
+      const st = sim.state.__global ?? {};
+      const mode = st[`zener_${a}_${k}`] ?? 'off';
+      if (mode === 'forward') {
+        current = (v - vf) / rOn;
+      } else if (mode === 'reverse') {
+        current = (v + vz) / rOn;
+      } else {
+        current = v / rOff;
+      }
     } else if (comp.type === 'dcVoltage' || comp.type === 'acVoltage' || comp.type === 'pulseSource') {
       const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
       current = nodeCurrentOut.get(p) ?? 0;
@@ -1026,12 +1067,14 @@ export function simulateStep(
   // the default 0V initialization and are used when `uic` is true.
   // Apply .NODESET as a hint for the DC solver (initial guess).
   if (!hasPrev && simOptions) {
-    // .IC — overrides node voltages at t=0
+    // .IC — overrides node voltages at t=0.
+    // NOTE: nodeVoltage is indexed by node id (index 0 = ground), so the
+    // write slot for nodeId is `nodeId` itself — NOT `nodeId - 1`.
     if (simOptions.initialConditions) {
       for (const [termKey, voltage] of Object.entries(simOptions.initialConditions)) {
         const nodeId = nodeMap.terminalNode.get(termKey);
-        if (nodeId != null && nodeId > 0 && nodeId - 1 < nodeVoltage.length) {
-          nodeVoltage[nodeId - 1] = voltage;
+        if (nodeId != null && nodeId > 0 && nodeId < nodeVoltage.length) {
+          nodeVoltage[nodeId] = voltage;
         }
       }
     }
@@ -1041,10 +1084,10 @@ export function simulateStep(
     if (simOptions.nodeSets) {
       for (const [termKey, voltage] of Object.entries(simOptions.nodeSets)) {
         const nodeId = nodeMap.terminalNode.get(termKey);
-        if (nodeId != null && nodeId > 0 && nodeId - 1 < nodeVoltage.length) {
+        if (nodeId != null && nodeId > 0 && nodeId < nodeVoltage.length) {
           // Only apply if not already set by .IC
           if (simOptions.initialConditions?.[termKey] === undefined) {
-            nodeVoltage[nodeId - 1] = voltage;
+            nodeVoltage[nodeId] = voltage;
           }
         }
       }

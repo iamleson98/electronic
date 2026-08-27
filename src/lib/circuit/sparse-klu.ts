@@ -165,57 +165,18 @@ function stampCCVS(sys: SparseMnaSystem, a: number, b: number, extraIndex: numbe
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// solveSparse — converts the dense A into a sparse CSR representation, runs
-// LU factorization with Markowitz pivoting, and back-substitutes.
+// solveSparse — LU factorization with Markowitz pivoting and back-substitution.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function solveSparse(sys: SparseMnaSystem): Float64Array | null {
   const n = sys.size;
   if (n === 0) return new Float64Array(0);
 
-  // Build CSR representation from the dense matrix.
-  // Count nonzeros per row first.
-  const rowCounts = new Int32Array(n);
-  for (let r = 0; r < n; r++) {
-    let cnt = 0;
-    for (let c = 0; c < n; c++) {
-      if (sys.A[r * n + c] !== 0) cnt++;
-    }
-    rowCounts[r] = cnt;
-  }
-  const rowPtr = new Int32Array(n + 1);
-  for (let r = 0; r < n; r++) rowPtr[r + 1] = rowPtr[r] + rowCounts[r];
-  const nnz = rowPtr[n];
-  const colIdx = new Int32Array(nnz);
-  const values = new Float64Array(nnz);
-
-  // Fill CSR — track current fill position per row
-  const fillPos = new Int32Array(n);
-  for (let r = 0; r < n; r++) {
-    for (let c = 0; c < n; c++) {
-      const v = sys.A[r * n + c];
-      if (v !== 0) {
-        const pos = rowPtr[r] + fillPos[r]++;
-        colIdx[pos] = c;
-        values[pos] = v;
-      }
-    }
-  }
-
-  // Convert to a linked-list sparse representation for in-place LU with pivoting.
-  // We use a simple approach: convert back to dense, do dense LU with partial
-  // pivoting (since we already paid for the dense array), but skip rows that
-  // are entirely zero (significantly faster for very sparse matrices where
-  // many rows have only 1-2 entries).
+  // Dense LU with zero-skipping. (A CSR conversion was previously built here
+  // and immediately discarded — pure overhead, removed.)
   //
-  // For a true sparse solve, we'd implement KLU-style ordering + symbolic
-  // factorization + numerical factorization. That's a substantial undertaking
-  // (1000+ lines) and most circuit matrices are small enough that the dense
-  // solver is fine. This module provides:
-  //   - The API surface (createSparseMnaSystem + solveSparse)
-  //   - Sparse storage for inspection / future optimization
-  //   - A note that the actual solve is still dense-but-skipping-zeros
-
+  // NOTE: the engine compacts the system (A/z/size/numExtra) after stamping,
+  // so by the time we get here the matrix is exactly the used block.
   return solveDenseWithZeroSkipping(sys);
 }
 
@@ -357,25 +318,22 @@ export function shouldUseSparseSolver(numNodes: number, numExtra: number): boole
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bridge: create a SparseMnaSystem that's also usable as a regular MnaSystem
-// (so the existing engine.ts code can use it without changes).
+// Bridge: use a SparseMnaSystem as a regular MnaSystem.
+//
+// CRITICAL: this must return the sparse system itself (they are structurally
+// identical), NOT a copy. The engine mutates the returned object after
+// stamping — it resets `nextExtra`, shrinks A/z to the used block, and updates
+// `size`/`numExtra`. With a copy, those mutations land on the detached view:
+//   - `nextExtra` on the copy goes stale (stamps increment the original),
+//   - the shrink compacts the copy while `solveSparse` still reads the
+//     original at the inflated size,
+//   - `numExtra` ends up 0, so the engine's branch-current copy-back loop
+//     runs zero iterations and `sim.branchCurrent` stays all zeros —
+//     silently killing every branch-current consumer (NPN/PNP `prevIb`
+//     state, ammeters, voltage-source current readouts) on any circuit
+//     large enough to take the sparse path.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function asMnaSystem(sparse: SparseMnaSystem): MnaSystem {
-  return {
-    numNodes: sparse.numNodes,
-    numExtra: sparse.numExtra,
-    size: sparse.size,
-    A: sparse.A,
-    z: sparse.z,
-    nextExtra: sparse.nextExtra,
-    addExtra: sparse.addExtra,
-    stampConductance: sparse.stampConductance,
-    stampCurrentSource: sparse.stampCurrentSource,
-    stampVoltageSource: sparse.stampVoltageSource,
-    stampVCVS: sparse.stampVCVS,
-    stampVCCS: sparse.stampVCCS,
-    stampCCCS: sparse.stampCCCS,
-    stampCCVS: sparse.stampCCVS,
-  };
+  return sparse as unknown as MnaSystem;
 }

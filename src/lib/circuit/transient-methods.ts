@@ -1,1 +1,31 @@
-export function rcChargingVoltage(t: number, Vs: number, R: number, C: number): number { return Vs * (1 - Math.exp(-t/(R*C))); } export function rcDischargingVoltage(t: number, V0: number, R: number, C: number): number { return V0 * Math.exp(-t/(R*C)); } export function rlCurrentBuildup(t: number, Vs: number, R: number, L: number): number { return (Vs/R) * (1 - Math.exp(-t*L/R)); } export function relativeError(a: number, e: number): number { return Math.abs(e) < 1e-12 ? Math.abs(a-e) : Math.abs((a-e)/e); } export function rmsError(a: number[], e: number[]): number { if (a.length !== e.length || a.length === 0) return Infinity; let s = 0; for (let i = 0; i < a.length; i++) s += (a[i]-e[i])**2; return Math.sqrt(s/a.length); }
+// Closed-form transient references for test oracles.
+//
+// Physics:
+//   RC charging:    v(t) = Vs·(1 − e^(−t/RC)),       τ = R·C
+//   RC discharging: v(t) = V0·e^(−t/RC),             τ = R·C
+//   RL buildup:     i(t) = (Vs/R)·(1 − e^(−t·R/L)),  τ = L/R
+// (the RL exponent is −t/τ = −t·R/L — NOT −t·L/R, which would invert the
+//  time constant and be dimensionally meaningless)
+
+export function rcChargingVoltage(t: number, Vs: number, R: number, C: number): number {
+  return Vs * (1 - Math.exp(-t / (R * C)));
+}
+
+export function rcDischargingVoltage(t: number, V0: number, R: number, C: number): number {
+  return V0 * Math.exp(-t / (R * C));
+}
+
+export function rlCurrentBuildup(t: number, Vs: number, R: number, L: number): number {
+  return (Vs / R) * (1 - Math.exp((-t * R) / L));
+}
+
+export function relativeError(a: number, e: number): number {
+  return Math.abs(e) < 1e-12 ? Math.abs(a - e) : Math.abs((a - e) / e);
+}
+
+export function rmsError(a: number[], e: number[]): number {
+  if (a.length !== e.length || a.length === 0) return Infinity;
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += (a[i] - e[i]) ** 2;
+  return Math.sqrt(s / a.length);
+}

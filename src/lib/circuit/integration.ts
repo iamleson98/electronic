@@ -108,7 +108,7 @@ export function inductorGear2(
   // i_n = (4*iPrev - iPrev2)/3 + (2dt/(3L))*v_n
   const gEq = (2 * dt) / (3 * L);
   const iEq = (4 * iPrev - iPrev2) / 3;
-  return { gEq, iEq, newState: { vPrev: iPrev, iPrev2 } };
+  return { gEq, iEq, newState: { vPrev: 0, iPrev, iPrev2 } };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
