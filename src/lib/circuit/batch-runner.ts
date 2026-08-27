@@ -122,8 +122,16 @@ function generateSweepValues(config: BatchConfig, components: CircuitComponent[]
       }
     } else if (config.start !== undefined && config.stop !== undefined && config.step !== undefined) {
       const step = config.step;
-      for (let v = config.start; (step > 0 ? v <= config.stop : v >= config.stop); v += step) {
-        values.push({ name: config.param, value: v });
+      // Guard: step === 0 (or non-finite) would loop forever; a step pointing
+      // away from the stop value produces nothing.
+      const directionOk = Number.isFinite(step) && step !== 0 && (
+        (step > 0 && config.stop >= config.start) || (step < 0 && config.stop <= config.start)
+      );
+      if (directionOk) {
+        for (let v = config.start; (step > 0 ? v <= config.stop : v >= config.stop); v += step) {
+          values.push({ name: config.param, value: v });
+          if (values.length > 10000) break; // hard safety cap
+        }
       }
     }
   } else if (config.type === 'mc') {
@@ -137,7 +145,7 @@ function generateSweepValues(config: BatchConfig, components: CircuitComponent[]
         tolerance: config.tolerance ?? 0.05,
         distribution: (config.distribution === 'gaussian' ? 'gauss' : 'uniform') as 'uniform' | 'gauss',
       }],
-      measurement: { type: 'voltage' as const, node: '' },
+      measurement: { type: 'voltage' as const, node: config.outputNode ?? '' },
       nBins: 20,
     };
     const doc = { version: 1 as const, components, wires };
@@ -150,18 +158,17 @@ function generateSweepValues(config: BatchConfig, components: CircuitComponent[]
       }
     }
   } else if (config.type === 'worst') {
-    // Two runs: min and max (worst-case ±tol)
+    // Two runs: min and max (worst-case ±tol around the component's NOMINAL
+    // value). The nominal is the component's actual parameter — using the
+    // sweep `start` here was wrong (it's a range bound, not a nominal).
     const tol = config.tolerance ?? 0.05;
-    // Look up nominal from components (same as .mc above)
-    let nominal: number | undefined = config.start;
-    if (nominal === undefined && components) {
-      const c = components.find(cc => cc.id === config.componentId);
-      if (c) {
-        const v = c.parameters[config.param];
-        if (typeof v === 'number') nominal = v;
-      }
+    let nominal: number | undefined;
+    const c = components.find(cc => cc.id === config.componentId);
+    if (c) {
+      const v = c.parameters[config.param];
+      if (typeof v === 'number' && isFinite(v)) nominal = v;
     }
-    const nominalValue = nominal ?? 1;
+    const nominalValue = nominal ?? config.start ?? 1;
     values.push({ name: config.param, value: nominalValue * (1 + tol) });
     values.push({ name: config.param, value: nominalValue * (1 - tol) });
   }
@@ -172,10 +179,15 @@ function extractOutputValue(result: AnalysisResult, outputNode?: string): number
   if (!result.traces.length) return 0;
   const tr = result.traces[0];
   if ('yValues' in tr && tr.yValues.length > 0) {
-    // For real traces: take last value (steady-state)
-    if (tr.yValues instanceof Float64Array) {
-      return tr.yValues[tr.yValues.length - 1] as number;
+    if (result.type === 'ac') {
+      // Complex trace: yValues are interleaved [re, im] — take the magnitude
+      // of the last point (the old code returned just the imaginary part).
+      const n = tr.yValues.length;
+      if (n >= 2) return Math.hypot(tr.yValues[n - 2], tr.yValues[n - 1]);
+      return 0;
     }
+    // For real traces: take last value (steady-state)
+    return tr.yValues[tr.yValues.length - 1] as number;
   }
   void outputNode;
   return 0;

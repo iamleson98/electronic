@@ -552,7 +552,7 @@ describe('Worst-case analysis', () => {
     }
   });
 
-  it('returns empty for > 16 tolerances (too many combos)', () => {
+  it('falls back to the two extreme corners for > 16 tolerances', () => {
     const { components, wires } = voltageDivider();
     const tolerances = Array.from({ length: 17 }, (_, i) => ({
       componentId: 'R1', param: 'resistance', tolerance: 0.05,
@@ -562,6 +562,9 @@ describe('Worst-case analysis', () => {
       { tolerances, measurement: { type: 'voltage', node: 'R1:b' } } as any,
       pluginsFor(components),
     );
-    expect(r.length).toBe(0);
+    // 2^17 combos is too many — but all-at-min / all-at-max are still
+    // meaningful bounds (the old code returned nothing at all).
+    expect(r.length).toBe(2);
+    expect(r[0].value).toBeLessThan(r[1].value);
   });
 });

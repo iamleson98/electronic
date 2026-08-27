@@ -9,13 +9,13 @@
 // imported and reused — NOT modified.
 
 import type { CircuitComponent, ComponentPlugin, Wire, SimContext } from './types';
-import { simulateStep, solveDC, buildNodeMap, getTerminalsForComponent } from './engine';
+import { simulateStep, solveDC, buildNodeMap, getTerminalsForComponent, computeComponentCurrents } from './engine';
 import { createMnaSystem, solveMna } from './solver';
 import {
   createComplexMnaSystem, solveComplexMna, cStampConductance, cStampCurrentSource,
   cStampVoltageSource, cStampVCCS, cStampVCVS, type Complex,
 } from './complex-solver';
-import { mergeOptions, type SimOptions, type ConvergenceReport } from './sim-options';
+import { mergeOptions, type SimOptions, type ConvergenceReport, toKelvin } from './sim-options';
 import { thermalVoltage } from './sim-options';
 import { runSens as _runSens, type SensConfig } from './sensitivity';
 
@@ -108,6 +108,7 @@ function buildACSystemAtFrequency(
   omega: number,
   config: ACAnalysisConfig,
   gmin: number,
+  temp: number = 27,
 ): { sys: ReturnType<typeof createComplexMnaSystem>; nodeMap: ReturnType<typeof buildNodeMap> } | null {
   const nodeMap = buildNodeMap(components, wires, plugins);
   const numNodes = nodeMap.numNodes;
@@ -144,13 +145,14 @@ function buildACSystemAtFrequency(
       const g = -1 / (omega * L);
       cStampConductance(sys, a, b, { re: 0, im: g });
     } else if (comp.type === 'dcVoltage' || comp.type === 'acVoltage' || comp.type === 'pulseSource') {
-      // DC source: zero AC contribution unless it's the AC source
+      // In small-signal (phasor) analysis EVERY independent voltage source must
+      // be stamped — a 0 V source is a short, which is exactly why supply rails
+      // are AC ground in SPICE. Skipping the stamp leaves the node pair
+      // connected only through gmin and grossly distorts biased-circuit gain.
       const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
       const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
       const acVal = getSourceACValue(comp, config);
-      if (acVal.re !== 0 || acVal.im !== 0) {
-        cStampVoltageSource(sys, p, n, acVal);
-      }
+      cStampVoltageSource(sys, p, n, acVal);
     } else if (comp.type === 'currentSource') {
       const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
       const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
@@ -159,17 +161,23 @@ function buildACSystemAtFrequency(
         cStampCurrentSource(sys, p, n, acVal);
       }
     } else if (comp.type === 'diode' || comp.type === 'led') {
-      // Linearize around DC operating point — Shockley model gives g = dI/dV = Is/(n*Vt) * exp(V/(n*Vt))
-      // For small-signal: just stamp conductance = I/Vt (assuming forward bias)
+      // Linearize consistently with the DC model actually used by the solver
+      // (piecewise threshold model: forward = 1/onR, reverse = 1/offR). The
+      // previous Shockley default (Is/N params that don't exist on these
+      // plugins) was ~5 orders of magnitude off — effectively an open circuit.
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
       const vAK = dcOp.nodeVoltage[a] - dcOp.nodeVoltage[k];
-      const Is = (comp.parameters.Is as number) ?? 1e-14;
-      const n = (comp.parameters.N as number) ?? 1.5;
-      const Vt = thermalVoltage(27);
-      const g = Is / (n * Vt) * Math.exp(Math.min(vAK / (n * Vt), 30));
+      const vf = (comp.parameters.forwardV as number) ?? (comp.type === 'led' ? 2.0 : 0.7);
+      const rOn = comp.type === 'led'
+        ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
+        : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
+      const rOff = Math.max(1e3, (comp.parameters.offR as number) ?? 1e7);
+      const st = (dcOp.state as any).__global ?? {};
+      const on = st[`${comp.type}_${a}_${k}`] ?? vAK > vf;
+      const g = on ? 1 / rOn : 1 / rOff;
       cStampConductance(sys, a, k, { re: g, im: 0 });
-      // Also add junction capacitance Cjo if present
+      // Junction capacitance Cjo if present
       const Cjo = (comp.parameters.Cjo as number) ?? 0;
       if (Cjo > 0) {
         const Vj = (comp.parameters.Vj as number) ?? 0.7;
@@ -179,45 +187,70 @@ function buildACSystemAtFrequency(
         cStampConductance(sys, a, k, { re: 0, im: omega * cj });
       }
     } else if (comp.type === 'npn' || comp.type === 'pnp') {
-      // Linearize: g_m = Ic/Vt, g_o = 1/Vaf (Early effect)
-      // Simplified: stamp collector-emitter conductance based on gm
+      // Hybrid-pi linearization at the DC operating point.
+      //   gm = Ic/Vt, rpi = β/gm, go = Ic/Vaf
+      // Ic is taken from the actual DC solution: the npn/pnp plugins store the
+      // external base current in `*_ib` state keys, so Ic = hfe * ib.
       const c = terms.find((t) => t.terminalId === 'c')?.nodeId ?? 0;
       const e = terms.find((t) => t.terminalId === 'e')?.nodeId ?? 0;
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-      const Ic = Math.abs(dcOp.nodeVoltage[c] - dcOp.nodeVoltage[e]) /
-                  Math.max(1, (comp.parameters.Rc as number) ?? 1000);
-      const Vt = thermalVoltage(27);
-      const gm = Math.min(1, Ic / Vt);
-      // VCCS from b→e controlling c→e current
-      cStampVCCS(sys, c, e, b, e, { re: gm, im: 0 });
+      const isNpn = comp.type === 'npn';
+      const st = (dcOp.state as any).__global ?? {};
+      const ibKey = isNpn ? `npn_${c}_${b}_${e}_ib` : `pnp_${e}_${b}_${c}_ib`;
+      const ib = Math.abs((st[ibKey] as number) ?? 0);
+      const hfe = (comp.parameters.hfe as number) ?? 100;
+      const Ic = ib * hfe;
+      const Vt = thermalVoltage(temp);
+      const gm = Ic / Vt; // no cap — a 10 mA bias legitimately gives ~0.4 S
+      const beta = Math.max(1, hfe);
+      const rpi = gm > 0 ? beta / gm : 0;
+      const sign = isNpn ? 1 : -1;
+      if (gm > 0) {
+        // input resistance rpi between base and emitter
+        cStampConductance(sys, b, e, { re: rpi, im: 0 });
+        // VCCS: ic = gm·vbe (current flows c→e for NPN, e→c for PNP)
+        cStampVCCS(sys, c, e, b, e, { re: sign * gm, im: 0 });
+      } else {
+        // Off: keep the base weakly defined (1 MΩ), no channel
+        cStampConductance(sys, b, e, { re: 1e-6, im: 0 });
+      }
       // output conductance (Early effect)
-      const Vaf = (comp.parameters.Vaf as number) ?? 100;
-      const go = Ic / Math.max(1, Vaf);
-      cStampConductance(sys, c, e, { re: go, im: 0 });
+      const Vaf = Math.abs((comp.parameters.Vaf as number) ?? 100);
+      const go = Ic > 0 ? Ic / Math.max(1, Vaf) : 1e-12;
+      cStampConductance(sys, c, e, { re: sign * go, im: 0 });
     } else if (comp.type === 'nmos' || comp.type === 'pmos') {
-      // Linearize: gm = 2*Id/(Vgs-Vth), gds = Id*lambda
+      // Linearize: gm = Kp·vov, gds = Id·λ (consistent with the ½·Kp·vov² DC law)
       const d = terms.find((t) => t.terminalId === 'd')?.nodeId ?? 0;
       const s = terms.find((t) => t.terminalId === 's')?.nodeId ?? 0;
       const g = terms.find((t) => t.terminalId === 'g')?.nodeId ?? 0;
+      const isNmos = comp.type === 'nmos';
       const vGS = dcOp.nodeVoltage[g] - dcOp.nodeVoltage[s];
       const vDS = dcOp.nodeVoltage[d] - dcOp.nodeVoltage[s];
-      const vth = (comp.parameters.vth as number) ?? 1.5;
-      const Kp = (comp.parameters.Kp as number) ?? 0.05;
+      // Plugins define lowercase `kp` (default 0.1) and `vth` (default 2.0)
+      const vth = (comp.parameters.vth as number) ?? 2.0;
+      const Kp = (comp.parameters.kp as number) ?? 0.1;
       const lambda = (comp.parameters.lambda as number) ?? 0.02;
-      const vov = Math.max(0, vGS - vth);
-      const Id = (vDS > vov)
-        ? 0.5 * Kp * vov * vov * (1 + lambda * vDS)         // saturation
-        : Kp * (vDS * vov - 0.5 * vDS * vDS) * (1 + lambda * vDS); // linear
+      // magnitude-form overdrive: NMOS vgs−Vth; PMOS |Vsg|−|Vth| (robust to
+      // either sign convention for the PMOS threshold parameter)
+      const vthMag = Math.abs(vth);
+      const vov = Math.max(0, isNmos ? vGS - vth : -vGS - vthMag);
+      const vdsMag = isNmos ? vDS : -vDS;
+      const Id = (vdsMag > vov && vov > 0)
+        ? 0.5 * Kp * vov * vov * (1 + lambda * vdsMag)          // saturation
+        : Kp * (vov * vdsMag - 0.5 * vdsMag * vdsMag) * (1 + lambda * vdsMag); // linear
       const gm = vov > 0 ? Kp * vov : 0;
       const gds = Id * lambda;
-      cStampVCCS(sys, d, s, g, s, { re: gm, im: 0 });
-      cStampConductance(sys, d, s, { re: gds, im: 0 });
+      const sign = isNmos ? 1 : -1;
+      if (gm > 0) cStampVCCS(sys, d, s, g, s, { re: sign * gm, im: 0 });
+      cStampConductance(sys, d, s, { re: sign * gds, im: 0 });
+      // gate is high impedance
+      cStampConductance(sys, g, s, { re: 1e-6, im: 0 });
     } else if (comp.type === 'opamp' || comp.type === 'opampRails') {
-      // Ideal op-amp: VCVS with very high gain
+      // Ideal op-amp: VCVS with the plugin's open-loop gain (was hardcoded 1e6)
       const inn = terms.find((t) => t.terminalId === 'in-')?.nodeId ?? 0;
       const inp = terms.find((t) => t.terminalId === 'in+')?.nodeId ?? 0;
       const out = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
-      const gain = 1e6;
+      const gain = (comp.parameters.gain as number) ?? 1e5;
       cStampVCVS(sys, out, 0, inp, inn, { re: gain, im: 0 });
     }
   }
@@ -282,7 +315,7 @@ export function runAC(
   for (let i = 0; i < freqs.length; i++) {
     const f = freqs[i];
     const omega = 2 * Math.PI * f;
-    const built = buildACSystemAtFrequency(components, wires, plugins, dcOp, omega, config, options.gmin);
+    const built = buildACSystemAtFrequency(components, wires, plugins, dcOp, omega, config, options.gmin, options.temp);
     if (!built) continue;
     const x = solveComplexMna(built.sys);
     if (!x) continue;
@@ -389,8 +422,18 @@ export function runDCSweep(
   const options = mergeOptions(opts);
 
   const vValues: number[] = [];
-  for (let v = config.vStart; (config.vStep > 0 ? v <= config.vStop + 1e-9 : v >= config.vStop - 1e-9); v += config.vStep) {
-    vValues.push(v);
+  // Guard: a zero/NaN step (or a step pointing away from the stop value)
+  // would loop forever / produce nothing — fail loudly instead.
+  const stepValid = Number.isFinite(config.vStep) && config.vStep !== 0;
+  const directionValid = stepValid && (
+    (config.vStep > 0 && config.vStop >= config.vStart) ||
+    (config.vStep < 0 && config.vStop <= config.vStart)
+  );
+  if (directionValid) {
+    for (let v = config.vStart; (config.vStep > 0 ? v <= config.vStop + 1e-9 : v >= config.vStop - 1e-9); v += config.vStep) {
+      vValues.push(v);
+      if (vValues.length > 100000) break; // hard safety cap
+    }
   }
 
   // single sweep (no nested)
@@ -660,27 +703,50 @@ export function runPZ(
     return { type: 'pz', traces: [], scalars: {}, report: { converged: false, iterations: 0, attempts: [] }, durationMs: performance.now() - start };
   }
 
-  // Build a small MNA system at the DC operating point to extract the linearized A matrix.
+  // Build a real MNA system at the DC operating point to extract the
+  // linearized A matrix. (This previously passed a ComplexMnaSystem — which
+  // has no stampConductance/stampVoltageSource — so every plugin stamp threw
+  // TypeError and runPZ crashed on any real circuit.)
   const nodeMap = buildNodeMap(components, wires, plugins);
   const numNodes = nodeMap.numNodes;
   const maxExtras = components.length * 4 + 8;
-  const sys = createComplexMnaSystem(numNodes - 1, maxExtras);
+  const sys = createMnaSystem(numNodes - 1, maxExtras);
+  sys.nextExtra = numNodes - 1;
 
   // Stamp conductances from all components (linearized about DC operating point)
   for (const comp of components) {
     const plugin = plugins.get(comp.type);
     if (!plugin?.stamp) continue;
     const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
-    plugin.stamp(comp.parameters, terminals, sys as any, dcOp);
+    try {
+      plugin.stamp(comp.parameters, terminals, sys, dcOp);
+    } catch {
+      // a plugin that cannot stamp linearized DC is simply skipped
+    }
   }
 
-  // Extract the dense A matrix from the complex system (real part only for PZ)
-  const size = sys.size;
+  // Shrink to the used block (same compaction the engine applies) so the
+  // reserved-but-unused extra rows don't produce phantom zero eigenvalues.
+  const size = sys.nextExtra;
+  if (size < sys.size) {
+    const newA = new Float64Array(size * size);
+    const newZ = new Float64Array(size);
+    for (let r = 0; r < size; r++) {
+      for (let c = 0; c < size; c++) {
+        newA[r * size + c] = sys.A[r * sys.size + c];
+      }
+      newZ[r] = sys.z[r];
+    }
+    sys.A = newA;
+    sys.z = newZ;
+    sys.size = size;
+  }
+
+  // Extract the dense A matrix (real-valued MNA layout: A[r*size+c])
   const A: number[][] = Array.from({ length: size }, () => new Array(size).fill(0));
   for (let r = 0; r < size; r++) {
     for (let c = 0; c < size; c++) {
-      // ComplexMnaSystem stores re/im interleaved — take real part
-      A[r][c] = sys.A[(r * size + c) * 2] ?? 0;
+      A[r][c] = sys.A[r * size + c] ?? 0;
     }
   }
 
@@ -831,8 +897,11 @@ function qrEigenvalues(A: number[][]): { re: number; im: number }[] {
       if (r < 1e-14) { x = H[k + 1][k]; y = k + 2 < n ? H[k + 2][k] : 0; continue; }
       const cs = x / r;
       const sn = y / r;
-      // Apply rotation to rows k and k+1
-      for (let j = k; j < n; j++) {
+      // Apply rotation to rows k and k+1. The rotation at step k−1 creates a
+      // bulge at H[k+1][k-1]; this rotation must start at column k−1 to chase
+      // it. Starting at column k leaves the bulge in place, destroying the
+      // Hessenberg structure and preventing convergence.
+      for (let j = Math.max(0, k - 1); j < n; j++) {
         const t1 = H[k][j];
         const t2 = H[k + 1][j];
         H[k][j] = cs * t1 + sn * t2;
@@ -920,11 +989,32 @@ export function runNoise(
 
   // For each frequency, sum thermal + shot noise contributions from all devices
   // Thermal noise: 4*kT*G (per resistor) — sqrt(4*kT*R*Δf) per resistor
-  // Shot noise: 2*q*I*Δf (per diode/BJT)
+  // Shot noise: 2*q*I*Δf (per diode/BJT, at the actual DC bias current)
   const kB = 1.380649e-23;
-  const T = 27 + 273.15;
+  const T = toKelvin(options.temp);
   const q = 1.602176634e-19;
   const deltaF = 1; // 1 Hz bandwidth
+
+  // Diode/LED bias currents from the DC operating point (the old code assumed
+  // a hardcoded 1 mA for every diode regardless of bias).
+  const diodeCurrent = new Map<string, number>();
+  {
+    const nm = buildNodeMap(components, wires, plugins);
+    const compCurrents = computeComponentCurrents(components, wires, plugins, dcOp);
+    for (const comp of components) {
+      if (comp.type === 'diode' || comp.type === 'led') {
+        const plugin = plugins.get(comp.type);
+        if (!plugin) continue;
+        const terms = getTerminalsForComponent(comp, plugin, nm);
+        const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+        const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
+        const v = dcOp.nodeVoltage[a] - dcOp.nodeVoltage[k];
+        const vf = (comp.parameters.forwardV as number) ?? (comp.type === 'led' ? 2.0 : 0.7);
+        // only forward-biased junctions contribute shot noise
+        diodeCurrent.set(comp.id, v > vf ? Math.abs(compCurrents.get(comp.id) ?? 0) : 0);
+      }
+    }
+  }
 
   for (let i = 0; i < freqs.length; i++) {
     const f = freqs[i];
@@ -936,9 +1026,9 @@ export function runNoise(
         // thermal noise: 4*kT*R (V²/Hz)
         totalNoisePower += 4 * kB * T * R * deltaF;
       } else if (comp.type === 'diode' || comp.type === 'led') {
-        // shot noise: 2*q*I (A²/Hz) — assume forward bias
-        const I = 1e-3; // placeholder
-        totalNoisePower += 2 * q * I * deltaF;
+        // shot noise: 2*q*I (A²/Hz) at the actual forward current
+        const I = diodeCurrent.get(comp.id) ?? 0;
+        if (I > 0) totalNoisePower += 2 * q * I * deltaF;
       }
     }
     yValues[i] = Math.sqrt(totalNoisePower);
@@ -1010,13 +1100,23 @@ export function runDisto(
   }
 
   const outputNodeName = config.outputNode;
+  // Pristine copy of the DC operating point — each frequency's transient must
+  // start from the same bias (the loop below used to mutate dcOp in place and
+  // carry the previous frequency's final state across the sweep).
+  const dcOpPristine: SimContext = {
+    nodeVoltage: Float64Array.from(dcOp.nodeVoltage),
+    branchCurrent: Float64Array.from(dcOp.branchCurrent),
+    time: 0,
+    state: dcOp.state,
+    dt: dcOp.dt,
+  };
   // For each frequency, run a short transient sim + FFT to measure HD2/HD3
   for (let i = 0; i < freqs.length; i++) {
     const f1 = freqs[i];
-    // Set the input source to a sine wave at f1 with small amplitude (1V)
+    // Set the input source to a sine wave at f1 with small amplitude (0.1V)
     // so nonlinearity is excited but not saturated
     const amplitude = 0.1; // 100mV — small enough to stay in weakly nonlinear regime
-    // Run transient for 5 periods of f1
+    // Run transient for 5 periods of f1 (discard the first for settling)
     const period = 1 / f1;
     const tEnd = 5 * period;
     const tStep = period / 64; // 64 samples per period
@@ -1025,47 +1125,65 @@ export function runDisto(
     // Save original input source parameters
     const origParams = { ...inputComp.parameters };
 
+    // Reset the transient state for this frequency
+    const tranPrev: SimContext = {
+      nodeVoltage: Float64Array.from(dcOpPristine.nodeVoltage),
+      branchCurrent: Float64Array.from(dcOpPristine.branchCurrent),
+      time: 0,
+      state: dcOpPristine.state,
+      dt: dcOpPristine.dt,
+    };
+
     // Run transient simulation with the sine input
     const N = Math.ceil(tEnd / tStep);
+    const nodeMap = buildNodeMap(components, wires, plugins);
     for (let n = 0; n < N; n++) {
       const t = n * tStep;
-      // Set the input source's voltage to amplitude * sin(2*pi*f1*t)
-      // (We modify parameters in-place; the engine reads them at stamp time)
-      if (inputComp.type === 'dcVoltage' || inputComp.type === 'acVoltage' || inputComp.type === 'pulseSource') {
+      // Drive the stimulus on the source's actual parameters. dcVoltage reads
+      // `voltage`; acVoltage reads `amplitude/frequency/offset/phase`; setting
+      // `voltage` alone did nothing for those two types.
+      if (inputComp.type === 'dcVoltage' || inputComp.type === 'pulseSource') {
         inputComp.parameters.voltage = amplitude * Math.sin(2 * Math.PI * f1 * t);
+      } else if (inputComp.type === 'acVoltage') {
+        inputComp.parameters.amplitude = amplitude;
+        inputComp.parameters.frequency = f1;
+        inputComp.parameters.offset = 0;
+        inputComp.parameters.phase = 0;
       }
       // Run a single step
-      const sim = simulateStep(components, wires, plugins, dcOp, tStep, {
+      const sim = simulateStep(components, wires, plugins, tranPrev, tStep, {
         initialConditions: options.initialConditions,
         nodeSets: options.nodeSets,
       });
       if (sim) {
-        // Read output node voltage
-        const nodeMap = buildNodeMap(components, wires, plugins);
+        // Read output node voltage (nodeVoltage is node-id indexed: 0 = ground)
         const outTerm = nodeMap.terminalNode.get(outputNodeName);
         if (outTerm != null && outTerm > 0) {
-          samples.push({ t, v: sim.sim.nodeVoltage[outTerm - 1] ?? 0 });
+          samples.push({ t, v: sim.sim.nodeVoltage[outTerm] ?? 0 });
         } else {
           samples.push({ t, v: 0 });
         }
-        // Update DC operating point for next iteration
-        dcOp.nodeVoltage = sim.sim.nodeVoltage;
-        dcOp.branchCurrent = sim.sim.branchCurrent;
-        dcOp.time = sim.sim.time;
+        // Advance the transient state
+        tranPrev.nodeVoltage = sim.sim.nodeVoltage;
+        tranPrev.branchCurrent = sim.sim.branchCurrent;
+        tranPrev.time = sim.sim.time;
       }
     }
 
     // Restore input source parameters
     inputComp.parameters = origParams;
 
-    // FFT the output samples to extract harmonic content
-    if (samples.length < 16) continue;
-    const fftSize = nextPow2(samples.length);
+    // FFT the output samples to extract harmonic content (skip the first
+    // period, which contains the startup settling transient)
+    const settleIdx = samples.findIndex(s => s.t >= period);
+    const kept = settleIdx > 0 ? samples.slice(settleIdx) : samples;
+    if (kept.length < 16) continue;
+    const fftSize = nextPow2(kept.length);
     const re = new Float64Array(fftSize);
     const im = new Float64Array(fftSize);
-    for (let n = 0; n < samples.length; n++) re[n] = samples[n].v;
+    for (let n = 0; n < kept.length; n++) re[n] = kept[n].v;
     fft(re, im);
-    // Find magnitude at f1, 2*f1, 3*f1
+    // Find magnitude at f1, 2*f1, 3*f1 (bin = f·fftSize·dt)
     const binF1 = Math.round(f1 * fftSize * tStep);
     const mag1 = binF1 < fftSize / 2 ? Math.hypot(re[binF1], im[binF1]) * 2 / fftSize : 0;
     const mag2 = 2 * binF1 < fftSize / 2 ? Math.hypot(re[2 * binF1], im[2 * binF1]) * 2 / fftSize : 0;
@@ -1132,14 +1250,21 @@ export function runFour(
   for (let i = 0; i < N; i++) re[i] = windowed[i];
   fft(re, im);
 
-  // Extract magnitude at harmonic frequencies
-  const fundamentalBin = Math.round(config.fundamentalFreq * fftSize * (config.timeValues[N - 1] - config.timeValues[0]));
+  // Extract magnitude at harmonic frequencies.
+  // Bin index = f·fftSize·dt with dt = (t[N−1]−t[0])/(N−1) — the old code
+  // multiplied by the total time span (off by a factor of N−1, which pushed
+  // every harmonic past Nyquist and made all magnitudes 0).
+  const dt = (config.timeValues[N - 1] - config.timeValues[0]) / (N - 1);
+  const fundamentalBin = Math.round(config.fundamentalFreq * fftSize * dt);
   const harmonicXValues = new Float64Array(config.nHarmonics);
   const harmonicYValues = new Float64Array(config.nHarmonics);
+  // Hann window coherent gain: Σw = (N−1)/2 — normalize against it so a
+  // bin-centered sinusoid reads its true amplitude (was ~2× / 6 dB low).
+  const wsum = (N - 1) / 2;
   for (let h = 1; h <= config.nHarmonics; h++) {
     const bin = fundamentalBin * h;
     harmonicXValues[h - 1] = h * config.fundamentalFreq;
-    harmonicYValues[h - 1] = (bin < fftSize / 2) ? Math.hypot(re[bin], im[bin]) / (N / 2) : 0;
+    harmonicYValues[h - 1] = (bin < fftSize / 2) ? Math.hypot(re[bin], im[bin]) * 2 / wsum : 0;
   }
 
   const trace: RealTrace = {
@@ -1301,8 +1426,8 @@ export function runTran(
   const { tStop, tStep, probes = [] } = config;
 
   // Solve DC operating point first
-  let prev = solveDC(components, wires, plugins, options.itl1);
-  if (!prev) {
+  const dcResult = solveDC(components, wires, plugins, options.itl1);
+  if (!dcResult) {
     return {
       type: 'tran',
       traces: [],
@@ -1311,6 +1436,17 @@ export function runTran(
       durationMs: performance.now() - start,
     };
   }
+  // solveDC iterates with DC_DT = 1e6 s, so its SimContext carries a clock of
+  // ~1e6 s. Seed the transient from a copy with time reset to 0 — otherwise
+  // every source phase (sin(2πf·t), pulse phase, 555 astable) starts at a
+  // garbage offset and finalTime reports megaseconds.
+  const prev: SimContext = {
+    nodeVoltage: dcResult.nodeVoltage,
+    branchCurrent: dcResult.branchCurrent,
+    time: 0,
+    state: dcResult.state,
+    dt: dcResult.dt,
+  };
 
   // Collect traces: one per probe node
   const nm = buildNodeMap(components, wires, plugins);
@@ -1337,10 +1473,21 @@ export function runTran(
       branchCurrent: simState.branchCurrent,
       time: simState.time,
       state: simState.state,
-    }, tStep);
+    }, tStep, {
+      initialConditions: options.uic ? options.initialConditions : undefined,
+      nodeSets: options.nodeSets,
+    });
     if (!result) break;
     simState = result.sim;
     stepCount++;
+    // Sample the final state at t = tStop (previously the last solve result
+    // was computed and then discarded).
+    if (i === maxSteps - 1) {
+      timeValues.push((i + 1) * tStep);
+      for (const pn of probeNodes) {
+        traceData[pn.key].push(simState.nodeVoltage[pn.nodeId] ?? 0);
+      }
+    }
   }
 
   const traces: RealTrace[] = probeNodes.map(pn => ({

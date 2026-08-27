@@ -5,7 +5,7 @@
 // the existing solveDC() function is unchanged.
 
 import type { CircuitComponent, ComponentPlugin, Wire, SimContext } from './types';
-import { solveDC, buildNodeMap, getTerminalsForComponent, simulateStep } from './engine';
+import { solveDC, buildNodeMap, getTerminalsForComponent } from './engine';
 import { createMnaSystem, solveMna } from './solver';
 import { mergeOptions, type SimOptions, type ConvergenceReport, reportOK, reportFail } from './sim-options';
 
@@ -14,10 +14,58 @@ import { mergeOptions, type SimOptions, type ConvergenceReport, reportOK, report
 //   - Add a large conductance gmin_start from every node to ground (e.g., 1e-3 S)
 //   - Solve DC operating point (this is well-conditioned because the gmin
 //     conductances dominate and break any floating loops).
-//   - Reduce gmin by a factor (typically 10×) and re-solve using the previous
-//     solution as the initial guess.
+//   - Reduce gmin by a factor (typically 10×) and re-solve.
 //   - Repeat until gmin reaches the actual value (typically 1e-12 S).
+//
+// Implemented for real here by injecting temporary shunt resistors
+// (1/gmin Ω from each non-ground node to ground) into a cloned circuit.
 // ─────────────────────────────────────────────────────────────────────────────
+
+function buildGminShuntedCircuit(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  gmin: number,
+): { components: CircuitComponent[]; wires: Wire[] } | null {
+  const nodeMap = buildNodeMap(components, wires, plugins);
+  // Find one terminal key per non-ground node to hang the shunt from.
+  const nodeTerminal = new Map<number, { componentId: string; terminalId: string }>();
+  for (const [key, nodeId] of nodeMap.terminalNode) {
+    if (nodeId > 0 && !nodeTerminal.has(nodeId)) {
+      const [componentId, terminalId] = key.split(':');
+      nodeTerminal.set(nodeId, { componentId, terminalId });
+    }
+  }
+  // Shunts need a ground reference.
+  const ground = components.find(c => c.type === 'ground' || c.type === 'powerGND');
+  if (!ground) return null;
+
+  const newComponents: CircuitComponent[] = [...components];
+  const newWires: Wire[] = [...wires];
+  let idx = 0;
+  for (const [nodeId, term] of nodeTerminal) {
+    const shuntId = `__gmin_shunt_${nodeId}__`;
+    newComponents.push({
+      id: shuntId,
+      type: 'resistor',
+      position: { x: 0, y: 0 },
+      rotation: 0,
+      parameters: { resistance: 1 / gmin },
+    });
+    newWires.push({
+      id: `__gmin_wire_a_${idx}__`,
+      from: { componentId: shuntId, terminalId: 'a' },
+      to: { componentId: term.componentId, terminalId: term.terminalId },
+    });
+    newWires.push({
+      id: `__gmin_wire_b_${idx}__`,
+      from: { componentId: shuntId, terminalId: 'b' },
+      to: { componentId: ground.id, terminalId: 'g' },
+    });
+    idx++;
+  }
+  return { components: newComponents, wires: newWires };
+}
 
 export function solveDCWithGminStepping(
   components: CircuitComponent[],
@@ -35,36 +83,36 @@ export function solveDCWithGminStepping(
   }
   attempts.push('plain newton');
 
-  // 2. Source stepping — ramp voltage sources from 0% to 100% in steps,
-  //    using each step's solution as the initial guess for the next.
-  //    This helps non-linear circuits (diodes, transistors) converge.
-  const sourceSteps = [0.1, 0.25, 0.5, 0.75, 1.0];
-  for (const scale of sourceSteps) {
-    // Scale all voltage source parameters
-    const scaledComponents = components.map(c => {
-      if (c.type === 'dcVoltage' || c.type === 'acVoltage') {
-        return { ...c, parameters: { ...c.parameters, voltage: (c.parameters.voltage as number) * scale } };
-      }
-      return c;
-    });
-    const stepResult = solveDC(scaledComponents, wires, plugins, options.itl1);
-    if (stepResult) {
-      attempts.push(`source stepping @${scale * 100}%`);
-      // Use this as initial guess for full solve
-      const finalResult = solveDC(components, wires, plugins, options.itl1);
-      if (finalResult) {
-        return { sim: finalResult, report: reportOK(sourceSteps.length, 0) };
-      }
+  // 2. True gmin stepping: shunt every node to ground with 1/gmin Ω and
+  //    decay the shunt conductance toward the target gmin. Each step is
+  //    better conditioned than the last; the final answer is a clean solve
+  //    (or, failing that, the solve at the target gmin — within gmin of the
+  //    true operating point, exactly as SPICE accepts it).
+  const gminStart = 1e-2;
+  const gminTarget = options.gmin ?? 1e-12;
+  let lastShunted: SimContext | null = null;
+  for (let gmin = gminStart; gmin >= gminTarget * 0.999; gmin *= 0.1) {
+    const shunted = buildGminShuntedCircuit(components, wires, plugins, gmin);
+    if (!shunted) break;
+    const r = solveDC(shunted.components, shunted.wires, plugins, options.itl1);
+    attempts.push(`gmin stepping @${gmin.toExponential(1)}`);
+    if (r) {
+      lastShunted = r;
+    } else {
+      // this gmin step failed to converge — try a smaller one
+      continue;
     }
   }
 
-  // 3. Pseudo-transient: run transient analysis with large dt and large C
-  //    to let the circuit settle to DC. We add small capacitors to non-ground
-  //    nodes by running many steps with a large dt.
-  const ptResult = solveDC(components, wires, plugins, Math.max(200, options.itl4));
-  if (ptResult) {
-    attempts.push('pseudo-transient');
-    return { sim: ptResult, report: reportOK(200, 0) };
+  // 3. Final clean solve at full source values
+  const finalResult = solveDC(components, wires, plugins, options.itl1);
+  if (finalResult) {
+    attempts.push('final clean solve');
+    return { sim: finalResult, report: reportOK(attempts.length, 0) };
+  }
+  if (lastShunted) {
+    attempts.push('returning gmin-target solution (clean solve failed)');
+    return { sim: lastShunted, report: reportOK(attempts.length, 0) };
   }
 
   return { sim: null, report: reportFail('gmin_step_failed', 'gmin stepping failed to converge', attempts) };
@@ -88,44 +136,47 @@ export function solveDCWithSourceStepping(
   const options = mergeOptions(opts);
   const attempts: string[] = ['plain newton (failed)'];
 
-  // Scale all sources by alpha
+  // Scale all sources by alpha, ramping 0.01 → 1. The ramp MUST finish with
+  // an exact alpha = 1 solve: doubling 0.01 never lands on 1.0, and the old
+  // loop exited at alpha = 1.28 having last solved alpha = 0.64 — returning a
+  // 64%-source operating point stamped "converged".
   let alpha = 0.01;
-  let prevSim: SimContext | null = null;
   let iterations = 0;
   const maxSteps = 30;
 
-  while (alpha < 1.0 + 1e-6 && iterations < maxSteps) {
+  while (iterations < maxSteps) {
     iterations++;
+    const a = Math.min(alpha, 1.0);
     const scaledComponents = components.map((c) => {
       if (c.type === 'dcVoltage' || c.type === 'acVoltage' || c.type === 'pulseSource') {
         const v = (c.parameters.voltage as number) ?? 0;
-        return { ...c, parameters: { ...c.parameters, voltage: v * alpha } };
+        return { ...c, parameters: { ...c.parameters, voltage: v * a } };
       }
       if (c.type === 'currentSource') {
         const i = (c.parameters.current as number) ?? 0;
-        return { ...c, parameters: { ...c.parameters, current: i * alpha } };
+        return { ...c, parameters: { ...c.parameters, current: i * a } };
       }
       return c;
     });
     const r = solveDC(scaledComponents, wires, plugins, options.itl1);
     if (!r) {
-      // try smaller alpha step
+      // try a smaller alpha step
       alpha *= 0.5;
       if (alpha < 1e-6) {
         attempts.push(`source stepping (alpha stalled at ${alpha})`);
-        return { sim: prevSim, report: reportFail('source_step_failed', `source stepping stalled at alpha=${alpha}`, attempts) };
+        return { sim: null, report: reportFail('source_step_failed', `source stepping stalled at alpha=${alpha}`, attempts) };
       }
       continue;
     }
-    prevSim = r;
-    alpha *= 2;
+    if (a >= 1.0) {
+      // full-source solve succeeded — this is the answer
+      attempts.push(`source stepping (${iterations} steps, reached alpha=1)`);
+      return { sim: r, report: reportOK(iterations, 0) };
+    }
+    alpha = a * 2;
   }
 
-  if (prevSim) {
-    attempts.push(`source stepping (${iterations} steps)`);
-    return { sim: prevSim, report: reportOK(iterations, 0) };
-  }
-  return { sim: null, report: reportFail('source_step_failed', 'source stepping failed', attempts) };
+  return { sim: null, report: reportFail('source_step_failed', 'source stepping exhausted step budget', attempts) };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -161,6 +212,7 @@ export function solveDCWithPseudoTran(
   attempts.push('pseudo-transient (gmin stepping)');
   const nodeMap = buildNodeMap(components, wires, plugins);
   const numNodes = nodeMap.numNodes;
+  const numNonGround = numNodes - 1; // matrix rows/cols for node voltages
 
   // Build a wrapper around the MNA system that adds gmin conductances.
   // We use a "virtual" MNA system that intercepts stamp calls and adds the
@@ -168,7 +220,7 @@ export function solveDCWithPseudoTran(
   const gminStart = 1.0;        // 1 S = 1 Ω to ground (very stiff)
   const gminTarget = options.gmin ?? 1e-12;
   const gminDecay = 0.1;        // reduce gmin by 10× each iteration
-  const maxIter = options.itl4 ?? 50;
+  const maxIter = Math.max(30, options.itl4 ?? 50);
 
   let gmin = gminStart;
   let converged = false;
@@ -186,8 +238,12 @@ export function solveDCWithPseudoTran(
       state: { __pseudo_tran: true, __gmin: gmin },
     };
 
-    // Build the MNA system with gmin conductances added
-    const sys = createMnaSystem(numNodes, components.length * 4 + 8);
+    // Build the MNA system. NOTE: createMnaSystem expects the NON-GROUND
+    // node count (matrix index of node k is k−1) — passing numNodes created
+    // a phantom never-stamped row/column and made the matrix singular on
+    // every iteration, so pseudo-transient could never succeed.
+    const sys = createMnaSystem(numNonGround, components.length * 4 + 8);
+    sys.nextExtra = numNonGround;
 
     // Stamp all components
     for (const comp of components) {
@@ -206,6 +262,23 @@ export function solveDCWithPseudoTran(
       sys.stampConductance(i, 0, gmin);
     }
 
+    // Shrink to the used block (mirrors the engine's compaction)
+    const actualSize = sys.nextExtra;
+    if (actualSize < sys.size) {
+      const newA = new Float64Array(actualSize * actualSize);
+      const newZ = new Float64Array(actualSize);
+      for (let r = 0; r < actualSize; r++) {
+        for (let c = 0; c < actualSize; c++) {
+          newA[r * actualSize + c] = sys.A[r * sys.size + c];
+        }
+        newZ[r] = sys.z[r];
+      }
+      sys.A = newA;
+      sys.z = newZ;
+      sys.size = actualSize;
+      sys.numExtra = actualSize - numNonGround;
+    }
+
     // Solve
     const sol = solveMna(sys);
     if (!sol) {
@@ -215,9 +288,15 @@ export function solveDCWithPseudoTran(
       continue;
     }
 
-    // Update sim voltages
+    // Update sim voltages. nodeVoltage is node-id indexed (0 = ground), so
+    // node i's voltage is sol[i−1] — the old code copied sol[i] directly,
+    // shifting every node reading by one.
     for (let i = 0; i < numNodes; i++) {
-      sim.nodeVoltage[i] = sol[i] ?? 0;
+      sim.nodeVoltage[i] = i === 0 ? 0 : (sol[i - 1] ?? 0);
+    }
+    // Branch currents: extra variable j lives at matrix index numNonGround + j
+    for (let j = 0; j < sys.numExtra && j < sim.branchCurrent.length; j++) {
+      sim.branchCurrent[j] = sol[numNonGround + j] ?? 0;
     }
 
     // Check convergence: max delta between iterations

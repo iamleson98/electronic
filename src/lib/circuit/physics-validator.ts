@@ -201,9 +201,11 @@ export function validatePhysics(
     const kNode = terms.find(t => t.terminalId === 'k')?.nodeId ?? 0;
     const v = sim.nodeVoltage[aNode] - sim.nodeVoltage[kNode];
     const vf = (comp.parameters.forwardV as number) || 0.7;
+    // Guard against undefined params — Math.max(0.01, undefined) is NaN and
+    // NaN comparisons are always false, silently disabling this whole check.
     const r = comp.type === 'led'
-      ? Math.max(0.01, comp.parameters.seriesR as number)
-      : Math.max(0.001, comp.parameters.onR as number);
+      ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
+      : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
     const st = sim.state.__global ?? {};
     const on = st[`${comp.type}_${aNode}_${kNode}`] ?? false;
     const actualI = Math.abs(compCurrents.get(comp.id) ?? 0);
@@ -288,7 +290,9 @@ export function validatePhysics(
     } else if (comp.type === 'acVoltage') {
       const amp = comp.parameters.amplitude as number;
       const freq = comp.parameters.frequency as number;
-      const phase = (comp.parameters.phase as number) ?? 0;
+      // The plugin's phase parameter is in DEGREES (unit: '°') — convert to
+      // radians like sources.ts does, or every phased source false-errors.
+      const phase = ((comp.parameters.phase as number) ?? 0) * Math.PI / 180;
       const offset = (comp.parameters.offset as number) ?? 0;
       expectedV = offset + amp * Math.sin(2 * Math.PI * freq * sim.time + phase);
     } else {
@@ -324,9 +328,22 @@ export function validatePhysics(
       const nNode = terms.find(t => t.terminalId === 'n')?.nodeId ?? 0;
       const v = sim.nodeVoltage[pNode] - sim.nodeVoltage[nNode];
       powerSupplied += v * i;
-    } else if (['resistor', 'led', 'diode', 'capacitor', 'inductor', 'speaker', 'lamp', 'dcMotor', 'photoresistor'].includes(comp.type)) {
-      const aNode = terms.find(t => t.terminalId === 'a')?.nodeId ?? 0;
-      const bNode = terms.find(t => t.terminalId === (comp.type === 'led' || comp.type === 'diode' ? 'k' : 'b'))?.nodeId ?? 0;
+    } else if (['resistor', 'led', 'diode', 'zener', 'capacitor', 'inductor', 'speaker', 'lamp', 'dcMotor', 'photoresistor',
+               'npn', 'pnp', 'nmos', 'pmos', 'switch', 'pushButton', 'potentiometer'].includes(comp.type)) {
+      // Two-terminal passives plus transistors/switches: account for their
+      // dissipation so transistor circuits don't trip the power-conservation
+      // warning (Vce·Ic used to be missing entirely from "consumed").
+      let aNode: number, bNode: number;
+      if (comp.type === 'npn' || comp.type === 'nmos' || comp.type === 'pmos') {
+        aNode = terms.find(t => t.terminalId === (comp.type === 'npn' ? 'c' : 'd'))?.nodeId ?? 0;
+        bNode = terms.find(t => t.terminalId === (comp.type === 'npn' ? 'e' : 's'))?.nodeId ?? 0;
+      } else if (comp.type === 'pnp') {
+        aNode = terms.find(t => t.terminalId === 'e')?.nodeId ?? 0;
+        bNode = terms.find(t => t.terminalId === 'c')?.nodeId ?? 0;
+      } else {
+        aNode = terms.find(t => t.terminalId === 'a')?.nodeId ?? 0;
+        bNode = terms.find(t => t.terminalId === (comp.type === 'led' || comp.type === 'diode' || comp.type === 'zener' ? 'k' : 'b'))?.nodeId ?? 0;
+      }
       const v = sim.nodeVoltage[aNode] - sim.nodeVoltage[bNode];
       powerConsumed += Math.abs(v * i);
     } else if (comp.type === 'sevenSegment') {

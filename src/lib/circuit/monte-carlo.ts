@@ -17,7 +17,7 @@
 // Uses a simple LCG (Linear Congruential Generator) for reproducibility —
 // pass `config.seed` for deterministic results.
 
-import { solveDC, buildNodeMap } from './engine';
+import { solveDC, buildNodeMap, computeComponentCurrents } from './engine';
 import type { CircuitComponent, Wire, ComponentPlugin, CircuitDocument } from './types';
 
 export interface MonteCarloTolerance {
@@ -153,7 +153,14 @@ export function runMonteCarlo(
 
     // Run the measurement
     const value = measure({ components: clonedComponents, wires: doc.wires }, plugins, config.measurement);
-    if (!isFinite(value)) continue;
+    if (!isFinite(value)) {
+      // Record the failed run (with its perturbations) but exclude it from
+      // the statistics — previously failed runs vanished entirely, so yield
+      // was computed only over survivors (a circuit failing 90% of the time
+      // could report 100% yield).
+      runs.push({ index: run, value: NaN, passed: false, perturbations });
+      continue;
+    }
 
     // Check spec
     let passed = true;
@@ -192,9 +199,31 @@ export function runWorstCase(
   const n = config.tolerances.length;
   if (n === 0) return [];
   if (n > 16) {
-    // Too many combinations — fall back to just the corners
-    // (avoid 2^N explosion)
-    return [];
+    // Too many combinations for the full 2^N sweep — fall back to the two
+    // extreme corners (all-at-min and all-at-max) instead of returning
+    // nothing at all.
+    const corners: Array<{ combo: number[]; value: number; perturbations: Array<{ componentId: string; param: string; value: number }> }> = [];
+    for (const sign of [-1, 1]) {
+      const clonedComponents: CircuitComponent[] = JSON.parse(JSON.stringify(doc.components));
+      const comboArr: number[] = [];
+      const perturbations: Array<{ componentId: string; param: string; value: number }> = [];
+      for (const tol of config.tolerances) {
+        const comp = clonedComponents.find(c => c.id === tol.componentId);
+        if (!comp) { comboArr.push(0); continue; }
+        const orig = Number(comp.parameters[tol.param]);
+        if (!isFinite(orig)) { comboArr.push(0); continue; }
+        const perturbed = orig * (1 + sign * tol.tolerance);
+        comp.parameters[tol.param] = perturbed;
+        comboArr.push(sign);
+        perturbations.push({ componentId: tol.componentId, param: tol.param, value: perturbed });
+      }
+      const value = measure({ components: clonedComponents, wires: doc.wires }, plugins, config.measurement);
+      if (isFinite(value)) {
+        corners.push({ combo: comboArr, value, perturbations });
+      }
+    }
+    corners.sort((a, b) => a.value - b.value);
+    return corners;
   }
   const totalCombos = 1 << n;  // 2^n
   const results: Array<{ combo: number[]; value: number; perturbations: Array<{ componentId: string; param: string; value: number }> }> = [];
@@ -244,28 +273,15 @@ function measure(
     if (node === undefined) return NaN;
     return dc.nodeVoltage[node];
   } else if (measurement.type === 'current' && measurement.componentId) {
-    // Find the branch current for this component
-    // (simplified: assume it's a voltage source and use branchCurrent)
-    const plugin = plugins.get(doc.components.find(c => c.id === measurement.componentId)?.type ?? '');
-    if (!plugin) return NaN;
-    // For a resistor, compute I = V_drop / R using DC operating point
+    // Measure the component's current via the engine's per-component current
+    // computation (handles resistors, diodes, sources, transistors, ...).
+    // The old fallback indexed branchCurrent by the component's ARRAY index,
+    // which has no relation to the extra-variable indices the solver assigns.
     const comp = doc.components.find(c => c.id === measurement.componentId);
     if (!comp) return NaN;
-    const nm = buildNodeMap(doc.components, doc.wires, plugins);
-    const terms = plugin.terminals;
-    if (terms.length < 2) return NaN;
-    const n1 = nm.terminalNode.get(`${comp.id}:${terms[0].id}`);
-    const n2 = nm.terminalNode.get(`${comp.id}:${terms[1].id}`);
-    if (n1 === undefined || n2 === undefined) return NaN;
-    const v1 = dc.nodeVoltage[n1] ?? 0;
-    const v2 = dc.nodeVoltage[n2] ?? 0;
-    if (comp.type === 'resistor') {
-      const R = Number(comp.parameters.resistance) || 1e-12;
-      return (v1 - v2) / R;
-    }
-    // For other types, fall back to branch current
-    const idx = doc.components.indexOf(comp);
-    return dc.branchCurrent?.[idx] ?? 0;
+    const compCurrents = computeComponentCurrents(doc.components, doc.wires, plugins, dc);
+    const i = compCurrents.get(comp.id);
+    return i !== undefined ? i : NaN;
   }
   return NaN;
 }

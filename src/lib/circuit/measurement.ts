@@ -74,17 +74,17 @@ export function parseMeasLine(line: string): MeasCommand | null {
     cmd.whenExpr = whenMatch[2].trim();
   }
 
-  // Extract FROM/TO
-  const fromMatch = rest.match(/FROM\s*=\s*([\d.]+[munp]?)/i);
+  // Extract FROM/TO (sign, exponent and SPICE suffixes all supported)
+  const fromMatch = rest.match(/FROM\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?(?:meg|k|mil|m|u|µ|n|p|f|t|g)?s?)/i);
   if (fromMatch) cmd.fromTime = parseNumberWithSuffix(fromMatch[1]);
-  const toMatch = rest.match(/TO\s*=\s*([\d.]+[munp]?)/i);
+  const toMatch = rest.match(/TO\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?(?:meg|k|mil|m|u|µ|n|p|f|t|g)?s?)/i);
   if (toMatch) cmd.toTime = parseNumberWithSuffix(toMatch[1]);
 
   // Extract TRIG/TARG
-  const trigMatch = rest.match(/TRIG\s+(\S+)\s*=\s*([\d.+-]+)/i);
-  if (trigMatch) { cmd.trigExpr = trigMatch[1]; cmd.trigVal = parseFloat(trigMatch[2]); }
-  const targMatch = rest.match(/TARG\s+(\S+)\s*=\s*([\d.+-]+)/i);
-  if (targMatch) { cmd.targExpr = targMatch[1]; cmd.targVal = parseFloat(targMatch[2]); }
+  const trigMatch = rest.match(/TRIG\s+(\S+)\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?(?:meg|k|mil|m|u|µ|n|p|f|t|g)?s?)/i);
+  if (trigMatch) { cmd.trigExpr = trigMatch[1]; cmd.trigVal = parseNumberWithSuffix(trigMatch[2]); }
+  const targMatch = rest.match(/TARG\s+(\S+)\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?(?:meg|k|mil|m|u|µ|n|p|f|t|g)?s?)/i);
+  if (targMatch) { cmd.targExpr = targMatch[1]; cmd.targVal = parseNumberWithSuffix(targMatch[2]); }
 
   // strip modifiers from expr
   cmd.expr = cmd.expr.split(/\s+(WHEN|FROM|TO|TRIG|TARG|CROSS|RISE|FALL)/i)[0].trim();
@@ -92,14 +92,20 @@ export function parseMeasLine(line: string): MeasCommand | null {
 }
 
 function parseNumberWithSuffix(s: string): number {
-  const m = s.match(/^([\d.]+)([munp]?s?)$/i);
+  // Full SPICE suffix support: T G MEG K MIL M U/N/P/F, optional trailing 's',
+  // sign and scientific notation. (The old regex silently dropped the sign
+  // and everything beyond a bare m/u/n/p suffix — `FROM=-5ms` parsed as -5.)
+  const m = s.trim().match(/^([+-]?[\d.]+(?:[eE][+-]?\d+)?)(meg|k|mil|m|u|µ|n|p|f|t|g)?s?$/i);
   if (!m) return parseFloat(s);
   const num = parseFloat(m[1]);
-  const suf = m[2].toLowerCase();
-  const mult: Record<string, number> = { m: 1e-3, u: 1e-6, n: 1e-9, p: 1e-12 };
+  if (!Number.isFinite(num)) return 0;
+  const suf = (m[2] ?? '').toLowerCase();
+  const mult: Record<string, number> = {
+    t: 1e12, g: 1e9, meg: 1e6, k: 1e3,
+    mil: 25.4e-6, m: 1e-3, u: 1e-6, µ: 1e-6, n: 1e-9, p: 1e-12, f: 1e-15,
+  };
   if (suf === '') return num;
-  if (mult[suf[0]]) return num * mult[suf[0]];
-  return num;
+  return num * (mult[suf] ?? 1);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -112,9 +118,18 @@ export function execMeas(
 ): MeasResult {
   switch (cmd.type) {
     case 'AVG': {
-      const [avg] = sliceTrace(trace, cmd.fromTime, cmd.toTime);
-      const sum = avg.reduce((a, b) => a + b, 0);
-      return { name: cmd.name, value: avg.length > 0 ? sum / avg.length : 0, unit: trace.yLabel };
+      // Time-weighted average (trapezoidal integration over the range) — a
+      // plain sample-count mean is wrong for non-uniform sampling.
+      const [ys, xs] = sliceTrace(trace, cmd.fromTime, cmd.toTime);
+      if (ys.length < 2) return { name: cmd.name, value: ys.length === 1 ? ys[0] : 0, unit: trace.yLabel };
+      let area = 0;
+      let span = 0;
+      for (let i = 1; i < ys.length; i++) {
+        const dx = xs[i] - xs[i - 1];
+        area += 0.5 * (ys[i] + ys[i - 1]) * dx;
+        span += dx;
+      }
+      return { name: cmd.name, value: span > 0 ? area / span : ys[0], unit: trace.yLabel };
     }
     case 'MIN': {
       const [vals] = sliceTrace(trace, cmd.fromTime, cmd.toTime);
@@ -130,31 +145,37 @@ export function execMeas(
       return { name: cmd.name, value: Math.max(...vals) - Math.min(...vals), unit: trace.yLabel };
     }
     case 'RMS': {
-      const [vals] = sliceTrace(trace, cmd.fromTime, cmd.toTime);
-      const sumSq = vals.reduce((a, b) => a + b * b, 0);
-      return { name: cmd.name, value: Math.sqrt(sumSq / Math.max(1, vals.length)), unit: trace.yLabel };
+      // Time-weighted RMS: sqrt( (1/T)·∫ y² dt )
+      const [ys, xs] = sliceTrace(trace, cmd.fromTime, cmd.toTime);
+      if (ys.length < 2) {
+        return { name: cmd.name, value: ys.length === 1 ? Math.abs(ys[0]) : 0, unit: trace.yLabel };
+      }
+      let area = 0;
+      let span = 0;
+      for (let i = 1; i < ys.length; i++) {
+        const dx = xs[i] - xs[i - 1];
+        area += 0.5 * (ys[i] * ys[i] + ys[i - 1] * ys[i - 1]) * dx;
+        span += dx;
+      }
+      return { name: cmd.name, value: span > 0 ? Math.sqrt(area / span) : Math.abs(ys[0]), unit: trace.yLabel };
     }
     case 'FIND': {
-      // Find V(out) at the time when whenExpr is true (first crossing)
-      // Simplified: assume whenExpr is V(node)=value
+      // Find the trace value at the time when whenExpr's target is crossed.
+      // NOTE: the API takes a single trace, so the WHEN expression is
+      // evaluated on the measured trace itself. The value at the crossing is
+      // linearly interpolated — the old code floored the sample index and
+      // returned the point BEFORE the crossing.
       const m = cmd.whenExpr?.match(/V\((\w+)\)\s*=\s*([\d.+-]+)/);
       if (!m) return { name: cmd.name, value: 0 };
       const target = parseFloat(m[2]);
-      // find first crossing
       for (let i = 1; i < trace.yValues.length; i++) {
         if ((trace.yValues[i - 1] < target && trace.yValues[i] >= target) ||
             (trace.yValues[i - 1] > target && trace.yValues[i] <= target)) {
-          // interpolate
-          const t0 = trace.xValues[i - 1];
-          const t1 = trace.xValues[i];
           const v0 = trace.yValues[i - 1];
           const v1 = trace.yValues[i];
           const frac = (target - v0) / (v1 - v0);
-          const tCross = t0 + frac * (t1 - t0);
-          // for FIND...WHEN, the FIND expr is the value AT the WHEN crossing
-          // Simplified: return the trace value at that time
-          const idx = Math.floor(frac + (i - 1));
-          return { name: cmd.name, value: trace.yValues[idx] ?? 0, unit: trace.yLabel };
+          const value = v0 + frac * (v1 - v0);
+          return { name: cmd.name, value, unit: trace.yLabel };
         }
       }
       return { name: cmd.name, value: 0 };
@@ -178,9 +199,28 @@ export function execMeas(
       return { name: cmd.name, value: 0, unit: 's' };
     }
     case 'DELAY': {
-      // Time between trig crossing and targ crossing
-      // (simplified — needs trig and targ traces)
-      return { name: cmd.name, value: 0, unit: 's' };
+      // Time between the TRIG crossing and the TARG crossing (both evaluated
+      // on this trace — the single-trace API limitation). Previously a stub
+      // that always returned 0.
+      const findCrossing = (target: number | undefined): number | null => {
+        if (target === undefined || !Number.isFinite(target)) return null;
+        for (let i = 1; i < trace.yValues.length; i++) {
+          if ((trace.yValues[i - 1] < target && trace.yValues[i] >= target) ||
+              (trace.yValues[i - 1] > target && trace.yValues[i] <= target)) {
+            const t0 = trace.xValues[i - 1];
+            const t1 = trace.xValues[i];
+            const v0 = trace.yValues[i - 1];
+            const v1 = trace.yValues[i];
+            const frac = (target - v0) / (v1 - v0);
+            return t0 + frac * (t1 - t0);
+          }
+        }
+        return null;
+      };
+      const tTrig = findCrossing(cmd.trigVal);
+      const tTarg = findCrossing(cmd.targVal);
+      if (tTrig === null || tTarg === null) return { name: cmd.name, value: 0, unit: 's' };
+      return { name: cmd.name, value: tTarg - tTrig, unit: 's' };
     }
     case 'PARAM': {
       // Evaluate a parameter expression (e.g., 2*gain)
@@ -303,15 +343,19 @@ export function computeFFT(trace: RealTrace): RealTrace {
   for (let i = 0; i < N; i++) re[i] = windowed[i];
   fft(re, im);
 
-  // Compute magnitude spectrum (one-sided)
+  // Compute magnitude spectrum (one-sided).
+  // Normalization: the Hann window's coherent gain is Σw = (N−1)/2, so a
+  // bin-centered sinusoid of amplitude A gives |X[k]| = A·Σw/2. Dividing by
+  // N/2 (rectangular-window convention) read amplitudes ~2× (6 dB) low.
   const halfSize = fftSize / 2;
   const xValues = new Float64Array(halfSize);
   const yValues = new Float64Array(halfSize);
   const dt = trace.xValues[1] - trace.xValues[0];
   const fs = 1 / dt;
+  const wsum = (N - 1) / 2; // Hann window sum over the N samples
   for (let i = 0; i < halfSize; i++) {
     xValues[i] = i * fs / fftSize;
-    yValues[i] = 2 * Math.hypot(re[i], im[i]) / N;
+    yValues[i] = 2 * Math.hypot(re[i], im[i]) / wsum;
   }
   return {
     name: `FFT(${trace.name})`,
