@@ -70,24 +70,24 @@ This file tracks all remaining improvements.
 
 ### Missing Components
 
-- [x] **Voltage regulators** — LM7805, LM317 added (78xx/79xx series, LM1117, LT3045 still needed)
+- [x] **Voltage regulators** — LM7805, LM317, LM1117 (selectable 1.8–5 V), LT3045 added
 - [x] **Flip-flops** — D, JK, SR latch added
-- [x] **Logic ICs** — 7402, 7404, 7408, 7432, 7486, 74125 added (7490, 74164, 74245, 74374 still needed)
-- [x] **CD4000-series CMOS** — CD4013, CD4066 added (CD4027, CD4017, CD4060, CD4093, CD4511 still needed)
-- [x] **Comparators** — Generic comparator added (LM311, LM393 macromodels still needed)
-- [x] **Op-amp macromodels** — LM358, LM741, TL072 added (LM324, NE5532 still needed)
+- [x] **Logic ICs** — 7402, 7404, 7408, 7432, 7486, 74125, 7490, 74164, 74245, 74374 added
+- [x] **CD4000-series CMOS** — CD4013, CD4066, CD4027, CD4017, CD4060, CD4093, CD4511 added
+- [x] **Comparators** — Generic comparator, LM311 (with strobe), LM393 open-collector added
+- [x] **Op-amp macromodels** — LM358, LM741, TL072, LM324, NE5532 added
 - [x] **SPICE .SUBCKT import** — X cards imported as passthrough connectors (full subckt expansion still needed)
 - [x] **SPICE .MODEL import** — .MODEL cards parsed and skipped (model params not yet attached to components)
-- [x] **Fuses** — Added (PTCs, MOVs still needed)
-- [x] **Thermistors (NTC)** — Added (PTC still needed)
+- [x] **Fuses** — Added; MOV varistor and PTC added (PTC resettable fuses as separate part still possible)
+- [x] **Thermistors (NTC)** — Added; PTC added
 - [x] **Optocouplers** — Added
 - [x] **Connectors, headers, test points** — Connector and Test Point added
-- [x] **Relays** — Electromechanical added (solid-state still needed)
+- [x] **Relays** — Electromechanical added; solid-state relay (SSR) added
 - [x] **Batteries/cells** — Added
 - [x] **Schmitt trigger gates** — Schmitt NOT, Schmitt NAND added
 - [x] **Multiplexers/decoders** — 74138 (3-to-8 decoder), 74153 (4-to-1 MUX) added
 - [x] **Tri-state buffer** — Added
-- [x] **SCR, Triac, Diac** — Added (IGBT still missing)
+- [x] **SCR, Triac, Diac** — Added; IGBT added
 
 ### ~~Mobile / Touch~~ (Removed — web-only project)
 
@@ -125,17 +125,18 @@ This file tracks all remaining improvements.
 ### Advanced Simulation
 
 - [x] **Fourier THD/spectrum display** — Spectrum tab in ProbePanel: log-x bar chart with H1..H10 markers, table with THD%, SNR, SINAD, harmonic breakdown
-- [ ] **Real sparse solver** — CSR-based LU factorization (KLU-style) for 1000+ node circuits
+- [x] **Real sparse solver** — `sparse-klu.ts`: COO triplet stamping (no dense matrix), CSR build with duplicate merging, right-looking sparse LU with lazy Markowitz pivot search + 0.05 threshold pivoting, sparse triangular solves, O(nnz) residual guard. 2000-node ladder solveDC ~15 ms; O(nnz) memory
 - [x] **Adaptive timestep / integration methods** — `integration-adapter.ts` wires trap/Gear2 methods into capacitor/inductor stamps via `stampCapacitor` / `stampInductor` helpers; reads `simOptions.method` ('euler' | 'trap' | 'gear')
 - [x] **Wire in `memory.ts`** — cleanupComponentState called on deleteComponent (inline), orphaned sim state removed
 - [x] **Memoize nodeMap** — Identity-keyed cache (components/wires refs + registry generation); invalidates on any topology edit
 - [ ] **Move canvas rendering out of React** — Direct RAF loop reading from `useEditor.getState()`, bypass React for hot path
 - [x] **Ring buffer for trace samples** — `SampleRingBuffer` class with fixed-capacity Float64Array + write index; O(1) push, O(1) last(), chronological iteration
 - [x] **Fix autosave to filter sim updates** — Only marks dirty on component/wire reference changes, not 60Hz simContext updates
+- [ ] **Refactorize reuse in sparse solver** — KLU-style: reuse the pivot sequence across Newton iterations/time steps (values change, structure doesn't); currently each solve re-factors
 
 ### Advanced Components
 
-- [ ] **PLL** — 74HC4046, LM565
+- [x] **PLL** — 74HC4046: VCO (fmin..fmax linear in control voltage, phase-integrated) + sequential PFD with charge-pump output, time-guarded stamps (LM565 still needed)
 - [x] **ADC/DAC** — 8-bit ADC (4 MSB outputs + VREF + VCC/GND), 8-bit DAC (4 digital inputs + VREF + VOUT + GND)
 - [x] **Active crystal oscillator** — 4-pin active oscillator (VCC/GND/OUT/EN), square wave at rated frequency, EN gate
 - [ ] **Multi-unit IC support** — Extend beyond 7400 sample (7402, 7404, etc. as multi-unit)
@@ -143,14 +144,14 @@ This file tracks all remaining improvements.
 - [ ] **Hall-effect sensors, IMUs** — For embedded/robotics
 - [x] **Photodiode, phototransistor, solar cell** — Photodiode (responsivity × lux × area), NPN phototransistor (hFE × photo-base current), Solar cell (V_oc × √(lux/1000) Thevenin)
 - [x] **Motors** — DC motor (with back-EMF RPM readout), Bipolar 2-coil stepper (A+/A−/B+/B−), PWM hobby servo (VCC/GND/CTRL with θ readout)
-- [ ] **Constant-current diode** — JFET current regulator
+- [x] **Constant-current diode** — JFET current regulator (CRD with knee-voltage regions)
 
 ### Database
 
-- [ ] **Normalize tags** — Separate `circuit_tags` table with FK for indexed tag lookup
+- [x] **Normalize tags** — `circuit_tags` table (FK, unique per circuit, lowercase tags) + `src/lib/tags.ts` parseTags; TEXT column stays as source of truth and display format; JS backfill in runMigrations (idempotent)
 - [ ] **Turso embedded replica** — Configure `syncUrl` for local read caching
 - [x] **Move migrations out of request path** — `src/instrumentation.ts` runs `runMigrations()` on server startup (Next.js instrumentation hook); `initDb()` falls back to running migrations if the hook hasn't run yet (e.g., in tests)
-- [ ] **FTS5 full-text search** — On `name` and `tags` for fast searching
+- [x] **FTS5 full-text search** — `circuits_fts` (standalone contentful FTS5 on name/description/tags, app-maintained via atomic write batches); `?search=` uses MATCH with sanitized prefix query, `?tag=` exact via join; LIKE fallback on any FTS error
 
 ### Architecture
 
@@ -159,7 +160,7 @@ This file tracks all remaining improvements.
 - [ ] **Split SymbolEditorDialog.tsx** (1241 lines) — Extract sub-components
 - [ ] **Split FootprintEditorDialog.tsx** (1427 lines) — Extract sub-components
 - [x] **Wire in `findRoute`** — A* smart-wire-router.ts is wired into `completeWire` in store.ts (falls back to L-shaped routing if findRoute fails)
-- [ ] **Wire in `scope-viewer.ts`** — Connect to ProbePanel (full scope with cursors/trigger)
+- [x] **Wire in `scope-viewer.ts`** — ProbePanel scope tab now a real scope: 10×8 graticule, timebase + per-channel V/div/offset/DC-AC coupling, draggable A/B cursors with Δt/1/Δt readouts, trigger status + level marker, measurements row; 42 new tests
 - [x] **Wire in `monte-carlo.ts`** — batch-runner.ts uses `runMonteCarlo` from monte-carlo.ts (LCG RNG, Gaussian/uniform, tolerance perturbation, yield %, worst-case)
 - [x] **Wire in `keyboard-shortcuts.ts`** — HelpDialog's Shortcuts tab now reads from keyboard-shortcuts.ts (single source of truth; was hardcoded duplicate)
 - [x] **Wire in `integration.ts`** — `integration-adapter.ts` exposes `stampCapacitor` / `stampInductor` that call `capTrapezoidal`, `capGear2`, `inductorTrapezoidal`, `inductorGear2` based on `simOptions.method`; companion models and state tracking fully implemented
