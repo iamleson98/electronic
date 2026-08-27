@@ -250,17 +250,16 @@ const nmos: ComponentPlugin = {
       sys.stampConductance(g, s, 1e-6);
       return;
     }
-    // On: if vds > (vgs - vth): saturation -> current source Id = Kp * (vgs-vth)^2
+    // On: if vds > (vgs - vth): saturation -> current source Id = ½·Kp·(vgs−vth)²
     // Else: linear region -> approximately a small resistor (ron)
     // Pick based on vds.
     const vov = vgs - vth;
     if (vds > vov && vov > 0) {
-      // saturation: Id = Kp * vov^2 (current from d to s)
-      // Add output conductance gds for channel modulation (Early effect).
-      // gds = Lambda * Id  (SPICE Level-1 model)
+      // saturation: Id = ½·Kp·vov² (SPICE Level-1 square law — the ½ was
+      // missing, doubling every saturation current)
       const kp = params.kp as number;
       const lambda = (params.lambda as number) ?? 0.02; // default 0.02 V^-1
-      const id = kp * vov * vov;
+      const id = 0.5 * kp * vov * vov;
       sys.stampCurrentSource(d, s, id);
       // Output conductance: gds = lambda * Id (limits gain in amplifiers)
       const gds = lambda * Math.abs(id);
@@ -357,26 +356,30 @@ const pmos: ComponentPlugin = {
     const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
     const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
     const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
-    const vth = params.vth as number;
+    // Use |Vth| as the threshold magnitude: the plugin's default is +2.0 but
+    // SPICE imports carry a negative PMOS Vto — a raw `vsg > vth` with a
+    // negative vth made the device conduct even with gate = source.
+    const vthMag = Math.abs(params.vth as number);
     const ron = Math.max(0.001, params.ron as number);
     const vsg = sim.nodeVoltage[s] - sim.nodeVoltage[g];
     const vsd = sim.nodeVoltage[s] - sim.nodeVoltage[d];
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `pmos_${s}_${g}_${d}`;
     const prevOn = st[key] ?? false;
-    const on = prevOn ? vsg > vth - 0.2 : vsg > vth;
+    const on = prevOn ? vsg > vthMag - 0.2 : vsg > vthMag;
     st[key] = on;
     if (!on) {
       sys.stampConductance(s, d, 1e-13);
       sys.stampConductance(g, s, 1e-6);
       return;
     }
-    const vov = vsg - vth;
+    const vov = vsg - vthMag;
     if (vsd > vov && vov > 0) {
-      // saturation: Is = Kp * vov^2 (current from s to d)
+      // saturation: Is = ½·Kp·vov² (current from s to d) — SPICE Level-1
+      // square law with the ½ factor (was missing, doubling the current)
       const kp = params.kp as number;
       const lambda = (params.lambda as number) ?? 0.02;
-      const id = kp * vov * vov;
+      const id = 0.5 * kp * vov * vov;
       sys.stampCurrentSource(s, d, id);
       // Output conductance (channel modulation / Early effect)
       const gds = lambda * Math.abs(id);
@@ -452,9 +455,15 @@ const opampRails: ComponentPlugin = {
     const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
     const vp = terminals.find((t) => t.terminalId === 'v+')!.nodeId;
     const vn = terminals.find((t) => t.terminalId === 'v-')!.nodeId;
-    // Determine rails from V+/V- nodes (if connected to voltage sources, they have known voltages)
-    const vPlus = sim.nodeVoltage[vp] || 12; // default 12V if not connected
-    const vMinus = sim.nodeVoltage[vn] || -12;
+    // Determine rails from the V+/V− node voltages. An unconnected pin maps
+    // to node 0 (0 V) in this engine — indistinguishable from a grounded pin
+    // by voltage alone. Heuristic: if BOTH pins sit at node 0, treat them as
+    // unconnected and use the ±12 V defaults; if only one is at node 0 it is
+    // a deliberate ground (e.g. a single-supply op-amp) and must be honored —
+    // the old `|| 12` turned every grounded V− into −12 V.
+    const bothRailsFloating = vp === 0 && vn === 0;
+    const vPlus = bothRailsFloating ? 12 : (sim.nodeVoltage[vp] ?? 12);
+    const vMinus = bothRailsFloating ? -12 : (sim.nodeVoltage[vn] ?? -12);
     // Compute ideal output
     const vdiff = sim.nodeVoltage[inp] - sim.nodeVoltage[inn];
     const voutIdeal = gain * vdiff;
@@ -623,35 +632,21 @@ const sevenSegment: ComponentPlugin = {
     }
   },
   step(params, terminals, sim, instance) {
-    const threshold = params.threshold as number;
     if (!instance.simState) instance.simState = {};
+    // stamp() (which runs before the solve) already computed the segment
+    // states with the authoritative rule: com-referenced segment voltage,
+    // threshold hysteresis, and multiplex latching. Reuse it — the old step()
+    // recomputed with a DIFFERENT rule (ground-referenced, no hysteresis)
+    // into a different store, so the rendered digit could disagree with the
+    // electrical loading stamped into the matrix.
+    const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `7seg_${terminals.map(t => t.nodeId).join('_')}`;
-    const com = terminals.find((t) => t.terminalId === 'com')!.nodeId;
-    const comV = sim.nodeVoltage[com] ?? 0;
-    const vccApprox = 5;
-    const isActive = comV < vccApprox * 0.5;
-
-    if (!sim.state[key]) sim.state[key] = {};
-    const existing = sim.state[key] as Record<string, boolean>;
-
-    // Only update segment states when the display is active (com LOW).
-    // When inactive (com HIGH), keep the latched states.
-    if (isActive) {
-      const segState: Record<string, boolean> = {};
-      for (const seg of ['a', 'b', 'c', 'd', 'e', 'f', 'g']) {
-        const node = terminals.find((t) => t.terminalId === seg)!.nodeId;
-        segState[seg] = sim.nodeVoltage[node] > threshold;
-      }
-      sim.state[key] = segState;
-      instance.simState.__7seg = segState;
-    } else {
-      // Keep latched state
-      instance.simState.__7seg = existing;
-    }
+    instance.simState.__7seg = (st[key] ?? {}) as Record<string, boolean>;
   },
   measure(params, terminals, sim) {
+    const st = (sim.state as any).__global ?? {};
     const key = `7seg_${terminals.map(t => t.nodeId).join('_')}`;
-    const segState = (sim.state[key] || {}) as Record<string, boolean>;
+    const segState = (st[key] || {}) as Record<string, boolean>;
     const onSegs = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].filter(s => segState[s]).join('');
     return [{ label: 'ON', value: onSegs || '—', unit: '' }];
   },
@@ -851,22 +846,29 @@ const transformer: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, `${params.ratio}:1`, 2 * cellSize, 3.5 * cellSize);
   },
-  stamp(params, terminals, sys, sim) {
-    // Simplified model: V_s1 - V_s2 = N * (V_p1 - V_p2)
-    // And current mirrors. Use VCVS for voltage, CCCS for current.
+  stamp(params, terminals, sys, sim, comp) {
+    // Ideal transformer: V(s1)−V(s2) = N·(V(p1)−V(p2)) and the reflected
+    // primary current I(p1→p2) = −N·I(s1→s2, inside the source) — power
+    // conserving. Plus a parallel magnetizing conductance on the primary.
     const n = params.ratio as number;
     const p1 = terminals.find((t) => t.terminalId === 'p1')!.nodeId;
     const p2 = terminals.find((t) => t.terminalId === 'p2')!.nodeId;
     const s1 = terminals.find((t) => t.terminalId === 's1')!.nodeId;
     const s2 = terminals.find((t) => t.terminalId === 's2')!.nodeId;
-    // VCVS: V(s1) - V(s2) = N * (V(p1) - V(p2))
-    sys.stampVCVS(s1, s2, p1, p2, n);
-    // The corresponding primary current is N * secondary current.
-    // We need to add a CCVS to capture secondary branch current, then CCCS on primary.
-    // The VCVS above already added a branch index for the secondary current; capture it.
-    // Unfortunately our API doesn't return the index from stampVCVS in a tracked way.
-    // As a simpler approximation, also stamp a parallel magnetizing inductance on the primary
-    // to give the primary a defined current path.
+    // VCVS: V(s1) - V(s2) = N * (V(p1) - V(p2)); its branch current is the
+    // secondary current flowing s1→s2 through the source.
+    const vcvsIdx = sys.stampVCVS(s1, s2, p1, p2, n);
+    // Reflect the secondary current into the primary. Without this CCCS the
+    // secondary delivered power that the primary never drew — the transformer
+    // created energy from nothing (10 W out, 0.01 W in).
+    if (vcvsIdx >= 0) {
+      sys.stampCCCS(p1, p2, vcvsIdx, -n);
+    }
+    // Record the branch index so computeComponentCurrents can add the
+    // reflected current to the primary current readout.
+    const stR = sim.state.__global ?? (sim.state.__global = {});
+    stR[`xfmr_branch_${comp?.id ?? `${p1}_${p2}`}`] = vcvsIdx;
+    // Magnetizing conductance across the primary (memoryless approximation)
     const lm = Math.max(1e-6, params.lm as number);
     const dt = Math.max(sim.dt, 1e-12);
     sys.stampConductance(p1, p2, dt / lm);

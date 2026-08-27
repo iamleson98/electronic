@@ -303,7 +303,7 @@ describe('Solar Cell', () => {
         voltageStamped = true;
         expect(v).toBeGreaterThan(0);
       },
-      stampVCCS: () => {}, stampVCVS: () => {}, stampCCCS: () => {}, stampCCVS: () => {},
+      stampVCCS: () => {}, stampVCVS: () => {}, stampCCCS: () => {}, stampCCVS: () => {}, addExtra: () => 5,
     };
     p.stamp!(params, terms, sys as any, sim);
     expect(voltageStamped).toBe(true);
@@ -316,8 +316,8 @@ describe('Solar Cell', () => {
     const params2 = getParams(p);
     params2.illuminance = 4000;
     // sqrt(4000/1000) = 2× → 2× the voltage
-    const sys1 = { stampConductance: () => {}, stampCurrentSource: () => {}, stampVoltageSource: (_n1: number, _n2: number, v: number) => { (globalThis as any).__v1 = v; }, stampVCCS: () => {}, stampVCVS: () => {}, stampCCCS: () => {}, stampCCVS: () => {} };
-    const sys2 = { stampConductance: () => {}, stampCurrentSource: () => {}, stampVoltageSource: (_n1: number, _n2: number, v: number) => { (globalThis as any).__v2 = v; }, stampVCCS: () => {}, stampVCVS: () => {}, stampCCCS: () => {}, stampCCVS: () => {} };
+    const sys1 = { stampConductance: () => {}, stampCurrentSource: () => {}, stampVoltageSource: (_n1: number, _n2: number, v: number) => { (globalThis as any).__v1 = v; }, stampVCCS: () => {}, stampVCVS: () => {}, stampCCCS: () => {}, stampCCVS: () => {}, addExtra: () => 5 };
+    const sys2 = { stampConductance: () => {}, stampCurrentSource: () => {}, stampVoltageSource: (_n1: number, _n2: number, v: number) => { (globalThis as any).__v2 = v; }, stampVCCS: () => {}, stampVCVS: () => {}, stampCCCS: () => {}, stampCCVS: () => {}, addExtra: () => 5 };
     const sim = mkSim();
     const terms = getTerms(p, sim);
     p.stamp!(params1, terms, sys1 as any, sim);

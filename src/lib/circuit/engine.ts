@@ -689,12 +689,35 @@ export function computeComponentCurrents(
       nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - iBot);
       nodeCurrentOut.set(wp, (nodeCurrentOut.get(wp) ?? 0) + (-iTOP + iBot));
     } else if (comp.type === 'transformer' || comp.type === 'coupledInductor') {
-      const lm = Math.max(1e-6, (comp.parameters.lm as number) ?? 0.01);
-      const dt = Math.max(sim.dt, 1e-12);
-      const g = dt / lm;
+      // Primary current = magnetizing companion current + the reflected
+      // secondary current (−V2/V1 · I2, read from the recorded VCVS branch).
       const p1 = terms.find((t) => t.terminalId === 'p1')?.nodeId ?? 0;
       const p2 = terms.find((t) => t.terminalId === 'p2')?.nodeId ?? 0;
-      const i = (sim.nodeVoltage[p1] - sim.nodeVoltage[p2]) * g;
+      const st = sim.state.__global ?? {};
+      const lm = Math.max(1e-6, (comp.parameters.lm as number) ?? (comp.parameters.L1 as number) ?? 0.01);
+      const dt = Math.max(sim.dt, 1e-12);
+      const g = dt / lm;
+      const v = sim.nodeVoltage[p1] - sim.nodeVoltage[p2];
+      let i = v * g;
+      // coupled inductor keeps its own companion state (iPrev)
+      if (comp.type === 'coupledInductor') {
+        const s1n = terms.find((t) => t.terminalId === 's1')?.nodeId ?? 0;
+        const s2n = terms.find((t) => t.terminalId === 's2')?.nodeId ?? 0;
+        i += (st[`xfmr_${p1}_${p2}_${s1n}_${s2n}`] as number) ?? 0;
+      }
+      // reflected secondary current
+      const branchIdx = st[`xfmr_branch_${comp.id}`] as number | undefined;
+      if (branchIdx !== undefined && branchIdx >= 0) {
+        const numNonGround = sim.nodeVoltage.length - 1;
+        const relIdx = branchIdx - numNonGround;
+        if (relIdx >= 0 && relIdx < sim.branchCurrent.length) {
+          const i2 = sim.branchCurrent[relIdx];
+          const v2v1 = comp.type === 'transformer'
+            ? (comp.parameters.ratio as number) ?? 1
+            : 1 / ((comp.parameters.ratio as number) ?? 1);
+          i += -v2v1 * i2;
+        }
+      }
       nodeCurrentOut.set(p1, (nodeCurrentOut.get(p1) ?? 0) + i);
       nodeCurrentOut.set(p2, (nodeCurrentOut.get(p2) ?? 0) - i);
     } else if (comp.type === 'opamp' || comp.type === 'opampRails' || comp.type === 'opampReal') {

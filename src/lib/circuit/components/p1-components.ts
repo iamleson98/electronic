@@ -107,19 +107,37 @@ export const lm317: ComponentPlugin = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function makeFlipFlop(type: string, name: string, symbol: string): ComponentPlugin {
+  const isDff = type === 'dff';
+  const isSr = type === 'srlatch';
+  // Pin labels differ per family, but terminal IDs stay 'd'/'clk' so existing
+  // documents (wires reference terminal ids) keep working.
+  const dLabel = isSr ? 'S' : (type === 'jkff' ? 'J' : 'D');
+  const clkLabel = isSr ? 'R' : '>';
   return {
     type,
     name,
     category: 'logic',
-    description: `${name} — digital storage element. Clock on rising edge.`,
+    description: isSr
+      ? 'SR latch — level-sensitive. S (D pin) sets, R (CLK pin) resets, active-high.'
+      : (type === 'jkff'
+        ? 'JK flip-flop — rising-edge clocked. J=K=1 toggles.'
+        : `${name} — digital storage element. Clock on rising edge.`),
     symbol,
     boundingBox: { width: 6, height: 4 },
-    terminals: [
-      { id: 'd', label: 'D', position: { x: 0, y: 1 }, electricalType: 'input' as const },
-      { id: 'clk', label: '>', position: { x: 0, y: 3 }, electricalType: 'input' as const },
-      { id: 'q', label: 'Q', position: { x: 6, y: 1 }, electricalType: 'output' as const },
-      { id: 'qbar', label: 'Q̄', position: { x: 6, y: 3 }, electricalType: 'output' as const },
-    ],
+    terminals: type === 'jkff'
+      ? [
+          { id: 'd', label: dLabel, position: { x: 0, y: 1 }, electricalType: 'input' as const },
+          { id: 'k', label: 'K', position: { x: 0, y: 2 }, electricalType: 'input' as const },
+          { id: 'clk', label: clkLabel, position: { x: 0, y: 3 }, electricalType: 'input' as const },
+          { id: 'q', label: 'Q', position: { x: 6, y: 1 }, electricalType: 'output' as const },
+          { id: 'qbar', label: 'Q̄', position: { x: 6, y: 3 }, electricalType: 'output' as const },
+        ]
+      : [
+          { id: 'd', label: dLabel, position: { x: 0, y: 1 }, electricalType: 'input' as const },
+          { id: 'clk', label: clkLabel, position: { x: 0, y: 3 }, electricalType: 'input' as const },
+          { id: 'q', label: 'Q', position: { x: 6, y: 1 }, electricalType: 'output' as const },
+          { id: 'qbar', label: 'Q̄', position: { x: 6, y: 3 }, electricalType: 'output' as const },
+        ],
     parameters: [
       { key: 'initialState', label: 'Initial State', type: 'boolean', default: false },
     ],
@@ -137,28 +155,48 @@ function makeFlipFlop(type: string, name: string, symbol: string): ComponentPlug
       ctx.lineTo(cellSize, 3.5 * cellSize);
       ctx.stroke();
     },
-    stamp(params, terminals, sys, sim) {
+    stamp(params, terminals, sys, sim, comp) {
       const d = terminals.find(t => t.terminalId === 'd')?.nodeId ?? 0;
       const clk = terminals.find(t => t.terminalId === 'clk')?.nodeId ?? 0;
+      const k = terminals.find(t => t.terminalId === 'k')?.nodeId ?? 0;
       const q = terminals.find(t => t.terminalId === 'q')?.nodeId ?? 0;
       const qbar = terminals.find(t => t.terminalId === 'qbar')?.nodeId ?? 0;
       const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = `ff_${type}_${q}_${qbar}`;
-      const clkPrev = st[`${key}_clk`] ?? 0;
+      // State keyed by component id — node-based keys made every instance
+      // with unconnected outputs (q=qbar=0) share one bit.
+      const key = `ff_${comp?.id ?? `${type}_${q}_${qbar}`}`;
+      const state = (st[key] ?? (st[key] = { q: params.initialState as boolean, clkPrev: null as number | null })) as { q: boolean; clkPrev: number | null };
       const clkNow = sim.nodeVoltage[clk] ?? 0;
-      // Rising edge detection
-      if (clkNow > 2.5 && clkPrev <= 2.5) {
-        // D flip-flop: Q follows D on rising edge
-        const dVal = (sim.nodeVoltage[d] ?? 0) > 2.5;
-        st[key] = dVal;
+      const dV = sim.nodeVoltage[d] ?? 0;
+      // clkPrev starts as null so a clock that is already HIGH at t=0 does
+      // not produce a spurious first edge.
+      const rising = state.clkPrev !== null && clkNow > 2.5 && state.clkPrev <= 2.5;
+      if (isSr) {
+        // Level-sensitive SR latch: S = D pin, R = CLK pin (labels say so).
+        const s = dV > 2.5;
+        const r = clkNow > 2.5;
+        if (s && r) state.q = false; // forbidden S=R=1 — deterministic reset
+        else if (s) state.q = true;
+        else if (r) state.q = false;
+      } else if (isDff) {
+        if (rising) state.q = dV > 2.5;
+      } else {
+        // JK flip-flop, rising-edge clocked: J = D pin, K = K pin.
+        if (rising) {
+          const j = dV > 2.5;
+          const kk = k > 0 ? (sim.nodeVoltage[k] ?? 0) > 2.5 : false;
+          if (j && kk) state.q = !state.q; // toggle
+          else if (j) state.q = true;
+          else if (kk) state.q = false;
+        }
       }
-      st[`${key}_clk`] = clkNow;
-      const qVal = st[key] ?? (params.initialState as boolean);
-      // Drive Q and Q-bar
-      sys.stampConductance(q, 0, 1e6);
-      sys.stampCurrentSource(0, q, qVal ? 5 / 1e6 : 0);
-      sys.stampConductance(qbar, 0, 1e6);
-      sys.stampCurrentSource(0, qbar, !qVal ? 5 / 1e6 : 0);
+      state.clkPrev = clkNow;
+      const qVal = state.q;
+      // Drive Q/Q̄ with real voltage sources (like every other logic plugin).
+      // The old 1 MΩ Thevenin drive could only source 5 µA — Q collapsed to
+      // millivolts under any real load.
+      if (q > 0) sys.stampVoltageSource(q, 0, qVal ? 5 : 0);
+      if (qbar > 0) sys.stampVoltageSource(qbar, 0, qVal ? 0 : 5);
     },
     getFlowPath() { return [{ x: 0, y: 1 }, { x: 6, y: 1 }]; },
   };
@@ -217,12 +255,19 @@ export const comparator: ComponentPlugin = {
     // Hysteresis (1mV)
     const currentHigh = prevHigh ? vPlus > vMinus - 0.001 : vPlus > vMinus + 0.001;
     st[key] = currentHigh;
+    // Open-collector output (LM393/LM311 style): the output transistor pulls
+    // LOW when the comparator is asserted-low (V+ < V−) and FLOATS otherwise —
+    // the level when floating is set by the external pull-up. The old model
+    // actively drove the output HIGH and floated when LOW, so a classic
+    // comparator + pull-up circuit could never pull its output low.
     if (currentHigh) {
+      // Transistor OFF — output floats (weak leakage only)
+      sys.stampConductance(out, 0, 1 / Math.max(1e3, params.roff as number));
+    } else {
+      // Transistor ON — pulls the output toward vlow through ron
       const r = Math.max(0.001, params.ron as number);
       sys.stampConductance(out, 0, 1 / r);
-      sys.stampCurrentSource(0, out, (params.vhigh as number) / r);
-    } else {
-      sys.stampConductance(out, 0, 1 / (params.roff as number));
+      sys.stampCurrentSource(0, out, (params.vlow as number) / r);
     }
   },
   getFlowPath() { return [{ x: 0, y: 2 }, { x: 6, y: 2 }]; },
@@ -501,9 +546,12 @@ export const optocoupler: ComponentPlugin = {
       // LED current drives phototransistor
       const iLed = (vLed - vf) / ledR;
       const iTrans = iLed * ctr;
-      // Phototransistor: current from C to E
+      // Phototransistor: collector current C→E driven by the LED (CTR model).
+      // stampCurrentSource(c, e, iTrans) — the old (e, c) direction pushed
+      // current INTO the collector and OUT of the emitter (a generator that
+      // could pull the collector ABOVE the rail).
       sys.stampConductance(c, e, 1 / transR);
-      sys.stampCurrentSource(e, c, iTrans);
+      sys.stampCurrentSource(c, e, iTrans);
     } else {
       sys.stampConductance(ledA, ledK, 1e-13);
       sys.stampConductance(c, e, 1e-13);
@@ -601,25 +649,19 @@ function makeSchmittGate(type: string, name: string, symbol: string, op: (a: boo
       if (b !== undefined && b !== gnd && b !== vcc) sys.stampConductance(b, gnd, inputPullDown);
       if (vcc !== gnd) sys.stampConductance(vcc, gnd, 1e-13);
       const key = `schmitt_${y}`;
-      const st = sim.state[key] ?? (sim.state[key] = { out: false });
+      // Per-input Schmitt state (like a real 74HC14/74HC132: hysteresis acts
+      // on each input independently, then the gate logic applies).
+      const st = sim.state[key] ?? (sim.state[key] = { a: false, b: false });
       const aV = sim.nodeVoltage[a] ?? 0;
       const bV = b !== undefined ? (sim.nodeVoltage[b] ?? 0) : 0;
-      // Determine if input is "high" using Schmitt hysteresis
-      const inputV = isNot ? aV : Math.min(aV, bV);
-      if (st.out) {
-        // Currently HIGH — need input to drop below vtNeg to go LOW
-        if (inputV < vtNeg) st.out = false;
-      } else {
-        // Currently LOW — need input to rise above vtPos to go HIGH
-        if (inputV > vtPos) st.out = true;
-      }
-      // Apply logic operation for NAND variant
-      const aHigh = aV > vtPos;
-      const bHigh = b !== undefined ? bV > vtPos : undefined;
-      const logicResult = isNot ? !aHigh : op(aHigh, bHigh);
-      // For Schmitt NOT, output follows the hysteresis result directly
-      // For Schmitt NAND, apply hysteresis to the combined input
-      const output = isNot ? st.out : (st.out ? logicResult : false);
+      const aHigh = st.a ? aV > vtNeg : aV > vtPos;
+      st.a = aHigh;
+      const bHigh = b !== undefined ? (st.b ? bV > vtNeg : bV > vtPos) : undefined;
+      if (b !== undefined) st.b = bHigh as boolean;
+      // NOT inverts the hysteresis-filtered input; NAND combines them.
+      // (The old code returned the raw input state for NOT — a non-inverting
+      //  buffer — and forced the NAND output to always-LOW.)
+      const output = isNot ? !aHigh : op(aHigh, bHigh);
       if (y !== gnd) sys.stampVoltageSource(y, gnd, output ? vccV : 0);
     },
     measure(params, terminals, sim) {
@@ -778,17 +820,24 @@ export const scr: ComponentPlugin = {
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `scr_${a}_${k}`;
     let on = st[key] ?? false;
-    // Check gate trigger
-    const gateV = sim.nodeVoltage[g] ?? 0;
-    if (!on && gateV > gateTrigV) {
+    // Gate trigger: the gate-cathode junction is what fires an SCR — compare
+    // V(g)−V(k), not V(g) to ground (an elevated cathode never triggered).
+    const vGK = (sim.nodeVoltage[g] ?? 0) - (sim.nodeVoltage[k] ?? 0);
+    if (!on && vGK > gateTrigV) {
       on = true;
     }
-    // Check holding current — if anode current drops below holdingI, turn OFF
+    // Holding current / commutation: reverse anode voltage blocks (and
+    // commutates off) an SCR — the old Math.abs(vAK) kept it latched under
+    // reverse drive with no reverse blocking.
     if (on) {
       const vAK = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[k] ?? 0);
-      const iA = Math.abs(vAK) / Math.max(0.001, params.onR as number);
-      if (iA < holdingI) {
+      if (vAK < 0) {
         on = false;
+      } else {
+        const iA = vAK / Math.max(0.001, params.onR as number);
+        if (iA < holdingI) {
+          on = false;
+        }
       }
     }
     st[key] = on;
@@ -859,20 +908,34 @@ export const triac: ComponentPlugin = {
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `triac_${mt1}_${mt2}`;
     let on = st[key] ?? false;
-    const gateV = Math.abs(sim.nodeVoltage[g] ?? 0);
-    if (!on && gateV > gateTrigV) on = true;
+    // Gate trigger referenced to MT1 (gate current flows gate→MT1)
+    const vG = Math.abs((sim.nodeVoltage[g] ?? 0) - (sim.nodeVoltage[mt1] ?? 0));
+    if (!on && vG > gateTrigV) on = true;
+    const v = (sim.nodeVoltage[mt1] ?? 0) - (sim.nodeVoltage[mt2] ?? 0);
+    // Conduction direction (latched; reverses at AC zero-crossings)
+    let dir = (st[key + '_dir'] as number | undefined) ?? 0;
     if (on) {
-      const vMT = Math.abs((sim.nodeVoltage[mt1] ?? 0) - (sim.nodeVoltage[mt2] ?? 0));
-      const i = vMT / Math.max(0.001, params.onR as number);
+      if (dir === 0) dir = v >= 0 ? 1 : -1;
+      else if (v < 0 && dir > 0) dir = -1;
+      else if (v > 0 && dir < 0) dir = 1;
+      // Holding current in the active direction
+      const vDir = dir > 0 ? v : -v;
+      const i = vDir / Math.max(0.001, params.onR as number);
       if (i < holdingI) on = false;
     }
     st[key] = on;
+    st[key + '_dir'] = dir;
     if (on) {
       const r = Math.max(0.001, params.onR as number);
       sys.stampConductance(mt1, mt2, 1 / r);
-      // Voltage drop (bidirectional — small offset)
-      sys.stampCurrentSource(mt2, mt1, (params.onV as number) / r);
-      sys.stampCurrentSource(mt1, mt2, (params.onV as number) / r);
+      // On-state voltage drop in the ACTIVE direction (SCR-style companion).
+      // The old code stamped two equal anti-parallel sources — they cancelled
+      // exactly, silently ignoring onV in both directions.
+      if (dir > 0) {
+        sys.stampCurrentSource(mt2, mt1, (params.onV as number) / r);
+      } else {
+        sys.stampCurrentSource(mt1, mt2, (params.onV as number) / r);
+      }
     } else {
       sys.stampConductance(mt1, mt2, 1 / (params.offR as number));
     }

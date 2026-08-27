@@ -226,14 +226,14 @@ registerPlugin({
 // Multiplexer / Decoder
 // ─────────────────────────────────────────────────────────────────────────────
 
-// 74138 — 3-to-8 line decoder (simplified: 2-to-4)
+// 74138 — 3-to-8 line decoder (active-low outputs)
 registerPlugin({
   type: 'ic74138',
   name: '74138 (3-to-8 Decoder)',
   category: 'logic',
   description: '3-to-8 line decoder/demultiplexer. Selects one of 8 outputs based on 3 select lines.',
   symbol: '138',
-  boundingBox: { width: 8, height: 6 },
+  boundingBox: { width: 8, height: 8 },
   terminals: [
     { id: 's0', label: 'S0', position: { x: 0, y: 1 }, electricalType: 'input' as const },
     { id: 's1', label: 'S1', position: { x: 0, y: 3 }, electricalType: 'input' as const },
@@ -244,8 +244,10 @@ registerPlugin({
     { id: 'y3', label: 'Y3', position: { x: 8, y: 3.5 }, electricalType: 'output' as const },
     { id: 'y4', label: 'Y4', position: { x: 8, y: 4.5 }, electricalType: 'output' as const },
     { id: 'y5', label: 'Y5', position: { x: 8, y: 5.5 }, electricalType: 'output' as const },
+    { id: 'y6', label: 'Y6', position: { x: 8, y: 6.5 }, electricalType: 'output' as const },
+    { id: 'y7', label: 'Y7', position: { x: 8, y: 7.5 }, electricalType: 'output' as const },
     { id: 'vcc', label: 'VCC', position: { x: 4, y: 0 }, electricalType: 'power_in' as const },
-    { id: 'gnd', label: 'GND', position: { x: 4, y: 6 }, electricalType: 'power_in' as const },
+    { id: 'gnd', label: 'GND', position: { x: 4, y: 8 }, electricalType: 'power_in' as const },
   ],
   parameters: [
     { key: 'vcc', label: 'Logic High', type: 'number', default: 5, unit: 'V', min: 1, max: 18, step: 0.1 },
@@ -255,9 +257,9 @@ registerPlugin({
   render(ctx, _params, cellSize) {
     ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.rect(cellSize, 0.5 * cellSize, 6 * cellSize, 5 * cellSize);
+    ctx.rect(cellSize, 0.5 * cellSize, 6 * cellSize, 7 * cellSize);
     ctx.stroke();
-    drawLabel(ctx, '138', 4 * cellSize, 3 * cellSize);
+    drawLabel(ctx, '138', 4 * cellSize, 3.5 * cellSize);
   },
   stamp(params, terminals, sys, sim) {
     const vccV = params.vcc as number;
@@ -266,8 +268,10 @@ registerPlugin({
     const s1 = (sim.nodeVoltage[terminals.find(t => t.terminalId === 's1')!.nodeId] ?? 0) > thresh;
     const s2 = (sim.nodeVoltage[terminals.find(t => t.terminalId === 's2')!.nodeId] ?? 0) > thresh;
     const sel = (s2 ? 4 : 0) + (s1 ? 2 : 0) + (s0 ? 1 : 0);
-    // 74138 outputs are active-low: selected output = 0, all others = VCC
-    for (let i = 0; i < 6; i++) {
+    // 74138 outputs are active-low: selected output = 0, all others = VCC.
+    // All 8 outputs (y0..y7) — the old loop only covered 6, so select
+    // values 6 and 7 lit no output at all.
+    for (let i = 0; i < 8; i++) {
       const yt = terminals.find(t => t.terminalId === `y${i}`);
       if (yt) sys.stampVoltageSource(yt.nodeId, 0, i === sel ? 0 : vccV);
     }

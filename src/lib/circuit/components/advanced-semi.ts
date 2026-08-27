@@ -219,7 +219,11 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       sys.stampConductance(b, e, sign * gpi);
       // current sources for the constant offsets (linearization around guess)
       const IcEq = Ic - gm * vBEguess - gds * vCEguess;
-      const IbEq = gm * vBEguess / Bf - gpi * vBEguess;
+      // Base current at the operating point: Ib = Is/Bf·e^(vBE/Vt) = gm·Vt/Bf.
+      // The old expression `gm*vBEguess/Bf − gpi*vBEguess` collapsed to exactly
+      // zero because gpi = gm/Bf — leaving the b-e junction a plain resistor
+      // through the origin with no exponential base-current offset.
+      const IbEq = gpi * (Vt - vBEguess);
       sys.stampCurrentSource(c, e, sign * IcEq);
       sys.stampCurrentSource(b, e, sign * IbEq);
     },
@@ -243,7 +247,9 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       const Bf = params.Bf as number;
       const Vaf = params.Vaf as number;
       const Vt = thermalVoltage(27);
-      const Ic = Is * Math.exp(Math.min(vBE / Vt, 30)) * (1 + Math.max(0, vCE) / Vaf);
+      // Use |vBE| magnitude — a PNP's vBE is negative in normal operation and
+      // exp(negative) → 0 made every PNP read Ic ≈ 0.
+      const Ic = Is * Math.exp(Math.min(Math.abs(vBE) / Vt, 30)) * (1 + Math.abs(vCE) / Vaf);
       const Ib = Ic / Bf;
       return [
         { label: 'Vbe', value: vBE.toFixed(4), unit: 'V' },
@@ -333,12 +339,17 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
       // Get previous voltages
       const st = sim.state.__global ?? (sim.state.__global = {});
       const key = `mos_${d}_${g}_${s}_${b}`;
-      const vGSguess = isNmos ? (st[key + '_vgs'] ?? 2) : -(st[key + '_vgs'] ?? 2);
-      const vDSguess = isNmos ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? 1);
+      // Work in MAGNITUDES for region classification (NMOS: identity; PMOS:
+      // negate the signed stored values). The old code mixed a magnitude
+      // vGSguess with the SIGNED (negative) PMOS Vth, so any biased PMOS fell
+      // into the sub-threshold branch and exploded to ~1e6 A after the first
+      // timestep (the first step only worked by accident of the default).
+      const vGSguess = isNmos ? (st[key + '_vgs'] ?? 2) : -(st[key + '_vgs'] ?? -2);
+      const vDSguess = isNmos ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? -1);
       const vBSguess = isNmos ? (st[key + '_vbs'] ?? 0) : -(st[key + '_vbs'] ?? 0);
-      // Body effect: Vth = Vto0 + γ*(sqrt(2ΦF - Vbs) - sqrt(2ΦF))
-      const Vth = Vto0 + Gamma * (Math.sqrt(Math.max(0, 2 * Phi - vBSguess)) - Math.sqrt(2 * Phi));
-      const vov = isNmos ? (vGSguess - Vth) : -(vGSguess - Vth);
+      // Threshold magnitude with body effect: |Vth| = |Vto| + γ(√(2Φ−|Vbs|) − √2Φ)
+      const vthMag = (isNmos ? Vto0 : -Vto0) + Gamma * (Math.sqrt(Math.max(0, 2 * Phi - Math.abs(vBSguess))) - Math.sqrt(2 * Phi));
+      const vov = vGSguess - vthMag;
       // Compute Id
       let Id = 0;
       let gm = 0;
@@ -360,28 +371,36 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
         // n is sub-threshold slope factor (typical 1.5)
         const Vt_thermal = 0.026; // 26 mV at room temp
         const n = 1.5;
-        const expArg = Math.min((vGSguess - Vth) / (n * Vt_thermal), 30);
+        const expArg = Math.min((vGSguess - vthMag) / (n * Vt_thermal), 30);
         Id = 1e-7 * (Math.exp(expArg) - 1) * (1 + Lambda * vDSguess);
         gm = 1e-7 * Math.exp(expArg) / (n * Vt_thermal);
         gds = 1e-7 * (Math.exp(expArg) - 1) * Lambda;
       }
       const sign = isNmos ? 1 : -1;
-      // stamp VCCS from d→s controlled by g-s
-      sys.stampVCCS(d, s, g, s, sign * gm);
-      // output conductance
-      sys.stampConductance(d, s, sign * gds);
-      // current source offset (linearization)
-      const Ieq = Id - gm * vGSguess - gds * vDSguess;
-      sys.stampCurrentSource(d, s, sign * Ieq);
-      // series resistances Rd, Rs
+      // Effective channel terminals. When Rd/Rs > 0 the channel connects to
+      // the external terminal through a REAL series conductance via an
+      // internal pseudo-node (an extra unknown used as a voltage node). The
+      // old code stamped them d→s in PARALLEL with the channel — a leak across
+      // the device even when the channel was off.
+      let dEff = d;
+      let sEff = s;
       if (Rd > 0) {
-        // stamp Rd as series conductance between d and internal node
-        // (we approximate by adding conductance to source side)
-        sys.stampConductance(d, s, 1 / Rd);
+        const di = sys.addExtra() + 1; // pseudo-node id (extra index + 1)
+        sys.stampConductance(di, d, 1 / Rd);
+        dEff = di;
       }
       if (Rs > 0) {
-        sys.stampConductance(d, s, 1 / Rs);
+        const si = sys.addExtra() + 1;
+        sys.stampConductance(si, s, 1 / Rs);
+        sEff = si;
       }
+      // stamp VCCS from d→s controlled by g-s
+      sys.stampVCCS(dEff, sEff, g, sEff, sign * gm);
+      // output conductance
+      sys.stampConductance(dEff, sEff, sign * gds);
+      // current source offset (linearization)
+      const Ieq = Id - gm * vGSguess - gds * vDSguess;
+      sys.stampCurrentSource(dEff, sEff, sign * Ieq);
     },
     step(params, terminals, sim) {
       const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
@@ -481,10 +500,13 @@ function makeJFET(type: 'n' | 'p'): ComponentPlugin {
           gm = -2 * Idss * vov / Vp;
           gds = 0;
         } else {
-          // linear
-          Id = Idss * (2 * vov * vDSguess / Vp + vDSguess * vDSguess / (Vp * Vp));
-          gm = -2 * Idss * vDSguess / Vp / Vp;
-          gds = 2 * Idss * (vov / Vp + vDSguess / (Vp * Vp));
+          // Shockley triode region: Id = Idss·(2·vov·vds/(−Vp) − (vds/(−Vp))²).
+          // Both terms below were sign-flipped (Id came out NEGATIVE for an
+          // N-JFET, gm was negative → positive feedback) and discontinuous
+          // with the saturation branch at the boundary.
+          Id = Idss * (-2 * vov * vDSguess / Vp - vDSguess * vDSguess / (Vp * Vp));
+          gm = 2 * Idss * vDSguess / (Vp * Vp);
+          gds = -2 * Idss * (vov / Vp + vDSguess / (Vp * Vp));
         }
       }
       const sign = isN ? 1 : -1;

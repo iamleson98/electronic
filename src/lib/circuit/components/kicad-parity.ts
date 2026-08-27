@@ -208,23 +208,21 @@ export const hierarchicalLabel: ComponentPlugin = {
     ctx.strokeStyle = color; ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.lineWidth = 1.5;
     const w = Math.max(net.length * cellSize * 0.32, cellSize * 1.5);
     const h = cellSize * 0.7;
-    // pentagon pointing right for input, left for output
-    const flip = dir === 'output';
+    // Pentagon tag: input points INTO the sheet (left), output points OUT
+    // (right), everything else is a plain rectangle.
     ctx.beginPath();
-    if (flip) {
+    if (dir === 'output') {
       ctx.moveTo(0, -h / 2); ctx.lineTo(w, -h / 2);
       ctx.lineTo(w + h * 0.5, 0);
       ctx.lineTo(w, h / 2); ctx.lineTo(0, h / 2);
-    } else {
-      ctx.moveTo(h * 0.5, 0); ctx.lineTo(w + h * 0.5, -h / 2);
-      // wait — easier: pentagon pointing left for input
-      ctx.closePath();
-      ctx.beginPath();
+    } else if (dir === 'input') {
       ctx.moveTo(0, 0);
-      ctx.lineTo(w * 0.2, -h / 2);
-      ctx.lineTo(w + w * 0.2, -h / 2);
-      ctx.lineTo(w + w * 0.2, h / 2);
-      ctx.lineTo(w * 0.2, h / 2);
+      ctx.lineTo(h * 0.5, -h / 2);
+      ctx.lineTo(w + h * 0.5, -h / 2);
+      ctx.lineTo(w + h * 0.5, h / 2);
+      ctx.lineTo(h * 0.5, h / 2);
+    } else {
+      ctx.rect(0, -h / 2, w, h);
     }
     ctx.closePath();
     ctx.fill(); ctx.stroke();

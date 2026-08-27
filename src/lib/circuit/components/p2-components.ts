@@ -94,15 +94,20 @@ export const lm385: ComponentPlugin = {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const k = terminals.find(t => t.terminalId === 'k')!.nodeId;
     const refV = params.refV as number;
-    const v = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[k] ?? 0);
+    // The LM385 is a REVERSE-biased (zener-style) shunt reference: it
+    // regulates when the cathode is above the anode by refV. The old code
+    // modeled a FORWARD diode, so it never regulated in the correct
+    // orientation (mirror the lm336/icl8069 stamps in this file).
+    const v = (sim.nodeVoltage[k] ?? 0) - (sim.nodeVoltage[a] ?? 0);
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `lm385_${a}_${k}`;
-    const on = v > refV;
+    const prevOn = st[key] ?? false;
+    const on = prevOn ? v > refV - 0.05 : v > refV;
     st[key] = on;
     if (on) {
       const r = Math.max(0.001, params.onR as number);
       sys.stampConductance(a, k, 1 / r);
-      sys.stampCurrentSource(k, a, refV / r);
+      sys.stampCurrentSource(a, k, refV / r);
     } else {
       sys.stampConductance(a, k, 1 / (params.offR as number));
     }
@@ -143,8 +148,14 @@ export const adc: ComponentPlugin = {
   },
   stamp(params, terminals, sys, sim) {
     const vccV = params.vcc as number;
-    const vin = sim.nodeVoltage[terminals.find(t => t.terminalId === 'vin')!.nodeId] ?? 0;
-    const vref = sim.nodeVoltage[terminals.find(t => t.terminalId === 'vref')!.nodeId] ?? vccV;
+    const vinNode = terminals.find(t => t.terminalId === 'vin')!.nodeId;
+    const vrefNode = terminals.find(t => t.terminalId === 'vref')!.nodeId;
+    const vin = sim.nodeVoltage[vinNode] ?? 0;
+    // An unconnected terminal maps to node 0 and reads 0 V — the `?? vccV`
+    // fallback could never fire. Detect the unconnected VREF explicitly and
+    // default it to VCC (an unconnected VREF previously read 0 V, saturating
+    // the converter to 255).
+    const vref = vrefNode !== 0 ? (sim.nodeVoltage[vrefNode] ?? vccV) : vccV;
     // Convert analog voltage to 8-bit value
     const ratio = Math.max(0, Math.min(1, vin / Math.max(0.001, vref)));
     const digitalValue = Math.round(ratio * 255);
@@ -592,9 +603,12 @@ export const photodiode: ComponentPlugin = {
     const responsivity = params.responsivity as number;
     const lux = params.illuminance as number;
     const area = params.activeArea as number;
-    // Irradiance ≈ lux / 683 (lm/W conversion at 555nm)
+    // Irradiance ≈ lux / 683 (lm/W conversion at 555nm).
+    // The photocurrent is responsivity·E·area — the old code multiplied by
+    // 1000 "for visible effect", inflating the current a thousandfold
+    // (1000 lux → 5.5 mA instead of the physical 5.5 µA).
     const irradiance = lux / 683;
-    const photocurrent = responsivity * irradiance * area * 1000; // scale up for visible effect
+    const photocurrent = responsivity * irradiance * area;
     const dark = params.darkCurrent as number;
     const totalCurrent = photocurrent + dark;
     // High impedance when not conducting — add parallel leak so node isn't floating
@@ -776,15 +790,22 @@ export const solarCell: ComponentPlugin = {
     const lux = params.illuminance as number;
     const voc = params.voc as number;
     const isc = params.isc as number;
-    const r = Math.max(0.001, params.seriesR as number);
-    // Effective voltage at current illuminance
+    const seriesR = Math.max(0.001, params.seriesR as number);
+    // Effective voltage / short-circuit current at current illuminance
     const vEffective = voc * Math.sqrt(Math.max(0, lux) / 1000);
-    // Model as voltage source with series R (Thevenin equivalent)
-    sys.stampVoltageSource(p, n, vEffective);
-    // Series resistance — conductance from p to n
-    sys.stampConductance(p, n, 1 / r);
+    const iscEff = Math.max(0, isc) * Math.max(0, lux) / 1000;
+    // Thevenin equivalent with a REAL series resistance: an ideal source
+    // pinned directly across the terminals made the old parallel conductance
+    // do nothing (a 1 mΩ load still saw the full ~0.6 V). The source drives
+    // an internal pseudo-node; R_th = vEff/isc (so the short-circuit current
+    // is the rated Isc) plus the user's series resistance.
+    const rTh = iscEff > 1e-12 ? vEffective / iscEff : 1e9; // ~open when dark
+    const rTotal = Math.max(0.001, rTh + seriesR);
+    const m = sys.addExtra() + 1; // pseudo-node id (extra index + 1)
+    sys.stampVoltageSource(m, n, vEffective); // V(m) − V(n) = vEff
+    sys.stampConductance(p, m, 1 / rTotal);   // series R between p and the internal node
     const st = sim.state.__global ?? (sim.state.__global = {});
-    st[`solar_${p}_${n}`] = { vEffective, iMax: isc, lux };
+    st[`solar_${p}_${n}`] = { vEffective, iMax: iscEff, lux };
   },
   measure(params, terminals, sim) {
     const p = terminals.find(t => t.terminalId === 'p')!.nodeId;
@@ -851,7 +872,13 @@ export const crystalOscillator: ComponentPlugin = {
     const freq = params.frequency as number;
     const voh = params.voh as number;
     const vol = params.vol as number;
-    const enV = (sim.nodeVoltage[en] ?? vccV) - (sim.nodeVoltage[gnd] ?? 0);
+    // EN has an internal 1 MΩ pull-up to VCC (like real active oscillator
+    // modules): unconnected EN → enabled, grounded EN → disabled. The old
+    // `sim.nodeVoltage[en] ?? vccV` fallback could never fire because an
+    // unconnected pin reads 0 V (node 0), leaving the oscillator disabled.
+    sys.stampConductance(en, gnd, 1e-6);
+    sys.stampCurrentSource(gnd, en, vccV * 1e-6);
+    const enV = (sim.nodeVoltage[en] ?? 0) - (sim.nodeVoltage[gnd] ?? 0);
     const enabled = enV > threshold;
     // Square wave: 50% duty cycle at the rated frequency
     const t = sim.time;

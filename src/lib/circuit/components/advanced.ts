@@ -91,9 +91,17 @@ const ammeter: ComponentPlugin = {
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     const st = sim.state.__global ?? {};
     const branchIdx = st[`ammeter_${p}_${n}`];
-    if (branchIdx !== undefined && sim.branchCurrent[branchIdx] !== undefined) {
-      const i = sim.branchCurrent[branchIdx];
-      return [{ label: 'I', value: (i * 1000).toFixed(3), unit: 'mA' }];
+    // stampVoltageSource returns the RAW matrix index of the extra variable;
+    // sim.branchCurrent is indexed RELATIVE to the first extra variable
+    // (branchCurrent[i] = x[numNodes-1+i]). Convert before reading, like the
+    // npn/pnp plugins do — the old code read an unrelated slot (or nothing).
+    if (branchIdx !== undefined) {
+      const numNonGround = sim.nodeVoltage.length - 1;
+      const relIdx = (branchIdx as number) - numNonGround;
+      if (relIdx >= 0 && relIdx < sim.branchCurrent.length) {
+        const i = sim.branchCurrent[relIdx];
+        return [{ label: 'I', value: (i * 1000).toFixed(3), unit: 'mA' }];
+      }
     }
     return [{ label: 'I', value: '0.000', unit: 'mA' }];
   },

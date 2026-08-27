@@ -427,7 +427,7 @@ export const coupledInductor: ComponentPlugin = {
     ctx.moveTo(2 * cellSize + 4, cellSize); ctx.lineTo(2 * cellSize + 4, 3 * cellSize);
     ctx.stroke();
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const p1 = terminals.find((t) => t.terminalId === 'p1')!.nodeId;
     const p2 = terminals.find((t) => t.terminalId === 'p2')!.nodeId;
     const s1 = terminals.find((t) => t.terminalId === 's1')!.nodeId;
@@ -437,13 +437,21 @@ export const coupledInductor: ComponentPlugin = {
     const k = Math.max(0, Math.min(1, params.k as number));
     const ratio = params.ratio as number;
     const M = k * Math.sqrt(L1 * L2);
-    // For simplicity, model as ideal transformer: V2 = V1/ratio, I2 = -I1*ratio
-    // (ignores magnetizing inductance — but that's typical for high-k transformers)
-    // Use VCVS + CCCS:
-    sys.stampVCVS(s1, s2, p1, p2, 1 / ratio);
-    // Don't add CCCS for primary side — it's implicit in KCL
-    void M;
-    // Add primary self-inductance (companion model, backward Euler)
+    void L2; void M;
+    // Ideal transformer: V2 = V1/ratio. The VCVS branch current i flows s1→s2
+    // INSIDE the source; when the secondary delivers power, i < 0. Power
+    // conservation fixes the reflected primary current: I(p1→p2 internal) =
+    // −i·(V2/V1) = −i/ratio. The old comment claimed the reflection was
+    // "implicit in KCL" — it is not: without this CCCS the secondary delivered
+    // power the primary never drew (energy from nothing).
+    const vcvsIdx = sys.stampVCVS(s1, s2, p1, p2, 1 / ratio);
+    if (vcvsIdx >= 0) {
+      sys.stampCCCS(p1, p2, vcvsIdx, -1 / ratio);
+    }
+    // Record the branch index for the primary-current readout
+    const stR = sim.state.__global ?? (sim.state.__global = {});
+    stR[`xfmr_branch_${comp?.id ?? `${p1}_${p2}`}`] = vcvsIdx;
+    // Primary self-/magnetizing inductance (companion model, backward Euler)
     const dt = Math.max(sim.dt, 1e-12);
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `xfmr_${p1}_${p2}_${s1}_${s2}`;
@@ -902,14 +910,26 @@ export const opampReal: ComponentPlugin = {
     const gain = params.gain as number;
     const rout = Math.max(1, params.rout as number);
     const voff = (params.voff as number) / 1000; // mV to V
-    // Open-loop gain with finite output resistance
-    // V(out) = gain * (V(in+) - V(in-) - voff), limited by VCC/VEE
-    // For small-signal: just VCVS with gain, plus Rout in series
-    sys.stampVCVS(out, 0, inp, inn, gain);
-    // offset (current source to in- terminal)
-    sys.stampCurrentSource(0, inn, voff * gain / 1e6);  // tiny offset current
-    // output resistance
-    sys.stampConductance(out, 0, 1 / rout);
+    // Thevenin output stage: the VCVS drives an INTERNAL node (a pseudo-node
+    // built from an extra unknown) and rout connects it to the real output.
+    // The old code stamped rout from out to ground in parallel with the VCVS —
+    // the VCVS still pinned V(out) exactly, so rout had no effect whatsoever
+    // (a 75 Ω load didn't change V(out) at all).
+    const internal = sys.addExtra() + 1; // pseudo-node id (extra index + 1)
+    const vcvsIdx = sys.stampVCVS(internal, 0, inp, inn, gain);
+    // Input-referred offset: V(internal) = gain·(v+ − v− + voff). The VCVS
+    // row is V(internal) − gain·(v+ − v−) = z[vcvsIdx]; setting that RHS to
+    // gain·voff folds the offset into the gain equation. (The old code
+    // injected a meaningless voff·gain/1M amp current into the inverting
+    // node, which did nothing when that node was grounded.)
+    if (vcvsIdx >= 0 && voff !== 0) {
+      sys.z[vcvsIdx] += gain * voff;
+    }
+    // Series output resistance between the internal node and the output
+    sys.stampConductance(internal, out, 1 / rout);
+    // Input bias path (prevents floating inputs, like the ideal op-amp)
+    sys.stampConductance(inp, 0, 1e-6);
+    sys.stampConductance(inn, 0, 1e-6);
     void sim;
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 3, y: 2 }, { x: 6, y: 2 }]; },

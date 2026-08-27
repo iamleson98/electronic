@@ -83,7 +83,10 @@ function makePowerSymbol(
       const net = (params.net as string) || netName;
       const node = terminals.find((t) => t.terminalId === 'p')!.nodeId;
       if (net === 'GND' || net === 'gnd' || net === '0') return;
-      const nominalV = parseFloat(netName.replace(/[^\d.+-]/g, '')) || 0;
+      // Parse the nominal voltage from the USER'S net parameter (renaming a
+      // +5V port to +3.3V previously still drove 5 V — the fixed default
+      // netName was parsed instead of the live value).
+      const nominalV = parseFloat(net.replace(/[^\d.+-]/g, '')) || 0;
       if (nominalV !== 0) {
         const gPull = 1e-6;
         sys.stampConductance(node, 0, gPull);
@@ -341,4 +344,7 @@ registerPlugin(netLabel);
 registerPlugin(bus);
 registerPlugin(busLabel);
 registerPlugin(busVectorLabel);
-registerPlugin(hierLabel);
+// NOTE: hierLabel is intentionally NOT registered here — kicad-parity.ts
+// registers its own 'hierLabel' plugin and registerPlugin is last-wins, so
+// this registration was always silently overridden. Keep the export for API
+// compatibility; the live plugin is kicad-parity's hierarchicalLabel.
