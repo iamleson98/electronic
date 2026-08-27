@@ -12,6 +12,11 @@
 // off the main thread. For circuits > 200 nodes, this keeps the UI
 // responsive (60fps) while the solver churns in the background.
 
+// Import the full plugin registry — plugins self-register via side-effect
+// imports (store.ts does the same on the main thread). Without this the
+// worker's registry is empty, getPlugin() returns undefined for every type,
+// and simulateStep stamps nothing.
+import './components';
 import { simulateStep } from '../circuit/engine';
 import type { CircuitComponent, ComponentPlugin, Wire, SimContext } from '../circuit/types';
 import { getPlugin } from '../circuit/registry';
@@ -23,7 +28,7 @@ self.onmessage = (e: MessageEvent) => {
 
   switch (msg.type) {
     case 'step': {
-      const { components, wires, prev, dt, pluginsSnapshot } = msg;
+      const { components, wires, prev, dt, pluginsSnapshot, requestId } = msg;
       try {
         // Rebuild the plugins map from the snapshot (plugins aren't directly transferable)
         const plugins = new Map<string, ComponentPlugin>();
@@ -39,24 +44,27 @@ self.onmessage = (e: MessageEvent) => {
           dt as number,
         );
         if (result) {
-          // Transfer the result back — use structured clone (default)
+          // Transfer the result back — use structured clone (default).
+          // NOTE: every reply MUST echo requestId — the main thread keys its
+          // pending promises by it.
           (self as any).postMessage({
             type: 'result',
+            requestId,
             sim: result.sim,
             branchCurrentSize: result.branchCurrentSize,
             nodeMap: result.nodeMap,
           });
         } else {
-          (self as any).postMessage({ type: 'error', message: 'simulateStep returned null' });
+          (self as any).postMessage({ type: 'error', requestId, message: 'simulateStep returned null' });
         }
       } catch (err) {
-        (self as any).postMessage({ type: 'error', message: (err as Error).message });
+        (self as any).postMessage({ type: 'error', requestId, message: (err as Error).message });
       }
       break;
     }
     case 'batch': {
       // Run a batch of steps (e.g. for a transient sweep)
-      const { components, wires, prev, dt, count, pluginsSnapshot } = msg;
+      const { components, wires, prev, dt, count, pluginsSnapshot, requestId } = msg;
       try {
         const plugins = new Map<string, ComponentPlugin>();
         for (const type of pluginsSnapshot as string[]) {
@@ -74,7 +82,7 @@ self.onmessage = (e: MessageEvent) => {
             dt as number,
           );
           if (!result) {
-            (self as any).postMessage({ type: 'error', message: `step ${i} returned null`, partial: results });
+            (self as any).postMessage({ type: 'error', requestId, message: `step ${i} returned null`, partial: results });
             return;
           }
           results.push({
@@ -88,9 +96,9 @@ self.onmessage = (e: MessageEvent) => {
             state: result.sim.state,
           };
         }
-        (self as any).postMessage({ type: 'batch_result', results });
+        (self as any).postMessage({ type: 'batch_result', requestId, results });
       } catch (err) {
-        (self as any).postMessage({ type: 'error', message: (err as Error).message });
+        (self as any).postMessage({ type: 'error', requestId, message: (err as Error).message });
       }
       break;
     }

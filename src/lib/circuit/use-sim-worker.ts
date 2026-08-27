@@ -60,14 +60,21 @@ export function useSimWorker() {
         }
       };
       worker.onerror = () => {
-        // Worker failed to load — fall back to sync
+        // Worker failed to load — fall back to sync and settle every pending
+        // request so awaiting callers don't hang forever (and pendingRef
+        // doesn't leak).
         setIsWorkerReady(false);
+        for (const resolve of pendingRef.current.values()) resolve(null);
+        pendingRef.current.clear();
       };
       // Ping the worker to check if it's ready
       worker.postMessage({ type: 'ping' });
       return () => {
         worker.terminate();
         workerRef.current = null;
+        // Settle in-flight requests on unmount
+        for (const resolve of pendingRef.current.values()) resolve(null);
+        pendingRef.current.clear();
       };
     } catch {
       // Worker creation failed (e.g., CSP restriction) — fall back to sync

@@ -1121,10 +1121,18 @@ export function simulateStep(
   // PERSISTENT state: reuse the same state object across steps so plugins (capacitors,
   // inductors, 555, MCU) keep their memory. Created once per session.
   const stateMap: Record<string, any> = prev ? prev.state : {};
-  // expose per-component state objects (also persistent via comp.simState)
+  // expose per-component state objects (also persistent via comp.simState).
+  // When components arrive as structured clones (e.g. worker messages), their
+  // simState copies are detached from the persistent state map — always
+  // (re)link comp.simState to the authoritative persistent object.
   for (const comp of components) {
     if (!comp.simState) comp.simState = {};
-    if (!stateMap[comp.id]) stateMap[comp.id] = comp.simState;
+    const persistent = stateMap[comp.id];
+    if (persistent && typeof persistent === 'object' && persistent !== comp.simState) {
+      comp.simState = persistent;
+    } else if (!persistent) {
+      stateMap[comp.id] = comp.simState;
+    }
   }
 
   const sim: SimContext = {

@@ -23,7 +23,8 @@ import type {
 } from './types';
 import { DEFAULT_PAGE_SETUP, DEFAULT_TITLE_BLOCK } from './types';
 import { getPlugin, getAllPlugins } from './registry';
-import { simulateStep, getTerminalsForComponent, buildNodeMap } from './engine';
+import { simulateStep, getTerminalsForComponent } from './engine';
+import { cleanupComponentState } from './memory';
 import { findRoute, buildRoutingGrid, pathToWaypoints } from './smart-wire-router';
 import { validatePhysics, type PhysicsViolation } from './physics-validator';
 import { runFullERC } from './erc';
@@ -560,23 +561,17 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   deleteComponent: (id) => {
     get().pushHistory();
-    // Clean up orphaned sim-state entries for the deleted component.
-    // Previously: cap_${id}, ind_${id}, vcsw_${id}, etc. were left in
-    // sim.state.__global forever, causing a memory leak.
+    // Clean up orphaned sim-state entries for the deleted component — with
+    // EXACT key matching. The old substring match (`key.includes('_'+id)`)
+    // also wiped other components whose ids share a prefix (deleting
+    // comp_x_5 destroyed cap_comp_x_51's state).
     const s = get();
-    if (s.simContext?.state?.__global) {
-      const g = s.simContext.state.__global;
-      for (const key of Object.keys(g)) {
-        if (key.includes(`_${id}`) || key.includes(`${id}_`)) {
-          delete g[key];
-        }
-      }
-    }
-    set((s) => ({
-      components: s.components.filter((c) => c.id !== id),
-      wires: s.wires.filter((w) => w.from.componentId !== id && w.to.componentId !== id),
+    cleanupComponentState(s.simContext, s.components.filter((c) => c.id !== id));
+    set((s2) => ({
+      components: s2.components.filter((c) => c.id !== id),
+      wires: s2.wires.filter((w) => w.from.componentId !== id && w.to.componentId !== id),
       selection: { type: null, id: null },
-      traces: s.traces.filter((t) => t.componentId !== id),
+      traces: s2.traces.filter((t) => t.componentId !== id),
     }));
   },
 
@@ -709,12 +704,18 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (s.selection.type === 'component' && s.selection.id) idsToDelete.add(s.selection.id);
       const wiresToDelete = new Set(s.multiSelection.wires);
       if (s.selection.type === 'wire' && s.selection.id) wiresToDelete.add(s.selection.id);
+      const remaining = s.components.filter((c) => !idsToDelete.has(c.id));
+      // Clean up orphaned sim state and traces exactly like deleteComponent —
+      // deleting an oscilloscope via multi-select used to leave its trace in
+      // the probe panel and leak every deleted component's state keys.
+      cleanupComponentState(s.simContext, remaining);
       return {
-        components: s.components.filter((c) => !idsToDelete.has(c.id)),
+        components: remaining,
         wires: s.wires.filter((w) => !wiresToDelete.has(w.id) &&
           !idsToDelete.has(w.from.componentId) && !idsToDelete.has(w.to.componentId)),
         selection: { type: null, id: null },
         multiSelection: { components: new Set(), wires: new Set() },
+        traces: s.traces.filter((t) => !idsToDelete.has(t.componentId)),
       };
     });
   },
@@ -1105,7 +1106,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
 
   moveSheet: (id, position) => {
-    get().pushHistory();
+    // No pushHistory here: fires on every mousemove of a sheet drag (the
+    // canvas pushes once at drag start).
     set((s) => ({
       sheets: s.sheets.map((sh) => sh.id === id ? { ...sh, position } : sh),
     }));
@@ -1300,8 +1302,10 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
 
   setWireWaypoints: (id, waypoints) => {
-    // Make wire handle drags undoable — same pattern as moveComponent.
-    get().pushHistory();
+    // No pushHistory here: this fires on EVERY mousemove during a wire-handle
+    // drag. The canvas pushes one history entry at drag start (same pattern
+    // as component drags) — pushing per-move flooded the 100-entry history
+    // and made undo retreat one waypoint tweak at a time.
     set((s) => ({
       wires: s.wires.map((w) => (w.id === id ? { ...w, waypoints: waypoints.length > 0 ? waypoints : undefined } : w)),
     }));
@@ -1344,7 +1348,17 @@ export const useEditor = create<EditorState>((set, get) => ({
         groups: prev.groups,
         sheets: prev.sheets,
         netClasses: prev.netClasses,
+        // Restore the FULL document snapshot. Dropping these fields made
+        // setPageSetup/setMetadata edits permanently un-undoable (history
+        // was captured but never restored) and let undo cross a sheet
+        // switch, corrupting sub-sheets with root content.
+        pageSetup: prev.pageSetup,
+        metadata: prev.metadata,
+        savedViews: prev.savedViews,
+        childSheets: prev.childSheets,
+        activeSheet: prev.activeSheet,
         selection: { type: null, id: null },
+        multiSelection: { components: new Set(), wires: new Set() },
       };
     });
     // Toast feedback — fire after state update so it's visible to the user
@@ -1371,7 +1385,14 @@ export const useEditor = create<EditorState>((set, get) => ({
         groups: next.groups,
         sheets: next.sheets,
         netClasses: next.netClasses,
+        // Restore the full document snapshot (see undo())
+        pageSetup: next.pageSetup,
+        metadata: next.metadata,
+        savedViews: next.savedViews,
+        childSheets: next.childSheets,
+        activeSheet: next.activeSheet,
         selection: { type: null, id: null },
+        multiSelection: { components: new Set(), wires: new Set() },
       };
     });
     if (hadFuture && typeof window !== 'undefined') {
@@ -1534,6 +1555,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     // For speed < 1: run 1 step every Nth frame, where N = ceil(1/speed)
     //   This is tracked via simStepCounter in the store state
     const speed = s.speed;
+    // Guard: speed <= 0 (reachable via the AI chat's unvalidated setSpeed)
+    // would freeze the sim forever — 1/0 = Infinity and the modulo check
+    // below never passes.
+    if (!(speed > 0)) return;
     let subSteps: number;
     if (speed >= 1) {
       subSteps = Math.max(1, Math.floor(speed));

@@ -142,8 +142,10 @@ export function CircuitCanvas() {
     return () => ro.disconnect();
   }, []);
 
-  // Use extracted simulation loop hook
-  const { flowPhaseRef } = useSimulationLoop(running, step);
+  // Use extracted simulation loop hook. animTick changes every RAF frame so
+  // the canvas draw effect re-runs between sim steps — without it the flow
+  // dots freeze whenever speed < 1 (steps land every Nth frame).
+  const { flowPhaseRef, animTick } = useSimulationLoop(running, step);
 
   // Use extracted coordinate/hit-testing hook
   const {
@@ -925,7 +927,7 @@ export function CircuitCanvas() {
     }
 
     ctx.restore();
-  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, use45Routing, running, gridToScreen, getTerminalPos, plugins, getRotateHandlePos, ercErrors, hoveredERC, units, sheets, hoveredSheetId, resolveEndpointPos, netClasses, showNetColors]);
+  }, [size, pan, zoom, components, wires, selection, multiSelection, hover, cursor, simContext, showGrid, wireDraft, use45Routing, running, gridToScreen, getTerminalPos, plugins, getRotateHandlePos, ercErrors, hoveredERC, units, sheets, hoveredSheetId, resolveEndpointPos, netClasses, showNetColors, animTick]);
 
   // ----- Mouse handlers -----
   const onMouseDown = (e: React.MouseEvent) => {
@@ -972,6 +974,9 @@ export function CircuitCanvas() {
         const drag = { id: sheetHit.id, offset };
         sheetDragRef.current = drag;
         setSheetDrag(drag);
+        // One history entry per drag (moveSheet itself doesn't push — it
+        // fires on every mousemove)
+        useEditor.getState().pushHistory();
         return;
       }
     }
@@ -1053,6 +1058,9 @@ export function CircuitCanvas() {
                 startGrid: g,
                 originalWaypoints,
               };
+              // One history entry per drag (setWireWaypoints itself doesn't
+              // push — it fires on every mousemove)
+              useEditor.getState().pushHistory();
               return;
             }
           }

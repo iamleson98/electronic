@@ -1,11 +1,55 @@
+// Keys built from NODE ids (npn_1_2_3, 7seg_..., gate_...) cannot be
+// attributed to a component here and are left alone.
+
+// State-key prefixes that embed a component id: `prefix_${id}` with an
+// optional trailing suffix (_i, _dir, _ib, ...).
+const COMP_ID_STATE_PREFIXES = ['cap', 'ind', 'vcsw', 'xfmr_branch', 'ff'];
+
+/**
+ * Remove __global sim-state entries that reference deleted components.
+ *
+ * A key is garbage when it embeds a component id that is no longer present:
+ *   - via a known state prefix (`cap_<id>`, `ind_<id>_i`, `vcsw_<id>`, ...),
+ *     which works for ids of ANY format (C1, R1, comp_...), or
+ *   - via the genId pattern `prefix_<base36-ts>_<counter>` embedded anywhere
+ *     (`other_<id>`, ...).
+ *
+ * The old substring match (`key.includes('_' + id)`) also wiped keys of
+ * OTHER components whose ids shared a prefix — deleting `comp_x_5`
+ * destroyed `cap_comp_x_51`'s state. Full-id matching makes that collision
+ * impossible. Legacy node-pair keys (`cap_3_7`) are preserved.
+ */
 export function cleanupComponentState(sim: any, components: any[]): number {
   if (!sim || !sim.state || !sim.state.__global) return 0;
-  const globalState = sim.state.__global; const validIds = new Set(components.map(c => c.id));
+  const globalState = sim.state.__global;
+  const validIds = new Set(components.map(c => c.id));
+  // genId pattern: prefix_base36timestamp_counter (timestamp >= 6 chars)
+  const idPattern = /(?:^|_)([a-z][a-z0-9]*_[a-z0-9]{6,}_\d+)(?=_|$)/gi;
   let removed = 0; const keysToDelete: string[] = [];
+  outer:
   for (const key of Object.keys(globalState)) {
-    const capMatch = key.match(/^cap_(.+?)(_i)?$/); if (capMatch) { if (!capMatch[1].match(/^\d+_\d+$/) && !validIds.has(capMatch[1])) { keysToDelete.push(key); removed++; } continue; }
-    const indMatch = key.match(/^ind_(.+?)(_i)?$/); if (indMatch) { if (!indMatch[1].match(/^\d+_\d+$/) && !validIds.has(indMatch[1])) { keysToDelete.push(key); removed++; } continue; }
-    const vcswMatch = key.match(/^vcsw_(.+)$/); if (vcswMatch) { if (!validIds.has(vcswMatch[1])) { keysToDelete.push(key); removed++; } continue; }
+    // (a) known state prefix + arbitrary-format id
+    for (const prefix of COMP_ID_STATE_PREFIXES) {
+      if (!key.startsWith(`${prefix}_`)) continue;
+      const m = key.slice(prefix.length + 1).match(/^(.+?)(?:_i|_dir|_ib|_clk|_vgs|_vds|_vbs|_vbe|_vce|_a|_b|_branch)?$/);
+      if (m) {
+        const id = m[1];
+        // pure-numeric ids are legacy node-pair keys — keep them
+        if (!/^\d+(_\d+)*$/.test(id) && !validIds.has(id)) {
+          keysToDelete.push(key); removed++;
+          continue outer;
+        }
+      }
+    }
+    // (b) genId-pattern id embedded anywhere in the key
+    idPattern.lastIndex = 0;
+    let m2: RegExpExecArray | null;
+    while ((m2 = idPattern.exec(key)) !== null) {
+      if (!validIds.has(m2[1])) {
+        keysToDelete.push(key); removed++;
+        break;
+      }
+    }
   }
   for (const key of keysToDelete) delete globalState[key];
   return removed;
