@@ -14,6 +14,8 @@ import { getProvider, type ChatMessage, type ProviderName } from '@/lib/ai/provi
 import { TOOLS_BY_NAME, getToolDefinitions, type ToolContext } from '@/lib/ai/tools';
 import type { CircuitDocument } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
+import { buildSystemPrompt, MUTATING_TOOL_NAMES, runAutoVerify, autoVerifyNeedsAttention, buildAutoVerifyMessages } from '@/lib/ai/system-prompt';
+import { ensurePlugins } from '@/lib/ai/tools/helpers';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;  // 5 min — allows for long retry sequences on rate limits
@@ -43,49 +45,7 @@ interface RequestBody {
   model?: string;
 }
 
-const SYSTEM_PROMPT = `You are an expert electrical engineer and patient electronics teacher in a circuit simulator app. You help users design, analyze, debug, and LEARN about circuits.
 
-## Your Dual Role
-1. **Engineer**: Build, simulate, and debug circuits using the available tools.
-2. **Teacher**: Explain concepts, suggest improvements, and help the user understand WHY things work (or don't).
-
-## CRITICAL RULES for building circuits
-1. ALWAYS connect voltage source "n" terminal to ground — no return path = sim fails.
-2. Common terminals: sources=p/n, passives=a/b, LEDs/diodes=a/k, transistors=c/b/e, op-amps=in+/in-/out, ground=g.
-3. Don't call getComponentInfo for common types — you know their terminals.
-4. After building, ALWAYS run simulate.run then simulate.validatePhysics.
-5. Space components ≥4 grid units apart to avoid overlap.
-
-## When the user asks "why doesn't this work?" or reports a problem
-1. Call **ai.diagnose** FIRST — it runs all checks and returns ranked issues with fixes.
-2. Read the issues, explain the ROOT CAUSE to the user in plain language.
-3. Cite the relevant knowledge base article (use kb.lookup or kb.search) to teach the concept.
-4. Offer to fix it automatically (use schematic.setParameter / addComponent / addWire).
-
-## When the user asks "explain X" (a concept, component, or circuit)
-1. Use **kb.search** to find relevant articles.
-2. Use **kb.lookup** to get the full article.
-3. Summarize the article in your own words, adding context from the user's circuit if relevant.
-4. Suggest related articles via kb.related for further reading.
-
-## When the user asks "what if I change X to Y?"
-1. Use **simulate.whatIf** — it clones the circuit, applies the change, runs a sim, and returns results WITHOUT modifying the actual circuit.
-2. Compare the results to the current state and explain the difference.
-
-## Teaching Guidelines
-- **Always explain WHY**, not just WHAT. Don't just say "add a 330Ω resistor" — explain "a 330Ω resistor limits the LED current to 15mA, which is safe for a standard LED".
-- **Use analogies** for beginners (water pressure = voltage, flow = current, narrow pipe = resistance).
-- **Cite the knowledge base** when relevant (e.g., "See the Ohm's Law article for the full derivation").
-- **Suggest improvements** proactively ("Your LED circuit works, but a 220Ω resistor would be more standard than 150Ω").
-- **Be encouraging** — electronics is hard. Celebrate correct designs, frame mistakes as learning opportunities.
-
-## Response Style
-- **Concise but complete** — don't pad, but don't skip important details.
-- **Use formatting** — bullet points, bold for key values, code for component IDs.
-- **If a tool fails**, explain why in plain language and suggest a fix.
-- **If ambiguous**, ask for clarification before proceeding.
-
-Grid: (x,y), x=right, y=down. Range 0-40 x, 0-30 y.`;
 
 function sseEvent(event: string, data: any): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -188,7 +148,7 @@ export async function POST(req: NextRequest) {
         const contextPreamble = buildContextPreamble(body, doc);
 
         const messages: ChatMessage[] = [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: buildSystemPrompt() },
           ...(contextPreamble ? [{ role: 'system' as const, content: contextPreamble }] : []),
           ...body.messages,
         ];
@@ -198,17 +158,16 @@ export async function POST(req: NextRequest) {
         // clock with 30+ components and 50+ wires needs ~40 tool calls).
         const MAX_ITERATIONS = 50;
         let circuitModified = false;
+        let autoVerifyCount = 0;
 
         for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
           const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 16384 });
 
-          // Stream any text content
-          if (result.content) {
-            send('text_delta', { text: result.content });
-          }
-
-          // If tool calls, execute them
+          // If tool calls, execute them (text streamed here narrates the tool use)
           if (result.tool_calls && result.tool_calls.length > 0) {
+            if (result.content) {
+              send('text_delta', { text: result.content });
+            }
             messages.push({
               role: 'assistant',
               content: result.content,
@@ -265,15 +224,12 @@ export async function POST(req: NextRequest) {
                   ok: toolResult.ok,
                 });
 
-                // If this was a circuit-mutating tool, mark as modified
-                const mutators = [
-                  'schematic.addComponent', 'schematic.removeComponent', 'schematic.moveComponent',
-                  'schematic.rotateComponent', 'schematic.setParameter', 'schematic.addWire',
-                  'schematic.removeWire', 'schematic.clear', 'schematic.reannotate',
-                  'schematic.loadDocument', 'examples.load',
-                ];
-                if (mutators.includes(tc.function.name)) {
+                // If this was a circuit-mutating tool, mark as modified and
+                // keep the plugin map in sync with newly added component types
+                // (the map was built from the initial client snapshot).
+                if (MUTATING_TOOL_NAMES.has(tc.function.name)) {
                   circuitModified = true;
+                  ensurePlugins(ctx);
                 }
 
                 messages.push({
@@ -305,7 +261,27 @@ export async function POST(req: NextRequest) {
             continue;
           }
 
-          // No tool calls — final response
+          // No tool calls — final response... unless the circuit was mutated
+          // and the automatic verification pass finds problems the model
+          // should fix first (max 2 auto-verify rounds per request).
+          if (circuitModified && autoVerifyCount < 2) {
+            const report = runAutoVerify(ctx);
+            if (autoVerifyNeedsAttention(report)) {
+              autoVerifyCount++;
+              send('verify', {
+                attempt: autoVerifyCount,
+                health: report.health,
+                issueCount: report.issues.length,
+                dcConverged: report.dcConverged,
+              });
+              messages.push(...(buildAutoVerifyMessages(report, autoVerifyCount) as ChatMessage[]));
+              continue;
+            }
+          }
+
+          if (result.content) {
+            send('text_delta', { text: result.content });
+          }
           send('done', {
             response: result.content,
             toolCalls: executedToolCalls,

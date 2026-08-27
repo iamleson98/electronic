@@ -96,10 +96,10 @@ interface CircuitSnapshot {
 }
 
 const SUGGESTED_PROMPTS = [
-  'Build an LED blinker with a 555 timer',
-  'Create an RC low-pass filter and verify the cutoff frequency',
+  'Build a 5V power supply with transformer, bridge rectifier and regulator',
+  'Design a 555 LED blinker at 2 Hz with 60% duty cycle',
   'Why doesn\'t my circuit work? Diagnose it',
-  'Explain Ohm\'s Law and how it applies to my circuit',
+  'Build an inverting amplifier with a gain of 10 and verify it',
   'What if I changed R1 to 10k? Compare the results',
 ];
 
@@ -108,7 +108,7 @@ const MUTATING_TOOLS = new Set([
   'schematic.addComponent', 'schematic.removeComponent', 'schematic.moveComponent',
   'schematic.rotateComponent', 'schematic.setParameter', 'schematic.addWire',
   'schematic.removeWire', 'schematic.clear', 'schematic.reannotate',
-  'schematic.loadDocument', 'examples.load',
+  'schematic.loadDocument', 'examples.load', 'design.buildPattern',
 ]);
 
 // Tools that require client-side PCB action
@@ -422,6 +422,21 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                 if (SIM_CONTROL_TOOLS.has(tc.name) || PCB_TOOLS.has(tc.name) || tc.name.startsWith('pcb.')) {
                   handleClientSideAction(tc);
                 }
+              } else if (eventType === 'verify') {
+                // System auto-verification ran after the AI's circuit changes —
+                // surfaced as a pseudo tool-call so the user sees the check.
+                const tc: ToolCallEntry = {
+                  name: 'verify.autoCheck',
+                  args: { attempt: data.attempt },
+                  result: { health: data.health, issueCount: data.issueCount, dcConverged: data.dcConverged },
+                  ok: data.health !== 'critical',
+                };
+                toolCalls.push(tc);
+                setMessages(prev => prev.map(m =>
+                  m.id === assistantMsgId
+                    ? { ...m, toolCalls: [...(m.toolCalls || []), tc], loading: false }
+                    : m
+                ));
               } else if (eventType === 'circuit_update') {
                 pendingCircuitUpdate = { components: data.components, wires: data.wires };
 

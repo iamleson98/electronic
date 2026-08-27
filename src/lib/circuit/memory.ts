@@ -6,7 +6,9 @@
 
 // State-key prefixes that embed a component id: `prefix_${id}` with an
 // optional trailing suffix (_i, _dir, _ib, ...).
-const COMP_ID_STATE_PREFIXES = [
+// Exported for tests (tests/hall-sensors.test.ts asserts new prefixes land
+// here — otherwise deleting a component orphans its __global state entry).
+export const COMP_ID_STATE_PREFIXES = [
   // passives & switches
   'cap', 'ind', 'vcsw', 'xfmr_branch', 'ff', 'xfmr', 'tline', 'tlineRLGC',
   // semiconductors
@@ -22,6 +24,8 @@ const COMP_ID_STATE_PREFIXES = [
   // protection / power
   'fuse', 'scr', 'triac', 'diac', 'tl431', 'lm385', 'lm336', 'icl8069',
   'pd', 'pt', 'solar', 'ammeter', 'arduino', 'arduinoReal',
+  // sensors (hallLinear is stateless — only the switch keeps hysteresis state)
+  'hallsw',
 ];
 
 // Optional suffixes appended to state keys (`npn_<id>_ib`, `mos_<id>_vgs`,

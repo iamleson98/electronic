@@ -21,7 +21,7 @@ import type { Tool, ToolContext } from './types';
 export type { Tool, ToolContext, ToolResult } from './types';
 
 import { addComponentTool, removeComponentTool, moveComponentTool, rotateComponentTool, setParameterTool, addWireTool, removeWireTool, clearCircuitTool } from './schematic-component-tools';
-import { listComponentsTool, listWiresTool, listComponentTypesTool, getComponentInfoTool } from './schematic-inspection-tools';
+import { listComponentsTool, listWiresTool, listComponentTypesTool, getComponentInfoTool, describeCircuitTool } from './schematic-inspection-tools';
 import { runSimulationTool, getVoltageTool, getCurrentTool, validatePhysicsTool, solveDCTool } from './simulation-tools';
 import { startSimulationTool, pauseSimulationTool, resetSimulationTool, setSimulationSpeedTool } from './simulation-control-tools';
 import { listExamplesTool, loadExampleTool } from './examples-tools';
@@ -35,6 +35,8 @@ import { diagnoseCircuitTool } from './diagnostic-tools';
 import { kbLookupTool, kbSearchTool, kbListByCategoryTool, kbRelatedTool, kbListCategoriesTool } from './kb-tools';
 import { simulateWhatIfTool } from './whatif-tools';
 import { simulateSweepTool } from './sweep-tools';
+import { designCalculateTool } from './design-calculators';
+import { designBuildPatternTool } from './design-patterns';
 
 export const TOOLS: Tool[] = [
   // Circuit Building
@@ -56,6 +58,7 @@ export const TOOLS: Tool[] = [
   getComponentInfoTool,
   findComponentTool,
   serializeDocumentTool,
+  describeCircuitTool,
 
   // Simulation & Analysis
   runSimulationTool,
@@ -71,10 +74,12 @@ export const TOOLS: Tool[] = [
   resetSimulationTool,
   setSimulationSpeedTool,
 
-  // AI-Powered Diagnosis & Teaching
+  // AI-Powered Diagnosis, Teaching & Design
   diagnoseCircuitTool,
   simulateWhatIfTool,
   simulateSweepTool,
+  designCalculateTool,
+  designBuildPatternTool,
 
   // Knowledge Base
   kbLookupTool,

@@ -6,6 +6,7 @@
 
 import { runBatch } from '../../circuit/batch-runner';
 import type { Tool, ToolContext } from './types';
+import { ensurePlugins } from './helpers';
 
 export const simulateSweepTool: Tool = {
   name: 'simulate.sweep',
@@ -75,6 +76,9 @@ export const simulateSweepTool: Tool = {
     }
 
     try {
+      // The plugin map may be stale if the AI added new component types since
+      // the request snapshot — refresh before simulating.
+      ensurePlugins(ctx);
       // Run the batch sweep with a transient inner analysis
       const batchConfig = {
         type: 'step' as const,

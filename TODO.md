@@ -141,7 +141,7 @@ This file tracks all remaining improvements.
 - [x] **Active crystal oscillator** — 4-pin active oscillator (VCC/GND/OUT/EN), square wave at rated frequency, EN gate
 - [ ] **Multi-unit IC support** — Extend beyond 7400 sample (7402, 7404, etc. as multi-unit)
 - [x] **Voltage references** — TL431 (adjustable shunt), LM336 (2.5V), LM385 (1.2V), ICL8069 (1.2V bandgap)
-- [ ] **Hall-effect sensors, IMUs** — For embedded/robotics
+- [x] **Hall-effect sensors, IMUs** — Hall done (IMUs still needed): A1302-style linear ratiometric `hallLinear` (Vout = Q·Vcc/5 + S·Vcc/5·B, 25 mV/mT, rail clamps, 1 Ω Thevenin out) + US1881-style `hallSwitch` (Bop/Brp hysteresis, open-drain ron, optional internal 10 kΩ pull-up)
 - [x] **Photodiode, phototransistor, solar cell** — Photodiode (responsivity × lux × area), NPN phototransistor (hFE × photo-base current), Solar cell (V_oc × √(lux/1000) Thevenin)
 - [x] **Motors** — DC motor (with back-EMF RPM readout), Bipolar 2-coil stepper (A+/A−/B+/B−), PWM hobby servo (VCC/GND/CTRL with θ readout)
 - [x] **Constant-current diode** — JFET current regulator (CRD with knee-voltage regions)

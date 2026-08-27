@@ -994,7 +994,7 @@ describe('Component plugin metadata', () => {
     }
   });
   it('every plugin has valid category', () => {
-    const validCategories = ['passive', 'source', 'semiconductor', 'ic', 'meter', 'mcu', 'io', 'logic'];
+    const validCategories = ['passive', 'source', 'semiconductor', 'ic', 'meter', 'mcu', 'io', 'logic', 'sensor'];
     for (const p of allPlugins) {
       expect(validCategories).toContain(p.category);
     }

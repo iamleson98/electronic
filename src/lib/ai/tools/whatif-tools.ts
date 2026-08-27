@@ -4,10 +4,10 @@
 // change. Clones the circuit, applies the modifications, runs a sim, returns
 // the results, and DISCARDS the clone.
 
-import { simulateStep, buildNodeMap, getTerminalsForComponent } from '../../circuit/engine';
-import { createMnaSystem, solveMna } from '../../circuit/solver';
+import { simulateStep, solveDC, buildNodeMap, type PrevState } from '../../circuit/engine';
 import type { CircuitComponent, CircuitDocument, Wire, SimContext } from '../../circuit/types';
 import type { Tool, ToolContext } from './types';
+import { ensurePlugins } from './helpers';
 
 interface WhatIfModification {
   componentId: string;
@@ -57,14 +57,18 @@ export const simulateWhatIfTool: Tool = {
     dt?: number;
     probes?: string[];
   }, ctx: ToolContext) {
-    // Deep clone the circuit
+    // The plugin map may be stale if the AI added new component types since
+    // the request snapshot — refresh before simulating.
+    ensurePlugins(ctx);
+    // Deep clone the circuit (strip simState — the clone gets fresh state)
     const clonedDoc: CircuitDocument = {
       version: 1,
       components: ctx.doc.components.map(c => ({
         ...c,
         parameters: { ...c.parameters },
         position: { ...c.position },
-      })),
+        simState: undefined,
+      })) as CircuitComponent[],
       wires: ctx.doc.wires.map(w => ({
         ...w,
         from: { ...w.from },
@@ -99,8 +103,13 @@ export const simulateWhatIfTool: Tool = {
     try {
       const sim = simulateCircuit(clonedDoc.components, clonedDoc.wires, plugins, steps, dt);
 
+      // DC operating point of the modified circuit (Newton-converged, includes
+      // semiconductor/op-amp extra variables — far more accurate than the
+      // transient's final sample for "what does this change do?" questions).
+      const dcSim = solveDC(clonedDoc.components, clonedDoc.wires, plugins);
+
       // Collect probe results
-      const probeResults: Record<string, { finalVoltage: number; minVoltage: number; maxVoltage: number }> = {};
+      const probeResults: Record<string, { finalVoltage: number; minVoltage: number; maxVoltage: number; dcVoltage: number }> = {};
       if (args.probes) {
         const nodeMap = buildNodeMap(clonedDoc.components, clonedDoc.wires, plugins);
         for (const probe of args.probes) {
@@ -119,11 +128,13 @@ export const simulateWhatIfTool: Tool = {
             if (v < minV) minV = v;
             if (v > maxV) maxV = v;
           }
-          const finalV = sim[sim.length - 1].nodeVoltage[nodeId] ?? 0;
+          const finalV = sim.length > 0 ? sim[sim.length - 1].nodeVoltage[nodeId] ?? 0 : 0;
+          const dcV = dcSim ? dcSim.nodeVoltage[nodeId] ?? 0 : finalV;
           probeResults[probe] = {
             finalVoltage: finalV,
             minVoltage: minV,
             maxVoltage: maxV,
+            dcVoltage: dcV,
           };
         }
       }
@@ -136,7 +147,7 @@ export const simulateWhatIfTool: Tool = {
           dt,
           simTime: steps * dt,
           probes: probeResults,
-          note: 'This was a non-mutating simulation. The actual circuit is unchanged. To apply these changes permanently, use schematic.setParameter.',
+          note: 'This was a non-mutating simulation using the full engine (Newton iteration + semiconductor models). dcVoltage is the converged DC operating point of the modified circuit; finalVoltage is the last transient sample. The actual circuit is unchanged. To apply these changes permanently, use schematic.setParameter.',
         },
       };
     } catch (err) {
@@ -149,7 +160,9 @@ export const simulateWhatIfTool: Tool = {
   },
 };
 
-// Helper: run a simple transient simulation on a set of components
+// Helper: run a transient simulation on a set of components using the REAL
+// engine (Newton iteration, extra unknowns for op-amps/semiconductors, sparse
+// solver for large circuits, persistent plugin state across steps).
 function simulateCircuit(
   components: CircuitComponent[],
   wires: Wire[],
@@ -157,51 +170,18 @@ function simulateCircuit(
   steps: number,
   dt: number,
 ): SimContext[] {
-  const nodeMap = buildNodeMap(components, wires, plugins);
-  const numNodes = nodeMap.numNodes;
-  const sys = createMnaSystem(numNodes, 100);
-  const state: Record<string, any> = {};
-
   const results: SimContext[] = [];
-  let simTime = 0;
-  const nodeVoltage = new Float64Array(numNodes);
-  const branchCurrent = new Float64Array(100);
-
+  let prev: PrevState | undefined;
   for (let step = 0; step < steps; step++) {
-    simTime += dt;
-    const simContext: SimContext = {
-      nodeVoltage,
-      branchCurrent,
-      state,
-      time: simTime,
-      dt,
+    const r = simulateStep(components, wires, plugins as Map<any, any>, prev, dt);
+    if (!r) break;
+    results.push(r.sim);
+    prev = {
+      nodeVoltage: r.sim.nodeVoltage,
+      branchCurrent: r.sim.branchCurrent,
+      time: r.sim.time,
+      state: r.sim.state,
     };
-
-    // Re-stamp by creating a fresh MNA system each step
-    const freshSys = createMnaSystem(numNodes, 100);
-    for (const comp of components) {
-      const plugin = plugins.get(comp.type);
-      if (!plugin) continue;
-      const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
-      plugin.stamp?.(comp.parameters, terminals, freshSys, simContext);
-    }
-
-    // Solve
-    const sol = solveMna(freshSys);
-    if (sol) {
-      for (let i = 0; i < numNodes; i++) {
-        nodeVoltage[i] = sol[i] ?? 0;
-      }
-    }
-
-    results.push({
-      nodeVoltage: new Float64Array(nodeVoltage),
-      branchCurrent: new Float64Array(branchCurrent),
-      state,
-      time: simTime,
-      dt,
-    });
   }
-
   return results;
 }

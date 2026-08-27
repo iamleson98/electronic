@@ -16,6 +16,8 @@ import { getProvider, type ChatMessage, type ProviderName } from '@/lib/ai/provi
 import { TOOLS_BY_NAME, getToolDefinitions, type ToolContext } from '@/lib/ai/tools';
 import type { CircuitDocument, CircuitComponent, Wire } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
+import { buildSystemPrompt, MUTATING_TOOL_NAMES, runAutoVerify, autoVerifyNeedsAttention, buildAutoVerifyMessages } from '@/lib/ai/system-prompt';
+import { ensurePlugins } from '@/lib/ai/tools/helpers';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;  // 5 min — allows for long retry sequences on rate limits
@@ -31,19 +33,6 @@ interface RequestBody {
   /** Per-request model override (chosen from the AI panel model dropdown). */
   model?: string;
 }
-
-const SYSTEM_PROMPT = `You are an expert electrical engineer and circuit design assistant in a circuit simulator app. You help users design, analyze, and debug circuits using the available tools.
-
-CRITICAL RULES for building circuits:
-1. ALWAYS connect voltage source "n" terminal to ground — no return path = sim fails.
-2. Common terminals: sources=p/n, passives=a/b, LEDs/diodes=a/k, transistors=c/b/e, op-amps=in+/in-/out, ground=g.
-3. Don't call getComponentInfo for common types — you know their terminals.
-4. After building, ALWAYS run simulate.run then simulate.validatePhysics.
-5. Space components ≥4 grid units apart to avoid overlap.
-
-Be concise. If a tool fails, explain why and suggest a fix. If ambiguous, ask for clarification.
-
-Grid: (x,y), x=right, y=down. Range 0-40 x, 0-30 y.`;
 
 export async function POST(req: NextRequest) {
   try {
@@ -77,17 +66,20 @@ export async function POST(req: NextRequest) {
     const provider = getProvider(body.provider, body.model);
     const toolDefs = getToolDefinitions();
 
-    // Build the message history (prepend system prompt)
+    // Build the message history (prepend the shared system prompt — includes
+    // the live component catalog from the plugin registry)
     const messages: ChatMessage[] = [
-      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'system', content: buildSystemPrompt() },
       ...body.messages,
     ];
 
     // AI loop: call provider, execute tools, repeat.
-    // 20 iterations allows building complex circuits (e.g. a 555 timer
-    // circuit with 7+ components and 10+ wires needs ~15 tool calls).
+    // 50 iterations allows building complex circuits (e.g. a full power
+    // supply = 11 components + 18 wires via patterns, or larger via raw calls).
     const executedToolCalls: any[] = [];
-    const MAX_ITERATIONS = 20;
+    const MAX_ITERATIONS = 50;
+    let circuitMutated = false;
+    let autoVerifyCount = 0;
 
     for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
       const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 16384 });
@@ -133,6 +125,12 @@ export async function POST(req: NextRequest) {
 
           try {
             const toolResult = await tool.execute(args, ctx);
+            if (toolResult.ok && MUTATING_TOOL_NAMES.has(tc.function.name)) {
+              circuitMutated = true;
+              // Keep the plugin map in sync with any newly added component types
+              // (the map was built from the initial client snapshot).
+              ensurePlugins(ctx);
+            }
             executedToolCalls.push({
               name: tc.function.name,
               args,
@@ -162,7 +160,18 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
-      // No tool calls — this is the final response
+      // No tool calls — this is the final response... unless the circuit was
+      // mutated and an automatic verification pass finds problems the model
+      // should fix before answering (max 2 auto-verify rounds per request).
+      if (circuitMutated && autoVerifyCount < 2) {
+        const report = runAutoVerify(ctx);
+        if (autoVerifyNeedsAttention(report)) {
+          autoVerifyCount++;
+          messages.push(...(buildAutoVerifyMessages(report, autoVerifyCount) as ChatMessage[]));
+          continue;
+        }
+      }
+
       return NextResponse.json({
         response: result.content,
         toolCalls: executedToolCalls,

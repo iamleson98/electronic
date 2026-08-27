@@ -30,3 +30,5 @@ import './p2-components';
 import './p3-components';
 // Register P3 logic ICs
 import './p3-logic';
+// Register Hall-effect sensors
+import './hall-sensors';
