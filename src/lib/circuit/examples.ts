@@ -1295,6 +1295,41 @@ export const exampleOpampNonInverting: CircuitDocument = {
   ],
 };
 
+// ----- LC Tank Oscillator (integration-method showcase) -----
+// A parallel LC tank kicked by the capacitor's initial 5 V charge rings at
+// f0 = 1/(2π√(LC)) ≈ 159 Hz (L=0.1H, C=10µF). The 1MΩ bleed is almost
+// lossless (Q ≈ 30000), so the PHYSICAL oscillation barely decays.
+//
+// This is THE circuit for seeing the Integration Method option work
+// (Options dialog → Integration Method):
+//   - Backward Euler numerically DAMPS the tank — the ringing fades in a few
+//     cycles even though the physics says it shouldn't.
+//   - Trapezoidal is 2nd-order and (nearly) energy-preserving: the amplitude
+//     holds cycle after cycle, and the measured period is exact.
+//   - Gear (BDF-2) is L-stable: a small, clean amplitude decay, far gentler
+//     than Euler.
+export const exampleLCTank: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('capacitor', 'c1', [8, 6], 0, { capacitance: 10e-6, initialV: 5 }),
+    comp('inductor', 'l1', [8, 12], 0, { inductance: 0.1, initialI: 0 }),
+    comp('resistor', 'r1', [16, 6], 0, { resistance: 1e6 }), // light bleed only
+    comp('oscilloscope', 'sc1', [22, 12], 0, { color: '#22d3ee', label: 'Tank' }),
+    comp('ground', 'gnd1', [9, 18], 0, {}),
+  ],
+  wires: [
+    // Tank: C1 ∥ L1 ∥ R1 — top node rings, bottom node is ground.
+    wire('w1', 'c1', 'a', 'l1', 'a', [[10, 7], [10, 13]]),
+    wire('w2', 'c1', 'b', 'l1', 'b', [[10, 8], [10, 17]]),
+    wire('w3', 'c1', 'a', 'r1', 'a', [[12, 7]]),
+    wire('w4', 'r1', 'b', 'gnd1', 'g', [[20, 7], [20, 18], [10, 18]]),
+    wire('w5', 'c1', 'b', 'gnd1', 'g', [[10, 8], [10, 18]]),
+    // Scope probes the tank top node.
+    wire('w6', 'c1', 'a', 'sc1', 'p', [[12, 7], [12, 14], [24, 14]]),
+    wire('w7', 'sc1', 'n', 'gnd1', 'g', [[24, 14], [24, 18], [10, 18]]),
+  ],
+};
+
 // ----- VCO Frequency Sweep -----
 // Voltage-controlled oscillator. DC voltage controls the output frequency.
 // A load resistor draws current so flow dots are visible.
@@ -1504,6 +1539,7 @@ export const exampleCategories: ExampleCategory[] = [
     label: 'Timers & Oscillators',
     examples: [
       { name: '555 Astable Blink', description: 'Classic 555 timer in astable mode driving an LED', doc: example555 },
+      { name: 'LC Tank Oscillator', description: 'Parallel LC tank rings at 159 Hz — switch Integration Method (Options) between Backward Euler / Trapezoidal / Gear and watch the amplitude: Euler damps it away, Trapezoidal preserves it', doc: exampleLCTank },
       { name: 'VCO Frequency Sweep', description: 'Voltage-controlled oscillator, DC input controls frequency', doc: exampleVCO },
     ],
   },
