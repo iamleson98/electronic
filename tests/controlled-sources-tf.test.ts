@@ -67,13 +67,15 @@ describe('CCCS (Current-Controlled Current Source)', () => {
     ];
     const dc = solveDC(components, wires, pluginsFor(components));
     expect(dc).not.toBeNull();
-    // Output voltage across Rload should be > 0 if CCCS is stamping.
+    // beta = 2, sense current = 5V/1k = 5mA → 10mA flows through the element
+    // from O+ to O− (SPICE F convention, same as the I source): it is DRAWN
+    // OUT of the O+ node → V(O+) = −10mA·1k = −10V. (Asserting the precise
+    // value — the old |v| > 0.001 check passed with any gain or direction.)
     const nm = buildNodeMap(components, wires, pluginsFor(components));
     const loadANode = nm.terminalNode.get('Rload:a');
-    if (loadANode !== undefined) {
-      const v = dc!.nodeVoltage[loadANode];
-      expect(Math.abs(v)).toBeGreaterThan(0.001);
-    }
+    expect(loadANode).toBeDefined();
+    const v = dc!.nodeVoltage[loadANode!];
+    expect(v).toBeCloseTo(-10, 6);
   });
 
   it('does not crash when sense source is missing', () => {
@@ -134,12 +136,12 @@ describe('CCVS (Current-Controlled Voltage Source)', () => {
     ];
     const dc = solveDC(components, wires, pluginsFor(components));
     expect(dc).not.toBeNull();
+    // transimp = 100, sense current = 5mA → V(out) = 0.5V EXACTLY
     const nm = buildNodeMap(components, wires, pluginsFor(components));
     const loadANode = nm.terminalNode.get('Rload:a');
-    if (loadANode !== undefined) {
-      const v = dc!.nodeVoltage[loadANode];
-      expect(Math.abs(v)).toBeGreaterThan(0.001);
-    }
+    expect(loadANode).toBeDefined();
+    const v = dc!.nodeVoltage[loadANode!];
+    expect(v).toBeCloseTo(0.5, 6);
   });
 
   it('does not crash when sense source is missing', () => {
@@ -167,6 +169,64 @@ describe('CCVS (Current-Controlled Voltage Source)', () => {
     expect(p!.terminals.length).toBe(4);  // op, on, sp, sn
     expect(p!.parameters.some(pa => pa.key === 'transimp')).toBe(true);
     expect(p!.parameters.some(pa => pa.key === 'vsenseName')).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VCCS / VCVS (SPICE G / E elements) — exact engine-level values
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('VCCS (SPICE G element) exact values', () => {
+  it('gm=0.01, Vin=1V, RL=1k → V(out) = −10V (drawn from O+, injected into O−)', () => {
+    const components = [
+      comp('dcVoltage', 'VIN', { voltage: 1 }),
+      comp('resistor', 'RI', { resistance: 1e6 }),
+      comp('vccsUser', 'G1', { gm: 0.01 }),
+      comp('resistor', 'RL', { resistance: 1000 }),
+      comp('ground', 'GND'),
+    ];
+    const wires = [
+      wire('w1', 'VIN', 'p', 'RI', 'a'),
+      wire('w2', 'VIN', 'n', 'GND', 'g'),
+      wire('w3', 'RI', 'b', 'G1', 'ip'),
+      wire('w4', 'G1', 'in', 'GND', 'g'),
+      wire('w5', 'G1', 'op', 'RL', 'a'),
+      wire('w6', 'RL', 'b', 'GND', 'g'),
+      wire('w7', 'G1', 'on', 'GND', 'g'),
+    ];
+    const dc = solveDC(components, wires, pluginsFor(components));
+    expect(dc).not.toBeNull();
+    const nm = buildNodeMap(components, wires, pluginsFor(components));
+    const v = dc!.nodeVoltage[nm.terminalNode.get('RL:a')!];
+    // current gm·V(ip) = 10mA flows through the element O+ → O−: drawn out of
+    // the O+ node → V(O+) = −10mA · 1k = −10V
+    expect(v).toBeCloseTo(-10, 6);
+  });
+});
+
+describe('VCVS (SPICE E element) exact values', () => {
+  it('gain=4, Vin=1V → V(out) = 4V exactly', () => {
+    const components = [
+      comp('dcVoltage', 'VIN', { voltage: 1 }),
+      comp('resistor', 'RI', { resistance: 1e6 }),
+      comp('vcvsUser', 'E1', { gain: 4 }),
+      comp('resistor', 'RL', { resistance: 1000 }),
+      comp('ground', 'GND'),
+    ];
+    const wires = [
+      wire('w1', 'VIN', 'p', 'RI', 'a'),
+      wire('w2', 'VIN', 'n', 'GND', 'g'),
+      wire('w3', 'RI', 'b', 'E1', 'ip'),
+      wire('w4', 'E1', 'in', 'GND', 'g'),
+      wire('w5', 'E1', 'op', 'RL', 'a'),
+      wire('w6', 'RL', 'b', 'GND', 'g'),
+      wire('w7', 'E1', 'on', 'GND', 'g'),
+    ];
+    const dc = solveDC(components, wires, pluginsFor(components));
+    expect(dc).not.toBeNull();
+    const nm = buildNodeMap(components, wires, pluginsFor(components));
+    const v = dc!.nodeVoltage[nm.terminalNode.get('RL:a')!];
+    expect(v).toBeCloseTo(4, 6);
   });
 });
 
