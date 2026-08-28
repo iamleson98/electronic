@@ -1627,11 +1627,29 @@ function runTranSteps(
     yLabel: 'Voltage (V)',
   }));
 
+  // Trapezoidal ringing guard telemetry: the per-element detectors in
+  // passive.ts count every suppression in state.__global.__trapRingCount.
+  // Surface it on the report (and scalars) so users can see when the guard
+  // engaged — a large count hints the timestep is too coarse for the circuit.
+  const trapRingCount = options.method === 'trap'
+    ? ((simState.state as any)?.__global?.__trapRingCount as number | undefined) ?? 0
+    : undefined;
+
   return {
     type: 'tran',
     traces,
-    scalars: { steps: stepCount, finalTime: simState.time },
-    report: { converged: true, iterations: stepCount, finalDelta: 0, attempts: [] },
+    scalars: {
+      steps: stepCount,
+      finalTime: simState.time,
+      ...(trapRingCount !== undefined ? { trapRings: trapRingCount } : {}),
+    },
+    report: {
+      converged: true,
+      iterations: stepCount,
+      finalDelta: 0,
+      attempts: [],
+      ...(trapRingCount !== undefined ? { trapRings: trapRingCount } : {}),
+    },
     durationMs: performance.now() - start,
   };
 }

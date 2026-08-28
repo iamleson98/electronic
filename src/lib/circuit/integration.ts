@@ -134,6 +134,46 @@ export function detectTrapOscillation(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Trapezoidal ringing guard (LTspice "modified trap" style).
+//
+// The trapezoidal companion has an undamped (−1)^n sampling mode: when the
+// time step is large relative to the element's time constant — or a source
+// flips discontinuously — the solved sequence alternates around the true
+// solution instead of settling. The cure used by production SPICE (LTspice's
+// modified trapezoidal) is to detect the sustained sign alternation and fall
+// back to backward Euler for a couple of steps: backward Euler is L-stable,
+// so one or two steps annihilate the (−1)^n mode, after which trapezoidal
+// resumes with its 2nd-order accuracy.
+//
+// Detection key: a SMOOTH signal can produce at most ONE sign alternation of
+// consecutive differences (at an extremum). Sustained ringing alternates
+// EVERY step. The per-element detectors in passive.ts therefore count
+// consecutive alternating differences and trip at TRAP_RING_ALT_THRESHOLD.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Consecutive alternating differences required before the Euler fallback trips. */
+export const TRAP_RING_ALT_THRESHOLD = 3;
+
+/**
+ * One step of the alternation test: did the newest sample xNow flip the
+ * difference sign vs. the previous difference, with an amplitude above
+ * tolerance (so numerical noise never trips the guard)?
+ */
+export function trapAlternates(
+  xNow: number,
+  xPrev: number,
+  xPrev2: number,
+  absTol: number,
+  relTol: number,
+): boolean {
+  const d1 = xNow - xPrev;
+  const d2 = xPrev - xPrev2;
+  if (d1 * d2 >= 0) return false;
+  const tol = Math.max(absTol, relTol * Math.abs(xNow));
+  return Math.abs(d1) > tol;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Adaptive timestep controller
 // Controls dt based on the rate of change of node voltages.
 // If max(dv/dt) is large, reduce dt; if small, increase dt.

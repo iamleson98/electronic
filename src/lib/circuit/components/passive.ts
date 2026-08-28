@@ -4,6 +4,7 @@
 import type { ComponentPlugin } from '../types';
 import { drawResistorZigzag, drawCapacitor, drawInductor, drawLabel } from './draw';
 import { registerPlugin } from '../registry';
+import { trapAlternates, TRAP_RING_ALT_THRESHOLD } from '../integration';
 
 // ----- Resistor -----
 const resistor: ComponentPlugin = {
@@ -110,13 +111,22 @@ const capacitor: ComponentPlugin = {
     const dt = Math.max(sim.dt, 1e-12);
     let g: number;
     let iEq: number;
-    if (method === 'trap') {
+    if (method === 'trap' && !(st[key + '_ring'] > 0)) {
       // Trapezoidal (2nd order): i_n = (2C/dt)(v_n − v_{n−1}) − i_{n−1}
       //   → G = 2C/dt, I_eq = (2C/dt)·vPrev + iPrev
       // iPrev (the previous step's cap current) is stored under `_i` by step().
       const iPrev = (st[key + '_i'] as number | undefined) ?? 0;
       g = (2 * C) / dt;
       iEq = g * vPrev + iPrev;
+      st[key + '_used'] = 'trap';
+    } else if (method === 'trap') {
+      // Trapezoidal ringing guard: the detector in step() counted a sustained
+      // (−1)^n alternation of the cap current — fall back to backward Euler
+      // for this step (L-stable, kills the sampling mode). The `_ring`
+      // counter is decremented once per step by step().
+      g = C / dt;
+      iEq = (C / dt) * vPrev;
+      st[key + '_used'] = 'euler';
     } else if (method === 'gear') {
       // Gear/BDF-2: i_n = C(3v_n − 4v_{n−1} + v_{n−2})/(2dt)
       //   → G = 3C/(2dt), I_eq = C(4vPrev − vPrev2)/(2dt)
@@ -158,11 +168,35 @@ const capacitor: ComponentPlugin = {
     // Compute the ACTUAL current that flowed during this step (BEFORE updating
     // vPrev). This is stored under `_i` and doubles as the trapezoidal
     // method's iPrev for the next step — the two quantities are identical.
+    const used = method === 'trap' ? (st[key + '_used'] as 'trap' | 'euler' | undefined) ?? 'trap' : method;
     let i: number;
-    if (method === 'trap') {
+    if (used === 'trap') {
       const iPrev = (st[key + '_i'] as number | undefined) ?? 0;
       i = ((2 * C) / dt) * (vCurr - vPrev) - iPrev;
-    } else if (method === 'gear') {
+      // ── Trapezoidal ringing guard ──────────────────────────────────────
+      // Sustained sign alternation of the current differences = the (−1)^n
+      // sampling mode. A smooth signal alternates at most once (at an
+      // extremum), so TRAP_RING_ALT_THRESHOLD consecutive alternations are
+      // unambiguous ringing. Trip → the next two stamps fall back to Euler.
+      const iPrev2 = st[key + '_i2'] as number | undefined;
+      if (iPrev2 !== undefined) {
+        const altKey = key + '_alt';
+        if (trapAlternates(i, iPrev, iPrev2, 1e-12, 1e-3)) {
+          const alt = ((st[altKey] as number | undefined) ?? 0) + 1;
+          st[altKey] = alt;
+          if (alt >= TRAP_RING_ALT_THRESHOLD) {
+            st[key + '_ring'] = 2;                 // 2 Euler-fallback steps
+            st[altKey] = 0;
+            st.__trapRingCount = ((st.__trapRingCount as number | undefined) ?? 0) + 1;
+          }
+        } else {
+          st[altKey] = 0;
+        }
+      }
+    } else if (used === 'euler' && method === 'trap') {
+      // Euler fallback step (ringing guard) — plain companion current.
+      i = (C / dt) * (vCurr - vPrev);
+    } else if (used === 'gear') {
       const vPrev2 = st[key + '_v2'] as number | undefined;
       i = vPrev2 === undefined
         ? (C / dt) * (vCurr - vPrev)
@@ -170,10 +204,19 @@ const capacitor: ComponentPlugin = {
     } else {
       i = (C / dt) * (vCurr - vPrev);
     }
+    // shift history: _i2 keeps i_{n−1} (trap detector), _i keeps i_n.
+    st[key + '_i2'] = st[key + '_i'];
     st[key + '_i'] = i;
     // Gear needs the shifted voltage history (v_{n−2} = old v_{n−1}).
     if (method === 'gear') {
       st[key + '_v2'] = vPrev;
+    }
+    // consume one Euler-fallback step (stamp() only reads the counter — it is
+    // re-stamped several times per step by the feedback iteration, so the
+    // countdown must happen exactly once, here).
+    if (method === 'trap') {
+      const ring = st[key + '_ring'] as number | undefined;
+      if (ring !== undefined && ring > 0) st[key + '_ring'] = ring - 1;
     }
     // Now update vPrev for the next step's stamp()
     st[key] = vCurr;
@@ -234,12 +277,18 @@ const inductor: ComponentPlugin = {
     const dt = Math.max(sim.dt, 1e-12);
     let g: number;
     let iEq: number;
-    if (method === 'trap') {
+    if (method === 'trap' && !(st[key + '_ring'] > 0)) {
       // Trapezoidal: i_n = i_{n−1} + (dt/2L)(v_n + v_{n−1})
       //   → Norton: G = dt/(2L), I_eq = iPrev + (dt/2L)·vPrev (source a→b)
       const vPrev = (st[key + '_vp'] as number | undefined) ?? 0;
       g = dt / (2 * L);
       iEq = iPrev + g * vPrev;
+      st[key + '_used'] = 'trap';
+    } else if (method === 'trap') {
+      // Ringing guard fallback — backward Euler companion (see capacitor).
+      g = dt / L;
+      iEq = iPrev;
+      st[key + '_used'] = 'euler';
     } else if (method === 'gear') {
       // Gear/BDF-2: i_n = (4i_{n−1} − i_{n−2})/3 + (2dt/3L)·v_n
       // First step (no i_{n−2} yet) falls back to Euler.
@@ -283,11 +332,31 @@ const inductor: ComponentPlugin = {
     // Integrate the inductor current with the selected method. The stored
     // `_i` (this step's current) doubles as the readout for current displays
     // and, for Gear, `_i2` keeps i_{n−2}; `_vp` keeps v_{n−1} for trapezoidal.
+    const used = method === 'trap' ? (st[key + '_used'] as 'trap' | 'euler' | undefined) ?? 'trap' : method;
     let iCurr: number;
-    if (method === 'trap') {
+    if (used === 'trap') {
       const vPrev = (st[key + '_vp'] as number | undefined) ?? 0;
       iCurr = iPrev + (dt / (2 * L)) * (v + vPrev);
-    } else if (method === 'gear') {
+      // ── Trapezoidal ringing guard (dual of the capacitor's) ──────────────
+      // Ringing on an inductor appears in the VOLTAGE across it (the current
+      // integrates smoothly). Watch the voltage history for sustained sign
+      // alternation of consecutive differences.
+      const vPrev2 = st[key + '_vp2'] as number | undefined;
+      if (vPrev2 !== undefined) {
+        const altKey = key + '_alt';
+        if (trapAlternates(v, vPrev, vPrev2, 1e-6, 1e-3)) {
+          const alt = ((st[altKey] as number | undefined) ?? 0) + 1;
+          st[altKey] = alt;
+          if (alt >= TRAP_RING_ALT_THRESHOLD) {
+            st[key + '_ring'] = 2;               // 2 Euler-fallback steps
+            st[altKey] = 0;
+            st.__trapRingCount = ((st.__trapRingCount as number | undefined) ?? 0) + 1;
+          }
+        } else {
+          st[altKey] = 0;
+        }
+      }
+    } else if (used === 'gear') {
       const iPrev2 = st[key + '_i2'] as number | undefined;
       iCurr = iPrev2 === undefined
         ? iPrev + (v / L) * dt
@@ -301,7 +370,16 @@ const inductor: ComponentPlugin = {
     if (method === 'gear') {
       st[key + '_i2'] = iPrev;
     }
+    // shift voltage history for the trap detector: _vp2 keeps v_{n−1}.
+    if (method === 'trap') {
+      st[key + '_vp2'] = st[key + '_vp'];
+    }
     st[key + '_vp'] = v;
+    // consume one Euler-fallback step (see the capacitor's step()).
+    if (method === 'trap') {
+      const ring = st[key + '_ring'] as number | undefined;
+      if (ring !== undefined && ring > 0) st[key + '_ring'] = ring - 1;
+    }
     // Now update iPrev for the next step's stamp()
     st[key] = iCurr;
   },

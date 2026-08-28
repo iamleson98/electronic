@@ -120,6 +120,13 @@ export interface ConvergenceReport {
   finalDelta?: number;
   /** strategies attempted (for diagnostics) */
   attempts: string[];
+  /**
+   * Number of times the trapezoidal ringing guard tripped during a transient
+   * run (sustained (−1)^n alternation detected on a capacitor/inductor and
+   * suppressed with a backward-Euler fallback). Undefined for non-transient
+   * analyses and when the integration method is not 'trap'.
+   */
+  trapRings?: number;
 }
 
 export function reportOK(iterations: number, finalDelta: number): ConvergenceReport {
