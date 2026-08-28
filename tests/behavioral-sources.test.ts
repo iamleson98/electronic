@@ -561,3 +561,52 @@ describe('feedback iteration semantics', () => {
     expect(sim!.nodeVoltage[outNode]).toBeCloseTo(5 / 3, 3);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Catalog example — "Behavioral Signal Chain" end-to-end physics
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Behavioral Signal Chain example (catalog)', () => {
+  it('amplifies the sine by 3 and squares it through the comparator', async () => {
+    const { exampleBehavioral } = await import('../src/lib/circuit/examples');
+    expect(exampleBehavioral.components.some(c => c.type === 'bvSource')).toBe(true);
+    const plugins = pluginsFor(exampleBehavioral.components);
+    let prev: any;
+    let sim: SimContext | null = null;
+    // 51 steps of dt=1e-4 → last step at t = 5ms = the sine's first peak
+    for (let i = 0; i < 51; i++) {
+      const r = simulateStep(exampleBehavioral.components, exampleBehavioral.wires, plugins, prev, 1e-4);
+      expect(r).not.toBeNull();
+      sim = r!.sim;
+      prev = {
+        nodeVoltage: sim.nodeVoltage,
+        branchCurrent: sim.branchCurrent,
+        time: sim.time,
+        state: sim.state,
+      };
+    }
+    const nm = buildNodeMap(exampleBehavioral.components, exampleBehavioral.wires, plugins);
+    const inNode = nodeOf(sim!, nm, 'vIn:p');
+    const ampNode = nodeOf(sim!, nm, 'r1:a');
+    const outNode = nodeOf(sim!, nm, 'r2:a');
+    // At t = 5ms the 50 Hz sine peaks: V(in) = 1.5V → amp = 3·1.5 = 4.5V
+    // → comparator (amp > 2) → out = 4V.
+    expect(sim!.nodeVoltage[inNode]).toBeCloseTo(1.5, 2);
+    expect(sim!.nodeVoltage[ampNode]).toBeCloseTo(4.5, 2);
+    expect(sim!.nodeVoltage[outNode]).toBeCloseTo(4, 2);
+  });
+
+  it('KB documents the behavioral sources and integration methods', async () => {
+    const { getArticle, searchArticles } = await import('../src/lib/ai/knowledge/knowledge-base');
+    const bv = getArticle('behavioral-sources');
+    expect(bv).toBeDefined();
+    expect(bv!.body).toContain('if(V(in) > 2.5, 5, 0)');
+    expect(bv!.body).toContain('Gauss–Seidel');
+    const im = getArticle('integration-methods');
+    expect(im).toBeDefined();
+    expect(im!.body).toContain('Trapezoidal');
+    // searchable
+    expect(searchArticles('behavioral comparator').some(a => a.id === 'behavioral-sources')).toBe(true);
+    expect(searchArticles('trapezoidal gear integration').some(a => a.id === 'integration-methods')).toBe(true);
+  });
+});

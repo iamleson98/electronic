@@ -148,7 +148,7 @@ export const exampleTransistor: CircuitDocument = {
   components: [
     comp('dcVoltage', 'v1', [4, 4], 0, { voltage: 5 }),
     comp('dcVoltage', 'v2', [4, 16], 0, { voltage: 5 }),
-    comp('pushButton', 'btn1', [8, 16], 0, { pressed: false }),
+    comp('pushButton', 'btn1', [8, 16], 0, { pressed: true }),
     comp('resistor', 'rb', [14, 16], 0, { resistance: 10000 }),
     comp('resistor', 'rc', [14, 4], 0, { resistance: 1000 }),
     comp('npn', 'q1', [22, 8], 0, { hfe: 100, vbe: 0.7, satV: 0.2 }),
@@ -168,6 +168,47 @@ export const exampleTransistor: CircuitDocument = {
     wire('w2', 'v1', 'n', 'gnd1', 'g', [[5, 8], [5, 22]]),
     wire('w6', 'v2', 'n', 'gnd1', 'g', [[5, 20], [5, 22]]),
     wire('w9', 'q1', 'e', 'gnd1', 'g', [[25, 12], [25, 22], [5, 22]]),
+  ],
+};
+
+// ----- Example: Behavioral signal chain (BV sources with V(node)) -----
+// Demonstrates behavioral (B-element) sources: a gain-of-3 amplifier built
+// from "V = 3*V(in)" and a comparator from "if(V(amp) > 2, 4, 0)". The
+// engine's feedback iteration resolves the V(node) references within each
+// timestep, so the chain tracks the input with no lag.
+export const exampleBehavioral: CircuitDocument = {
+  version: 1,
+  components: [
+    comp('acVoltage', 'vIn', [4, 6], 0, { amplitude: 1.5, frequency: 50, offset: 0, phase: 0 }),
+    comp('netLabel', 'lIn', [4, 2], 0, { net: 'in' }),
+    comp('oscilloscope', 'scIn', [8, 12], 0, { color: '#f97316', label: 'In' }),
+    comp('bvSource', 'b1', [14, 6], 0, { expr: '3*V(in)' }),
+    comp('netLabel', 'lAmp', [14, 2], 0, { net: 'amp' }),
+    comp('resistor', 'r1', [20, 6], 0, { resistance: 10000 }),
+    comp('bvSource', 'b2', [26, 6], 0, { expr: 'if(V(amp) > 2, 4, 0)' }),
+    comp('netLabel', 'lOut', [26, 2], 0, { net: 'out' }),
+    comp('resistor', 'r2', [32, 6], 0, { resistance: 10000 }),
+    comp('oscilloscope', 'scOut', [32, 12], 0, { color: '#22d3ee', label: 'Out' }),
+    comp('ground', 'gnd1', [6, 20], 0, {}),
+  ],
+  wires: [
+    // Input net
+    wire('w1', 'vIn', 'p', 'lIn', 'p'),
+    wire('w2', 'vIn', 'n', 'gnd1', 'g', [[5, 10], [5, 20]]),
+    wire('w3', 'vIn', 'p', 'scIn', 'p', [[5, 12]]),
+    wire('w4', 'scIn', 'n', 'gnd1', 'g', [[10, 13], [10, 20], [6, 20]]),
+    // Stage 1: behavioral amplifier V = 3*V(in)
+    wire('w5', 'b1', 'p', 'lAmp', 'p'),
+    wire('w6', 'b1', 'p', 'r1', 'a', [[18, 7]]),
+    wire('w7', 'r1', 'b', 'gnd1', 'g', [[24, 7], [24, 20], [6, 20]]),
+    wire('w8', 'b1', 'n', 'gnd1', 'g', [[16, 8], [16, 20], [6, 20]]),
+    // Stage 2: behavioral comparator if(V(amp) > 2, 4, 0)
+    wire('w9', 'b2', 'p', 'lOut', 'p'),
+    wire('w10', 'b2', 'p', 'r2', 'a', [[30, 7]]),
+    wire('w11', 'r2', 'b', 'gnd1', 'g', [[36, 7], [36, 20], [6, 20]]),
+    wire('w12', 'b2', 'n', 'gnd1', 'g', [[28, 8], [28, 20], [6, 20]]),
+    wire('w13', 'b2', 'p', 'scOut', 'p', [[30, 12]]),
+    wire('w14', 'scOut', 'n', 'gnd1', 'g', [[34, 13], [34, 20], [6, 20]]),
   ],
 };
 
@@ -235,7 +276,7 @@ export const exampleNmos: CircuitDocument = {
   components: [
     comp('dcVoltage', 'v1', [4, 4], 0, { voltage: 5 }),
     comp('dcVoltage', 'v2', [4, 16], 0, { voltage: 5 }),
-    comp('pushButton', 'btn1', [8, 16], 0, { pressed: false }),
+    comp('pushButton', 'btn1', [8, 16], 0, { pressed: true }),
     comp('resistor', 'rG', [14, 16], 0, { resistance: 100 }),
     comp('resistor', 'rD', [14, 4], 0, { resistance: 1000 }),
     comp('nmos', 'm1', [22, 8], 0, { vth: 2.0, kp: 0.1, ron: 0.1 }),
@@ -1456,6 +1497,7 @@ export const exampleCategories: ExampleCategory[] = [
       { name: 'Diode Rectifier', description: 'Half-wave rectifier: AC → diode → DC (positive only)', doc: exampleDiodeRectifier },
       { name: 'Voltage Divider', description: 'Potentiometer as variable voltage divider + voltmeter', doc: exampleVoltageDivider },
       { name: 'Current Source', description: 'Current source drives resistor, ammeter measures current', doc: exampleCurrentSource },
+      { name: 'Behavioral Signal Chain', description: 'BV sources: V=3*V(in) amplifier + if(V>2,4,0) comparator — square wave from a sine', doc: exampleBehavioral },
     ],
   },
   {
