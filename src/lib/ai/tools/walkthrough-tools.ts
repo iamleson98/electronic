@@ -181,6 +181,27 @@ function paramOf(c: CircuitComponent, key: string, fallback: number): number {
   return typeof v === 'number' && isFinite(v) ? v : fallback;
 }
 
+/** Find a numeric parameter whose key matches a pattern (e.g. /^forward/i). */
+function paramByPattern(c: CircuitComponent, pattern: RegExp, fallback: number): number {
+  const plugin = getPlugin(c.type);
+  if (plugin) {
+    for (const def of plugin.parameters) {
+      if (pattern.test(def.key) && def.type === 'number') {
+        const v = c.parameters?.[def.key];
+        if (typeof v === 'number' && isFinite(v)) return v;
+        if (typeof def.default === 'number') return def.default;
+      }
+    }
+  }
+  for (const key of Object.keys(c.parameters ?? {})) {
+    if (pattern.test(key)) {
+      const v = c.parameters?.[key];
+      if (typeof v === 'number' && isFinite(v)) return v;
+    }
+  }
+  return fallback;
+}
+
 function fmtParams(c: CircuitComponent): string {
   const plugin = getPlugin(c.type);
   if (!plugin) return '';
@@ -502,8 +523,13 @@ export function analyzeCircuitWalkthrough(
       const role = 'LED — emits light when forward current flows';
       if (seriesR) {
         const vinGuess = estimateDriveVoltage(c, seriesR, nl, components);
-        const vf = paramOf(c, 'forwardVoltage', 2.0);
-        const out = calcOhmsLaw(Math.max(0.1, vinGuess - vf), undefined, paramOf(seriesR, 'resistance', 330));
+        // The LED model carries a forward voltage AND an internal series
+        // resistance (params forwardV / seriesR) — both belong in the loop.
+        const vf = paramByPattern(c, /^forwardv/i, 2.0);
+        const ledRs = paramByPattern(c, /^seriesr$/i, 220);
+        const rTotal = paramOf(seriesR, 'resistance', 330) + ledRs;
+        const driveV = Math.max(0.1, vinGuess - vf);
+        const out = calcOhmsLaw(driveV, undefined, rTotal);
         const i = out.outputs.i;
         analysis = [{ label: 'Approx. LED current', value: typeof i === 'number' ? engFormat(i, 'A') : String(i) }];
       }

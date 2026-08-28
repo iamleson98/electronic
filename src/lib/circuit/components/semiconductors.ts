@@ -424,14 +424,17 @@ const timer555: ComponentPlugin = {
   // The state (flip-flop, outHigh) persists across steps via sim.state[key].
   //
   // Two modes:
-  //   1. Normal mode (astable=false): uses external RC network, reads THR/TRIG
-  //      voltages. Includes fast-forward to advance sim.time toward threshold
-  //      crossings.
+  //   1. Normal mode (astable=false): uses the external RC network — REAL
+  //      physics. The capacitor charges/discharges through R1+R2 / R2 at the
+  //      actual timestep, so the period is exactly 0.693·(R1+2·R2)·C in
+  //      sim.time. (The old in-stamp "fast-forward" that jumped sim.time
+  //      ahead of the capacitor's integration was removed: it desynchronized
+  //      sim.time from the RC state and stretched the period ~dt/jump×.)
   //   2. Astable mode (astable=true): computes output directly from sim.time
   //      using R1/R2/C parameters. Bypasses the slow RC simulation so the
-  //      555 oscillates at visible speed. The external RC components are
-  //      still wired (for visual authenticity) but the 555 uses its internal
-  //      timing model.
+  //      555 oscillates at visible speed (store-level digital fast-forward
+  //      advances the clock). The external RC components are still wired
+  //      (for visual authenticity) but the 555 uses its internal timing model.
   stamp(params, terminals, sys, sim, comp) {
     const vcc = params.vcc as number;
     const vccNode = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
@@ -493,34 +496,9 @@ const timer555: ComponentPlugin = {
       return;
     }
 
-    // ── Normal mode: use external RC, with fast-forward ────────────────
-    const thrNode = terminals.find((t) => t.terminalId === 'thr')!.nodeId;
-    const vThr = sim.nodeVoltage[thrNode] ?? 0;
-    const ctrlV = ctrlNode !== gndNode && ctrlNode !== vccNode ? sim.nodeVoltage[ctrlNode] ?? 0 : 0;
-    const vThresh = ctrlV > 0.1 ? ctrlV : (2 / 3) * vcc;
-    const vTrigThresh = ctrlV > 0.1 ? ctrlV / 2 : (1 / 3) * vcc;
-    const prevV = st.prevV ?? 0;
-    const prevT = st.prevT ?? -1;
-    const elapsed = sim.time - prevT;
-    if (elapsed > 0 && Math.abs(vThr - prevV) > 1e-6) {
-      const dVdt = (vThr - prevV) / elapsed;
-      if (Math.abs(dVdt) > 0.01) {
-        let timeToCross = Infinity;
-        if (st.ff && vThr < vThresh) {
-          timeToCross = (vThresh - vThr) / dVdt;
-        } else if (!st.ff && vThr > vTrigThresh) {
-          timeToCross = (vTrigThresh - vThr) / dVdt;
-        }
-        if (timeToCross > 0 && timeToCross < 2) {
-          const advance = Math.min(0.016, timeToCross * 0.9);
-          if (advance > sim.dt) {
-            sim.time = sim.time + advance;
-          }
-        }
-      }
-    }
-    st.prevV = vThr;
-    st.prevT = sim.time;
+    // ── Normal mode: real external RC physics ────────────────────────
+    // (The flip-flop state st.ff / st.outHigh is updated in step() from the
+    //  actual THR/TRIG node voltages; this stamp only reflects the state.)
 
     if (out !== gndNode) sys.stampVoltageSource(out, gndNode, st.outHigh ? vcc : 0);
     if (!st.ff) {

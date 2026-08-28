@@ -87,8 +87,9 @@ describe('analyzeCircuitWalkthrough — LED + resistor classic', () => {
     const led = outBlock.components.find((p) => p.type === 'led')!;
     expect(led.analysis).toBeDefined();
     const current = led.analysis!.find((a) => /LED current/i.test(a.label))!;
-    // (5 - 2)/330 = 9.09 mA
-    expect(current.value).toContain('9.09m');
+    // (5 − 2) / (330 + 220 internal) = 5.45 mA — includes the LED model's
+    // internal series resistance, matching what the engine actually solves.
+    expect(current.value).toContain('5.45m');
   });
 
   it('does not flag the LED (it has a series resistor)', () => {
