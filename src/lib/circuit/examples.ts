@@ -992,26 +992,28 @@ export const exampleSimpleClock: CircuitDocument = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ----- RL High-pass Filter -----
-// Inductor in series with signal, resistor to ground. High frequencies pass
-// through the inductor (low impedance), low frequencies are blocked.
-// Components: acVoltage, inductor, resistor, oscilloscope ×2, ground
+// Resistor in series with the signal, inductor to ground (output taken
+// across the inductor). High frequencies pass (inductor impedance rises
+// with frequency), low frequencies are shorted to ground through the
+// inductor. fc = R/(2πL) ≈ 1.59 kHz for R=100Ω, L=10mH.
+// Components: acVoltage, resistor, inductor, oscilloscope ×2, ground
 export const exampleRLHighPass: CircuitDocument = {
   version: 1,
   components: [
     comp('acVoltage', 'v1', [4, 6], 0, { amplitude: 5, frequency: 1000, offset: 0, phase: 0 }),
-    comp('inductor', 'l1', [10, 6], 0, { inductance: 0.01 }),
-    comp('resistor', 'r1', [16, 6], 0, { resistance: 100 }),
+    comp('resistor', 'r1', [10, 6], 0, { resistance: 100 }),
+    comp('inductor', 'l1', [16, 6], 0, { inductance: 0.01 }),
     comp('oscilloscope', 'scIn', [4, 2], 0, { color: '#f97316', label: 'In' }),
     comp('oscilloscope', 'scOut', [18, 2], 0, { color: '#22d3ee', label: 'Out' }),
     comp('ground', 'gnd1', [5, 12], 0, {}),
   ],
   wires: [
-    wire('w1', 'v1', 'p', 'l1', 'a', [[5, 7]]),
+    wire('w1', 'v1', 'p', 'r1', 'a', [[5, 7]]),
     wire('w2', 'v1', 'p', 'scIn', 'p', [[5, 3]]),
     wire('w3', 'scIn', 'n', 'gnd1', 'g', [[5, 3], [5, 12]]),
-    wire('w4', 'l1', 'b', 'r1', 'a'),
-    wire('w5', 'r1', 'b', 'gnd1', 'g', [[20, 7], [20, 12], [5, 12]]),
-    wire('w6', 'r1', 'a', 'scOut', 'p', [[18, 3]]),
+    wire('w4', 'r1', 'b', 'l1', 'a'),
+    wire('w5', 'l1', 'b', 'gnd1', 'g', [[20, 7], [20, 12], [5, 12]]),
+    wire('w6', 'l1', 'a', 'scOut', 'p', [[18, 3]]),
     wire('w7', 'scOut', 'n', 'gnd1', 'g', [[19, 3], [19, 12], [5, 12]]),
     wire('w8', 'v1', 'n', 'gnd1', 'g', [[5, 12]]),
   ],
@@ -1101,7 +1103,9 @@ export const examplePnpSwitch: CircuitDocument = {
 
 // ----- Current Source Circuit -----
 // Demonstrates a current source driving a resistor. Ammeter measures the
-// current through the resistor.
+// current through the resistor. SPICE convention: current flows through the
+// source from + to − (down the drawn arrow), so the external circuit carries
+// the current out of the − terminal, through the load, and back into +.
 // Components: currentSource, resistor, ammeter, ground
 export const exampleCurrentSource: CircuitDocument = {
   version: 1,
@@ -1112,10 +1116,11 @@ export const exampleCurrentSource: CircuitDocument = {
     comp('ground', 'gnd1', [5, 12], 0, {}),
   ],
   wires: [
-    wire('w1', 'i1', 'p', 'am1', 'p'),
+    // source + terminal grounded; the − terminal drives the load
+    wire('w1', 'i1', 'n', 'am1', 'p', [[5, 10], [5, 10]]),
     wire('w2', 'am1', 'n', 'r1', 'a'),
     wire('w3', 'r1', 'b', 'gnd1', 'g', [[18, 7], [18, 12], [5, 12]]),
-    wire('w4', 'i1', 'n', 'gnd1', 'g', [[5, 12]]),
+    wire('w4', 'i1', 'p', 'gnd1', 'g', [[5, 4], [5, 12]]),
   ],
 };
 
@@ -1126,7 +1131,7 @@ export const exampleSpeaker: CircuitDocument = {
   version: 1,
   components: [
     comp('acVoltage', 'v1', [4, 6], 0, { amplitude: 0.5, frequency: 440, offset: 0, phase: 0 }),  // A4 audio tone
-    comp('opamp', 'op1', [12, 6], 0, { gain: 100 }),
+    comp('opamp', 'op1', [12, 6], 0, { gain: 1e5 }),
     comp('resistor', 'rf', [16, 2], 0, { resistance: 10000 }),    // feedback
     comp('resistor', 'rin', [8, 10], 0, { resistance: 1000 }),    // input
     comp('speaker', 'spk1', [20, 6], 0, { impedance: 8 }),
@@ -1291,12 +1296,14 @@ export const exampleVCO: CircuitDocument = {
 //     → Q2 second common-emitter amplifier (gain from Rc2/Re2)
 //     → C3 output coupling cap → 8Ω speaker
 //
-// Power: +9V single supply. Two NPN stages provide enough gain without needing
-// an op-amp (avoids the op-amp model's rail-latching issue with capacitive load).
+// Power: +9V single supply. Two stages provide the gain and drive.
+// Stage 2 is an EMITTER FOLLOWER (class-A power output): a CE stage's 1k
+// collector load would be AC-shunted by the 8Ω speaker (gain ≈ 0.1), so the
+// low-impedance load needs a current-gain stage instead.
 // Three oscilloscopes probe the input, post-stage-1, and the final output.
 //
-// Components used: dcVoltage, acVoltage, npn ×2, resistor ×8, capacitor ×5,
-//   speaker, oscilloscope ×3, ground (17 components, 37 wires)
+// Components used: dcVoltage, acVoltage, npn ×2, resistor ×7, capacitor ×5,
+//   speaker, oscilloscope ×3, ground (24 components, 37 wires)
 export const exampleAudioAmplifier: CircuitDocument = {
   version: 1,
   components: [
@@ -1307,38 +1314,39 @@ export const exampleAudioAmplifier: CircuitDocument = {
 
     // ── Stage 1: NPN common-emitter pre-amplifier ─────────────────────────
     comp('capacitor', 'c1', [8, 8], 0, { capacitance: 1e-6, initialV: 0 }),
-    comp('resistor', 'rin', [9, 4], 0, { resistance: 10000 }),   // 10k input series R
+    comp('resistor', 'rin', [9, 4], 0, { resistance: 3300 }),   // 3.3k input series R
     comp('resistor', 'r1', [11, 4], 0, { resistance: 100000 }),   // 100k bias top
     comp('resistor', 'r2', [11, 12], 0, { resistance: 100000 }),  // 100k bias bottom
     comp('npn', 'q1', [14, 8], 0, { hfe: 50, vbe: 0.7, satV: 0.2 }),
     comp('resistor', 'rc1', [14, 4], 0, { resistance: 1000 }),     // 1k collector load
-    comp('resistor', 're1', [14, 12], 0, { resistance: 1000 }),    // 1k emitter (gain ≈ Rc/Re = 1)
-    // Ce1 bypass cap — boosts AC gain at lower frequencies (bass boost)
-    comp('capacitor', 'ce1', [18, 12], 0, { capacitance: 1e-6, initialV: 0 }),
+    comp('resistor', 're1', [14, 12], 0, { resistance: 1500 }),    // 1.5k emitter — centers Vc ≈ 6.5V for max swing
+    // Ce1 bypass cap — heavily bypasses Re1 at audio frequencies for the
+    // preamp's full gain (bass boost rolloff below ~2Hz)
+    comp('capacitor', 'ce1', [18, 12], 0, { capacitance: 22e-6, initialV: 0 }),
 
-    // ── Tone control: passive RC low-pass (treble cut, fc ≈ 1.6kHz) ───────
-    comp('resistor', 'rtone', [19, 8], 0, { resistance: 10000 }),
-    comp('capacitor', 'ctone', [23, 12], 0, { capacitance: 10e-9, initialV: 0 }),
+    // ── Tone control: passive RC low-pass (treble cut, fc ≈ 7kHz) ───────
+    comp('resistor', 'rtone', [19, 8], 0, { resistance: 470 }),
+    comp('capacitor', 'ctone', [23, 12], 0, { capacitance: 47e-9, initialV: 0 }),
 
     // ── Inter-stage coupling cap ─────────────────────────────────────────
     comp('capacitor', 'c2', [23, 8], 0, { capacitance: 1e-6, initialV: 0 }),
 
-    // ── Stage 2: NPN common-emitter power amplifier ───────────────────────
-    comp('resistor', 'r3', [25, 4], 0, { resistance: 47000 }),    // 47k bias top
-    comp('resistor', 'r4', [25, 12], 0, { resistance: 10000 }),    // 10k bias bottom (sets base ~1.6V)
-    // Rin2: input resistor for Q2. The NPN model has zero base input resistance
-    // (Vbe is modeled as an ideal voltage source), so without a series resistor
-    // the AC signal from C2 would be clamped and unable to swing the base.
-    // 1k is small enough to pass most of the signal but large enough to limit
-    // base current and prevent saturation.
-    comp('resistor', 'rin2', [26, 8], 0, { resistance: 1000 }),    // 1k Q2 input
+    // ── Stage 2: NPN emitter-follower (class-A power output) ──────────────
+    // Stiff bias divider (2.2k/1k) — the follower's ~200µA base current
+    // would sag a weak divider and collapse the class-A operating point.
+    comp('resistor', 'r3', [25, 4], 0, { resistance: 2200 }),    // 2.2k bias top
+    comp('resistor', 'r4', [25, 12], 0, { resistance: 1000 }),    // 1k bias bottom
+    // Rin2: small isolation resistor between C2 and Q2's base. The NPN model's
+    // base is an ideal Vbe voltage source; a large series resistor would form a
+    // stiff divider against the follower's reflected load (1+β)·Zload and
+    // swallow the signal — 100Ω isolates without attenuating.
+    comp('resistor', 'rin2', [26, 8], 0, { resistance: 100 }),    // 100Ω Q2 input
     comp('npn', 'q2', [28, 8], 0, { hfe: 100, vbe: 0.7, satV: 0.2 }),
-    comp('resistor', 'rc2', [28, 4], 0, { resistance: 1000 }),     // 1k collector (drives speaker via C3)
-    comp('resistor', 're2', [28, 12], 0, { resistance: 100 }),    // 100Ω emitter (gain = Rc/Re = 10)
+    comp('resistor', 're2', [28, 12], 0, { resistance: 100 }),    // 100Ω emitter bias (~20mA standing, ±0.5V pull-down headroom)
 
     // ── Output coupling + speaker ────────────────────────────────────────
-    comp('capacitor', 'c3', [32, 8], 0, { capacitance: 100e-6, initialV: 0 }),
-    comp('speaker', 'spk1', [35, 8], 0, { impedance: 8 }),
+    comp('capacitor', 'c3', [32, 8], 0, { capacitance: 220e-6, initialV: 0 }),
+    comp('speaker', 'spk1', [35, 8], 0, { impedance: 32 }),
 
     // ── Oscilloscope probes ─────────────────────────────────────────────
     comp('oscilloscope', 'scIn', [4, 2], 0, { color: '#f97316', label: 'Input' }),
@@ -1386,7 +1394,7 @@ export const exampleAudioAmplifier: CircuitDocument = {
     wire('w22', 'rtone', 'b', 'scMid', 'p', [[23, 3], [16, 3]]),
     wire('w23', 'scMid', 'n', 'gnd1', 'g', [[18, 3], [18, 22], [5, 22]]),
 
-    // ── Stage 2: bias + transistor ───────────────────────────────────────
+    // ── Stage 2: emitter follower ──────────────────────────────────────
     // C2.b → Rin2.a (AC signal into Q2's input resistor)
     wire('w24', 'c2', 'b', 'rin2', 'a', [[27, 9]]),
     // Rin2.b → Q2.b (signal into base, on top of bias)
@@ -1400,18 +1408,16 @@ export const exampleAudioAmplifier: CircuitDocument = {
     // R4.b → ground
     wire('w28', 'r4', 'b', 'gnd1', 'g', [[29, 22]]),
 
-    // Q2.c → Rc2.b (collector up to Rc2)
-    wire('w29', 'q2', 'c', 'rc2', 'b', [[31, 8], [31, 5]]),
-    // Rc2.a → V+ rail
-    wire('w30', 'rc2', 'a', 'vPos', 'p', [[28, 4]]),
-    // Q2.e → Re2.a (emitter to Re2)
+    // Q2.c → V+ rail directly (emitter follower: collector to supply)
+    wire('w29', 'q2', 'c', 'vPos', 'p', [[31, 8], [31, 4], [28, 4]]),
+    // Q2.e → Re2.a (emitter bias resistor to ground)
     wire('w31', 'q2', 'e', 're2', 'a', [[31, 13], [28, 13]]),
     // Re2.b → ground
     wire('w32', 're2', 'b', 'gnd1', 'g', [[31, 22]]),
 
-    // ── Output coupling → speaker ────────────────────────────────────────
-    // Q2.c → C3.a (signal from collector through output coupling cap)
-    wire('w33', 'q2', 'c', 'c3', 'a', [[32, 8], [31, 8]]),
+    // ── Output coupling → speaker (from the EMITTER) ───────────────────────
+    // Q2.e → C3.a (follower output through the coupling cap)
+    wire('w33', 'q2', 'e', 'c3', 'a', [[32, 13], [32, 8]]),
     // C3.b → speaker.a
     wire('w34', 'c3', 'b', 'spk1', 'a', [[36, 9], [35, 9]]),
     // Speaker.b → ground
@@ -1472,7 +1478,7 @@ export const exampleCategories: ExampleCategory[] = [
     examples: [
       { name: 'Op-Amp Inverting Amp', description: 'Op-amp with gain -10 (Rf/Rin = 10k/1k)', doc: exampleOpamp },
       { name: 'Op-Amp Non-inverting Amp', description: 'Real op-amp with rails, gain = 1 + Rf/Rg = 11', doc: exampleOpampNonInverting },
-      { name: 'Two-Stage Audio Amplifier', description: 'Pre-amp + tone control + power amp driving a speaker (16 components, 35 wires)', doc: exampleAudioAmplifier },
+      { name: 'Two-Stage Audio Amplifier', description: 'Pre-amp + tone control + class-A emitter-follower power amp driving a speaker (24 components, 37 wires)', doc: exampleAudioAmplifier },
     ],
   },
   {
@@ -1499,6 +1505,7 @@ export const exampleCategories: ExampleCategory[] = [
     label: 'Clocks & Counters',
     examples: [
       { name: 'Simple Seconds Counter', description: 'Minimalist 2-digit (0-99) counter using only 2 CD4026 chips', doc: exampleSimpleClock },
+      { name: 'Arduino Clock (MM:SS)', description: 'Compact 4-digit minute:second clock driven by 1 Arduino', doc: exampleArduinoClock },
       { name: 'Arduino Clock (HH:MM:SS)', description: 'Full 6-digit clock driven by 1 Arduino — multiplexed displays, no counter ICs', doc: exampleArduinoClockHHMMSS },
       { name: '555 Timer Clock (HH:MM:SS)', description: 'Complete 6-digit clock using a 555 timer oscillator + CD4026 chain', doc: example555Clock },
       { name: 'Digital Clock (HH:MM:SS)', description: '6-digit digital clock using CD4026 counters and 1Hz crystal oscillator', doc: exampleClock },

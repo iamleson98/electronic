@@ -257,17 +257,19 @@ describe('Two-Stage Audio Amplifier — end-to-end signal flow', () => {
       expect(collSwing).toBeGreaterThan(inSwing * 1.5);
     });
 
-    it('Stage 2 produces amplified signal at Q2 collector', () => {
+    it('Stage 2 emitter follower: emitter tracks the base, drives the output', () => {
       const r = run();
-      const stage1Swing = Math.max(...r.history.slice(4500).map(h => getVoltageAt(r, h, 'q1', 'c') ?? 0)) -
-                           Math.min(...r.history.slice(4500).map(h => getVoltageAt(r, h, 'q1', 'c') ?? 0));
-      const stage2Swing = Math.max(...r.history.slice(4500).map(h => getVoltageAt(r, h, 'q2', 'c') ?? 0)) -
-                           Math.min(...r.history.slice(4500).map(h => getVoltageAt(r, h, 'q2', 'c') ?? 0));
-      console.log(`Stage 2: Q1 collector = ${stage1Swing.toFixed(4)}V, Q2 collector = ${stage2Swing.toFixed(4)}V`);
-      // Q2 collector should have SOME signal — the NPN model's Vbe voltage
-      // source limits how much AC signal reaches the base, but there should
-      // still be a measurable swing at Q2's collector.
-      expect(stage2Swing).toBeGreaterThan(0.01);
+      const baseSwing = Math.max(...r.history.slice(4500).map(h => getVoltageAt(r, h, 'q2', 'b') ?? 0)) -
+                        Math.min(...r.history.slice(4500).map(h => getVoltageAt(r, h, 'q2', 'b') ?? 0));
+      const emitSwing = Math.max(...r.history.slice(4500).map(h => getVoltageAt(r, h, 'q2', 'e') ?? 0)) -
+                        Math.min(...r.history.slice(4500).map(h => getVoltageAt(r, h, 'q2', 'e') ?? 0));
+      console.log(`Stage 2 follower: Q2 base = ${baseSwing.toFixed(4)}V, Q2 emitter = ${emitSwing.toFixed(4)}V`);
+      // The emitter follower's collector sits at the supply rail by design —
+      // the OUTPUT is at the emitter. The emitter must carry a real signal
+      // (≥ 0.1V pp) and track the base within the follower's ~unity gain.
+      expect(emitSwing).toBeGreaterThan(0.1);
+      expect(emitSwing).toBeGreaterThan(baseSwing * 0.7);
+      expect(emitSwing).toBeLessThan(baseSwing * 1.3);
     });
 
     it('Speaker receives audio signal (non-zero swing)', () => {

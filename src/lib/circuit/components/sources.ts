@@ -185,7 +185,7 @@ const currentSource: ComponentPlugin = {
   type: 'currentSource',
   name: 'DC Current',
   category: 'source',
-  description: 'Ideal current source. Pushes a fixed current from + to - externally.',
+  description: 'Ideal DC current source. Current flows through the source in the arrow direction (+ to −, SPICE convention) — the external circuit carries it out of the − terminal and back into +.',
   symbol: 'I',
   boundingBox: { width: 2, height: 4 },
   terminals: [
@@ -447,8 +447,11 @@ const led: ComponentPlugin = {
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('led', comp, a, k);
     const prevOn = st[key] ?? false;
-    // threshold model with hysteresis (matches diode behavior)
-    const on = prevOn ? v > vf - 0.1 : v > vf;
+    void prevOn;
+    // Current-aware threshold model (see diode): the on-state Thevenin makes
+    // v > vf exactly "forward current flowing" — a hysteresis margin latches
+    // the LED on through reverse current (rectifier-style failures).
+    const on = v > vf;
     st[key] = on;
     if (on) {
       // Forward biased: model as V_th = Vf at 'a' in series with R.

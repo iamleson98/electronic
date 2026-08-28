@@ -36,7 +36,7 @@ describe('OFF-state leak', () => {
     expect(Math.abs(cc.get('V1')!)).toBeLessThan(VISIBLE);
     expect(Math.abs(cc.get('LED')!)).toBeLessThan(VISIBLE);
   });
-  it('Diode reverse-biased: zero current', () => {
+  it('Diode reverse-biased: only offR leakage flows', () => {
     const p = plugins();
     const c = [comp('dcVoltage','V1',{voltage:5}),comp('resistor','R1',{resistance:1000}),comp('diode','D1',{forwardV:0.7,onR:1,offR:1e7}),comp('ground','GND')];
     const w = [wire('w1','V1','p','R1','a'),wire('w3','R1','b','D1','k'),wire('w4','D1','a','GND','g'),wire('w2','V1','n','GND','g')];
@@ -44,7 +44,12 @@ describe('OFF-state leak', () => {
     const r = simulateStep(c, w, p, {nodeVoltage:dc!.nodeVoltage,branchCurrent:dc!.branchCurrent,time:0,state:dc!.state},1e-4);
     if(!r) return;
     const cc = computeComponentCurrents(c, w, p, r.sim);
-    expect(Math.abs(cc.get('V1')!)).toBeLessThan(VISIBLE);
+    // The diode now honors its offR parameter (default 10MΩ — same as the
+    // zener): reverse current is bounded by V/offR = 5V/10MΩ = 0.5µA, not
+    // the old hard-coded 1e-13S. That is still an open circuit for every
+    // practical purpose (no visible dots, no measurable loading).
+    expect(Math.abs(cc.get('V1')!)).toBeLessThan(1e-6);
+    expect(Math.abs(cc.get('V1')!)).toBeGreaterThan(1e-9);
   });
   it('Switch OPEN: zero current', () => {
     const p = plugins();

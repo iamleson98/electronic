@@ -419,6 +419,7 @@ const opampRails: ComponentPlugin = {
   parameters: [
     { key: 'gain', label: 'Open-loop Gain', type: 'number', default: 1e5, unit: '', min: 1, max: 1e9, step: 100 },
     { key: 'railMargin', label: 'Rail Margin', type: 'number', default: 0.5, unit: 'V', min: 0, max: 5, step: 0.1 },
+    { key: 'rout', label: 'Output Resistance', type: 'number', default: 100, unit: 'Ω', min: 0.01, max: 1e6, step: 1 },
   ],
   render(ctx, params, cellSize) {
     // leads
@@ -448,9 +449,10 @@ const opampRails: ComponentPlugin = {
     drawLabel(ctx, 'V+', 2 * cellSize + 6, cellSize * 0.3);
     drawLabel(ctx, 'V−', 2 * cellSize + 6, cellSize * 3.7);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const gain = params.gain as number;
     const railMargin = params.railMargin as number;
+    const rOut = Math.max(0.01, (params.rout as number) ?? 100);
     const inp = terminals.find((t) => t.terminalId === 'in+')!.nodeId;
     const inn = terminals.find((t) => t.terminalId === 'in-')!.nodeId;
     const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
@@ -465,18 +467,49 @@ const opampRails: ComponentPlugin = {
     const bothRailsFloating = vp === 0 && vn === 0;
     const vPlus = bothRailsFloating ? 12 : (sim.nodeVoltage[vp] ?? 12);
     const vMinus = bothRailsFloating ? -12 : (sim.nodeVoltage[vn] ?? -12);
-    // Compute ideal output
-    const vdiff = sim.nodeVoltage[inp] - sim.nodeVoltage[inn];
-    const voutIdeal = gain * vdiff;
-    // Clamp to rails
     const vHigh = vPlus - railMargin;
     const vLow = vMinus + railMargin;
-    const vout = Math.max(vLow, Math.min(vHigh, voutIdeal));
-    // Stamp as a voltage source (with limited gain -> just use the clamped value)
-    sys.stampVoltageSource(out, 0, vout);
-    // Input pins: 1 MΩ pull-down to GND (prevents floating when unconnected).
-    sys.stampConductance(inp, 0, 1e-6);
-    sys.stampConductance(inn, 0, 1e-6);
+    // Boyle-style macromodel (same structure as the P3 LM324/NE5532):
+    //   linear region  → VCCS gm·(V+ − V−) into out, || 1/rout to ground.
+    //     gm·rout = gain reproduces the open-loop gain, and because the gm
+    //     term is stamped INTO the matrix the closed-loop solve is a purely
+    //     linear one-shot problem — the previous-voltage voltage-source
+    //     stamp diverged rail-to-rail every step in any feedback circuit
+    //     (gain 1e5 × per-step relaxation = oscillator, not amplifier).
+    //   saturated      → Thevenin at the rail-limited level through rout.
+    // Region selection uses the previous-iterate open-loop prediction ONLY
+    // to pick the region; saturation always exits THROUGH the linear region
+    // so the output can never jump straight from one rail to the other.
+    const vRaw = gain * (sim.nodeVoltage[inp] - sim.nodeVoltage[inn]);
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = stateKey('opampRails', comp, out);
+    let region = (st[key] as number | undefined) ?? 0; // 0 linear, +1 hi, −1 lo
+    if (region === 0) {
+      if (vRaw > vHigh) region = 1;
+      else if (vRaw < vLow) region = -1;
+    } else if (region === 1) {
+      if (vRaw < vHigh) region = 0;
+    } else {
+      if (vRaw > vLow) region = 0;
+    }
+    st[key] = region;
+    // gmin-style input leak (1GΩ) keeps floating input nets solvable
+    sys.stampConductance(inp, 0, 1e-9);
+    sys.stampConductance(inn, 0, 1e-9);
+    if (out === 0) return; // unconnected output — nothing to drive
+    if (region === 0) {
+      // Linear: I(out) = gm·(V+ − V−) delivered into 1/rout.
+      // stampVCCS(0, out, inp, inn, gm): current from ground into out =
+      // gm·(V+−V−) — the op-amp output sources the transconductance current.
+      const gm = gain / rOut;
+      sys.stampConductance(out, 0, 1 / rOut);
+      sys.stampVCCS(0, out, inp, inn, gm);
+    } else {
+      // Saturated: Thevenin at the rail-limited level through rout.
+      const vSat = region > 0 ? vHigh : vLow;
+      sys.stampConductance(out, 0, 1 / rOut);
+      sys.stampCurrentSource(0, out, vSat / rOut);
+    }
     // Power pins: high-Z
     sys.stampConductance(vp, 0, 1e-13);
     sys.stampConductance(vn, 0, 1e-13);

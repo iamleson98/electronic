@@ -55,8 +55,15 @@ const diode: ComponentPlugin = {
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('diode', comp, a, k);
     const prevOn = st[key] ?? false;
-    // simple threshold model with hysteresis to avoid oscillation
-    const on = prevOn ? v > vf - 0.1 : v > vf;
+    void prevOn;
+    // Current-aware threshold model. The on-state companion is a Thevenin
+    // (Vf, onR): its solved terminal voltage is v = Vf + i*onR, so v > Vf
+    // is EXACTLY "forward current is flowing". A voltage hysteresis margin
+    // (v > Vf - 0.1) swallows the small reverse-current signal (the on-state
+    // settles at Vf - i*onR with i < 0) and latches the diode on forever —
+    // which made the rectifier example pass the negative half-cycle at
+    // -5.7V. No margin: the companion fixed point is self-consistent.
+    const on = v > vf;
     st[key] = on;
     if (on) {
       // Forward biased: Vf drop at 'a' in series with R.
@@ -66,8 +73,9 @@ const diode: ComponentPlugin = {
       sys.stampConductance(a, k, 1 / r);
       sys.stampCurrentSource(k, a, vf / r);
     } else {
-      // reverse biased: leak (1e-9 S wins against open switches in voltage divider)
-      sys.stampConductance(a, k, 1e-13);
+      // reverse biased: leak per the offR parameter (default 10MΩ)
+      const rOff = Math.max(1e3, (params.offR as number) ?? 1e7);
+      sys.stampConductance(a, k, 1 / rOff);
     }
   },
   getFlowPath() {
@@ -734,18 +742,19 @@ const zener: ComponentPlugin = {
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('zener', comp, a, k);
     const prevMode = st[key] ?? 'off'; // 'off' | 'forward' | 'reverse'
-    // Forward biased: V(A) > V(K) + Vf
-    // Reverse breakdown: V(K) > V(A) + Vz  (i.e., V = V(A)-V(K) < -Vz)
+    void prevMode;
+    // Self-consistent region selection (see diode note): each region's
+    // Thevenin companion makes its own threshold test exactly equivalent to
+    // "current flows in that region's direction", so plain thresholds are
+    // stable fixed points — the ±0.1V hysteresis margins latched reverse
+    // breakdown / forward conduction against reverse load current.
     let mode: string;
     if (v > vf) {
       mode = 'forward';
     } else if (v < -vz) {
       mode = 'reverse';
     } else {
-      // Hysteresis: stay in current mode until clearly out of breakdown
-      if (prevMode === 'forward' && v > vf - 0.1) mode = 'forward';
-      else if (prevMode === 'reverse' && v < -vz + 0.1) mode = 'reverse';
-      else mode = 'off';
+      mode = 'off';
     }
     st[key] = mode;
     const r = Math.max(0.001, params.onR as number);
