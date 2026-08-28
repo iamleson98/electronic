@@ -474,3 +474,61 @@ describe('trap ringing guard — Behavioral Signal Chain example under trap', ()
     expect(sim.nodeVoltage[outNode]).toBeCloseTo(4, 2);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Store behavior: switching Integration Method restarts the transient
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('setSimOptions method change resets the transient', () => {
+  it('switching method clears simContext + component simState (fresh t=0)', async () => {
+    const { useEditor } = await import('../src/lib/circuit/store');
+    const st: any = useEditor.getState();
+    // Build an RC circuit through the store
+    useEditor.setState({ components: [], wires: [], simContext: null, past: [], future: [] });
+    const v1 = st.addComponent('dcVoltage', { x: 4, y: 6 });
+    st.setParameter(v1, 'voltage', 5);
+    const r1 = st.addComponent('resistor', { x: 10, y: 6 });
+    st.setParameter(r1, 'resistance', 1000);
+    const c1 = st.addComponent('capacitor', { x: 16, y: 6 });
+    st.setParameter(c1, 'capacitance', 1e-9);
+    const gnd = st.addComponent('ground', { x: 10, y: 12 });
+    st.startWire({ componentId: v1, terminalId: 'p' }, { x: 5, y: 7 });
+    st.completeWire({ componentId: r1, terminalId: 'a' });
+    st.startWire({ componentId: r1, terminalId: 'b' }, { x: 11, y: 7 });
+    st.completeWire({ componentId: c1, terminalId: 'a' });
+    st.startWire({ componentId: c1, terminalId: 'b' }, { x: 17, y: 7 });
+    st.completeWire({ componentId: gnd, terminalId: 'g' });
+    st.startWire({ componentId: v1, terminalId: 'n' }, { x: 5, y: 13 });
+    st.completeWire({ componentId: gnd, terminalId: 'g' });
+
+    // Run a few steps so simContext + capacitor simState accumulate
+    st.setRunning(true);
+    for (let i = 0; i < 5; i++) st.step();
+    expect(useEditor.getState().simContext).not.toBeNull();
+    const capWithState = useEditor.getState().components.find((c: any) => c.id === c1)!;
+    expect(capWithState.simState).toBeDefined();
+    // __global state exists (cap_<id> key)
+    const g = (useEditor.getState().simContext as any).state.__global;
+    expect(g).toBeDefined();
+    expect(Object.keys(g).some((k) => k.startsWith('cap_'))).toBe(true);
+
+    // Switch the integration method → transient must reset
+    (useEditor.getState() as any).setSimOptions({ method: 'trap' });
+    expect(useEditor.getState().simOptions.method).toBe('trap');
+    expect(useEditor.getState().simContext).toBeNull();
+    const capAfter = useEditor.getState().components.find((c: any) => c.id === c1)!;
+    expect(capAfter.simState).toBeUndefined();
+
+    // A non-method option change must NOT reset (tolerance tweaks are safe)
+    for (let i = 0; i < 3; i++) st.step();
+    expect(useEditor.getState().simContext).not.toBeNull();
+    (useEditor.getState() as any).setSimOptions({ reltol: 5e-4 });
+    expect(useEditor.getState().simContext).not.toBeNull();
+
+    // same-method set (no change) also must not reset
+    (useEditor.getState() as any).setSimOptions({ method: 'trap' });
+    expect(useEditor.getState().simContext).not.toBeNull();
+
+    st.setRunning(false);
+  });
+});

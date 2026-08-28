@@ -1897,7 +1897,22 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
 
   setSimOptions: (patch) => {
-    set((s) => ({ simOptions: { ...s.simOptions, ...patch } }));
+    const s = get();
+    const methodChanged = patch.method !== undefined && patch.method !== s.simOptions.method;
+    set({
+      simOptions: { ...s.simOptions, ...patch },
+      // Changing the integration method mid-run would keep stale companion
+      // history (trap's iPrev/vPrev vs gear's two-step ladders) — numerically
+      // meaningless — and an oscillator already damped out by the old method
+      // stays damped, hiding the difference. Reset the transient so the new
+      // method starts from t=0 (SPICE parity: changing the method restarts
+      // the analysis).
+      ...(methodChanged ? {
+        simContext: null,
+        components: s.components.map((c) => ({ ...c, simState: undefined })),
+        traces: [],
+      } : {}),
+    });
   },
 
   solveDCRobust: () => {
