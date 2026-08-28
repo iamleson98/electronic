@@ -543,3 +543,60 @@ describe('runTran integration-method plumbing', () => {
     expect(y[9]).toBeCloseTo(0.15625, 4);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runTran UIC — initial conditions now actually apply
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('runTran UIC (initial conditions)', () => {
+  // RC charging: 5V source → 1k → cap(1µF) → gnd, τ = 1ms.
+  function chargingRC() {
+    const components = [
+      comp('ground', 'gnd'),
+      comp('dcVoltage', 'v1', { voltage: 5 }),
+      comp('resistor', 'r1', { resistance: 1000 }),
+      comp('capacitor', 'c1', { capacitance: 1e-6, initialV: 0 }),
+    ];
+    const wires = [
+      wire('w1', 'v1', 'p', 'r1', 'a'),
+      wire('w2', 'r1', 'b', 'c1', 'a'),
+      wire('w3', 'c1', 'b', 'gnd', 'g'),
+      wire('w4', 'v1', 'n', 'gnd', 'g'),
+    ];
+    return { components, wires, plugins: pluginsFor(components) };
+  }
+
+  it('without UIC the DC op pre-charges the cap (flat 5V trace)', () => {
+    const circ = chargingRC();
+    const result = runTran(circ.components, circ.wires, circ.plugins, {
+      type: 'tran', tStop: 5e-3, tStep: 1e-3, probes: ['c1:a'],
+    });
+    const y = result.traces[0].yValues;
+    // DC op: cap = 5V, transient stays settled
+    for (const v of y) expect(v).toBeCloseTo(5, 3);
+  });
+
+  it('with UIC the cap charges from its initialV=0 (exponential ramp)', () => {
+    const circ = chargingRC();
+    const result = runTran(circ.components, circ.wires, circ.plugins, {
+      type: 'tran', tStop: 5e-3, tStep: 1e-3, probes: ['c1:a'],
+    }, { uic: true });
+    const y = result.traces[0].yValues;
+    // t=0 sample (pre-step) is 0; the ramp climbs toward 5V
+    expect(y[0]).toBeCloseTo(0, 6);
+    expect(y[1]).toBeGreaterThan(1);          // first step charges the cap
+    expect(y[1]).toBeLessThan(4);
+    expect(y[y.length - 1]).toBeGreaterThan(4.5);
+  });
+
+  it('.IC v(node)=2 seeds the cap voltage at t=0 under UIC', () => {
+    const circ = chargingRC();
+    const result = runTran(circ.components, circ.wires, circ.plugins, {
+      type: 'tran', tStop: 3e-3, tStep: 1e-3, probes: ['c1:a'],
+    }, { uic: true, initialConditions: { 'c1:a': 2 } });
+    const y = result.traces[0].yValues;
+    // First post-step sample: cap charged from .IC=2V, ramping toward 5V
+    expect(y[1]).toBeGreaterThan(2);
+    expect(y[1]).toBeLessThan(5);
+  });
+});

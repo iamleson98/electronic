@@ -91,6 +91,17 @@ function tokenizeLine(line: string): string[] {
     if (i >= len) break;
     // comment starts with semicolon — rest of line is comment
     if (line[i] === ';') break;
+    // Quoted string (single or double): keep verbatim INCLUDING spaces and
+    // commas — B-element expressions like V='if(V(in) > 2, 5, 0)' must
+    // survive tokenization as one token.
+    if (line[i] === "'" || line[i] === '"') {
+      const quote = line[i];
+      let j = i + 1;
+      while (j < len && line[j] !== quote) j++;
+      tokens.push(line.slice(i, j + 1)); // include the quotes
+      i = j + 1;
+      continue;
+    }
     // read token until whitespace, comma, or end — but allow parentheses groups
     let token = '';
     while (i < len && !/\s/.test(line[i]) && line[i] !== ',') {
@@ -399,6 +410,37 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
           registerTerminal(tokens[2], id, 'n');
           break;
         }
+        case 'B': {  // Behavioral source: B<name> n+ n- V=expr | I=expr
+          // ngspice syntax: B1 out 0 V=3*V(in)  (or I=..., possibly quoted).
+          // Parse from the RAW line — the expression can contain spaces and
+          // commas that tokenization would mangle.
+          const bMatch = line.match(/^B\w+\s+(\S+)\s+(\S+)\s+(.+)$/i);
+          if (!bMatch) {
+            errors.push(`Line ${lineNum + 1}: B card needs n+ n- V=expr: "${line}"`);
+            continue;
+          }
+          const id = tokens[0];
+          const rest = bMatch[3];
+          const bvMatch = rest.match(/V\s*=\s*['"]?([^'"]+)['"]?/i);
+          const biMatch = rest.match(/I\s*=\s*['"]?([^'"]+)['"]?/i);
+          const isCurrent = !bvMatch && !!biMatch;
+          const expr = (bvMatch ?? biMatch)?.[1]?.trim();
+          if (!expr) {
+            errors.push(`Line ${lineNum + 1}: B card needs a V= or I= expression: "${line}"`);
+            continue;
+          }
+          const type = isCurrent ? 'biSource' : 'bvSource';
+          const plugin = getPlugin(type);
+          const params: any = {};
+          if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
+          params.expr = expr;
+          components.push({
+            id, type, position: { x: 0, y: 0 }, rotation: 0, parameters: params,
+          });
+          registerTerminal(bMatch[1], id, 'p');
+          registerTerminal(bMatch[2], id, 'n');
+          break;
+        }
         case 'D': {  // Diode: D<name> n+ n- model
           if (tokens.length < 4) {
             errors.push(`Line ${lineNum + 1}: D card needs n+ n- model: "${line}"`);
@@ -537,6 +579,41 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
   // If any net references ground (0/gnd), ensure a ground component exists.
   if (netMap.has('0') || netMap.has('gnd') || netMap.has('ground')) {
     ensureGround();
+  }
+
+  // Behavioral sources reference nets by NAME inside their expressions
+  // (V(in), V(a,b)). The engine resolves those through netLabel components,
+  // so for every V(name) reference attach a netLabel to one terminal of that
+  // net — otherwise the imported expression silently reads 0V.
+  const behavSources = components.filter(c => c.type === 'bvSource' || c.type === 'biSource');
+  if (behavSources.length > 0) {
+    // Preserve the expression's exact case — netNames lookup is case-sensitive.
+    const referenced = new Map<string, string>(); // lowercase → as-written
+    for (const b of behavSources) {
+      const expr = String(b.parameters.expr ?? '');
+      for (const m of expr.matchAll(/V\s*\(\s*([A-Za-z_][\w]*)/g)) {
+        if (m[1]) referenced.set(m[1].toLowerCase(), m[1]);
+      }
+    }
+    let labelCount = 0;
+    for (const [lower, asWritten] of referenced) {
+      if (lower === '0' || lower === 'gnd' || lower === 'ground') continue; // ground alias
+      const nid = netMap.get(lower);
+      const members = netMembers.get(nid);
+      if (!members || members.length === 0) {
+        warnings.push(`Behavioral expression references unknown net "${asWritten}" — it will read 0V.`);
+        continue;
+      }
+      const plugin = getPlugin('netLabel');
+      const params: any = {};
+      if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
+      params.net = asWritten;
+      const labelId = `NL${labelCount++}`;
+      components.push({
+        id: labelId, type: 'netLabel', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
+      });
+      members.push({ componentId: labelId, terminalId: 'p' });
+    }
   }
 
   // Build wires

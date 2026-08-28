@@ -1516,6 +1516,24 @@ export function runTran(
   const options = mergeOptions(opts);
   const { tStop, tStep, probes = [] } = config;
 
+  // UIC (.tran UIC): skip the DC operating point entirely and start the
+  // transient from a FRESH state — component initialV/initialI parameters
+  // and .IC node voltages become the t=0 conditions. (Previously prev was
+  // ALWAYS seeded from solveDC, so hasPrev was true on the first step and
+  // the .IC block in simulateStep could never fire — UIC was dead config.)
+  if (options.uic) {
+    // Seed an empty prev: simulateStep's cold-start path applies .IC to the
+    // node voltages and every reactive element reads its initial* parameter.
+    const prevUic: SimContext = {
+      nodeVoltage: new Float64Array(0),
+      branchCurrent: new Float64Array(0),
+      time: 0,
+      state: {},
+      dt: tStep,
+    };
+    return runTranSteps(components, wires, plugins, config, options, prevUic, start, true);
+  }
+
   // Solve DC operating point first
   const dcResult = solveDC(components, wires, plugins, options.itl1);
   if (!dcResult) {
@@ -1538,6 +1556,21 @@ export function runTran(
     state: dcResult.state,
     dt: dcResult.dt,
   };
+  return runTranSteps(components, wires, plugins, config, options, prev, start, false);
+}
+
+/** Shared transient stepping loop for runTran (DC-seeded and UIC variants). */
+function runTranSteps(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  config: TranConfig,
+  options: SimOptions,
+  prevSeed: SimContext,
+  start: number,
+  uic: boolean,
+): AnalysisResult {
+  const { tStop, tStep, probes = [] } = config;
 
   // Collect traces: one per probe node
   const nm = buildNodeMap(components, wires, plugins);
@@ -1549,7 +1582,7 @@ export function runTran(
   const traceData: Record<string, number[]> = {};
   for (const pn of probeNodes) traceData[pn.key] = [];
 
-  let simState = prev;
+  let simState = prevSeed;
   let stepCount = 0;
   const maxSteps = Math.min(Math.ceil(tStop / tStep), 100000);
 
@@ -1565,11 +1598,12 @@ export function runTran(
       time: simState.time,
       state: simState.state,
     }, tStep, {
-      initialConditions: options.uic ? options.initialConditions : undefined,
+      // .IC applies on the cold-start first step (UIC mode only).
+      initialConditions: uic ? options.initialConditions : undefined,
       nodeSets: options.nodeSets,
-      // Integration method from SimOptions — the DC operating point above
-      // always runs backward Euler (standard SPICE behavior), transient
-      // steps honor the user's trap/gear choice.
+      // Integration method from SimOptions — the DC operating point (when
+      // used) always runs backward Euler (standard SPICE behavior),
+      // transient steps honor the user's trap/gear choice.
       method: options.method,
     });
     if (!result) break;

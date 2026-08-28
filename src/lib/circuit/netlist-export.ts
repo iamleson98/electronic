@@ -101,6 +101,8 @@ const SPICE_TYPE_MAP: Record<string, string> = {
   acVoltage: 'V',
   pulseSource: 'V',
   currentSource: 'I',
+  bvSource: 'B',
+  biSource: 'B',
   npn: 'Q',
   pnp: 'Q',
   nmos: 'M',
@@ -149,6 +151,11 @@ export function exportSPICENetlist(doc: CircuitDocument, title: string = 'Circui
       const amp = comp.parameters.amplitude ?? 1;
       const freq = comp.parameters.frequency ?? 50;
       value = `SINE(0 ${amp} ${freq})`;
+    } else if (comp.type === 'bvSource' || comp.type === 'biSource') {
+      // ngspice B-element: B1 n+ n- V=expr (voltage) or I=expr (current).
+      // Quoted so expressions containing spaces/commas survive one line.
+      const kind = comp.type === 'bvSource' ? 'V' : 'I';
+      value = `${kind}='${(comp.parameters.expr as string) ?? '0'}'`;
     } else if (comp.type === 'diode' || comp.type === 'led' || comp.type === 'zener') {
       value = comp.parameters.modelName as string ?? '1N4148';
     } else if (comp.type === 'npn' || comp.type === 'pnp' || comp.type === 'nmos' || comp.type === 'pmos') {
