@@ -26,6 +26,11 @@ export const COMP_ID_STATE_PREFIXES = [
   'pd', 'pt', 'solar', 'ammeter', 'arduino', 'arduinoReal',
   // sensors (hallLinear is stateless — only the switch keeps hysteresis state)
   'hallsw',
+  // env sensors: LM565 PLL keeps VCO phase + PFD + loop-filter state
+  // (adxl335/mpu6050/ds18b20/dht22/hcsr04/pir501/acs712/mq2 are stateless)
+  'lm565',
+  // RGB LED: per-channel diode conduction hysteresis
+  'rgbled',
 ];
 
 // Optional suffixes appended to state keys (`npn_<id>_ib`, `mos_<id>_vgs`,

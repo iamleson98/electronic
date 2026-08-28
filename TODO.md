@@ -136,12 +136,12 @@ This file tracks all remaining improvements.
 
 ### Advanced Components
 
-- [x] **PLL** — 74HC4046: VCO (fmin..fmax linear in control voltage, phase-integrated) + sequential PFD with charge-pump output, time-guarded stamps (LM565 still needed)
+- [x] **PLL** — 74HC4046: VCO (fmin..fmax linear in control voltage, phase-integrated) + sequential PFD with charge-pump output, time-guarded stamps; **LM565 added** (env-sensors.ts): f₀ = 1/(3.7·R·C) with electrically-measured external timing R, sequential PFD + leaky-integrator loop filter, lock indicator
 - [x] **ADC/DAC** — 8-bit ADC (4 MSB outputs + VREF + VCC/GND), 8-bit DAC (4 digital inputs + VREF + VOUT + GND)
 - [x] **Active crystal oscillator** — 4-pin active oscillator (VCC/GND/OUT/EN), square wave at rated frequency, EN gate
 - [x] **Multi-unit IC support** — Generalized multi-unit factory: 7402 quad NOR (units A-D) + 7404 hex inverter (units A-F) with real pin numbers, hidden power pins, unwired-output-safe stamps; ERC unused-unit check works across the families
 - [x] **Voltage references** — TL431 (adjustable shunt), LM336 (2.5V), LM385 (1.2V), ICL8069 (1.2V bandgap)
-- [x] **Hall-effect sensors, IMUs** — Hall done (IMUs still needed): A1302-style linear ratiometric `hallLinear` (Vout = Q·Vcc/5 + S·Vcc/5·B, 25 mV/mT, rail clamps, 1 Ω Thevenin out) + US1881-style `hallSwitch` (Bop/Brp hysteresis, open-drain ron, optional internal 10 kΩ pull-up)
+- [x] **Hall-effect sensors, IMUs** — Hall done + **IMU/environmental batch** (env-sensors.ts): MPU-6050 (I²C address select, INT threshold), ADXL335 analog 3-axis, DS18B20 1-wire temp, DHT22, HC-SR04 ultrasonic, HC-SR501 PIR, ACS712 true current-sensing hall sensor (1.2 mΩ path), MQ-2 gas (real heater load) + **IO/display batch** (io-display.ts): EC11 rotary encoder (quadrature), WS2812B addressable RGB, discrete RGB LED, active buzzer, electret mic, 1602 LCD, SSD1306 OLED, nRF24L01 radio, ESP32 DevKitC (VIN LDO with Norton pass element, WiFi current modes); 'sensor' palette category added
 - [x] **Photodiode, phototransistor, solar cell** — Photodiode (responsivity × lux × area), NPN phototransistor (hFE × photo-base current), Solar cell (V_oc × √(lux/1000) Thevenin)
 - [x] **Motors** — DC motor (with back-EMF RPM readout), Bipolar 2-coil stepper (A+/A−/B+/B−), PWM hobby servo (VCC/GND/CTRL with θ readout)
 - [x] **Constant-current diode** — JFET current regulator (CRD with knee-voltage regions)

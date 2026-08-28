@@ -32,3 +32,7 @@ import './p3-components';
 import './p3-logic';
 // Register Hall-effect sensors
 import './hall-sensors';
+// Register environmental/motion sensors + LM565 PLL
+import './env-sensors';
+// Register human-IO, displays, wireless modules, ESP32 devkit
+import './io-display';

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { getPluginsByCategory } from '@/lib/circuit/registry';
 import { useEditor } from '@/lib/circuit/store';
-import { Search, Cpu, Zap, Radio, Lightbulb, CircuitBoard, Gauge, Microchip, Layers } from 'lucide-react';
+import { Search, Cpu, Zap, Radio, Lightbulb, CircuitBoard, Gauge, Microchip, Layers, Radar } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { ComponentIcon } from './ComponentIcon';
 
@@ -16,6 +16,7 @@ const categoryLabels: Record<string, string> = {
   logic: 'Logic Gates',
   meter: 'Meters & Probes',
   mcu: 'Microcontrollers',
+  sensor: 'Sensors & Modules',
 };
 
 const categoryIcons: Record<string, React.ComponentType<{ size?: number; className?: string }>> = {
@@ -27,6 +28,7 @@ const categoryIcons: Record<string, React.ComponentType<{ size?: number; classNa
   logic: Layers,
   meter: Gauge,
   mcu: Cpu,
+  sensor: Radar,
 };
 
 export function ComponentPalette() {
