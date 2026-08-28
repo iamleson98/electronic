@@ -909,10 +909,29 @@ const transformer: ComponentPlugin = {
     // reflected current to the primary current readout.
     const stR = sim.state.__global ?? (sim.state.__global = {});
     stR[`xfmr_branch_${comp?.id ?? `${p1}_${p2}`}`] = vcvsIdx;
-    // Magnetizing conductance across the primary (memoryless approximation)
+    // Magnetizing inductance across the primary — full backward-Euler
+    // companion: G = dt/Lm in PARALLEL with the history current source
+    // i_prev (the plain conductance alone was a lossy resistor that never
+    // integrated the magnetizing current and dissipated real power).
     const lm = Math.max(1e-6, params.lm as number);
-    const dt = Math.max(sim.dt, 1e-12);
+    const dt = Math.max(sim.dt ?? 1e-4, 1e-12);
+    const stL = sim.state.__global ?? (sim.state.__global = {});
+    const keyL = stateKey('xfmr_lm', comp, p1, p2);
+    const iLprev = (stL[keyL + '_i'] as number | undefined) ?? 0;
     sys.stampConductance(p1, p2, dt / lm);
+    if (iLprev !== 0) sys.stampCurrentSource(p1, p2, iLprev);
+  },
+  step(params, terminals, sim, comp) {
+    // integrate the magnetizing current: i_n = (dt/Lm)·v_n + i_{n−1}
+    const p1 = terminals.find((t) => t.terminalId === 'p1')!.nodeId;
+    const p2 = terminals.find((t) => t.terminalId === 'p2')!.nodeId;
+    const lm = Math.max(1e-6, params.lm as number);
+    const dt = Math.max(sim.dt ?? 1e-4, 1e-12);
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = stateKey('xfmr_lm', comp, p1, p2);
+    const iPrev = (st[key + '_i'] as number | undefined) ?? 0;
+    const v = (sim.nodeVoltage[p1] ?? 0) - (sim.nodeVoltage[p2] ?? 0);
+    st[key + '_i'] = (dt / lm) * v + iPrev;
   },
   measure(params, terminals, sim) {
     const p1 = terminals.find((t) => t.terminalId === 'p1')!.nodeId;
@@ -1196,7 +1215,7 @@ const cd4026: ComponentPlugin = {
 
     // Persistent state for this counter instance
     const key = cd4026Key(terminals, comp);
-    const st = sim.state[key] ?? (sim.state[key] = { count: 0, prevClkV: -1, initialized: false });
+    const st = sim.state[key] ?? (sim.state[key] = { count: 0, prevClkV: -1 });
 
     // Read clock and reset inputs (from previous step's solution)
     const clkNode = terminals.find((t) => t.terminalId === 'clk')!.nodeId;
@@ -1205,24 +1224,26 @@ const cd4026: ComponentPlugin = {
     const rstV = sim.nodeVoltage[rstNode] ?? 0;
     const clkHigh = clkV > vccV * 0.5;
     const rstHigh = rstV > vccV * 0.5;
-    const prevClkHigh = st.prevClkV > vccV * 0.5;
 
-    // On the very first step, sim.nodeVoltage is all zeros (no previous solve).
-    // We detect this by checking if the clk voltage is ~0V AND the CD4026 hasn't
-    // been initialized yet. Once we see a real voltage (either HIGH or LOW from
-    // the solver's output), we mark the CD4026 as initialized and enable edge
-    // detection. This prevents a spurious "rising edge" at startup when all
-    // node voltages transition from 0V (uninitialized) to their driven values.
-    const hasRealVoltage = Math.abs(clkV) > 0.01 || st.initialized;
-
-    if (rstHigh) {
-      st.count = 0;
-    } else if (st.initialized && clkHigh && !prevClkHigh) {
-      // Rising edge of clock: increment.
-      st.count = (st.count + 1) % maxCount;
+    // Edge detection. The prevClkV === -1 sentinel marks the very FIRST
+    // stamp, which sees all-zero (pre-solve) voltages — record the level and
+    // count no edge. From the second stamp on, voltages are real solver
+    // output and every rising edge counts. (The old `initialized` flag only
+    // latched once the clock exceeded 0.01V, so for a clock idling LOW it
+    // swallowed the FIRST genuine rising edge — every circuit's counter
+    // started one pulse late.)
+    if (st.prevClkV === -1) {
+      st.prevClkV = clkV;
+    } else {
+      const prevClkHigh = st.prevClkV > vccV * 0.5;
+      if (rstHigh) {
+        st.count = 0;
+      } else if (clkHigh && !prevClkHigh) {
+        // Rising edge of clock: increment.
+        st.count = (st.count + 1) % maxCount;
+      }
+      st.prevClkV = clkV;
     }
-    st.prevClkV = clkV;
-    st.initialized = hasRealVoltage;
 
     // Drive segment outputs based on current count
     const pattern = SEG_PATTERNS[st.count] ?? [0, 0, 0, 0, 0, 0, 0];

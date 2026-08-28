@@ -39,15 +39,31 @@ export const tl431: ComponentPlugin = {
     const ref = terminals.find(t => t.terminalId === 'ref')!.nodeId;
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const refV = params.refV as number;
-    const refVoltage = sim.nodeVoltage[ref] ?? 0;
+    // The TL431's error amplifier is referenced to the ANODE, not to ground:
+    // it conducts when V(REF) − V(ANODE) > refV. (The old ground-referenced
+    // comparison never triggered in any elevated-anode topology — same bug
+    // class as the SCR gate fix.)
+    const vRef = (sim.nodeVoltage[ref] ?? 0) - (sim.nodeVoltage[a] ?? 0);
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('tl431', comp, c, a);
-    // If REF > refV, TL431 conducts (pulls cathode toward anode)
-    const on = refVoltage > refV;
+    // Shunt-regulator model: in regulation the part sinks exactly the
+    // current that holds V(REF)−V(ANODE) at refV. Stamped as a transconduc-
+    // tance I(c→a) = gm·(V(ref)−V(a) − refV) — the closed loop solves
+    // IN-MATRIX (one-shot, like the op-amp macromodels), unlike a hard
+    // on/off switch that chatters around the threshold.
+    const gm = 2; // S — error-amp transconductance (loop gain = gm·Rdivider)
+    const iPrev = gm * (vRef - refV); // companion current at previous iterate
+    let on = st[key] ?? false;
+    if (on) {
+      if (iPrev < 0) on = false; // would push current backward -> block
+    } else {
+      if (vRef > refV) on = true;
+    }
     st[key] = on;
     if (on) {
-      const r = Math.max(0.001, params.onR as number);
-      sys.stampConductance(c, a, 1 / r);
+      // I(c→a) = gm·(Vref − Va) − gm·refV
+      sys.stampVCCS(c, a, ref, a, gm);
+      sys.stampCurrentSource(a, c, gm * refV);
     } else {
       sys.stampConductance(c, a, 1 / (params.offR as number));
     }
@@ -238,7 +254,8 @@ export const dcMotor: ComponentPlugin = {
   parameters: [
     { key: 'resistance', label: 'Winding Resistance', type: 'number', default: 5, unit: 'Ω', min: 0.1, max: 1000, step: 0.1 },
     { key: 'backEmf', label: 'Back-EMF Constant', type: 'number', default: 0.01, unit: 'V/(rad/s)', min: 0.001, max: 1, step: 0.001 },
-    { key: 'inertia', label: 'Rotor Inertia', type: 'number', default: 0.001, unit: 'kg·m²', min: 0.0001, max: 1, step: 0.0001 },
+    { key: 'inertia', label: 'Rotor Inertia', type: 'number', default: 1e-6, unit: 'kg·m²', min: 1e-9, max: 1, step: 1e-7 },
+    { key: 'friction', label: 'Viscous Friction', type: 'number', default: 1e-8, unit: 'N·m·s', min: 0, max: 1, step: 1e-9 },
   ],
   keywords: ['motor', 'dc', 'actuator', 'mechanical'],
   render(ctx, params, cellSize) {
@@ -253,22 +270,57 @@ export const dcMotor: ComponentPlugin = {
     ctx.moveTo(2.8 * cellSize, cellSize); ctx.lineTo(4 * cellSize, cellSize);
     ctx.stroke();
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const b = terminals.find(t => t.terminalId === 'b')!.nodeId;
     const r = Math.max(0.001, params.resistance as number);
-    // Simplified: motor = resistor (back-EMF ignored in DC steady state)
+    const K = params.backEmf as number;
+    // Electromechanical model: V_ab = I·R + K·ω  (back-EMF opposes the
+    // drive). Stamped as a Norton: conductance 1/R plus a current source
+    // K·ω_prev/R that shifts the I-V line — the previous step's rotor speed
+    // sets the EMF, the solve produces the new current, then step()
+    // integrates the torque balance. (The old stamp was a plain resistor:
+    // v − i·R ≡ 0 made the RPM readout permanently zero and the back-EMF /
+    // inertia parameters dead.)
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = stateKey('dcmotor', comp, a, b);
+    const omega = (st[key + '_w'] as number | undefined) ?? 0;
+    const emf = K * omega;
     sys.stampConductance(a, b, 1 / r);
+    if (emf !== 0) sys.stampCurrentSource(a, b, emf / r);
+  },
+  step(params, terminals, sim, comp) {
+    // Rotor dynamics: J·dω/dt = K·i − b·ω (motor torque minus viscous
+    // friction). Settles at the no-load speed ω_ss = V/K as the back-EMF
+    // starves the current — the classic first-order DC motor response with
+    // time constant J·R/K².
+    const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
+    const b = terminals.find(t => t.terminalId === 'b')!.nodeId;
+    const r = Math.max(0.001, params.resistance as number);
+    const K = params.backEmf as number;
+    const J = Math.max(1e-12, params.inertia as number);
+    const B = Math.max(0, params.friction as number);
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = stateKey('dcmotor', comp, a, b);
+    const omega = (st[key + '_w'] as number | undefined) ?? 0;
+    const v = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[b] ?? 0);
+    const emf = K * omega;
+    const i = (v - emf) / r;
+    const dt = sim.dt ?? 1e-4;
+    const dOmega = (K * i - B * omega) / J * dt;
+    st[key + '_w'] = omega + dOmega;
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
-  measure(params, terminals, sim) {
+  measure(params, terminals, sim, comp) {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
     const b = terminals.find(t => t.terminalId === 'b')!.nodeId;
     const v = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[b] ?? 0);
-    const i = v / Math.max(0.001, params.resistance as number);
-    // Mechanical: ω = (V − I·R) / K_emf  (back-EMF model)
+    const r = Math.max(0.001, params.resistance as number);
+    const st = (sim.state as any).__global ?? {};
+    const key = stateKey('dcmotor', comp, a, b);
+    const omega = (st[key + '_w'] as number | undefined) ?? 0;
     const K = params.backEmf as number;
-    const omega = Math.max(0, (v - i * (params.resistance as number)) / Math.max(0.0001, K));
+    const i = (v - K * omega) / r;
     const rpm = omega * 60 / (2 * Math.PI);
     return [
       { label: 'V', value: v.toFixed(3), unit: 'V' },

@@ -514,7 +514,8 @@ export const optocoupler: ComponentPlugin = {
     { key: 'ctr', label: 'CTR (Current Transfer Ratio)', type: 'number', default: 0.5, min: 0.01, max: 10, step: 0.05 },
     { key: 'ledVf', label: 'LED Forward Voltage', type: 'number', default: 1.2, unit: 'V', min: 0.5, max: 5, step: 0.1 },
     { key: 'ledR', label: 'LED Series R', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
-    { key: 'transR', label: 'Transistor R', type: 'number', default: 10, unit: 'Ω', min: 0.001, max: 1e6, step: 1 },
+    { key: 'satR', label: 'Saturation Resistance', type: 'number', default: 5, unit: 'Ω', min: 0.001, max: 100, step: 1 },
+    { key: 'rout', label: 'Output Resistance (Early)', type: 'number', default: 1e6, unit: 'Ω', min: 1e3, max: 1e12, step: 1e4 },
   ],
   keywords: ['optocoupler', 'opto', 'isolator', '4n35'],
   render(ctx, _params, cellSize) {
@@ -530,7 +531,7 @@ export const optocoupler: ComponentPlugin = {
     // Transistor (right side)
     drawLabel(ctx, 'PT', 4.5 * cellSize, 2 * cellSize);
   },
-  stamp(params, terminals, sys, sim) {
+  stamp(params, terminals, sys, sim, comp) {
     const ledA = terminals.find(t => t.terminalId === 'ledA')!.nodeId;
     const ledK = terminals.find(t => t.terminalId === 'ledK')!.nodeId;
     const c = terminals.find(t => t.terminalId === 'c')!.nodeId;
@@ -538,24 +539,57 @@ export const optocoupler: ComponentPlugin = {
     const vf = params.ledVf as number;
     const ledR = Math.max(0.001, params.ledR as number);
     const ctr = params.ctr as number;
-    const transR = Math.max(0.001, params.transR as number);
+    const satR = Math.max(0.001, Math.min(100, (params.satR as number) ?? 5));
+    const rOut = Math.max(1e3, params.rout as number);
+    const VCE_SAT = 0.2;
     // LED stamp (like diode)
     const vLed = sim.nodeVoltage[ledA] - sim.nodeVoltage[ledK];
     if (vLed > vf) {
       sys.stampConductance(ledA, ledK, 1 / ledR);
       sys.stampCurrentSource(ledK, ledA, vf / ledR);
-      // LED current drives phototransistor
-      const iLed = (vLed - vf) / ledR;
-      const iTrans = iLed * ctr;
-      // Phototransistor: collector current C→E driven by the LED (CTR model).
-      // stampCurrentSource(c, e, iTrans) — the old (e, c) direction pushed
-      // current INTO the collector and OUT of the emitter (a generator that
-      // could pull the collector ABOVE the rail).
-      sys.stampConductance(c, e, 1 / transR);
-      sys.stampCurrentSource(c, e, iTrans);
     } else {
       sys.stampConductance(ledA, ledK, 1e-13);
-      sys.stampConductance(c, e, 1e-13);
+    }
+    // Phototransistor: two-region model.
+    //   ACTIVE    — collector current C→E = CTR·I_LED, where I_LED is the LED
+    //               Thevenin's exact in-matrix current (V(ledA)−V(ledK) − Vf)/ledR.
+    //               Stamping it as a VCCS on the LED node voltage makes the
+    //               transfer exact in ONE solve — no previous-iterate
+    //               overshoot, no one-step rail-crash transients.
+    //   SATURATED — the pull-up cannot supply CTR·I_LED, so the device clamps
+    //               at Vce(sat): Thevenin (VCE_SAT, satR).
+    // The old stamp put a fixed 10Ω across C-E in the active region, which
+    // swamped the CTR source and forced hard saturation whenever the LED
+    // was on — the output became a switch with no linear range.
+    const iLedEst = vLed > vf ? (vLed - vf) / ledR : 0; // estimate for region logic
+    const iTransEst = iLedEst * ctr;
+    const vce = (sim.nodeVoltage[c] ?? 0) - (sim.nodeVoltage[e] ?? 0);
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = stateKey('opto', comp, c, e);
+    let sat = (st[key] as boolean | undefined) ?? false;
+    if (sat) {
+      // Exit when the demand no longer exceeds what the pull-up actually
+      // delivered through the saturation branch (i.e. the circuit could
+      // sustain the active-region current) — or the LED went dark.
+      const iSat = (vce - VCE_SAT) / satR; // current the supply pushed through
+      if (iTransEst <= iSat) sat = false;
+    } else {
+      if (vce < 0.25 && iTransEst > 0) sat = true; // over-driven: clamp
+    }
+    st[key] = sat;
+    if (sat) {
+      // Saturated: Thevenin VCE_SAT through satR (I(c→e) = vce/satR − VCE_SAT/satR)
+      sys.stampConductance(c, e, 1 / satR);
+      sys.stampCurrentSource(e, c, VCE_SAT / satR);
+    } else if (vLed > vf) {
+      // Active: I(c→e) = CTR·[(V(ledA)−V(ledK))/ledR − Vf/ledR] — VCCS on the
+      // LED terminal voltage plus the −CTR·Vf/ledR offset, and the Early leak.
+      sys.stampConductance(c, e, 1 / rOut);
+      sys.stampVCCS(c, e, ledA, ledK, ctr / ledR);
+      sys.stampCurrentSource(e, c, (ctr * vf) / ledR);
+    } else {
+      // LED dark: phototransistor off (Early leak only)
+      sys.stampConductance(c, e, 1 / rOut);
     }
   },
 };
@@ -683,7 +717,18 @@ export const schmittNand = makeSchmittGate('schmitt_nand', 'Schmitt NAND', 'σ&'
 function makeOpampMacromodel(type: string, name: string, params: {
   gain: number; gbw: number; slewRate: number; voff: number; ibias: number; cmrr: number; rout: number;
   vccMin: number; veeMax: number;
+  /** output clamp margin from the positive rail (V) */
+  mTop?: number;
+  /** output clamp margin from the negative rail (V) */
+  mLow?: number;
+  /** rail defaults when both power pins are left unwired */
+  defVcc?: number;
+  defVee?: number;
 }): ComponentPlugin {
+  const mTop = params.mTop ?? 0.5;
+  const mLow = params.mLow ?? 0.5;
+  const defVcc = params.defVcc ?? 15;
+  const defVee = params.defVee ?? -15;
   return {
     type,
     name,
@@ -723,7 +768,7 @@ function makeOpampMacromodel(type: string, name: string, params: {
       ctx.fillText('+', 1.6 * cellSize, 1.3 * cellSize);
       ctx.fillText('−', 1.6 * cellSize, 3.3 * cellSize);
     },
-    stamp(p, terminals, sys, sim) {
+    stamp(p, terminals, sys, sim, comp) {
       const inp = terminals.find(t => t.terminalId === 'inp')!.nodeId;
       const inn = terminals.find(t => t.terminalId === 'inn')!.nodeId;
       const out = terminals.find(t => t.terminalId === 'out')!.nodeId;
@@ -732,16 +777,61 @@ function makeOpampMacromodel(type: string, name: string, params: {
       const Av = p.gain as number;
       const rOut = Math.max(0.001, p.rout as number);
       const vOff = (p.voff as number) / 1000; // mV → V
+      const ibias = ((p.ibias as number) ?? 0) * 1e-9; // nA → A
+      // Rail voltages. Unwired power pins map to node 0 (ground, 0 V) —
+      // indistinguishable from a deliberate ground by voltage alone, so use
+      // the opampRails heuristic: BOTH pins at node 0 = unwired → part-typical
+      // defaults; a single grounded pin is honored (single-supply operation).
+      const bothFloating = vcc === 0 && vee === 0;
+      const vccV = bothFloating ? defVcc : (sim.nodeVoltage[vcc] ?? defVcc);
+      const veeV = bothFloating ? defVee : (sim.nodeVoltage[vee] ?? defVee);
+      const vHi = vccV - mTop;
+      const vLo = veeV + mLow;
+      // Boyle-style region macromodel (same as P3 LM324/NE5532 and the fixed
+      // opampRails): the LINEAR region stamps a true VCCS (gm = Av/rout), so
+      // the closed-loop solve is a one-shot linear problem. The previous
+      // Thevenin-from-previous-voltages stamp re-evaluated the full-gain
+      // output every step and oscillated rail-to-rail in ANY negative
+      // feedback circuit (a gain-11 stage read 23x / slammed to the rails).
       const vPlus = sim.nodeVoltage[inp] ?? 0;
       const vMinus = sim.nodeVoltage[inn] ?? 0;
-      const vccV = sim.nodeVoltage[vcc] ?? 15;
-      const veeV = sim.nodeVoltage[vee] ?? -15;
-      // Open-loop output = gain * (V+ - V−) + offset, clamped to rails
-      let vOut = Av * (vPlus - vMinus + vOff);
-      vOut = Math.max(veeV + 0.5, Math.min(vccV - 0.5, vOut));
-      // Model as voltage source through output resistance
-      sys.stampConductance(out, 0, 1 / rOut);
-      sys.stampCurrentSource(0, out, vOut / rOut);
+      const vRaw = Av * (vPlus - vMinus + vOff);
+      const st = sim.state.__global ?? (sim.state.__global = {});
+      const key = stateKey(`opamp_${type}`, comp, out);
+      // region: 0 = linear, +1 = saturated high, −1 = saturated low.
+      // Saturation always exits THROUGH the linear region — jumping straight
+      // to the opposite rail re-triggers the overshoot and never settles.
+      let region = (st[key] as number | undefined) ?? 0;
+      if (region === 0) {
+        if (vRaw > vHi) region = 1;
+        else if (vRaw < vLo) region = -1;
+      } else if (region === 1) {
+        if (vRaw < vHi) region = 0;
+      } else {
+        if (vRaw > vLo) region = 0;
+      }
+      st[key] = region;
+      // input bias currents: each input draws ibias (real parts: 45nA LM358,
+      // 65pA TL072 — matters with large source resistances)
+      if (inp > 0) sys.stampCurrentSource(inp, 0, ibias);
+      if (inn > 0) sys.stampCurrentSource(inn, 0, ibias);
+      // 1GΩ input leak keeps floating input nets solvable
+      sys.stampConductance(inp, 0, 1e-9);
+      sys.stampConductance(inn, 0, 1e-9);
+      if (out === 0) return; // unconnected output — nothing to drive
+      if (region === 0) {
+        // Linear: I(out) = gm·(V+ − V− + Voff) delivered into 1/rout.
+        // stampVCCS(0, out, inp, inn, gm): current from ground into out.
+        const gm = Av / rOut;
+        sys.stampConductance(out, 0, 1 / rOut);
+        sys.stampVCCS(0, out, inp, inn, gm);
+        sys.stampCurrentSource(0, out, gm * vOff);
+      } else {
+        // Saturated: Thevenin at the rail-limited level through rout.
+        const vSat = region > 0 ? vHi : vLo;
+        sys.stampConductance(out, 0, 1 / rOut);
+        sys.stampCurrentSource(0, out, vSat / rOut);
+      }
     },
     getFlowPath() { return [{ x: 0, y: 2 }, { x: 6, y: 2 }]; },
     measure(p, terminals, sim) {
@@ -759,12 +849,18 @@ function makeOpampMacromodel(type: string, name: string, params: {
 
 export const lm358 = makeOpampMacromodel('lm358', 'LM358', {
   gain: 1e5, gbw: 1e6, slewRate: 0.5, voff: 2, ibias: 45, cmrr: 85, rout: 300, vccMin: 3, veeMax: 0,
+  mTop: 0.5, mLow: 0.05, // single-supply part: output swings to within ~20mV of V−
+  defVcc: 15, defVee: 0,
 });
 export const lm741 = makeOpampMacromodel('lm741', 'LM741', {
   gain: 2e5, gbw: 1.5e6, slewRate: 0.5, voff: 1, ibias: 80, cmrr: 90, rout: 75, vccMin: 10, veeMax: -10,
+  mTop: 1.0, mLow: 1.0, // 741 output can't get closer than ~1V to either rail
+  defVcc: 15, defVee: -15,
 });
 export const tl072 = makeOpampMacromodel('tl072', 'TL072', {
   gain: 2e5, gbw: 3e6, slewRate: 13, voff: 3, ibias: 0.065, cmrr: 100, rout: 100, vccMin: 5, veeMax: -5,
+  mTop: 1.5, mLow: 1.5, // JFET input, swings within ~1.5V of the rails
+  defVcc: 15, defVee: -15,
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
