@@ -1,36 +1,42 @@
 // Custom hook: extracts coordinate conversion and hit-testing utilities.
 // Provides screenToGrid, gridToScreen, getTerminalPos, resolveEndpointPos,
 // findTerminalAt, findComponentAt, findWireAt, findWireHandle, getRotateHandlePos.
+//
+// pan/zoom are read from the shared mutable viewRef (owned by the render
+// loop) instead of React state, so these callbacks are STABLE across view
+// changes and always see the latest pan/zoom at event time.
 
 import { useCallback } from 'react';
+import type { RefObject } from 'react';
 import { getPlugin } from '@/lib/circuit/registry';
 import { rotateTerminal } from '@/lib/circuit/components/draw';
 import type { CircuitComponent, TerminalDef, Vec2, Wire } from '@/lib/circuit/types';
 import type { HierarchicalSheet } from '@/lib/circuit/types';
 import { CELL_SIZE, type HoverState } from './canvas-types';
+import type { CanvasView } from './canvas-renderer';
 import { getWirePath, segmentMidpoint, pointToSegmentDist } from './canvas-wire-utils';
 
 export function useCanvasCoordinates(opts: {
-  pan: Vec2;
-  zoom: number;
+  viewRef: RefObject<CanvasView>;
   snapToGrid: boolean;
   components: CircuitComponent[];
   wires: Wire[];
   sheets: HierarchicalSheet[];
   selection: { type: string | null; id: string | null };
-  use45Routing: boolean;
 }) {
-  const { pan, zoom, snapToGrid, components, wires, sheets, use45Routing } = opts;
+  const { viewRef, snapToGrid, components, wires, sheets } = opts;
 
   const screenToGrid = useCallback((sx: number, sy: number): Vec2 => {
+    const { pan, zoom } = viewRef.current;
     const x = (sx - pan.x) / (CELL_SIZE * zoom);
     const y = (sy - pan.y) / (CELL_SIZE * zoom);
     return snapToGrid ? { x: Math.round(x), y: Math.round(y) } : { x, y };
-  }, [pan, zoom, snapToGrid]);
+  }, [viewRef, snapToGrid]);
 
   const gridToScreen = useCallback((gx: number, gy: number): Vec2 => {
+    const { pan, zoom } = viewRef.current;
     return { x: gx * CELL_SIZE * zoom + pan.x, y: gy * CELL_SIZE * zoom + pan.y };
-  }, [pan, zoom]);
+  }, [viewRef]);
 
   const getTerminalPos = useCallback((comp: CircuitComponent, terminal: TerminalDef): Vec2 => {
     const plugin = getPlugin(comp.type);
@@ -72,7 +78,7 @@ export function useCanvasCoordinates(opts: {
         const pos = getTerminalPos(comp, t);
         const dx = pos.x - gx;
         const dy = pos.y - gy;
-        // Increased snap radius: 1.5 grid units (was 0.5) — makes wire
+        // Increased snap radius: 1.5 grid units — makes wire
         // snapping much easier. At CELL_SIZE=18, this is ~27px radius.
         if (dx * dx + dy * dy < 1.5 * 1.5) {
           return { componentId: comp.id, terminalId: t.id, pos };
@@ -124,6 +130,7 @@ export function useCanvasCoordinates(opts: {
   }, [components]);
 
   const findWireAt = useCallback((sx: number, sy: number): string | null => {
+    const use45Routing = viewRef.current.use45Routing;
     for (const wire of wires) {
       const fromComp = components.find((c) => c.id === wire.from.componentId);
       const toComp = components.find((c) => c.id === wire.to.componentId);
@@ -145,9 +152,10 @@ export function useCanvasCoordinates(opts: {
       }
     }
     return null;
-  }, [wires, components, gridToScreen, getTerminalPos, use45Routing]);
+  }, [wires, components, gridToScreen, getTerminalPos, viewRef]);
 
   const findWireHandle = useCallback((sx: number, sy: number): HoverState['wireHandle'] => {
+    const use45Routing = viewRef.current.use45Routing;
     for (const wire of wires) {
       const fromComp = components.find((c) => c.id === wire.from.componentId);
       const toComp = components.find((c) => c.id === wire.to.componentId);
@@ -173,11 +181,12 @@ export function useCanvasCoordinates(opts: {
       }
     }
     return null;
-  }, [wires, components, gridToScreen, getTerminalPos, use45Routing]);
+  }, [wires, components, gridToScreen, getTerminalPos, viewRef]);
 
   const getRotateHandlePos = useCallback((comp: CircuitComponent): Vec2 | null => {
     const plugin = getPlugin(comp.type);
     if (!plugin) return null;
+    const { zoom } = viewRef.current;
     const bb = plugin.boundingBox;
     const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
     const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
@@ -185,7 +194,7 @@ export function useCanvasCoordinates(opts: {
       x: centerScreen.x,
       y: centerScreen.y - (bb.height / 2 * CELL_SIZE * zoom) - 18,
     };
-  }, [gridToScreen, zoom]);
+  }, [gridToScreen, viewRef]);
 
   return {
     screenToGrid,

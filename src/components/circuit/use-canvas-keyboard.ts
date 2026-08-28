@@ -9,12 +9,13 @@
 // item is the selection, so Delete/R/X/PropertyPanel all work on it).
 
 import { useEffect } from 'react';
+import type { RefObject } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import type { HoverState } from './canvas-types';
 
 export function useCanvasKeyboard(opts: {
   running: boolean;
-  hover: HoverState;
+  hoverRef: RefObject<HoverState>;
   cancelWire: () => void;
   setSelection: (sel: any) => void;
   deleteComponent: (id: string) => void;
@@ -22,7 +23,7 @@ export function useCanvasKeyboard(opts: {
   setActiveSheet: (s: string) => void;
   setUse45Routing: (fn: (v: boolean) => boolean) => void;
 }) {
-  const { running, hover, cancelWire, setSelection, deleteComponent, rotateComponent, setActiveSheet, setUse45Routing } = opts;
+  const { running, hoverRef, cancelWire, setSelection, deleteComponent, rotateComponent, setActiveSheet, setUse45Routing } = opts;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -126,11 +127,12 @@ export function useCanvasKeyboard(opts: {
       } else if (e.key === 'n' || e.key === 'N') {
         if (running) return;
         e.preventDefault();
-        if (hover.terminal) {
+        if (hoverRef.current.terminal) {
+          const term = hoverRef.current.terminal;
           const s = useEditor.getState();
-          const exists = s.noConnects.find((nc) => nc.componentId === hover.terminal!.componentId && nc.terminalId === hover.terminal!.terminalId);
-          if (exists) s.removeNoConnect(hover.terminal!.componentId, hover.terminal!.terminalId);
-          else s.addNoConnect(hover.terminal!.componentId, hover.terminal!.terminalId);
+          const exists = s.noConnects.find((nc) => nc.componentId === term.componentId && nc.terminalId === term.terminalId);
+          if (exists) s.removeNoConnect(term.componentId, term.terminalId);
+          else s.addNoConnect(term.componentId, term.terminalId);
         }
       } else if (e.key === 'Escape') {
         if (useEditor.getState().activeSheet) {
@@ -179,5 +181,5 @@ export function useCanvasKeyboard(opts: {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [deleteComponent, rotateComponent, cancelWire, setSelection, running, hover, setActiveSheet, setUse45Routing]);
+  }, [deleteComponent, rotateComponent, cancelWire, setSelection, running, hoverRef, setActiveSheet, setUse45Routing]);
 }

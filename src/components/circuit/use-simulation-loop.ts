@@ -1,14 +1,17 @@
-// Custom hook: extracts the simulation/animation RAF loop from CircuitCanvas.
+// Custom hook: extracts the simulation RAF loop from CircuitCanvas.
 // Manages the requestAnimationFrame loop that drives both the simulation
 // step() calls and the flow-dot phase advancement.
+//
+// NOTE: this hook no longer triggers React re-renders. The canvas is drawn by
+// useCanvasRenderer's own RAF loop, which reads flowPhaseRef directly — so
+// there is no animTick/setAnimTick here anymore. This removes a full React
+// re-render per animation frame (the #1 hot-path cost while simulating).
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 
 export function useSimulationLoop(running: boolean, step: () => void) {
   const flowPhaseRef = useRef(0);
-  const [animTick, setAnimTick] = useState(0);
-  void animTick; // referenced to force re-render
 
   useEffect(() => {
     if (!running) return;
@@ -49,8 +52,6 @@ export function useSimulationLoop(running: boolean, step: () => void) {
         lastSimTime = now;
       }
 
-      // Single re-render per frame
-      setAnimTick((t) => (t + 1) % 1000000);
       raf = requestAnimationFrame(loop);
     };
 
@@ -73,5 +74,5 @@ export function useSimulationLoop(running: boolean, step: () => void) {
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [running]);
 
-  return { flowPhaseRef, animTick };
+  return { flowPhaseRef };
 }
