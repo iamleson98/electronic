@@ -109,7 +109,23 @@ const SPICE_TYPE_MAP: Record<string, string> = {
   pmos: 'M',
   switch: 'S',
   pushButton: 'S',
+  transLineLossless: 'T',
+  transLineLossy: 'O',
 };
+
+/** Format a value with SPICE engineering suffixes, compact (no unit noise). */
+function formatSpiceCompact(v: number): string {
+  const abs = Math.abs(v);
+  if (abs >= 1e9) return `${(v / 1e9).toPrecision(4)}g`;
+  if (abs >= 1e6) return `${(v / 1e6).toPrecision(4)}meg`;
+  if (abs >= 1e3) return `${(v / 1e3).toPrecision(4)}k`;
+  if (abs >= 1) return `${v.toPrecision(4)}`;
+  if (abs >= 1e-3) return `${(v / 1e-3).toPrecision(4)}m`;
+  if (abs >= 1e-6) return `${(v / 1e-6).toPrecision(4)}u`;
+  if (abs >= 1e-9) return `${(v / 1e-9).toPrecision(4)}n`;
+  if (abs >= 1e-12) return `${(v / 1e-12).toPrecision(4)}p`;
+  return `${(v / 1e-15).toPrecision(4)}f`;
+}
 
 export function exportSPICENetlist(doc: CircuitDocument, title: string = 'Circuit'): string {
   const plugins = new Map<string, ComponentPlugin>();
@@ -127,6 +143,9 @@ export function exportSPICENetlist(doc: CircuitDocument, title: string = 'Circui
   const lines: string[] = [];
   lines.push(`* ${title}`);
   lines.push(`* Exported from CircuitLab on ${new Date().toISOString()}`);
+  // Lossy lines reference an LTRA .model card; collect one per distinct
+  // parameter set (most designs have a handful).
+  const ltraModels = new Map<string, string>(); // modelName -> .model line
 
   for (const comp of doc.components) {
     const plugin = plugins.get(comp.type);
@@ -156,6 +175,20 @@ export function exportSPICENetlist(doc: CircuitDocument, title: string = 'Circui
       // Quoted so expressions containing spaces/commas survive one line.
       const kind = comp.type === 'bvSource' ? 'V' : 'I';
       value = `${kind}='${(comp.parameters.expr as string) ?? '0'}'`;
+    } else if (comp.type === 'transLineLossless') {
+      // SPICE T element: T<name> portA+ portA- portB+ portB- Z0=<z> TD=<t>
+      value = `Z0=${formatSpiceCompact(comp.parameters.Z0 as number ?? 50)} TD=${formatSpiceCompact(comp.parameters.Td as number ?? 1e-9)}`;
+    } else if (comp.type === 'transLineLossy') {
+      // ngspice lossy line: O<name> a1 a2 b1 b2 <modelname> + .model LTRA
+      const modelName = `LTRA_${(comp.refdes ?? comp.id).replace(/[^a-zA-Z0-9_]/g, '')}`;
+      const R = (comp.parameters.RperLen as number) ?? 0.1;
+      const Lp = (comp.parameters.LperLen as number) ?? 250e-9;
+      const G = (comp.parameters.GperLen as number) ?? 1e-9;
+      const C = (comp.parameters.CperLen as number) ?? 100e-12;
+      const len = (comp.parameters.length as number) ?? 0.1;
+      ltraModels.set(modelName,
+        `.model ${modelName} LTRA(R=${formatSpiceCompact(R)} L=${formatSpiceCompact(Lp)} G=${formatSpiceCompact(G)} C=${formatSpiceCompact(C)} LEN=${formatSpiceCompact(len)})`);
+      value = modelName;
     } else if (comp.type === 'diode' || comp.type === 'led' || comp.type === 'zener') {
       value = comp.parameters.modelName as string ?? '1N4148';
     } else if (comp.type === 'npn' || comp.type === 'pnp' || comp.type === 'nmos' || comp.type === 'pmos') {
@@ -173,6 +206,8 @@ export function exportSPICENetlist(doc: CircuitDocument, title: string = 'Circui
   lines.push(`.model 2N3906 PNP(Is=1.41f Xti=3 Eg=1.11 Vaf=18.7 Bf=180.7 Ne=1.5 Ise=0 Ikf=80m Xtb=1.5 Br=4.977 Nc=2 Isc=0 Ikr=0 Rc=2.5 Cjc=9.728p Mjc=0.3333 Vjc=0.75 Cje=8.063p Mje=0.3333 Vje=0.75 Tr=33.4n Tf=179.3p Itf=0.4 Vtf=4 Xtf=6)`);
   lines.push(`.model 2N7000 NMOS(Vto=2.1 Kp=0.1)`);
   lines.push(`.model BS250 PMOS(Vto=-2 Kp=0.05)`);
+  // LTRA models for lossy transmission lines (deduped per model name)
+  for (const m of ltraModels.values()) lines.push(m);
 
   // .tran / .end
   const lastTime = 10e-3;

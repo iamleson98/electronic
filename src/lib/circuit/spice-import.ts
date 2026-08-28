@@ -10,10 +10,15 @@
 //   Q<name>  c b e <model>                 — BJT (NPN/PNP inferred from .model)
 //   M<name>  d g s <model>                 — MOSFET (NMOS/PMOS inferred from .model)
 //   S<name>  n+ n- nc+ nc- <model> [on|off] — voltage-controlled switch
+//   T<name>  a1 a2 b1 b2 Z0=<z> TD=<t>   — lossless transmission line
+//   O<name>  a1 a2 b1 b2 <model>          — lossy line (LTRA .model R/L/G/C/LEN)
+//   B<name>  n+ n- V=expr | I=expr        — behavioral source
 //
 // Node 0 (or "gnd"/"ground") is treated as the ground node.
-// Sub-circuits (.SUBCKT/.ENDS) and .MODEL cards are recognized and skipped
+// Sub-circuits (.SUBCKT/.ENDS) are recognized and skipped
 // (the components inside a .SUBCKT are flattened inline as plain elements).
+// .MODEL cards are parsed for LTRA (lossy-line) parameters; other model types
+// are skipped (transistors infer NPN/PNP/NMOS/PMOS from model-name heuristics).
 // .TRAN, .AC, .DC, .OP, .END cards are recognized and skipped.
 //
 // Returns { doc: CircuitDocument | null, errors: string[], warnings: string[] }.
@@ -247,6 +252,23 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
   let groundId: string | null = null;
   let inSubckt = false;
 
+  // ── Pre-scan: collect .model definitions (for LTRA lossy lines) ────────
+  // SPICE allows forward references (an O card may appear before its .model),
+  // so models are gathered in a full pass before any element is parsed.
+  const modelDefs = new Map<string, { type: string; params: Map<string, number> }>();
+  for (const raw of lines) {
+    const l = raw.trim();
+    if (!l.startsWith('.')) continue;
+    const m = l.match(/^\.model\s+(\S+)\s+([A-Za-z]+)\s*\(([^)]*)\)/i);
+    if (!m) continue;
+    const params = new Map<string, number>();
+    for (const tok of m[3].split(/[\s,]+/)) {
+      const pm = tok.match(/^([A-Za-z_][\w]*)\s*=\s*(.+)$/);
+      if (pm) params.set(pm[1].toLowerCase(), parseSpiceValue(pm[2]));
+    }
+    modelDefs.set(m[1].toLowerCase(), { type: m[2].toUpperCase(), params });
+  }
+
   // Helper: ensure a ground component exists
   function ensureGround(): string {
     if (groundId) return groundId;
@@ -283,6 +305,25 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
     if (tokens.length === 0) continue;
 
     const first = tokens[0].toUpperCase();
+
+    // ── SPICE title convention ──────────────────────────────────────────
+    // The FIRST line of a netlist is always the title, never an element. A
+    // title that doesn't start with '*' (e.g. "T-line delay test" exported
+    // by ngspice) would otherwise be misparsed as an element card. Fixture
+    // netlists that have no title (first line IS a real element) keep
+    // working: only skip when the line can't possibly be a well-formed card
+    // (unknown element letter, or too few tokens for that card type).
+    if (lineNum === 0 && !line.startsWith('*') && !first.startsWith('.')) {
+      const MIN_TOKENS: Record<string, number> = {
+        R: 4, C: 4, L: 4, V: 4, I: 4, B: 4, D: 4, Q: 5, M: 5, S: 6,
+        T: 5, O: 6, X: 4, E: 5, F: 5, G: 5, H: 5, K: 4, W: 4, Z: 4, N: 4, P: 4,
+      };
+      const letter = tokens[0][0].toUpperCase();
+      const min = MIN_TOKENS[letter];
+      if (min === undefined || tokens.length < min) {
+        continue; // title line
+      }
+    }
 
     // ── Dot commands ────────────────────────────────────────────────────
     if (first === '.SUBCKT') { inSubckt = true; continue; }
@@ -559,6 +600,71 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
           }
           warnings.push(`Line ${lineNum + 1}: sub-circuit "${subcktName}" imported as passthrough connector (nodes: ${nodeTokens.join(', ')})`);
           continue;
+        }
+        case 'T': {  // Lossless transmission line: T<name> a1 a2 b1 b2 [Z0=.. TD=..]
+          if (tokens.length < 5) {
+            errors.push(`Line ${lineNum + 1}: T card needs 4 nodes + Z0/TD params: "${line}"`);
+            continue;
+          }
+          const id = tokens[0];
+          // Params after the 4 nodes: Z0= (or ZO=) and TD= (case-insensitive).
+          let Z0 = 50, Td = 0, sawZ0 = false, sawTd = false, sawFreqForm = false;
+          for (let k = 5; k < tokens.length; k++) {
+            const pm = tokens[k].match(/^([A-Za-z_][\w]*)\s*=\s*(.+)$/);
+            if (!pm) continue;
+            const key = pm[1].toLowerCase();
+            if (key === 'z0' || key === 'zo') { Z0 = parseSpiceValue(pm[2]); sawZ0 = true; }
+            else if (key === 'td') { Td = parseSpiceValue(pm[2]); sawTd = true; }
+            else if (key === 'f') sawFreqForm = true; // F=/NL= normalized-frequency form
+          }
+          if (!sawTd && sawFreqForm) {
+            warnings.push(`Line ${lineNum + 1}: T card "${id}" uses the F=/NL= frequency form — TD is required; imported with TD=${Td}s. Convert F/NL to TD = NL/F manually.`);
+          } else if (!sawTd) {
+            warnings.push(`Line ${lineNum + 1}: T card "${id}" has no TD= — imported as a zero-delay line.`);
+          }
+          if (!sawZ0) warnings.push(`Line ${lineNum + 1}: T card "${id}" has no Z0= — defaulting to 50 Ω.`);
+          const plugin = getPlugin('transLineLossless');
+          const params: any = {};
+          if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
+          params.Z0 = Z0;
+          params.Td = Td;
+          components.push({
+            id, type: 'transLineLossless', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
+          });
+          registerTerminal(tokens[1], id, 'a1');
+          registerTerminal(tokens[2], id, 'a2');
+          registerTerminal(tokens[3], id, 'b1');
+          registerTerminal(tokens[4], id, 'b2');
+          break;
+        }
+        case 'O': {  // Lossy line (ngspice LTRA): O<name> a1 a2 b1 b2 <model>
+          if (tokens.length < 6) {
+            errors.push(`Line ${lineNum + 1}: O card needs 4 nodes + model name: "${line}"`);
+            continue;
+          }
+          const id = tokens[0];
+          const modelName = tokens[5];
+          const model = modelDefs.get(modelName.toLowerCase());
+          if (!model || model.type !== 'LTRA') {
+            warnings.push(`Line ${lineNum + 1}: O card "${id}" references model "${modelName}" which is not a defined LTRA model — using default RLGC parameters.`);
+          }
+          const mp = model?.params;
+          const plugin = getPlugin('transLineLossy');
+          const params: any = {};
+          if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
+          if (mp?.has('r')) params.RperLen = mp.get('r');
+          if (mp?.has('l')) params.LperLen = mp.get('l');
+          if (mp?.has('g')) params.GperLen = mp.get('g');
+          if (mp?.has('c')) params.CperLen = mp.get('c');
+          if (mp?.has('len')) params.length = mp.get('len');
+          components.push({
+            id, type: 'transLineLossy', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
+          });
+          registerTerminal(tokens[1], id, 'a1');
+          registerTerminal(tokens[2], id, 'a2');
+          registerTerminal(tokens[3], id, 'b1');
+          registerTerminal(tokens[4], id, 'b2');
+          break;
         }
         default:
           // Unknown card — warn but continue
