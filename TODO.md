@@ -164,3 +164,9 @@ This file tracks all remaining improvements.
 - [x] **Wire in `monte-carlo.ts`** — batch-runner.ts uses `runMonteCarlo` from monte-carlo.ts (LCG RNG, Gaussian/uniform, tolerance perturbation, yield %, worst-case)
 - [x] **Wire in `keyboard-shortcuts.ts`** — HelpDialog's Shortcuts tab now reads from keyboard-shortcuts.ts (single source of truth; was hardcoded duplicate)
 - [x] **Wire in `integration.ts`** — `integration-adapter.ts` exposes `stampCapacitor` / `stampInductor` that call `capTrapezoidal`, `capGear2`, `inductorTrapezoidal`, `inductorGear2` based on `simOptions.method`; companion models and state tracking fully implemented
+
+## Session: React-bypass rendering + real-world components + AI teaching engine
+
+- [x] **Move canvas rendering out of React** — Direct RAF loop (use-canvas-renderer.ts + pure renderScene in canvas-renderer.ts); mutable viewRef for pan/zoom/cursor/hover; zustand-subscribe dirty flag; setAnimTick per-frame re-render removed; imperative cursor style + status overlay; CircuitCanvas 1625→~710 lines; 18 tests
+- [x] **18 real-world components** — env-sensors.ts (adxl335, mpu6050, ds18b20, dht22, hcsr04, pir501, acs712, mq2, lm565 PLL) + io-display.ts (EC11 rotary encoder, ws2812b, rgbLed, buzzer, electretMic, lcd1602, ssd1306, nrf24l01, esp32dev); 138 tests
+- [x] **AI teaching engine** — circuit.walkthrough (topology-based block detection: 555 astable/monostable, op-amp inverting/non-inverting/buffer/comparator, RC filter, divider, LED driver, flyback check, decoupling check, open-drain pull-up check, floating inputs — all numbers computed from the actual schematic values), concept.explain (level-adaptive + live worked examples), concept.quiz (deterministic seeded MCQs with exact computed answers), component.recommend (registry-grounded); teaching workflow in system prompt; 39 tests

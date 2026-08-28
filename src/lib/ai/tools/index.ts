@@ -37,6 +37,8 @@ import { simulateWhatIfTool } from './whatif-tools';
 import { simulateSweepTool } from './sweep-tools';
 import { designCalculateTool } from './design-calculators';
 import { designBuildPatternTool } from './design-patterns';
+import { circuitWalkthroughTool } from './walkthrough-tools';
+import { conceptExplainTool, conceptQuizTool, componentRecommendTool } from './teaching-tools';
 
 export const TOOLS: Tool[] = [
   // Circuit Building
@@ -80,6 +82,10 @@ export const TOOLS: Tool[] = [
   simulateSweepTool,
   designCalculateTool,
   designBuildPatternTool,
+  circuitWalkthroughTool,
+  conceptExplainTool,
+  conceptQuizTool,
+  componentRecommendTool,
 
   // Knowledge Base
   kbLookupTool,
