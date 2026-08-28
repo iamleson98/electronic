@@ -24,7 +24,7 @@ export interface KBTag {
 export interface KBArticle {
   id: string;
   title: string;
-  category: 'passives' | 'semiconductors' | 'ic' | 'sources' | 'concepts' | 'analysis' | 'troubleshooting' | 'pcb' | 'design-patterns';
+  category: 'passives' | 'semiconductors' | 'ic' | 'concepts' | 'analysis' | 'troubleshooting' | 'pcb' | 'design-patterns';
   tags: string[];
   summary: string;
   body: string;
@@ -37,7 +37,6 @@ export const KB_CATEGORIES: { id: KBArticle['category']; label: string; icon: st
   { id: 'passives', label: 'Passive Components', icon: '🔲' },
   { id: 'semiconductors', label: 'Semiconductors', icon: '🔺' },
   { id: 'ic', label: 'Integrated Circuits', icon: '🔧' },
-  { id: 'sources', label: 'Sources & Power', icon: '⚡' },
   { id: 'analysis', label: 'Analysis Techniques', icon: '📊' },
   { id: 'troubleshooting', label: 'Troubleshooting', icon: '🔍' },
   { id: 'design-patterns', label: 'Design Patterns', icon: '🧩' },
@@ -116,8 +115,8 @@ const ohmsLaw: KBArticle = {
     "- **Capacitors and inductors** — voltage/current relationship involves time, not just instant values",
     "- **Superconductors** — R = 0, so V = 0 regardless of I",
   ]),
-  related: ['kvl-kcl', 'voltage-divider', 'power-dissipation', 'kirchhoff'],
-  seeAlso: ['led-current-limiting', 'resistor-power-rating'],
+  related: ['kvl-kcl', 'voltage-divider', 'kvl-kcl'],
+  seeAlso: ['led-current-limiting'],
 };
 
 const kvlKcl: KBArticle = {
@@ -186,7 +185,7 @@ const kvlKcl: KBArticle = {
     "2. **Counting nodes wrong** — two points connected by a wire are the SAME node. A node is a region of equipotential.",
     "3. **Forgetting ground** — every circuit needs a reference (ground = 0 V). Without it, voltages are undefined and the simulator returns 'singular matrix'.",
   ]),
-  related: ['ohms-law', 'nodal-analysis', 'voltage-divider'],
+  related: ['ohms-law', 'voltage-divider'],
   seeAlso: ['floating-node', 'missing-ground'],
 };
 
@@ -253,8 +252,8 @@ const voltageDivider: KBArticle = {
     "3. **Using too-low values** — 100 Ω + 100 Ω across 5 V wastes 25 mA and dissipates 125 mW.",
     "4. **Expecting precision** — 5% resistors give a 5% output tolerance. Use 1% or better for references.",
   ]),
-  related: ['ohms-law', 'kvl-kcl', 'potentiometer'],
-  seeAlso: ['led-current-limiting', 'transistor-biasing'],
+  related: ['ohms-law', 'kvl-kcl'],
+  seeAlso: ['led-current-limiting'],
 };
 
 const capacitorBasics: KBArticle = {
@@ -352,8 +351,8 @@ const capacitorBasics: KBArticle = {
     "4. **Ignoring DC bias effect** — some ceramic caps (Class II, X7R) lose 50%+ capacitance at rated voltage.",
     "5. **Not calculating ripple current** — in power supplies, the cap's ESR × ripple current = heat.",
   ]),
-  related: ['inductor-basics', 'rc-filter', 'frequency-response', 'decoupling'],
-  seeAlso: ['time-constant', '555-timer'],
+  related: ['inductor-basics', 'decoupling'],
+  seeAlso: ['555-timer'],
 };
 
 const inductorBasics: KBArticle = {
@@ -428,8 +427,8 @@ const inductorBasics: KBArticle = {
     "3. **DC resistance** — real inductors have series resistance (DCR). In power applications, this causes I²R losses and heating.",
     "4. **Self-resonance** — the inductor's parasitic capacitance creates a self-resonant frequency (SRF). Above SRF, it behaves as a capacitor.",
   ]),
-  related: ['capacitor-basics', 'lc-filter', 'frequency-response', 'flyback-diode'],
-  seeAlso: ['buck-converter', 'boost-converter'],
+  related: ['capacitor-basics', 'flyback-diode'],
+  seeAlso: [],
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -515,8 +514,8 @@ const diodeBasics: KBArticle = {
     "3. **Forgetting V_f in calculations** — a '5 V' supply through a silicon diode gives 4.3 V.",
     "4. **Using a slow diode in a SMPS** — 1N4007 has t_rr = 30 µs. A 100 kHz SMPS needs t_rr < 100 ns. Use a Schottky or fast-recovery diode.",
   ]),
-  related: ['led-current-limiting', 'zener-regulator', 'rectifier', 'flyback-diode'],
-  seeAlso: ['transistor-basics', 'power-supply-design'],
+  related: ['led-current-limiting', 'flyback-diode'],
+  seeAlso: ['transistor-basics'],
 };
 
 const ledCurrentLimiting: KBArticle = {
@@ -594,7 +593,7 @@ const ledCurrentLimiting: KBArticle = {
     "4. **Forgetting V_LED varies** — blue LEDs need higher V_supply or fewer in series.",
     "5. **Using PWM without a resistor** — even at 50% duty, the peak current is unlimited.",
   ]),
-  related: ['ohms-law', 'diode-basics', 'power-dissipation'],
+  related: ['ohms-law', 'diode-basics'],
   seeAlso: ['voltage-divider', 'transistor-switch'],
 };
 
@@ -696,7 +695,7 @@ const transistorBasics: KBArticle = {
     "4. **Exceeding I_C(max)** — check the datasheet. A 2N3904 handles 200 mA; a TIP120 handles 5 A.",
     "5. **No flyback diode for inductive loads** — relay/motor coils generate voltage spikes when switched off. Always add a diode across the load.",
   ]),
-  related: ['mosfet-basics', 'transistor-switch', 'transistor-biasing', 'common-emitter'],
+  related: ['mosfet-basics', 'transistor-switch'],
   seeAlso: ['led-current-limiting', 'flyback-diode'],
 };
 
@@ -770,7 +769,7 @@ const mosfetBasics: KBArticle = {
     "",
     "- Power MOSFET: R_DS(on) = 10-50 mΩ",
     "- At 5 A, P = I²·R = 25 · 0.05 = 1.25 W — needs a heatsink",
-    "- At 5 A with R_DS(on) = 5 mΩ: P = 0.625 W — much better",
+    "- At 5 A with R_DS(on) = 5 mΩ: P = I²·R = 25 · 0.005 = 0.125 W — much better",
     "",
     "## Body Diode",
     "",
@@ -789,7 +788,7 @@ const mosfetBasics: KBArticle = {
     "6. **Not heatsinking** — even R_DS(on) = 10 mΩ dissipates 1 W at 10 A. Calculate P = I²·R.",
   ]),
   related: ['transistor-basics', 'transistor-switch', 'flyback-diode'],
-  seeAlso: ['buck-converter', 'motor-control'],
+  seeAlso: [],
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -898,8 +897,8 @@ const opampBasics: KBArticle = {
     "4. **Bandwidth limit** — Gain × Bandwidth = GBW (1 MHz for LM358). At gain 100, bandwidth = 10 kHz.",
     "5. **Slew rate limit** — at high frequencies, the output can't change fast enough.",
   ]),
-  related: ['feedback', 'virtual-ground', 'comparator', 'analog-filters'],
-  seeAlso: ['transistor-basics', 'frequency-response'],
+  related: [],
+  seeAlso: ['transistor-basics'],
 };
 
 const timer555: KBArticle = {
@@ -922,7 +921,7 @@ const timer555: KBArticle = {
     "| 5 | CTRL | Control voltage (⅔V_cc reference; bypass with 100 nF) |",
     "| 6 | THR | Threshold (ends timing when > ⅔V_cc) |",
     "| 7 | DIS | Discharge (open collector, discharges timing cap) |",
-    "| 8 | V_cc | Supply (4.5-16 V for NE555, 2-18 V for TLC555 CMOS) |",
+    "| 8 | V_cc | Supply (4.5-16 V for NE555, 2-15 V for TLC555 CMOS) |",
     "",
     "## Mode 1: Astable (Oscillator)",
     "",
@@ -952,7 +951,7 @@ const timer555: KBArticle = {
     "",
     "Pick R2 = 47 kΩ → R1 = 144k − 94k = 50 kΩ (use 47 kΩ).",
     "",
-    "Recalculate: f = 1.44 / ((47000 + 94000) · 10e−6) = 1.03 Hz.",
+    "Recalculate: f = 1.44 / ((47000 + 94000) · 10e−6) = 1.02 Hz.",
     "",
     "## Mode 2: Monostable (One-Shot)",
     "",
@@ -987,11 +986,11 @@ const timer555: KBArticle = {
     "| Part | Type | V_cc range | Max freq |",
     "|---|---|---|---|",
     "| NE555 | Bipolar | 4.5-16 V | 100 kHz |",
-    "| TLC555 | CMOS | 2-18 V | 2 MHz |",
+    "| TLC555 | CMOS | 2-15 V | 2 MHz |",
     "| LMC555 | CMOS | 1.5-15 V | 3 MHz |",
   ]),
-  related: ['capacitor-basics', 'rc-filter', 'time-constant', 'oscillator'],
-  seeAlso: ['comparator', 'transistor-switch'],
+  related: ['capacitor-basics'],
+  seeAlso: ['transistor-switch'],
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1052,7 +1051,7 @@ const floatingNode: KBArticle = {
     "- **Capacitor-only loop** — a loop with only capacitors. Fix: add a series resistor.",
     "- **Inductor loop** — a loop of only inductors. Fix: add a series resistor.",
   ]),
-  related: ['missing-ground', 'singular-matrix', 'capacitor-basics', 'dc-operating-point'],
+  related: ['missing-ground', 'capacitor-basics', 'dc-operating-point'],
   seeAlso: ['parallel-voltage-sources', 'convergence-issues'],
 };
 
@@ -1105,7 +1104,7 @@ const missingGround: KBArticle = {
     "4. **No ground on the secondary of a transformer** — the secondary is isolated; add a ground reference.",
   ]),
   related: ['floating-node', 'voltage-divider', 'dc-operating-point'],
-  seeAlso: ['power-supply-design', 'decoupling'],
+  seeAlso: ['decoupling'],
 };
 
 const convergenceIssues: KBArticle = {
@@ -1176,7 +1175,7 @@ const convergenceIssues: KBArticle = {
     "4. **Use the AI Diagnose tool** — it can identify convergence issues automatically.",
   ]),
   related: ['floating-node', 'missing-ground', 'dc-operating-point', 'diode-basics'],
-  seeAlso: ['transistor-basics', 'oscillator-design'],
+  seeAlso: ['transistor-basics'],
 };
 
 const parallelVoltageSources: KBArticle = {
@@ -1235,8 +1234,8 @@ const parallelVoltageSources: KBArticle = {
     "",
     "Use **current sharing resistors** (0.1-0.5 Ω) in series with each source.",
   ]),
-  related: ['floating-node', 'convergence-issues', 'singular-matrix'],
-  seeAlso: ['power-supply-design', 'inductor-basics'],
+  related: ['floating-node', 'convergence-issues'],
+  seeAlso: ['inductor-basics'],
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1314,8 +1313,8 @@ const decoupling: KBArticle = {
     "| FPGA | 100 nF per V_cc + 4.7 µF per bank + 47 µF bulk |",
     "| RF IC | 100 pF + 10 nF + 1 µF (multi-value) |",
   ]),
-  related: ['capacitor-basics', 'power-supply-design', 'pcb-layout-basics'],
-  seeAlso: ['ground-plane', 'emi-reduction'],
+  related: ['capacitor-basics', 'pcb-layout-basics'],
+  seeAlso: ['ground-plane'],
 };
 
 const transistorSwitch: KBArticle = {
@@ -1403,7 +1402,7 @@ const transistorSwitch: KBArticle = {
     "6. **No heatsink for high power** — even R_DS(on) = 50 mΩ dissipates 5 W at 10 A.",
   ]),
   related: ['transistor-basics', 'mosfet-basics', 'led-current-limiting', 'flyback-diode'],
-  seeAlso: ['motor-control', 'power-dissipation'],
+  seeAlso: [],
 };
 
 const flybackDiode: KBArticle = {
@@ -1475,7 +1474,7 @@ const flybackDiode: KBArticle = {
     "5. **Forgetting the diode on relay contacts** — arcing pits the contacts.",
   ]),
   related: ['inductor-basics', 'diode-basics', 'transistor-switch', 'mosfet-basics'],
-  seeAlso: ['buck-converter', 'motor-control'],
+  seeAlso: [],
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1589,8 +1588,8 @@ const pcbLayoutBasics: KBArticle = {
     "7. **No mounting holes** — board needs to be secured.",
     "8. **Components too close to the edge** — fab house may clip them.",
   ]),
-  related: ['decoupling', 'ground-plane', 'trace-width', 'gerber-files'],
-  seeAlso: ['drc-rules', 'power-supply-design'],
+  related: ['decoupling', 'ground-plane'],
+  seeAlso: [],
 };
 
 const groundPlane: KBArticle = {
@@ -1649,8 +1648,8 @@ const groundPlane: KBArticle = {
     "### 4. Don't Forget the Return Path for High-Speed Signals",
     "If you route a signal through a via to another layer, the return current must also find a via. Provide a ground via next to every signal via.",
   ]),
-  related: ['decoupling', 'pcb-layout-basics', 'emi-reduction'],
-  seeAlso: ['drc-rules', 'signal-integrity'],
+  related: ['decoupling', 'pcb-layout-basics'],
+  seeAlso: [],
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1712,10 +1711,10 @@ const dcOperatingPoint: KBArticle = {
     "If the bias puts the transistor in cutoff or saturation, the amplifier doesn't amplify.",
     "",
     "### Temperature Sensitivity",
-    "h_FE doubles for every 25°C rise. Use emitter feedback to stabilize.",
+    "h_FE rises roughly +0.5 %/°C with temperature (the ~doubles-every-10 °C rule applies to leakage current I_CBO, not gain). Use emitter feedback to stabilize the operating point.",
   ]),
-  related: ['transistor-biasing', 'ac-analysis', 'transient-analysis', 'convergence-issues'],
-  seeAlso: ['common-emitter', 'floating-node'],
+  related: ['ac-analysis', 'transient-analysis', 'convergence-issues'],
+  seeAlso: ['floating-node'],
 };
 
 const acAnalysisArticle: KBArticle = {
@@ -1787,8 +1786,8 @@ const acAnalysisArticle: KBArticle = {
     "3. **Source has no AC value** — add AC amplitude to the source.",
     "4. **Frequency range too narrow** — sweep wide enough to see the rolloff.",
   ]),
-  related: ['dc-operating-point', 'frequency-response', 'bode-plot', 'rc-filter'],
-  seeAlso: ['transient-analysis', 'analog-filters'],
+  related: ['dc-operating-point'],
+  seeAlso: ['transient-analysis'],
 };
 
 const transientAnalysis: KBArticle = {
@@ -1862,8 +1861,8 @@ const transientAnalysis: KBArticle = {
     "",
     "Use transient for large-signal or switching behavior. Use AC for linear frequency response.",
   ]),
-  related: ['dc-operating-point', 'ac-analysis', 'time-constant', 'capacitor-basics'],
-  seeAlso: ['convergence-issues', 'rc-filter'],
+  related: ['dc-operating-point', 'ac-analysis', 'capacitor-basics'],
+  seeAlso: ['convergence-issues'],
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1922,7 +1921,10 @@ export function searchArticles(query: string, limit = 5): KBArticle[] {
     if (article.tags.some(t => t.toLowerCase() === q)) score += 80;
     if (article.summary.toLowerCase().includes(q)) score += 50;
     for (const word of words) {
-      const count = (haystack.match(new RegExp(word, 'g')) || []).length;
+      // Escape regex metacharacters — a query containing '(' or '[' would
+      // otherwise throw SyntaxError and fail the whole kb.search call.
+      const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const count = (haystack.match(new RegExp(escaped, 'g')) || []).length;
       score += count * 2;
     }
     return { article, score };

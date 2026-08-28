@@ -14,6 +14,7 @@ import { runDRC } from '@/lib/pcb/drc';
 import { verifyNetlist } from '@/lib/pcb/netlist-verify';
 import { autoRoute } from '@/lib/pcb/auto-router';
 import { routeTopologically, DEFAULT_ROUTER_OPTIONS } from '@/lib/pcb/topological-router';
+import { runAutoVerify } from '@/lib/ai/system-prompt';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -42,12 +43,14 @@ const runSimulationTool: Tool = {
     let prev: any = undefined;
     let sim: SimContext | null = null;
     let lastError: string | null = null;
+    let stepsCompleted = 0;
 
     for (let i = 0; i < steps; i++) {
       try {
         const r = simulateStep(ctx.doc.components, ctx.doc.wires, plugins, prev, dt, { method });
         if (!r) { lastError = `Simulation returned null at step ${i} (singular matrix — likely a floating node or conflicting voltage sources)`; break; }
         sim = r.sim;
+        stepsCompleted = i + 1;
         prev = {
           nodeVoltage: r.sim.nodeVoltage,
           branchCurrent: r.sim.branchCurrent,
@@ -77,7 +80,8 @@ const runSimulationTool: Tool = {
     return {
       ok: true,
       result: {
-        stepsCompleted: steps,
+        stepsCompleted,
+        ...(lastError ? { stoppedEarly: true, stopReason: lastError } : {}),
         finalTime: sim.time,
         nodeVoltages: voltages,
         componentCurrents: Array.from(compCurrents.entries()).map(([id, i]) => ({ componentId: id, currentA: i })),
@@ -177,6 +181,27 @@ const solveDCTool: Tool = {
   },
 };
 
+// The system injects an automatic verify.autoCheck tool-call/result pair into
+// the conversation after circuit mutations; this registers the tool FOR REAL
+// so the model can also call it explicitly (previously the injected history
+// referenced an unregistered tool — imitating it returned "Unknown tool").
+const autoCheckTool: Tool = {
+  name: 'verify.autoCheck',
+  category: 'Simulation & Analysis',
+  description: 'Run the automatic verification suite on the current circuit: ERC diagnostics plus a DC operating-point solve. Returns health, ranked issues, and convergence status.',
+  parameters: { type: 'object', properties: {} },
+  execute(_args, ctx) {
+    const report = runAutoVerify(ctx);
+    return {
+      ok: true,
+      result: {
+        ...report,
+        note: 'Auto-check: fix critical/error issues before finishing your answer.',
+      },
+    };
+  },
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 
-export { runSimulationTool, getVoltageTool, getCurrentTool, validatePhysicsTool, solveDCTool };
+export { runSimulationTool, getVoltageTool, getCurrentTool, validatePhysicsTool, solveDCTool, autoCheckTool };

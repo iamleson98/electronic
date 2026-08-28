@@ -62,12 +62,17 @@ const runERCTool: Tool = {
 const reannotateTool: Tool = {
   name: 'schematic.reannotate',
   category: 'Circuit Building',
-  description: 'Re-number all component reference designators (R1, R2, C1, etc.) by insertion order. Useful after adding many components.',
+  description: 'Re-number all component reference designators (R1, R2, C1, etc.) by insertion order. Sets the refdes FIELD (what the UI displays) and keeps component ids stable so existing wiring and AI references stay valid. Useful after adding many components.',
   parameters: { type: 'object', properties: {} },
   execute(_args, ctx) {
-    // Renumber by type, in order of appearance
+    // Renumber the refdes field by type, in order of appearance. The previous
+    // implementation rewired comp.id in place, which (a) corrupted wiring
+    // whenever a rename collided with a later component's id (the later
+    // rename hijacked wires just re-pointed at the earlier one), and (b)
+    // never touched refdes at all — so the screen kept showing the old
+    // designators and AI/user references desynchronized.
     const counters: Record<string, number> = {};
-    const renames: { oldId: string; newId: string }[] = [];
+    const renames: { componentId: string; oldRefdes: string; newRefdes: string }[] = [];
     for (const comp of ctx.doc.components) {
       const prefix = comp.type === 'resistor' ? 'R' :
         comp.type === 'capacitor' ? 'C' :
@@ -79,18 +84,21 @@ const reannotateTool: Tool = {
         comp.type === 'opamp' || comp.type === 'opampRails' || comp.type === 'opampReal' ? 'U' :
         'X';
       counters[prefix] = (counters[prefix] || 0) + 1;
-      const newId = `${prefix}${counters[prefix]}`;
-      if (comp.id !== newId) {
-        renames.push({ oldId: comp.id, newId });
-        // Update wires that reference this component
-        for (const w of ctx.doc.wires) {
-          if (w.from.componentId === comp.id) w.from.componentId = newId;
-          if (w.to.componentId === comp.id) w.to.componentId = newId;
-        }
-        comp.id = newId;
+      const newRefdes = `${prefix}${counters[prefix]}`;
+      const oldRefdes = comp.refdes ?? comp.id;
+      if (oldRefdes !== newRefdes) {
+        comp.refdes = newRefdes;
+        renames.push({ componentId: comp.id, oldRefdes, newRefdes });
       }
     }
-    return { ok: true, result: { renamed: renames.length, renames } };
+    return {
+      ok: true,
+      result: {
+        renamed: renames.length,
+        renames,
+        note: 'Reference designators (labels shown in the UI) were renumbered. Component ids and wiring are unchanged.',
+      },
+    };
   },
 };
 

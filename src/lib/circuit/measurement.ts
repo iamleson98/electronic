@@ -107,6 +107,27 @@ export function parseMeasLine(line: string): MeasCommand | null {
   return cmd;
 }
 
+/**
+ * STRICT SPICE number parser: returns null unless the ENTIRE string is a
+ * valid number with an optional engineering suffix (e.g. "10k", "4.7u",
+ * "2.5meg", "-3.3"). Callers that must not corrupt string parameters
+ * (behavioral expressions like "2*V(in)" must stay strings) use this.
+ */
+export function parseStrictSpiceNumber(s: string): number | null {
+  const t = s.trim();
+  if (t === '') return null;
+  const m = t.match(/^([+-]?[\d.]+(?:[eE][+-]?\d+)?)(meg|k|mil|m|u|µ|n|p|f|t|g)?s?$/i);
+  if (!m) return null;
+  const num = parseFloat(m[1]);
+  if (!Number.isFinite(num)) return null;
+  const suf = (m[2] ?? '').toLowerCase();
+  const mult: Record<string, number> = {
+    t: 1e12, g: 1e9, meg: 1e6, k: 1e3,
+    mil: 25.4e-6, m: 1e-3, u: 1e-6, µ: 1e-6, n: 1e-9, p: 1e-12, f: 1e-15,
+  };
+  return suf === '' ? num : num * (mult[suf] ?? 1);
+}
+
 function parseNumberWithSuffix(s: string): number {
   // Full SPICE suffix support: T G MEG K MIL M U/N/P/F, optional trailing 's',
   // sign and scientific notation. (The old regex silently dropped the sign

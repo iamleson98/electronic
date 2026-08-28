@@ -22,7 +22,7 @@ export type { Tool, ToolContext, ToolResult } from './types';
 
 import { addComponentTool, removeComponentTool, moveComponentTool, rotateComponentTool, setParameterTool, addWireTool, removeWireTool, clearCircuitTool } from './schematic-component-tools';
 import { listComponentsTool, listWiresTool, listComponentTypesTool, getComponentInfoTool, describeCircuitTool } from './schematic-inspection-tools';
-import { runSimulationTool, getVoltageTool, getCurrentTool, validatePhysicsTool, solveDCTool } from './simulation-tools';
+import { runSimulationTool, getVoltageTool, getCurrentTool, validatePhysicsTool, solveDCTool, autoCheckTool } from './simulation-tools';
 import { startSimulationTool, pauseSimulationTool, resetSimulationTool, setSimulationSpeedTool } from './simulation-control-tools';
 import { listExamplesTool, loadExampleTool } from './examples-tools';
 import { exportSPICENetlistTool, exportBOMTool } from './export-tools';
@@ -69,6 +69,7 @@ export const TOOLS: Tool[] = [
   validatePhysicsTool,
   solveDCTool,
   runERCTool,
+  autoCheckTool,
 
   // Simulation Control (client-side)
   startSimulationTool,

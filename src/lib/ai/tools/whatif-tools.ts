@@ -6,6 +6,7 @@
 
 import { simulateStep, solveDC, buildNodeMap, type PrevState } from '../../circuit/engine';
 import type { CircuitComponent, CircuitDocument, Wire, SimContext } from '../../circuit/types';
+import { parseStrictSpiceNumber } from '../../circuit/measurement';
 import type { Tool, ToolContext } from './types';
 import { ensurePlugins } from './helpers';
 
@@ -60,6 +61,7 @@ export const simulateWhatIfTool: Tool = {
     // The plugin map may be stale if the AI added new component types since
     // the request snapshot — refresh before simulating.
     ensurePlugins(ctx);
+    const plugins = ctx.plugins;
     // Deep clone the circuit (strip simState — the clone gets fresh state)
     const clonedDoc: CircuitDocument = {
       version: 1,
@@ -89,16 +91,36 @@ export const simulateWhatIfTool: Tool = {
           },
         };
       }
-      // Try to parse the value as number, fall back to string
-      const numVal = parseFloat(mod.value as string);
-      comp.parameters[mod.key] = isNaN(numVal) ? mod.value : numVal;
+      // Parse the value according to the parameter's declared type.
+      // Bare parseFloat silently corrupts suffixed values ("10k" → 10 Ω,
+      // a 1000× error) and would mangle expression strings ("2*V(in)" → 2).
+      const plugin = plugins.get(comp.type);
+      const paramDef = plugin?.parameters.find(p => p.key === mod.key);
+      let parsed: number | string | boolean;
+      if (typeof mod.value === 'boolean') {
+        parsed = mod.value;
+      } else if (typeof mod.value === 'number') {
+        parsed = mod.value;
+      } else {
+        const asStr = String(mod.value);
+        if (paramDef?.type === 'string') {
+          parsed = asStr;
+        } else if (paramDef?.type === 'boolean' || paramDef?.type === 'select') {
+          parsed = asStr;
+        } else {
+          // numeric (or unknown) parameter — strict SPICE-suffix parse;
+          // expressions / non-numeric strings stay strings.
+          const num = parseStrictSpiceNumber(asStr);
+          parsed = num !== null ? num : asStr;
+        }
+      }
+      comp.parameters[mod.key] = parsed;
       appliedMods.push(`${mod.componentId}.${mod.key} = ${mod.value}`);
     }
 
     // Run the simulation on the clone
-    const steps = args.steps ?? 100;
+    const steps = Math.min(Math.max(Math.floor(args.steps ?? 100) || 1, 1), 2000);
     const dt = args.dt ?? 1e-4;
-    const plugins = ctx.plugins;
 
     try {
       const sim = simulateCircuit(clonedDoc.components, clonedDoc.wires, plugins, steps, dt);
@@ -121,13 +143,15 @@ export const simulateWhatIfTool: Tool = {
           const nodeId = nodeMap.terminalNode.get(`${compId}:${termId}`);
           if (nodeId === undefined) continue;
 
-          // Track voltage over the sim
+          // Track voltage over the sim (guard the empty case — a failed first
+          // step used to leak literal ±Infinity into the response)
           let minV = Infinity, maxV = -Infinity;
           for (let i = 0; i < sim.length; i++) {
             const v = sim[i].nodeVoltage[nodeId] ?? 0;
             if (v < minV) minV = v;
             if (v > maxV) maxV = v;
           }
+          if (sim.length === 0) { minV = 0; maxV = 0; }
           const finalV = sim.length > 0 ? sim[sim.length - 1].nodeVoltage[nodeId] ?? 0 : 0;
           const dcV = dcSim ? dcSim.nodeVoltage[nodeId] ?? 0 : finalV;
           probeResults[probe] = {
@@ -144,8 +168,9 @@ export const simulateWhatIfTool: Tool = {
         result: {
           modifications: appliedMods,
           steps,
+          stepsCompleted: sim.length,
           dt,
-          simTime: steps * dt,
+          simTime: sim.length * dt,
           probes: probeResults,
           note: 'This was a non-mutating simulation using the full engine (Newton iteration + semiconductor models). dcVoltage is the converged DC operating point of the modified circuit; finalVoltage is the last transient sample. The actual circuit is unchanged. To apply these changes permanently, use schematic.setParameter.',
         },

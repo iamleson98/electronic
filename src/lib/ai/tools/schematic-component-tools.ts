@@ -47,6 +47,9 @@ const addComponentTool: Tool = {
       parameters: { ...defaults, ...(args.parameters || {}) },
     };
     ctx.doc.components.push(comp);
+    // Topology changed — invalidate any cached simulation (node ids get
+    // renumbered; a stale simContext would silently return wrong-node data).
+    ctx.simContext = null;
     return { ok: true, result: { id, type: args.type, position: comp.position, parameters: comp.parameters } };
   },
 };
@@ -69,6 +72,7 @@ const removeComponentTool: Tool = {
     // Remove wires connected to this component
     const before = ctx.doc.wires.length;
     ctx.doc.wires = ctx.doc.wires.filter(w => w.from.componentId !== args.id && w.to.componentId !== args.id);
+    ctx.simContext = null; // topology changed — node ids renumbered
     return { ok: true, result: { removedId: args.id, wiresRemoved: before - ctx.doc.wires.length } };
   },
 };
@@ -130,6 +134,9 @@ const setParameterTool: Tool = {
     const comp = findComponent(ctx.doc, args.id);
     if (!comp) return { ok: false, error: `Component "${args.id}" not found` };
     comp.parameters[args.key] = args.value;
+    // A `net` parameter change on a label/power symbol rewires connectivity —
+    // and any parameter change invalidates the cached solve's physics.
+    ctx.simContext = null;
     return { ok: true, result: { id: args.id, key: args.key, value: args.value } };
   },
 };
@@ -176,6 +183,7 @@ const addWireTool: Tool = {
       (wire as any).waypoints = args.waypoints.map(([x, y]: [number, number]) => ({ x, y }));
     }
     ctx.doc.wires.push(wire);
+    ctx.simContext = null; // topology changed — node ids renumbered
     return { ok: true, result: { id: wire.id, from: wire.from, to: wire.to } };
   },
 };
@@ -195,6 +203,7 @@ const removeWireTool: Tool = {
     const idx = ctx.doc.wires.findIndex(w => w.id === args.id);
     if (idx === -1) return { ok: false, error: `Wire "${args.id}" not found` };
     ctx.doc.wires.splice(idx, 1);
+    ctx.simContext = null; // topology changed — node ids renumbered
     return { ok: true, result: { removedId: args.id } };
   },
 };
@@ -209,6 +218,7 @@ const clearCircuitTool: Tool = {
     const wireCount = ctx.doc.wires.length;
     ctx.doc.components = [];
     ctx.doc.wires = [];
+    ctx.simContext = null;
     return { ok: true, result: { cleared: true, componentsRemoved: compCount, wiresRemoved: wireCount } };
   },
 };

@@ -150,9 +150,14 @@ const describeCircuitTool: Tool = {
     }
     const wiredTerminals = new Set<string>();
     for (const w of wires) {
-      union(`${w.from.componentId}:${w.from.terminalId}`, `${w.to.componentId}:${w.to.terminalId}`);
-      wiredTerminals.add(`${w.from.componentId}:${w.from.terminalId}`);
-      wiredTerminals.add(`${w.to.componentId}:${w.to.terminalId}`);
+      const fromKey = `${w.from.componentId}:${w.from.terminalId}`;
+      const toKey = `${w.to.componentId}:${w.to.terminalId}`;
+      // Stale wire endpoints (deleted components / hand-edited documents)
+      // would inject undefined keys into the union-find and crash find().
+      if (!parent.has(fromKey) || !parent.has(toKey)) continue;
+      union(fromKey, toKey);
+      wiredTerminals.add(fromKey);
+      wiredTerminals.add(toKey);
     }
 
     // Group terminals into nets
@@ -171,9 +176,17 @@ const describeCircuitTool: Tool = {
 
     const compById = new Map(components.map(c => [c.id, c]));
     for (const [root, members] of nets) {
+      // Ground detection mirrors the engine: 'ground'/'powerGND' terminals map
+      // to node 0, and any power/net label whose net name is GND/gnd/0 too.
+      // (Only checking type==='ground' false-alarmed "No ground!" on perfectly
+      // valid KiCad imports, which map every GND symbol to powerGND.)
       const isGround = members.some(m => {
         const [cid] = m.split(':');
-        return compById.get(cid)?.type === 'ground';
+        const c = compById.get(cid);
+        if (!c) return false;
+        if (c.type === 'ground' || c.type === 'powerGND') return true;
+        const net = c.parameters?.net;
+        return typeof net === 'string' && ['GND', 'gnd', '0'].includes(net);
       });
       if (isGround) { groundNets.push(`N${[...nets.keys()].indexOf(root) + 1}`); continue; }
       // Supply rail: contains the p terminal of a DC source or a rail-type param source

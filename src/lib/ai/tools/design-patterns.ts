@@ -428,7 +428,12 @@ function buildPowerSupply(ctx: ToolContext, args: any): PatternResult {
   const headroom = peakV - outputV - dropout;
 
   const spec: PatternSpec[] = [
-    { type: 'acVoltage', x: 0, y: 8, params: { amplitude: vacRms, frequency: freq, offset: 0 }, role: 'mains' },
+    // acVoltage.amplitude is the PEAK of the sine (V = offset + amplitude·sin),
+    // so the user-facing vacRms (RMS secondary voltage) must be scaled by √2.
+    // The old code passed RMS as the amplitude while computing the rectified
+    // peak as RMS·√2 − 1.4 — every reported number was ~41% above the actual
+    // circuit, and low-vacRms builds silently ran the regulator in dropout.
+    { type: 'acVoltage', x: 0, y: 8, params: { amplitude: vacRms * Math.SQRT2, frequency: freq, offset: 0 }, role: 'mains' },
     { type: 'transformer', x: 6, y: 8, params: { ratio: 1 }, role: 'transformer' },
     { type: 'diode', x: 12, y: 1, params: { forwardV: 0.7 }, role: 'd1' },
     { type: 'diode', x: 12, y: 15, params: { forwardV: 0.7 }, role: 'd2' },
@@ -469,7 +474,7 @@ function buildPowerSupply(ctx: ToolContext, args: any): PatternResult {
   const guidance = [
     `Full-wave bridge + ${engFormat(cSmoothStd, 'F')} smoothing (~${rippleTarget.toFixed(1)}Vpp ripple at ${engFormat(iLoad, 'A')}) + ${outputV}V linear regulator.`,
     'Transformer ratio is 1:1 — set `ratio` to step the secondary voltage up/down (secondary = primary × ratio).',
-    'The AC source amplitude equals the RMS value here; the simulator treats amplitude as peak — check the transformer ratio if you need exact DC levels.',
+    `AC source: ${vacRms}V RMS secondary (amplitude ${(vacRms * Math.SQRT2).toFixed(1)}V peak) at ${freq}Hz.`,
   ];
   if (headroom < 0) {
     guidance.push(`⚠️ Peak secondary (${peakV.toFixed(1)}V after bridge drop) is below ${outputV} + ${dropout}V dropout — the regulator will drop out at the ripple valleys. Increase vacRms or the transformer ratio.`);

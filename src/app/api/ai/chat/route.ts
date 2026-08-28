@@ -82,7 +82,7 @@ export async function POST(req: NextRequest) {
     let autoVerifyCount = 0;
 
     for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-      const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 16384 });
+      const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 8192 });
 
       // If the AI wants to call tools, execute them
       if (result.tool_calls && result.tool_calls.length > 0) {

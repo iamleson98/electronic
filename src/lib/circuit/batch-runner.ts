@@ -49,8 +49,12 @@ export interface BatchResult {
   type: 'step' | 'mc' | 'worst';
   /** one trace per sweep value */
   traces: RealTrace[];
-  /** sweep values used */
+  /** sweep values used (ALL generated values, including skipped ones) */
   sweepValues: SweepValue[];
+  /** sweep values that actually produced a trace — INDEX-ALIGNED with `traces`.
+   * Sweep points whose analysis failed to converge are skipped entirely, so
+   * pairing traces[i] with sweepValues[i] mislabels every point after a skip. */
+  tracedSweepValues: SweepValue[];
   /** statistics (min/max/mean/std) for .mc */
   stats?: {
     min: number;
@@ -71,6 +75,7 @@ export function runBatch(
   const start = performance.now();
   const sweepValues = generateSweepValues(config, components, wires, plugins);
   const traces: RealTrace[] = [];
+  const tracedSweepValues: SweepValue[] = [];
   const outputValues: number[] = [];
 
   for (const sv of sweepValues) {
@@ -85,13 +90,16 @@ export function runBatch(
     // extract output value
     const outValue = extractOutputValue(result, config.outputNode);
     outputValues.push(outValue);
+    let pushedAnyTrace = false;
     // push the result trace with sweep value in name
     for (const tr of result.traces) {
       if ('yValues' in tr) {
         const rt = tr as RealTrace;
         traces.push({ ...rt, name: `${rt.name} @ ${sv.value}` });
+        pushedAnyTrace = true;
       }
     }
+    if (pushedAnyTrace) tracedSweepValues.push(sv);
   }
 
   // statistics for Monte Carlo
@@ -108,6 +116,7 @@ export function runBatch(
     type: config.type,
     traces,
     sweepValues,
+    tracedSweepValues,
     stats,
     durationMs: performance.now() - start,
   };

@@ -125,8 +125,14 @@ function checkGround(
   plugins: Map<string, ComponentPlugin>,
 ): DiagnosisIssue[] {
   const issues: DiagnosisIssue[] = [];
+  // Mirror the engine exactly: only 'ground'/'powerGND' terminals and nets
+  // NAMED GND/gnd/0 map to node 0 (engine.ts pre-pass + net-label mapping).
+  // powerAGND defaults to net 'AGND' — its own floating node — so counting
+  // it as ground produced a false "has ground" pass while the solve failed.
   const hasGround = components.some(c =>
-    c.type === 'ground' || c.type === 'powerGND' || c.type === 'powerAGND'
+    c.type === 'ground' ||
+    c.type === 'powerGND' ||
+    (c.parameters?.net && ['GND', 'gnd', '0'].includes(c.parameters.net as string))
   );
   const hasVoltageSource = components.some(c =>
     c.type === 'dcVoltage' || c.type === 'acVoltage' || c.type === 'pulseSource'
@@ -218,9 +224,20 @@ function checkParallelVoltageSources(
         (s1p === s2n && s1n === s2p);
 
       if (sameNodes) {
-        // Check if there's any resistance between them
-        const v1 = (s1.parameters.voltage as number) ?? 0;
-        const v2 = (s2.parameters.voltage as number) ?? 0;
+        // Effective DC value per source type (dcVoltage has `voltage`, but
+        // acVoltage/pulseSource don't — the old code always read 0V/0V).
+        const effectiveDC = (s: typeof s1): number => {
+          if (s.type === 'dcVoltage') return (s.parameters.voltage as number) ?? 0;
+          if (s.type === 'acVoltage') return (s.parameters.offset as number) ?? 0;
+          if (s.type === 'pulseSource') {
+            const hi = (s.parameters.high as number) ?? 0;
+            const lo = (s.parameters.low as number) ?? 0;
+            return (hi + lo) / 2;
+          }
+          return 0;
+        };
+        const v1 = effectiveDC(s1);
+        const v2 = effectiveDC(s2);
         issues.push({
           severity: 'critical',
           category: 'parallel-vsources',
@@ -352,25 +369,27 @@ function checkLEDCurrentLimiting(
   for (const comp of components) {
     if (comp.type !== 'led') continue;
 
-    // Check if there's a resistor in series with the LED
+    // Check if there's a resistor in series with the LED — on EITHER side.
+    // (Checking only the anode missed the equally-valid cathode-side
+    // resistor and produced a high-confidence false error.)
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
 
-    // Find wires connected to the LED's anode
-    const ledAnodeWires = wires.filter(w =>
-      (w.from.componentId === comp.id && w.from.terminalId === 'a') ||
-      (w.to.componentId === comp.id && w.to.terminalId === 'a')
-    );
-
-    // Check if any of those wires connect to a resistor
     let hasSeriesR = false;
-    for (const wire of ledAnodeWires) {
-      const otherEnd = wire.from.componentId === comp.id ? wire.to : wire.from;
-      const otherComp = components.find(c => c.id === otherEnd.componentId);
-      if (otherComp && otherComp.type === 'resistor') {
-        hasSeriesR = true;
-        break;
+    for (const termId of ['a', 'k']) {
+      const termWires = wires.filter(w =>
+        (w.from.componentId === comp.id && w.from.terminalId === termId) ||
+        (w.to.componentId === comp.id && w.to.terminalId === termId)
+      );
+      for (const wire of termWires) {
+        const otherEnd = wire.from.componentId === comp.id ? wire.to : wire.from;
+        const otherComp = components.find(c => c.id === otherEnd.componentId);
+        if (otherComp && otherComp.type === 'resistor') {
+          hasSeriesR = true;
+          break;
+        }
       }
+      if (hasSeriesR) break;
     }
 
     if (!hasSeriesR) {
@@ -423,22 +442,23 @@ function checkShortCircuits(
     const vN = nodeMap.terminalNode.get(`${v.id}:n`);
     if (vP === undefined || vN === undefined) continue;
 
-    // Check if V+ is directly connected to GND (node 0) without any load
-    if (vP === 0) {
-      const componentsOnNode = nodeToComponents.get(vP) || [];
-      const loads = componentsOnNode.filter(id => id !== v.id);
-      if (loads.length === 0) {
-        issues.push({
-          severity: 'critical',
-          category: 'short-circuit',
-          title: `Voltage source ${v.id} output is shorted to ground`,
-          description: `The positive terminal of ${v.id} is directly connected to ground with no load in between. This creates a short circuit — infinite current will flow.`,
-          affectedComponents: [v.id],
-          suggestedFix: `Add a load (resistor, LED, etc.) between ${v.id}'s positive terminal and ground.`,
-          kbArticles: ['ohms-law'],
-          confidence: 0.95,
-        });
-      }
+    // A source whose two terminals sit on the SAME node is a dead short
+    // (both-to-ground, or + wired straight to −). The old check fired only
+    // when v+ was on node 0 with no "load" — but the ground symbol itself
+    // was counted as a load, so the check could NEVER trigger; and it would
+    // have false-positived the legitimate negative-rail topology
+    // (p→gnd, n→load). Same-node is the exact pathological condition.
+    if (vP === vN) {
+      issues.push({
+        severity: 'critical',
+        category: 'short-circuit',
+        title: `Voltage source ${v.id} is shorted`,
+        description: `Both terminals of ${v.id} connect to the same node${vP === 0 ? ' (ground)' : ''}. An ideal voltage source across a short creates a singular matrix — the simulator cannot determine the current.`,
+        affectedComponents: [v.id],
+        suggestedFix: `Remove the wire that ties ${v.id}'s + and − terminals together${vP === 0 ? ' (both terminals currently go to ground)' : ''}, or add a load between them.`,
+        kbArticles: ['ohms-law'],
+        confidence: 0.95,
+      });
     }
   }
 

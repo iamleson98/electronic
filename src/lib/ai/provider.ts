@@ -93,9 +93,32 @@ export const AVAILABLE_MODELS: Record<ProviderName, ModelInfo[]> = {
   anthropic: [
     { id: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku (Fastest)', description: 'Fast and affordable Claude.', free: false },
     { id: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet', description: 'Most capable Claude model.', free: false },
-    { id: 'claude-3-opus-20240229', label: 'Claude 3 Opus', description: 'Legacy Opus model.', free: false },
   ],
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Anthropic helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Clamp max_tokens to the model's output limit. The Anthropic API returns a
+ * 400 invalid_request_error when max_tokens exceeds the model's cap, so an
+ * unclamped 16384 default would fail EVERY request on claude-3-* models.
+ */
+export function clampAnthropicMaxTokens(model: string, requested: number): number {
+  // Claude 3.5 family caps at 8192 output tokens; Claude 3 (opus/sonnet) at 4096.
+  const cap = model.includes('3-5') || model.includes('3.5') ? 8192 : 4096;
+  return Math.max(1, Math.min(requested, cap));
+}
+
+/** Map Anthropic stop_reason values onto the OpenAI-style finish_reason union. */
+function mapAnthropicStopReason(reason: string | undefined): 'stop' | 'length' | 'content_filter' {
+  switch (reason) {
+    case 'max_tokens': return 'length';
+    case 'refusal': return 'content_filter';
+    default: return 'stop';
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider factory
@@ -378,11 +401,19 @@ class AnthropicProvider implements AIProvider {
           content.push({ type: 'text', text: msg.content });
         }
         for (const tc of msg.tool_calls) {
+          // Models occasionally emit empty/malformed argument strings; a throw
+          // here would kill the whole request instead of degrading one call.
+          let input: any = {};
+          try {
+            input = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
+          } catch {
+            input = {};
+          }
           content.push({
             type: 'tool_use',
             id: tc.id,
             name: tc.function.name,
-            input: JSON.parse(tc.function.arguments),
+            input,
           });
         }
         anthropicMessages.push({ role: 'assistant', content });
@@ -396,7 +427,10 @@ class AnthropicProvider implements AIProvider {
 
     const body: any = {
       model: this.model,
-      max_tokens: options?.max_tokens ?? 16384,
+      // Per-model output caps — the API rejects max_tokens above the model's
+      // limit with a 400 (claude-3-* families cap at 4096–8192), which would
+      // fail EVERY request. Clamp to the per-family maximum.
+      max_tokens: clampAnthropicMaxTokens(this.model, options?.max_tokens ?? 8192),
       temperature: options?.temperature ?? 0.4,
       messages: anthropicMessages,
     };
@@ -447,7 +481,7 @@ class AnthropicProvider implements AIProvider {
     return {
       content,
       tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-      finish_reason: toolCalls.length > 0 ? 'tool_calls' : data.stop_reason,
+      finish_reason: toolCalls.length > 0 ? 'tool_calls' : mapAnthropicStopReason(data.stop_reason),
       usage: data.usage ? {
         prompt_tokens: data.usage.input_tokens,
         completion_tokens: data.usage.output_tokens,
