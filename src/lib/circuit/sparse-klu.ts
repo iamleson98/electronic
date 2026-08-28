@@ -205,11 +205,14 @@ function stampVCVS(sys: SparseMnaSystem, a: number, b: number, c: number, d: num
 }
 
 function stampVCCS(sys: SparseMnaSystem, n1: number, n2: number, c: number, d: number, g: number) {
+  // current from n1 to n2 (through the element) = g * (V(c) - V(d))
+  // Same convention as solver.ts stampVCCS (SPICE G-element):
+  // row n1 gets +g*(Vc-Vd), row n2 gets -g*(Vc-Vd).
   const t = sys.triplets;
-  if (n1 > 0 && c > 0) t.push(n1 - 1, c - 1, -g);
-  if (n1 > 0 && d > 0) t.push(n1 - 1, d - 1, g);
-  if (n2 > 0 && c > 0) t.push(n2 - 1, c - 1, g);
-  if (n2 > 0 && d > 0) t.push(n2 - 1, d - 1, -g);
+  if (n1 > 0 && c > 0) t.push(n1 - 1, c - 1, g);
+  if (n1 > 0 && d > 0) t.push(n1 - 1, d - 1, -g);
+  if (n2 > 0 && c > 0) t.push(n2 - 1, c - 1, -g);
+  if (n2 > 0 && d > 0) t.push(n2 - 1, d - 1, g);
 }
 
 function stampCCCS(sys: SparseMnaSystem, n1: number, n2: number, extraIndex: number, beta: number) {

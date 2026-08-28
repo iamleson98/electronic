@@ -113,10 +113,13 @@ export function cStampVoltageSource(sys: ComplexMnaSystem, n1: number, n2: numbe
 }
 
 export function cStampVCCS(sys: ComplexMnaSystem, n1: number, n2: number, c: number, d: number, g: Complex) {
-  if (n1 > 0 && c > 0) addComplex(sys, n1 - 1, c - 1, { re: -g.re, im: -g.im });
-  if (n1 > 0 && d > 0) addComplex(sys, n1 - 1, d - 1, g);
-  if (n2 > 0 && c > 0) addComplex(sys, n2 - 1, c - 1, g);
-  if (n2 > 0 && d > 0) addComplex(sys, n2 - 1, d - 1, { re: -g.re, im: -g.im });
+  // current from n1 to n2 (through the element) = g * (V(c) - V(d))
+  // Mirrors solver.ts stampVCCS (SPICE G-element convention):
+  // row n1 gets +g*(Vc-Vd), row n2 gets -g*(Vc-Vd).
+  if (n1 > 0 && c > 0) addComplex(sys, n1 - 1, c - 1, g);
+  if (n1 > 0 && d > 0) addComplex(sys, n1 - 1, d - 1, { re: -g.re, im: -g.im });
+  if (n2 > 0 && c > 0) addComplex(sys, n2 - 1, c - 1, { re: -g.re, im: -g.im });
+  if (n2 > 0 && d > 0) addComplex(sys, n2 - 1, d - 1, g);
 }
 
 export function cStampVCVS(sys: ComplexMnaSystem, a: number, b: number, c: number, d: number, mu: Complex): number {

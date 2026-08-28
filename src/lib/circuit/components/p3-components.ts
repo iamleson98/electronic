@@ -118,12 +118,11 @@ function makeOpampMacromodel(type: string, name: string, params: {
         // Linear: I(out) = gm·(V+ − V− + Voff) delivered into 1/rout.
         // gm·rout = Av reproduces the open-loop gain; the VCCS makes the
         // closed-loop solve a purely linear (one-shot) problem.
-        // NOTE: this solver's stampVCCS(n1, n2, c, d, g) pushes g·(V(c)−V(d))
-        // INTO n1 (verified numerically — the "current from n1 to n2" doc
-        // comment is inverted), hence n1 = out here.
+        // stampVCCS(0, out, inp, inn, gm): current from ground into out =
+        // gm·(V+−V−) — the op-amp output sources the transconductance current.
         const gm = Av / rOut;
         sys.stampConductance(out, 0, 1 / rOut);
-        sys.stampVCCS(out, 0, inp, inn, gm);
+        sys.stampVCCS(0, out, inp, inn, gm);
         sys.stampCurrentSource(0, out, gm * vOff);
       } else {
         // Saturated: Thevenin at the rail-limited level through rout (the
@@ -493,9 +492,10 @@ export const igbt: ComponentPlugin = {
       const vgePrev = vge;
       const iSat = kp * vov * vov;
       const gm = Math.max(0, 2 * kp * vov);
-      // stampVCCS pushes g·(V(c)−V(d)) into n1 — so n1 = e delivers the
-      // collector current into the emitter while drawing it from c.
-      sys.stampVCCS(e, c, g, e, gm);
+      // stampVCCS(c, e, g, e, gm): current c→e = gm·Vge — draws the
+      // collector current out of c and delivers it into e (the IGBT's
+      // collector sinks, emitter sources).
+      sys.stampVCCS(c, e, g, e, gm);
       sys.stampCurrentSource(c, e, iSat - gm * vgePrev);
     } else {
       // Ohmic region: fully enhanced — small on-resistance

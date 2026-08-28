@@ -412,12 +412,14 @@ function makeBSIM3Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
       // Evaluate the BSIM3 model at the operating point
       const op = evaluateBSIM3(vGSguess, vDSguess, vBSguess, p);
       const sign = isNmos ? 1 : -1;
-      // Stamp VCCS: gm — drain current controlled by Vgs
-      sys.stampVCCS(d, s, g, s, sign * op.gm);
+      // Polarity-symmetric Jacobian (see advanced-semi.ts bjtGPNpn note):
+      // +gm/+gds/+gmb on the matrix for BOTH channels; the channel polarity
+      // lives only in the offset source below.
+      sys.stampVCCS(d, s, g, s, op.gm);
       // Output conductance: gds between d and s
-      sys.stampConductance(d, s, sign * op.gds);
+      sys.stampConductance(d, s, op.gds);
       // Body transconductance: gmb — drain current controlled by Vbs
-      sys.stampVCCS(d, s, b, s, sign * op.gmb);
+      sys.stampVCCS(d, s, b, s, op.gmb);
       // Current source offset (linearization about the operating point)
       const Ieq = op.id - op.gm * vGSguess - op.gds * vDSguess - op.gmb * vBSguess;
       sys.stampCurrentSource(d, s, sign * Ieq);

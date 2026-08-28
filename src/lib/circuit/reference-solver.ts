@@ -91,11 +91,13 @@ export class ReferenceSolver {
         if (i2 > 0) { A[i2-1][col] -= 1; A[col][i2-1] -= 1; }
         z[col] = s.value;
       } else if (s.type === 'VCCS') {
+        // current from n1 to n2 (through the element) = gm * (V(c1) - V(c2))
+        // (SPICE G-element convention — matches the main solver's stampVCCS)
         const ic1 = this.nodeId(s.nodes[2]);
         const ic2 = this.nodeId(s.nodes[3]);
         const gm = s.value;
-        if (i1 > 0) { if (ic1 > 0) A[i1-1][ic1-1] -= gm; if (ic2 > 0) A[i1-1][ic2-1] += gm; }
-        if (i2 > 0) { if (ic1 > 0) A[i2-1][ic1-1] += gm; if (ic2 > 0) A[i2-1][ic2-1] -= gm; }
+        if (i1 > 0) { if (ic1 > 0) A[i1-1][ic1-1] += gm; if (ic2 > 0) A[i1-1][ic2-1] -= gm; }
+        if (i2 > 0) { if (ic1 > 0) A[i2-1][ic1-1] -= gm; if (ic2 > 0) A[i2-1][ic2-1] += gm; }
       } else if (s.type === 'VCVS') {
         const ic1 = this.nodeId(s.nodes[2]);
         const ic2 = this.nodeId(s.nodes[3]);

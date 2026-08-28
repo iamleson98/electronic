@@ -159,8 +159,11 @@ function buildACSystemAtFrequency(
       if (comp.type === 'transLineLossless') {
         const Z0 = Math.max(1e-3, comp.parameters.Z0 as number);
         const Td = Math.max(1e-15, comp.parameters.Td as number);
-        // Z0 = √(L/C) and Td = len·√(LC) → pick C=1, L=Z0², len = Td/√(LC) = Td
-        L = Z0 * Z0; C = 1; len = Td;
+        // Z0 = √(L/C) and Td = len·√(LC). With C=1 and L=Z0² we get
+        // √(LC) = Z0, so the electrical length must be len = Td/Z0 to make
+        // the one-way delay exactly Td (the old len = Td made the delay
+        // scale with Z0 — 50 Ω/1 ns lines delayed 50 ns).
+        L = Z0 * Z0; C = 1; len = Td / Z0;
       } else {
         R = Math.max(0, comp.parameters.RperLen as number);
         L = Math.max(0, comp.parameters.LperLen as number);
@@ -283,21 +286,24 @@ function buildACSystemAtFrequency(
       const Vt = thermalVoltage(temp);
       const gm = Ic / Vt; // no cap — a 10 mA bias legitimately gives ~0.4 S
       const beta = Math.max(1, hfe);
-      const rpi = gm > 0 ? beta / gm : 0;
-      const sign = isNpn ? 1 : -1;
+      const gpi = gm > 0 ? gm / beta : 0; // input conductance 1/rπ (rπ = β/gm is a RESISTANCE)
       if (gm > 0) {
-        // input resistance rpi between base and emitter
-        cStampConductance(sys, b, e, { re: rpi, im: 0 });
-        // VCCS: ic = gm·vbe (current flows c→e for NPN, e→c for PNP)
-        cStampVCCS(sys, c, e, b, e, { re: sign * gm, im: 0 });
+        // input conductance 1/rpi between base and emitter (the old code
+        // stamped rπ OHMS as SIEMENS — an effective short across the b-e
+        // junction that destroyed the AC input impedance)
+        cStampConductance(sys, b, e, { re: gpi, im: 0 });
+        // VCCS: ic = gm·vbe — polarity-symmetric Jacobian: +gm for BOTH NPN
+        // and PNP (the PNP's reversed current direction cancels its reversed
+        // junction polarity), so no sign here.
+        cStampVCCS(sys, c, e, b, e, { re: gm, im: 0 });
       } else {
         // Off: keep the base weakly defined (1 MΩ), no channel
         cStampConductance(sys, b, e, { re: 1e-6, im: 0 });
       }
-      // output conductance (Early effect)
+      // output conductance (Early effect) — polarity-symmetric: +go for both
       const Vaf = Math.abs((comp.parameters.Vaf as number) ?? 100);
       const go = Ic > 0 ? Ic / Math.max(1, Vaf) : 1e-12;
-      cStampConductance(sys, c, e, { re: sign * go, im: 0 });
+      cStampConductance(sys, c, e, { re: go, im: 0 });
     } else if (comp.type === 'nmos' || comp.type === 'pmos') {
       // Linearize: gm = Kp·vov, gds = Id·λ (consistent with the ½·Kp·vov² DC law)
       const d = terms.find((t) => t.terminalId === 'd')?.nodeId ?? 0;
@@ -320,9 +326,9 @@ function buildACSystemAtFrequency(
         : Kp * (vov * vdsMag - 0.5 * vdsMag * vdsMag) * (1 + lambda * vdsMag); // linear
       const gm = vov > 0 ? Kp * vov : 0;
       const gds = Id * lambda;
-      const sign = isNmos ? 1 : -1;
-      if (gm > 0) cStampVCCS(sys, d, s, g, s, { re: sign * gm, im: 0 });
-      cStampConductance(sys, d, s, { re: sign * gds, im: 0 });
+      // Polarity-symmetric Jacobian: +gm/+gds for BOTH N and P channels.
+      if (gm > 0) cStampVCCS(sys, d, s, g, s, { re: gm, im: 0 });
+      cStampConductance(sys, d, s, { re: gds, im: 0 });
       // gate is high impedance
       cStampConductance(sys, g, s, { re: 1e-6, im: 0 });
     } else if (comp.type === 'opamp' || comp.type === 'opampRails') {

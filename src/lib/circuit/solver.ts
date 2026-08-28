@@ -81,12 +81,16 @@ function stampVCVS(sys: MnaSystem, a: number, b: number, c: number, d: number, m
 }
 
 function stampVCCS(sys: MnaSystem, n1: number, n2: number, c: number, d: number, g: number) {
-  // current from n1 to n2 = g * (V(c) - V(d))
+  // current from n1 to n2 (through the element) = g * (V(c) - V(d))
+  // KCL row k = currents leaving node k, so:
+  //   row n1: current leaving n1 into the element = +g*(V(c)-V(d))
+  //   row n2: current leaving n2 into the element = -g*(V(c)-V(d))
+  // (matches the stampCCCS convention and standard SPICE G-element stamps)
   const s = sys.size;
-  if (n1 > 0 && c > 0) sys.A[idx(n1 - 1, c - 1, s)] -= g;
-  if (n1 > 0 && d > 0) sys.A[idx(n1 - 1, d - 1, s)] += g;
-  if (n2 > 0 && c > 0) sys.A[idx(n2 - 1, c - 1, s)] += g;
-  if (n2 > 0 && d > 0) sys.A[idx(n2 - 1, d - 1, s)] -= g;
+  if (n1 > 0 && c > 0) sys.A[idx(n1 - 1, c - 1, s)] += g;
+  if (n1 > 0 && d > 0) sys.A[idx(n1 - 1, d - 1, s)] -= g;
+  if (n2 > 0 && c > 0) sys.A[idx(n2 - 1, c - 1, s)] -= g;
+  if (n2 > 0 && d > 0) sys.A[idx(n2 - 1, d - 1, s)] += g;
 }
 
 function stampCCCS(sys: MnaSystem, n1: number, n2: number, extraIndex: number, beta: number) {

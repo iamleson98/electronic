@@ -208,16 +208,23 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       const gm = Is * evBE / Vt;
       const gds = Is * evBE / Vaf;
       const gpi = gm / Bf;
-      // Linearized model: VCCS from b→e controlling c→e (gm), conductance c-e (gds), conductance b-e (gpi)
-      // For NPN: current source c→e = gm*(vBE)
-      // For PNP: reverse all signs
+      // Linearized model: VCCS c→e controlled by b→e (gm), conductance c-e
+      // (gds), conductance b-e (gpi). The LHS stamps are polarity-SYMMETRIC:
+      // for both NPN and PNP the through-device current I(c→e) responds to
+      // V(b→e) and V(c→e) with positive gm/gds/gpi (the PNP's reversed current
+      // direction cancels its reversed junction polarities), so no `sign` is
+      // needed on the matrix stamps. Only the RHS offset sources carry the
+      // polarity: +IbEq/IcEq (NPN: currents c→e and b→e) vs −… for PNP.
+      // stampVCCS(c, e, b, e, gm): current c→e = gm·V(b→e) — sinks gm·Vbe
+      // from the collector and returns it at the emitter (correct for NPN;
+      // for PNP the negative Vbe makes the current flow e→c, also correct).
+      sys.stampVCCS(c, e, b, e, gm);
+      // output conductance gds (always positive — a negative conductance is a
+      // generator and blew PNP collectors above the rail)
+      sys.stampConductance(c, e, gds);
+      // input conductance gpi (at b-e junction, always positive)
+      sys.stampConductance(b, e, gpi);
       const sign = isNpn ? 1 : -1;
-      // VCCS: I_c = gm * V_BE
-      sys.stampVCCS(c, e, b, e, sign * gm);
-      // output conductance gds
-      sys.stampConductance(c, e, sign * gds);
-      // input conductance gpi (at b-e junction)
-      sys.stampConductance(b, e, sign * gpi);
       // current sources for the constant offsets (linearization around guess)
       const IcEq = Ic - gm * vBEguess - gds * vCEguess;
       // Base current at the operating point: Ib = Is/Bf·e^(vBE/Vt) = gm·Vt/Bf.
@@ -377,7 +384,6 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
         gm = 1e-7 * Math.exp(expArg) / (n * Vt_thermal);
         gds = 1e-7 * (Math.exp(expArg) - 1) * Lambda;
       }
-      const sign = isNmos ? 1 : -1;
       // Effective channel terminals. When Rd/Rs > 0 the channel connects to
       // the external terminal through a REAL series conductance via an
       // internal pseudo-node (an extra unknown used as a voltage node). The
@@ -395,11 +401,16 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
         sys.stampConductance(si, s, 1 / Rs);
         sEff = si;
       }
-      // stamp VCCS from d→s controlled by g-s
-      sys.stampVCCS(dEff, sEff, g, sEff, sign * gm);
-      // output conductance
-      sys.stampConductance(dEff, sEff, sign * gds);
-      // current source offset (linearization)
+      // stamp VCCS d→s controlled by g→s. Polarity-symmetric Jacobian (see
+      // bjtGPNpn note): through-device current I(d→s) responds to V(g→s)
+      // with +gm for BOTH N- and P-channel — the P-channel's reversed current
+      // direction cancels its reversed gate polarity. A negative gds stamp
+      // is a generator (PMOS drain hit −50 V before this fix).
+      sys.stampVCCS(dEff, sEff, g, sEff, gm);
+      // output conductance (always positive)
+      sys.stampConductance(dEff, sEff, gds);
+      // current source offset (linearization) — carries the channel polarity
+      const sign = isNmos ? 1 : -1;
       const Ieq = Id - gm * vGSguess - gds * vDSguess;
       sys.stampCurrentSource(dEff, sEff, sign * Ieq);
     },
@@ -511,8 +522,10 @@ function makeJFET(type: 'n' | 'p'): ComponentPlugin {
         }
       }
       const sign = isN ? 1 : -1;
-      sys.stampVCCS(d, s, g, s, sign * gm);
-      sys.stampConductance(d, s, sign * gds);
+      // Polarity-symmetric Jacobian (see bjtGPNpn note): +gm/+gds for both
+      // N- and P-channel; the polarity lives only in the offset source.
+      sys.stampVCCS(d, s, g, s, gm);
+      sys.stampConductance(d, s, gds);
       const Ieq = Id - gm * vGSguess - gds * vDSguess;
       sys.stampCurrentSource(d, s, sign * Ieq);
     },

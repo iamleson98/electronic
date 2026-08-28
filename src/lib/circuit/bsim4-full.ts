@@ -815,9 +815,12 @@ function makeBSIM4Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
       const sign = isNmos ? 1 : -1;
 
       // ── Drain current source + small-signal conductances (BSIM3-style) ──
-      sys.stampVCCS(d, s, g, s, sign * op.gm);
-      sys.stampConductance(d, s, sign * op.gds);
-      sys.stampVCCS(d, s, b, s, sign * op.gmb);
+      // Polarity-symmetric Jacobian (see advanced-semi.ts bjtGPNpn note):
+      // +gm/+gds/+gmb on the matrix for BOTH channels; the channel polarity
+      // lives only in the offset source below.
+      sys.stampVCCS(d, s, g, s, op.gm);
+      sys.stampConductance(d, s, op.gds);
+      sys.stampVCCS(d, s, b, s, op.gmb);
       const Ieq = op.id - op.gm * vGSguess - op.gds * vDSguess - op.gmb * vBSguess;
       sys.stampCurrentSource(d, s, sign * Ieq);
 

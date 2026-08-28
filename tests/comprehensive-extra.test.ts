@@ -245,12 +245,13 @@ describe('Complex MNA solver', () => {
   });
   it('cStampVCCS: gm=0.1 produces correct output', () => {
     // V1(5V) on node 1, gm=0.1 → VCCS produces I = g*(V_c − V_d) = 0.5A.
-    // In this implementation, current flows from n2 → n1 (out of n2, into n1).
-    // To source INTO node 2: call with n1=2, n2=0 (current flows from ground into node 2).
+    // cStampVCCS(sys, n1, n2, c, d, g): current flows through the element
+    // from n1 to n2 (SPICE G convention). To source INTO node 2 from
+    // ground: call with n1=0, n2=2 (current flows from ground into node 2).
     // That current flows through R=10Ω → V(node2) = 0.5A × 10Ω = 5V.
     const sys = createComplexMnaSystem(2, 1);
     cStampVoltageSource(sys, 1, 0, { re: 5, im: 0 });
-    cStampVCCS(sys, 2, 0, 1, 0, { re: 0.1, im: 0 });
+    cStampVCCS(sys, 0, 2, 1, 0, { re: 0.1, im: 0 });
     cStampConductance(sys, 2, 0, { re: 0.1, im: 0 });  // R = 10Ω
     const r = solveComplexMna(sys);
     expect(r).not.toBeNull();
@@ -323,15 +324,28 @@ describe('Reference solver', () => {
     expect(Math.abs(r.currents.get('V1')!)).toBeCloseTo(0.005, 6);
   });
   it('solve: VCCS mirrors current', () => {
-    // V1 = 1V on node 'a', gm=0.5, VCCS pulls 0.5A out of node 'b'
-    // Through R=2Ω on node b → V(b) = 1V
+    // V1 = 1V on node 'a', gm=0.5. stampVCCS('0','b','a','0',0.5) drives
+    // 0.5·V(a) = 0.5A from ground INTO node 'b' (SPICE G convention: current
+    // flows through the element from n1 to n2). Through R=2Ω on node b →
+    // V(b) = 1V.
+    const s = new ReferenceSolver();
+    s.stampV('a', '0', 1, 'V1');
+    s.stampVCCS('0', 'b', 'a', '0', 0.5);
+    s.stampR('b', '0', 2);
+    const r = s.solve();
+    expect(r.ok).toBe(true);
+    expect(r.voltages.get('b')).toBeCloseTo(1, 6);
+  });
+  it('solve: VCCS draws current from n1 (SPICE G polarity)', () => {
+    // stampVCCS('b','0','a','0',0.5): current flows b→0 through the element,
+    // i.e. 0.5A is DRAWN OUT of node 'b' → V(b) = −1V across 2Ω.
     const s = new ReferenceSolver();
     s.stampV('a', '0', 1, 'V1');
     s.stampVCCS('b', '0', 'a', '0', 0.5);
     s.stampR('b', '0', 2);
     const r = s.solve();
     expect(r.ok).toBe(true);
-    expect(r.voltages.get('b')).toBeCloseTo(1, 6);
+    expect(r.voltages.get('b')).toBeCloseTo(-1, 6);
   });
   it('solve: VCVS mirrors voltage', () => {
     // V1 = 3V on node 'a', mu=2 → VCVS makes V('b') = 6V

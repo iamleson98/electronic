@@ -1208,7 +1208,10 @@ export const esp32dev: ComponentPlugin = {
           // pins — VIN supplies exactly the rail load + module current,
           // unlike the plain ground-referenced Thevenin the lm7805 uses.
           sys.stampCurrentSource(vin, v3, V3V3 / RON);
-          sys.stampVCCS(vin, v3, v3, gnd, 1 / RON);
+          // stampVCCS(v3, vin, v3, gnd, 1/RON): current from 3V3 back to VIN
+          // = V(3v3)/ron — combined with the fixed source above, the net
+          // pass current VIN→3V3 is exactly (3.3 − V(3v3))/ron.
+          sys.stampVCCS(v3, vin, v3, gnd, 1 / RON);
         } else {
           // current limit: fixed 600 mA pass + gmin to keep the row alive
           sys.stampCurrentSource(vin, v3, ILIMIT);
