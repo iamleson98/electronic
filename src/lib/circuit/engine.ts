@@ -1096,6 +1096,27 @@ export interface PrevState {
   state: Record<string, any>;
 }
 
+/**
+ * Restore a deep-cloned snapshot into a live state object IN PLACE: keys are
+ * added/updated/deleted on `live` itself (and recursively on its nested
+ * objects), so references other code holds — e.g. `comp.simState` pointing at
+ * `live[compId]` — keep their identity while their contents travel back in
+ * time. Used to roll back plugin state before a gmin retry-stamp.
+ */
+function restoreStateInPlace(live: Record<string, any>, snapshot: Record<string, any>): void {
+  for (const k of Object.keys(live)) {
+    if (!(k in snapshot)) delete live[k];
+  }
+  for (const [k, v] of Object.entries(snapshot)) {
+    const cur = live[k];
+    if (v !== null && typeof v === 'object' && cur !== null && typeof cur === 'object' && !Array.isArray(v) && !Array.isArray(cur)) {
+      restoreStateInPlace(cur, v);
+    } else {
+      live[k] = v;
+    }
+  }
+}
+
 export function simulateStep(
   components: CircuitComponent[],
   wires: Wire[],
@@ -1119,8 +1140,6 @@ export function simulateStep(
   // O(nnz) memory and O(flops) factorization keep large designs fast.
   // Below that threshold, the dense solver wins (less overhead per stamp).
   const useSparse = shouldUseSparseSolver(numNodes - 1, maxExtras);
-  const sparseSys = useSparse ? createSparseMnaSystem(numNodes - 1, maxExtras) : null;
-  const sys = useSparse ? asMnaSystem(sparseSys!) : createMnaSystem(numNodes - 1, maxExtras);
 
   const time = prev && prev.nodeVoltage.length > 0 ? prev.time + dt : 0;
 
@@ -1196,51 +1215,81 @@ export function simulateStep(
     }
   }
 
-  // Stamp all components
-  sys.nextExtra = numNodes - 1; // reset extra counter; extra vars start at index (numNodes-1)
-  if (sparseSys) sparseSys.clearStamps(); // reset triplet buffer + RHS for fresh stamping
-  for (const comp of components) {
-    const plugin = plugins.get(comp.type);
-    if (!plugin || !plugin.stamp) continue;
-    const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
-    try {
-      (plugin.stamp as any)(comp.parameters, terminals, sys, sim, comp);
-    } catch (e) {
-      console.error(`stamp error in ${comp.type} (${comp.id}):`, e);
-    }
+  // Stamp + solve, with an optional gmin retry. A singular matrix can occur
+  // legitimately when a node's only DC path is a small capacitance (the DC
+  // companion of a 1nF cap at dt=1e6 is 1e-15 S — below the pivot floor), so
+  // on failure we retry once with SPICE-style gmin (1e-12 S from every node
+  // to ground). The retry is skipped entirely for circuits with no ground
+  // reference at all (a truly floating circuit must stay an error, exactly
+  // like SPICE's "no DC path to ground"), and plugin state mutated during
+  // the first stamp (edge counters, region latches) is rolled back first
+  // so the re-stamp applies every transition exactly once.
+  const hasGroundRef = [...nodeMap.terminalNode.values()].some((n: number) => n === 0);
+  let stateSnapshot: Record<string, any> | null = null;
+  if (hasGroundRef && typeof (globalThis as any).structuredClone === 'function') {
+    try { stateSnapshot = (globalThis as any).structuredClone(stateMap); } catch { stateSnapshot = null; }
   }
 
-  // resize system: we may have allocated more extra vars than used.
-  // build a smaller system to avoid singular cols
-  const actualSize = sys.nextExtra;
-  if (actualSize < sys.size) {
-    if (sparseSys) {
-      // Sparse path: drop anything outside the used block (O(nnz)) — no dense
-      // copy is involved. Stamps never touch unused extras, so this is a pure
-      // truncation of triplets + RHS.
-      sparseSys.truncate(actualSize);
-      sys.numExtra = actualSize - (numNodes - 1);
-    } else {
-      // shrink
-      const newA = new Float64Array(actualSize * actualSize);
-      const newZ = new Float64Array(actualSize);
-      for (let r = 0; r < actualSize; r++) {
-        for (let c = 0; c < actualSize; c++) {
-          newA[r * actualSize + c] = sys.A[r * sys.size + c];
-        }
-        newZ[r] = sys.z[r];
+  const buildAndSolve = (withGmin: boolean): { x: Float64Array | null; sys: any; sparseSys: any } => {
+    const sparse = useSparse ? createSparseMnaSystem(numNodes - 1, maxExtras) : null;
+    const s = useSparse ? asMnaSystem(sparse!) : createMnaSystem(numNodes - 1, maxExtras);
+    s.nextExtra = numNodes - 1;
+    if (withGmin) {
+      for (let n = 1; n < numNodes; n++) s.stampConductance(n, 0, 1e-12);
+    }
+    for (const comp of components) {
+      const plugin = plugins.get(comp.type);
+      if (!plugin || !plugin.stamp) continue;
+      const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
+      try {
+        (plugin.stamp as any)(comp.parameters, terminals, s, sim, comp);
+      } catch (e) {
+        console.error(`stamp error in ${comp.type} (${comp.id}):`, e);
       }
-      sys.A = newA;
-      sys.z = newZ;
-      sys.size = actualSize;
-      sys.numExtra = actualSize - (numNodes - 1);
     }
-  }
+    // resize system: we may have allocated more extra vars than used.
+    // build a smaller system to avoid singular cols
+    const actualSize = s.nextExtra;
+    if (actualSize < s.size) {
+      if (sparse) {
+        // Sparse path: drop anything outside the used block (O(nnz)) — no dense
+        // copy is involved. Stamps never touch unused extras, so this is a pure
+        // truncation of triplets + RHS.
+        sparse.truncate(actualSize);
+        s.numExtra = actualSize - (numNodes - 1);
+      } else {
+        // shrink
+        const newA = new Float64Array(actualSize * actualSize);
+        const newZ = new Float64Array(actualSize);
+        for (let r = 0; r < actualSize; r++) {
+          for (let c = 0; c < actualSize; c++) {
+            newA[r * actualSize + c] = s.A[r * s.size + c];
+          }
+          newZ[r] = s.z[r];
+        }
+        s.A = newA;
+        s.z = newZ;
+        s.size = actualSize;
+        s.numExtra = actualSize - (numNodes - 1);
+      }
+    }
+    const sol = useSparse && sparse ? solveSparse(sparse) : solveMna(s);
+    return { x: sol, sys: s, sparseSys: sparse };
+  };
 
-  const x = useSparse && sparseSys ? solveSparse(sparseSys) : solveMna(sys);
+  let attempt = buildAndSolve(false);
+  let x = attempt.x;
+  if (!x && stateSnapshot) {
+    // roll the plugin state back to the pre-stamp snapshot (in place, so
+    // comp.simState references keep their identity), then retry with gmin
+    restoreStateInPlace(stateMap, stateSnapshot);
+    attempt = buildAndSolve(true);
+    x = attempt.x;
+  }
   if (!x) {
     return null;
   }
+  const sys = attempt.sys;
 
   // copy results back into sim.nodeVoltage / branchCurrent
   for (let i = 0; i < numNodes; i++) {

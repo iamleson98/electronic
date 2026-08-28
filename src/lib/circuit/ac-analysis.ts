@@ -276,29 +276,56 @@ function computeOutputVoltage(
       const g = -1 / (omega * L);  // -j/(ωL)
       stampY(Yre, Yim, i1, i2, N, 0, g);
     } else if (c.type === 'dcVoltage' || c.type === 'acVoltage') {
-      // Pin the + terminal to the source voltage (penalty method)
+      // Voltage sources in small-signal phasor analysis:
+      //   stimulus      → pin V(+) − V(−) to the AC phasor acMag·e^{jφ}
+      //   everything else → 0V = AC SHORT (this is why supply rails are AC
+      //     ground in SPICE). The old code pinned non-stimulus DC sources to
+      //     their DC VALUE — injecting a spurious second stimulus into every
+      //     biased circuit (an RC low-pass read 6× too high), and left
+      //     non-stimulus AC sources completely unstamped (an AC open).
+      let vRe = 0, vIm = 0;
       if (c.id === source.id) {
-        const v = acMag;  // AC amplitude
-        if (i1 >= 0) {
-          Yre[i1 * N + i1] += PIN_G;
-          Ire[i1] += PIN_G * v;
+        const phaseDeg = Number(c.parameters?.phase) || 0;
+        const phaseRad = (phaseDeg * Math.PI) / 180;
+        vRe = acMag * Math.cos(phaseRad);
+        vIm = acMag * Math.sin(phaseRad);
+      }
+      // Pin the DIFFERENCE V(i1) − V(i2) to the phasor (penalty method).
+      // For a grounded − terminal this reduces to pinning V(i1) alone.
+      if (i1 >= 0) {
+        Yre[i1 * N + i1] += PIN_G;
+        Ire[i1] += PIN_G * vRe;
+        Iim[i1] += PIN_G * vIm;
+        if (i2 >= 0) {
+          Yre[i1 * N + i2] -= PIN_G;
+          Yim[i1 * N + i2] -= 0;
         }
-      } else if (c.type === 'dcVoltage') {
-        const v = Number(c.parameters.voltage) || 0;
+      }
+      if (i2 >= 0) {
+        Yre[i2 * N + i2] += PIN_G;
+        Ire[i2] -= PIN_G * vRe;
+        Iim[i2] -= PIN_G * vIm;
         if (i1 >= 0) {
-          Yre[i1 * N + i1] += PIN_G;
-          Ire[i1] += PIN_G * v;
+          Yre[i2 * N + i1] -= PIN_G;
         }
       }
     } else if (c.type === 'currentSource') {
-      const I = Number(c.parameters.current) || 0;
+      // SPICE convention (matches the engine's stampCurrentSource(p, n, i)):
+      // current flows THROUGH the source from + to −, i.e. it is DRAWN OUT of
+      // the + node and INJECTED into the − node. The old stamp injected into
+      // + — a 180° phase error in every current-source-stimulated transfer
+      // function.
+      let iRe = 0, iIm = 0;
       if (c.id === source.id) {
-        if (i1 >= 0) Ire[i1] += acMag;
-        if (i2 >= 0) Ire[i2] -= acMag;
+        const phaseDeg = Number(c.parameters?.phase) || 0;
+        const phaseRad = (phaseDeg * Math.PI) / 180;
+        iRe = acMag * Math.cos(phaseRad);
+        iIm = acMag * Math.sin(phaseRad);
       } else {
-        if (i1 >= 0) Ire[i1] += I;
-        if (i2 >= 0) Ire[i2] -= I;
+        iRe = Number(c.parameters.current) || 0;
       }
+      if (i1 >= 0) { Ire[i1] -= iRe; Iim[i1] -= iIm; }
+      if (i2 >= 0) { Ire[i2] += iRe; Iim[i2] += iIm; }
     } else if (c.type === 'diode' || c.type === 'led') {
       // Approximate as a small-signal resistance at DC operating point.
       // For simplicity, treat as a 1kΩ resistor in AC.
