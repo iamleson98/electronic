@@ -90,7 +90,7 @@ export function buildRoutingGrid(
       }
     }
     // Clear terminals (make them accessible)
-    const terms = getTerminalsForComponent(comp, plugin, { terminalNode: new Map(), numNodes: 0 });
+    const terms = getTerminalsForComponent(comp, plugin, { terminalNode: new Map(), numNodes: 0, netNames: new Map() });
     for (const term of terms) {
       // Terminal position is relative to component + rotation
       const tx = Math.round(comp.position.x + (term.nodeId % 100) * 0);  // simplified

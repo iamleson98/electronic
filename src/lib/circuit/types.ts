@@ -102,6 +102,20 @@ export interface SimContext {
   time: number;
   /** timestep, in seconds */
   dt: number;
+  /**
+   * Integration method for reactive companion models (capacitors/inductors).
+   * - 'euler': backward Euler (1st order, most damping — the historical default)
+   * - 'trap':  trapezoidal (2nd order, energy-conserving, SPICE default)
+   * - 'gear':  Gear/BDF-2 (2nd order, L-stable, extra damping for stiff circuits)
+   * Undefined = 'euler' (backward compatibility for hand-rolled SimContexts).
+   */
+  method?: 'euler' | 'trap' | 'gear';
+  /**
+   * Net label name -> node id (e.g. 'VCC' -> 3). Lets behavioral sources
+   * resolve V(netname) expressions. Undefined when the context was built
+   * without a node map (tests, AI tools).
+   */
+  netNames?: Map<string, number>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -507,6 +521,15 @@ export interface ComponentPlugin {
    * pre-allocated matrix.
    */
   extraVars?: (params: Record<string, any>) => number;
+
+  /**
+   * Declare that this component's stamp depends on node voltages from the
+   * CURRENT step (e.g. behavioral sources reading V(node)). The engine then
+   * runs a Gauss–Seidel outer iteration — stamp → solve → re-stamp with the
+   * fresh voltages — until the node voltages stop moving, instead of the
+   * default one-step lag. Circuits without feedback plugins pay zero cost.
+   */
+  feedback?: boolean;
 }
 
 // ----- MNA system interface -----

@@ -28,7 +28,7 @@ self.onmessage = (e: MessageEvent) => {
 
   switch (msg.type) {
     case 'step': {
-      const { components, wires, prev, dt, pluginsSnapshot, requestId } = msg;
+      const { components, wires, prev, dt, method, pluginsSnapshot, requestId } = msg;
       try {
         // Rebuild the plugins map from the snapshot (plugins aren't directly transferable)
         const plugins = new Map<string, ComponentPlugin>();
@@ -42,6 +42,7 @@ self.onmessage = (e: MessageEvent) => {
           plugins,
           prev as any,
           dt as number,
+          method ? { method } as any : undefined,
         );
         if (result) {
           // Transfer the result back — use structured clone (default).
@@ -64,7 +65,7 @@ self.onmessage = (e: MessageEvent) => {
     }
     case 'batch': {
       // Run a batch of steps (e.g. for a transient sweep)
-      const { components, wires, prev, dt, count, pluginsSnapshot, requestId } = msg;
+      const { components, wires, prev, dt, count, method, pluginsSnapshot, requestId } = msg;
       try {
         const plugins = new Map<string, ComponentPlugin>();
         for (const type of pluginsSnapshot as string[]) {
@@ -80,6 +81,7 @@ self.onmessage = (e: MessageEvent) => {
             plugins,
             currentPrev as any,
             dt as number,
+            method ? { method } as any : undefined,
           );
           if (!result) {
             (self as any).postMessage({ type: 'error', requestId, message: `step ${i} returned null`, partial: results });

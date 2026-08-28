@@ -9,7 +9,7 @@
 //   - vcvsUser / vccsUser / ccvsUser / cccsUser  — User-placeable E/G/F/H
 //   - opampReal           — Real op-amp macromodel with GBW, slew rate, offset, CMRR
 
-import type { ComponentPlugin } from '../types';
+import type { ComponentPlugin, SimContext } from '../types';
 import { registerPlugin } from '../registry';
 import { drawLabel } from './draw';
 import { stateKey } from '../state-keys';
@@ -40,7 +40,7 @@ function tokenize(expr: string): Token[] {
     if (/[a-zA-Z_]/.test(c)) {
       let id = '';
       while (i < expr.length && /[a-zA-Z0-9_]/.test(expr[i])) id += expr[i++];
-      tokens.push(/(exp|log|sin|cos|tan|abs|sqrt|min|max|table|limit|if|V|I|time)/.test(id)
+      tokens.push(/(exp|log|ln|log10|sin|cos|tan|abs|sqrt|min|max|table|limit|if|V|I|time|pi)/.test(id)
         ? { type: 'func', value: id } : { type: 'var', value: id });
       continue;
     }
@@ -48,7 +48,25 @@ function tokenize(expr: string): Token[] {
       tokens.push({ type: c === '(' || c === ')' ? 'paren' : 'op', value: c });
       i++; continue;
     }
-    if (c === ',' || c === ';') { i++; continue; }
+    if (c === ',') {
+      // Commas are real tokens: the V(n1,n2)/I(src) raw-argument collector
+      // splits on them, and the math-function arg loop consumes them.
+      // (The old tokenizer silently dropped commas, which glued V(a,b)'s
+      // arguments together into a single bogus node name "ab".)
+      tokens.push({ type: 'op', value: ',' });
+      i++; continue;
+    }
+    // comparison operators (two-char first)
+    const two = expr.slice(i, i + 2);
+    if (two === '>=' || two === '<=' || two === '==' || two === '!=' || two === '<>') {
+      tokens.push({ type: 'op', value: two === '<>' ? '!=' : two });
+      i += 2; continue;
+    }
+    if (c === '>' || c === '<') {
+      tokens.push({ type: 'op', value: c });
+      i++; continue;
+    }
+    if (c === ';' || c === '!') { i++; continue; }
     i++;
   }
   return tokens;
@@ -71,7 +89,25 @@ class ExprEvaluator {
   consume(): Token { return this.tokens[this.pos++]; }
 
   parse(): number {
-    return this.parseExpr();
+    return this.parseComparison();
+  }
+
+  /** Lowest precedence: comparisons → 1/0 (ngspice parity for if()/soft clamps) */
+  private parseComparison(): number {
+    let left = this.parseExpr();
+    while (this.peek()?.type === 'op' && ['>', '<', '>=', '<=', '==', '!='].includes(this.peek()!.value)) {
+      const op = this.consume().value;
+      const right = this.parseExpr();
+      switch (op) {
+        case '>': left = left > right ? 1 : 0; break;
+        case '<': left = left < right ? 1 : 0; break;
+        case '>=': left = left >= right ? 1 : 0; break;
+        case '<=': left = left <= right ? 1 : 0; break;
+        case '==': left = left === right ? 1 : 0; break;
+        case '!=': left = left !== right ? 1 : 0; break;
+      }
+    }
+    return left;
   }
 
   private parseExpr(): number {
@@ -122,13 +158,14 @@ class ExprEvaluator {
     if (tok.type === 'num') { this.consume(); return parseFloat(tok.value); }
     if (tok.type === 'paren' && tok.value === '(') {
       this.consume();
-      const v = this.parseExpr();
+      const v = this.parseComparison();
       if (this.peek()?.value === ')') this.consume();
       return v;
     }
     if (tok.type === 'func') {
       this.consume();
       if (tok.value === 'time') return this.time;
+      if (tok.value === 'pi') return Math.PI;
       // function call: expect (
       if (this.peek()?.value === '(') {
         this.consume();
@@ -150,15 +187,19 @@ class ExprEvaluator {
           argStrs.push(...parts);
           return this.resolver(tok.value as 'V' | 'I', argStrs);
         }
-        // math functions
+        // math functions — each argument may itself contain comparisons
+        // (e.g. if(V(a)>1, 5, -5)); parsing args with parseExpr would let the
+        // stray '>' be consumed as a junk primary and shift the arg list.
         while (this.peek() && this.peek()!.value !== ')') {
-          args.push(this.parseExpr());
+          args.push(this.parseComparison());
           if (this.peek()?.value === ',') this.consume();
         }
         if (this.peek()?.value === ')') this.consume();
         switch (tok.value) {
           case 'exp': return Math.exp(args[0]);
           case 'log': return Math.log(args[0]);
+          case 'ln': return Math.log(args[0]);
+          case 'log10': return Math.log10(args[0]);
           case 'sin': return Math.sin(args[0]);
           case 'cos': return Math.cos(args[0]);
           case 'tan': return Math.tan(args[0]);
@@ -176,6 +217,39 @@ class ExprEvaluator {
     this.consume();
     return 0;
   }
+}
+
+/**
+ * Build the V(node)/I(source) resolution tables for a behavioral source
+ * from the live SimContext.
+ *
+ * - V(name): resolves against net label names ("in", "VCC", ...), ground
+ *   aliases ("0"/"gnd"), and full terminal keys ("R1:a") — in that order.
+ * - I(name): resolves a voltage source's branch current by component id or
+ *   refdes via the `__branchIndices` map registered by source stamps.
+ *   `__branchIndices` stores ABSOLUTE row indices; `branchCurrent` is
+ *   0-based on extras, so we offset by (numNodes − 1).
+ */
+export function buildBehavioralTables(sim: SimContext): {
+  nodeNameToId: Map<string, number>;
+  branchCurrents: Map<string, number>;
+} {
+  const nodeNameToId = new Map<string, number>();
+  if (sim.netNames) {
+    for (const [name, id] of sim.netNames) nodeNameToId.set(name, id);
+  }
+  const branchCurrents = new Map<string, number>();
+  const idx = sim.state?.__branchIndices as Record<string, number> | undefined;
+  if (idx) {
+    const base = sim.nodeVoltage.length - 1; // absolute row of extra var 0
+    for (const [name, absIdx] of Object.entries(idx)) {
+      const extraIdx = absIdx - base;
+      if (extraIdx >= 0 && extraIdx < sim.branchCurrent.length) {
+        branchCurrents.set(name, sim.branchCurrent[extraIdx]);
+      }
+    }
+  }
+  return { nodeNameToId, branchCurrents };
 }
 
 /**
@@ -250,18 +324,31 @@ export const bvSource: ComponentPlugin = {
     const expr = params.expr as string;
     const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
-    // build node-name → node-id map (terminal id = node name)
-    // For simplicity, we use the parameter itself as the node name reference.
-    // A real implementation would parse the expression and look up node voltages.
-    const nodeNameToId = new Map<string, number>();
-    // We can't easily access all components here, so we fall back to evaluating
-    // only "time" expression and skip V(node) refs.
+    // Resolve V(netname) against the engine's net-name map and I(source)
+    // against registered voltage-source branch currents. The engine's
+    // feedback iteration (plugins with feedback:true) re-stamps until the
+    // node voltages the expression reads are self-consistent with the solve.
     try {
-      const v = evalExpression(expr, sim.nodeVoltage, nodeNameToId, sim.time);
+      const { nodeNameToId, branchCurrents } = buildBehavioralTables(sim);
+      const v = evalExpression(expr, sim.nodeVoltage, nodeNameToId, sim.time, branchCurrents);
       sys.stampVoltageSource(p, n, v);
     } catch (e) {
       console.error('BV source stamp error:', e);
     }
+  },
+  // behavioral: engine iterates stamp↔solve so V(node) refs converge within
+  // the same timestep instead of lagging one step behind.
+  feedback: true,
+  measure(params, terminals, sim, comp) {
+    const p = terminals.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+    const n = terminals.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+    const v = sim.nodeVoltage[p] - sim.nodeVoltage[n];
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const i = (st[`bv_i_${comp?.id ?? `${p}_${n}`}`] as number | undefined) ?? 0;
+    return [
+      { label: 'V', value: v.toFixed(3), unit: 'V' },
+      { label: 'I', value: i.toExponential(2), unit: 'A' },
+    ];
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
 };
@@ -304,11 +391,22 @@ export const biSource: ComponentPlugin = {
     const p = terminals.find((t) => t.terminalId === 'p')!.nodeId;
     const n = terminals.find((t) => t.terminalId === 'n')!.nodeId;
     try {
-      const i = evalExpression(expr, sim.nodeVoltage, new Map(), sim.time);
+      const { nodeNameToId, branchCurrents } = buildBehavioralTables(sim);
+      const i = evalExpression(expr, sim.nodeVoltage, nodeNameToId, sim.time, branchCurrents);
       sys.stampCurrentSource(p, n, i);
     } catch (e) {
       console.error('BI source stamp error:', e);
     }
+  },
+  // behavioral: engine iterates stamp↔solve so V(node)/I(source) refs
+  // converge within the same timestep.
+  feedback: true,
+  measure(params, terminals, sim, comp) {
+    const p = terminals.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+    const n = terminals.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const i = (st[`bi_i_${comp?.id ?? `${p}_${n}`}`] as number | undefined) ?? 0;
+    return [{ label: 'I', value: i.toExponential(2), unit: 'A' }];
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
 };

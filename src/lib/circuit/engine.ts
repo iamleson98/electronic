@@ -21,6 +21,8 @@ export interface NodeMap {
   terminalNode: Map<string, number>;
   /** total number of nodes (including ground) */
   numNodes: number;
+  /** net label name -> node id (e.g. 'VCC' -> 3). Same final ids as terminalNode. */
+  netNames: Map<string, number>;
 }
 
 /**
@@ -206,7 +208,19 @@ function buildNodeMapUncached(components: CircuitComponent[], wires: Wire[], plu
     terminalNode.set(k, rootToId.get(find(n))!);
   }
 
-  return { terminalNode, numNodes: nextId };
+  // Expose net label names (power rails, user net labels, bus bits) mapped to
+  // their FINAL contiguous node ids, so behavioral sources can resolve
+  // V(netname) expressions. netToNode holds pre-compression union-find ids.
+  const netNames = new Map<string, number>();
+  for (const [name, n] of netToNode) {
+    netNames.set(name, rootToId.get(find(n)) ?? 0);
+  }
+  // Ground aliases are always resolvable.
+  netNames.set('0', 0);
+  netNames.set('gnd', 0);
+  netNames.set('GND', 0);
+
+  return { terminalNode, numNodes: nextId, netNames };
 }
 
 export function getTerminalsForComponent(
@@ -1123,7 +1137,12 @@ export function simulateStep(
   plugins: Map<string, ComponentPlugin>,
   prev?: PrevState,
   dt: number = 1e-4,
-  simOptions?: { initialConditions?: Record<string, number>; nodeSets?: Record<string, number> },
+  simOptions?: {
+    initialConditions?: Record<string, number>;
+    nodeSets?: Record<string, number>;
+    /** integration method for reactive companion models (default 'euler') */
+    method?: 'euler' | 'trap' | 'gear';
+  },
 ): StepResult | null {
   const nodeMap = buildNodeMap(components, wires, plugins);
   const numNodes = nodeMap.numNodes; // includes ground (0)
@@ -1203,6 +1222,12 @@ export function simulateStep(
     state: stateMap,
     time,
     dt,
+    // Integration method for capacitor/inductor companion models. Defaults
+    // to backward Euler so every existing caller keeps its historical
+    // behavior unless it explicitly opts into trap/gear.
+    method: simOptions?.method ?? 'euler',
+    // Net-name resolution for behavioral sources (V(netname) expressions).
+    netNames: nodeMap.netNames,
   };
 
   // First pass: let plugins initialize their simState (e.g., capacitor voltage)
@@ -1286,6 +1311,100 @@ export function simulateStep(
     attempt = buildAndSolve(true);
     x = attempt.x;
   }
+
+  // ── Gauss–Seidel outer iteration for behavioral (feedback) sources ─────
+  // Plugins flagged `feedback: true` (bvSource / biSource) read node
+  // voltages / branch currents inside stamp() — e.g. V = 2*V(in) or
+  // I = I(V1). A single stamp/solve leaves those references one solve
+  // behind (the "one-step lag"). Re-stamp with the fresh solution until
+  // the node voltages AND branch currents stop moving. Circuits with no
+  // feedback plugins skip this entirely — zero overhead.
+  if (
+    x && stateSnapshot &&
+    components.some((c) => plugins.get(c.type)?.feedback === true)
+  ) {
+    // Round 0 (the solve above) stamped against the incoming (previous
+    // step's) voltages/currents. Measure how far the solve moved from what
+    // those stamps saw, then feed the results back for the re-stamp rounds.
+    let deltaV0 = 0;
+    for (let i = 1; i < numNodes; i++) {
+      const d = Math.abs(x[i - 1] - sim.nodeVoltage[i]);
+      if (d > deltaV0) deltaV0 = d;
+    }
+    let deltaI0 = 0;
+    for (let i = 0; i < attempt.sys.numExtra; i++) {
+      const iNew = x[numNodes - 1 + i];
+      const d = Math.abs(iNew - sim.branchCurrent[i]);
+      if (d > deltaI0) deltaI0 = d;
+    }
+    if (deltaV0 >= 1e-9 || deltaI0 >= 1e-12) {
+      const MAX_ITER = 20;
+      let prevDeltaV = Infinity;
+      let nonDecreasing = 0;
+      let dampAlpha = 0.5;   // blend factor once damping engages
+      let dampEngaged = false;
+      let lastGood: { x: Float64Array; sys: any } | null = { x, sys: attempt.sys };
+      // Feed round 0's results back so round 1 stamps against fresh values.
+      for (let i = 1; i < numNodes; i++) sim.nodeVoltage[i] = x[i - 1];
+      for (let i = 0; i < attempt.sys.numExtra; i++) sim.branchCurrent[i] = x[numNodes - 1 + i];
+      for (let k = 1; k < MAX_ITER; k++) {
+        // Undo state mutated by the previous round's stamp (edge counters,
+        // region latches) so every re-stamp applies transitions exactly once.
+        restoreStateInPlace(stateMap, stateSnapshot);
+        let round = buildAndSolve(false);
+        if (!round.x) {
+          restoreStateInPlace(stateMap, stateSnapshot);
+          round = buildAndSolve(true);
+        }
+        if (!round.x) break; // keep the last consistent round
+        lastGood = { x: round.x, sys: round.sys };
+        // Residual: how far the solve moved from what this round's stamps saw.
+        let deltaV = 0;
+        for (let i = 1; i < numNodes; i++) {
+          const d = Math.abs(round.x[i - 1] - sim.nodeVoltage[i]);
+          if (d > deltaV) deltaV = d;
+        }
+        // I(source) references read sim.branchCurrent — include those in
+        // the residual too (a BI mirror can move currents while voltages
+        // look settled) and feed the solved currents back for the next round.
+        let deltaI = 0;
+        for (let i = 0; i < round.sys.numExtra; i++) {
+          const iNew = round.x[numNodes - 1 + i];
+          const d = Math.abs(iNew - sim.branchCurrent[i]);
+          if (d > deltaI) deltaI = d;
+          sim.branchCurrent[i] = iNew;
+        }
+        if (deltaV < 1e-9 && deltaI < 1e-12) break; // self-consistent
+        // Feed the solved voltages back for the next stamp round. Once the
+        // residual has failed to decrease for two consecutive rounds (fixed
+        // point oscillating, |loop gain| > 1), engage 50/50 damping — and
+        // keep it engaged (a single damped round that shrinks the residual
+        // must not un-damp the iteration back into divergence). If the
+        // residual STILL grows while damped (|gain| > 2), halve the blend
+        // factor toward 0.05 until the iteration contracts.
+        if (!dampEngaged) {
+          nonDecreasing = deltaV >= prevDeltaV ? nonDecreasing + 1 : 0;
+          dampEngaged = nonDecreasing >= 2;
+        } else if (deltaV > prevDeltaV) {
+          dampAlpha = Math.max(0.05, dampAlpha * 0.5);
+        }
+        const alpha = dampEngaged ? dampAlpha : 1;
+        for (let i = 1; i < numNodes; i++) {
+          const vNew = round.x[i - 1];
+          sim.nodeVoltage[i] = (1 - alpha) * sim.nodeVoltage[i] + alpha * vNew;
+        }
+        prevDeltaV = deltaV;
+      }
+      // The reported solution is always a TRUE solve of the last stamp round
+      // (never a damped blend) — the iteration only refines what the stamps
+      // see. The final commit below rewrites sim.* from this solution.
+      if (lastGood && lastGood.x !== x) {
+        x = lastGood.x;
+        attempt = { x, sys: lastGood.sys, sparseSys: null } as any;
+      }
+    }
+  }
+
   if (!x) {
     return null;
   }

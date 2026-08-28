@@ -26,12 +26,15 @@ const runSimulationTool: Tool = {
     properties: {
       steps: { type: 'number', description: 'Number of simulation steps to run (default 200, max 2000). Each step is dt seconds.' },
       dt: { type: 'number', description: 'Time step in seconds (default 1e-4 = 100µs). Smaller = more accurate but slower.' },
+      method: { type: 'string', enum: ['euler', 'trap', 'gear'], description: 'Integration method for capacitors/inductors: "euler" (backward Euler, most stable, damps oscillators), "trap" (trapezoidal, 2nd-order, conserves LC energy — best for oscillators/filters), "gear" (Gear/BDF-2, 2nd-order, extra damping for stiff circuits). Default "euler".' },
     },
   },
   async execute(args, ctx) {
     const steps = Math.min(Math.max(args.steps || 200, 1), 2000);
     const dt = args.dt || 1e-4;
     const plugins = ctx.plugins;
+    const method: 'euler' | 'trap' | 'gear' =
+      args.method === 'trap' || args.method === 'gear' ? args.method : 'euler';
 
     // Reset simState for fresh run
     for (const c of ctx.doc.components) if (!c.simState) c.simState = {};
@@ -42,7 +45,7 @@ const runSimulationTool: Tool = {
 
     for (let i = 0; i < steps; i++) {
       try {
-        const r = simulateStep(ctx.doc.components, ctx.doc.wires, plugins, prev, dt);
+        const r = simulateStep(ctx.doc.components, ctx.doc.wires, plugins, prev, dt, { method });
         if (!r) { lastError = `Simulation returned null at step ${i} (singular matrix — likely a floating node or conflicting voltage sources)`; break; }
         sim = r.sim;
         prev = {

@@ -1567,6 +1567,10 @@ export function runTran(
     }, tStep, {
       initialConditions: options.uic ? options.initialConditions : undefined,
       nodeSets: options.nodeSets,
+      // Integration method from SimOptions — the DC operating point above
+      // always runs backward Euler (standard SPICE behavior), transient
+      // steps honor the user's trap/gear choice.
+      method: options.method,
     });
     if (!result) break;
     simState = result.sim;

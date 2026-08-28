@@ -103,15 +103,40 @@ const capacitor: ComponentPlugin = {
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `cap_${comp?.id ?? `${a}_${b}`}`;
     const vPrev = st[key] ?? (params.initialV as number);
-    // companion model (backward Euler): G_eq = C/dt, I_eq = C/dt * vPrev
-    // The Norton current source I_eq flows INTO node a (the positive plate),
-    // representing the capacitor's stored charge pushing current out.
-    // stampCurrentSource(b, a, iEq) injects into a and extracts from b.
+    const method = sim.method ?? 'euler';
+    // companion models — see integration.ts for the derivations.
+    // The Norton source injects I_eq INTO node a (positive plate), same
+    // orientation as the historical backward-Euler stamp.
     const dt = Math.max(sim.dt, 1e-12);
-    const g = C / dt;
-    const iEq = (C / dt) * vPrev;
+    let g: number;
+    let iEq: number;
+    if (method === 'trap') {
+      // Trapezoidal (2nd order): i_n = (2C/dt)(v_n − v_{n−1}) − i_{n−1}
+      //   → G = 2C/dt, I_eq = (2C/dt)·vPrev + iPrev
+      // iPrev (the previous step's cap current) is stored under `_i` by step().
+      const iPrev = (st[key + '_i'] as number | undefined) ?? 0;
+      g = (2 * C) / dt;
+      iEq = g * vPrev + iPrev;
+    } else if (method === 'gear') {
+      // Gear/BDF-2: i_n = C(3v_n − 4v_{n−1} + v_{n−2})/(2dt)
+      //   → G = 3C/(2dt), I_eq = C(4vPrev − vPrev2)/(2dt)
+      // Needs two steps of history; the first step falls back to Euler
+      // (standard SPICE practice — start at order 1, then ramp up).
+      const vPrev2 = st[key + '_v2'] as number | undefined;
+      if (vPrev2 === undefined) {
+        g = C / dt;
+        iEq = (C / dt) * vPrev;
+      } else {
+        g = (3 * C) / (2 * dt);
+        iEq = (C * (4 * vPrev - vPrev2)) / (2 * dt);
+      }
+    } else {
+      // Backward Euler (default): G_eq = C/dt, I_eq = (C/dt) * vPrev
+      g = C / dt;
+      iEq = (C / dt) * vPrev;
+    }
     sys.stampConductance(a, b, g);
-    sys.stampCurrentSource(b, a, iEq);  // FIXED: was (a, b) — wrong direction
+    sys.stampCurrentSource(b, a, iEq);
   },
   getFlowPath() {
     // Straight through the capacitor plates
@@ -126,14 +151,30 @@ const capacitor: ComponentPlugin = {
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `cap_${comp?.id ?? `${a}_${b}`}`;
+    const method = sim.method ?? 'euler';
     const dt = Math.max(sim.dt, 1e-12);
     const vPrev = st[key] ?? (params.initialV as number);
     const vCurr = sim.nodeVoltage[a] - sim.nodeVoltage[b];
-    // Compute and store the current BEFORE updating vPrev.
-    // I = C × dV/dt = (C/dt) × (V_curr - V_prev)
-    // This must be done HERE because after we update st[key], the old vPrev
-    // is lost and computeComponentCurrents would compute I = (C/dt) × 0 = 0.
-    st[key + '_i'] = (C / dt) * (vCurr - vPrev);
+    // Compute the ACTUAL current that flowed during this step (BEFORE updating
+    // vPrev). This is stored under `_i` and doubles as the trapezoidal
+    // method's iPrev for the next step — the two quantities are identical.
+    let i: number;
+    if (method === 'trap') {
+      const iPrev = (st[key + '_i'] as number | undefined) ?? 0;
+      i = ((2 * C) / dt) * (vCurr - vPrev) - iPrev;
+    } else if (method === 'gear') {
+      const vPrev2 = st[key + '_v2'] as number | undefined;
+      i = vPrev2 === undefined
+        ? (C / dt) * (vCurr - vPrev)
+        : (C / (2 * dt)) * (3 * vCurr - 4 * vPrev + vPrev2);
+    } else {
+      i = (C / dt) * (vCurr - vPrev);
+    }
+    st[key + '_i'] = i;
+    // Gear needs the shifted voltage history (v_{n−2} = old v_{n−1}).
+    if (method === 'gear') {
+      st[key + '_v2'] = vPrev;
+    }
     // Now update vPrev for the next step's stamp()
     st[key] = vCurr;
   },
@@ -189,15 +230,38 @@ const inductor: ComponentPlugin = {
     // node pair must have independent state (different currents).
     const key = `ind_${comp?.id ?? `${a}_${b}`}`;
     const iPrev = st[key] ?? (params.initialI as number);
-    // companion model (backward Euler):
-    //   V = L * (I - iPrev) / dt   ->   V = (L/dt) * I - (L/dt) * iPrev
-    //   stamp as voltage source with V = -L/dt * iPrev and series resistance R = L/dt
-    // Equivalent: Thevenin: V_th = -(L/dt) * iPrev, R = L/dt
-    //   -> stamp as conductance G = dt/L in parallel with current source I = iPrev
+    const method = sim.method ?? 'euler';
     const dt = Math.max(sim.dt, 1e-12);
-    const g = dt / L;
+    let g: number;
+    let iEq: number;
+    if (method === 'trap') {
+      // Trapezoidal: i_n = i_{n−1} + (dt/2L)(v_n + v_{n−1})
+      //   → Norton: G = dt/(2L), I_eq = iPrev + (dt/2L)·vPrev (source a→b)
+      const vPrev = (st[key + '_vp'] as number | undefined) ?? 0;
+      g = dt / (2 * L);
+      iEq = iPrev + g * vPrev;
+    } else if (method === 'gear') {
+      // Gear/BDF-2: i_n = (4i_{n−1} − i_{n−2})/3 + (2dt/3L)·v_n
+      // First step (no i_{n−2} yet) falls back to Euler.
+      const iPrev2 = st[key + '_i2'] as number | undefined;
+      if (iPrev2 === undefined) {
+        g = dt / L;
+        iEq = iPrev;
+      } else {
+        g = (2 * dt) / (3 * L);
+        iEq = (4 * iPrev - iPrev2) / 3;
+      }
+    } else {
+      // Backward Euler (default):
+      //   V = L * (I - iPrev) / dt   ->   V = (L/dt) * I - (L/dt) * iPrev
+      //   stamp as voltage source with V = -L/dt * iPrev and series resistance R = L/dt
+      // Equivalent: Thevenin: V_th = -(L/dt) * iPrev, R = L/dt
+      //   -> stamp as conductance G = dt/L in parallel with current source I = iPrev
+      g = dt / L;
+      iEq = iPrev;
+    }
     sys.stampConductance(a, b, g);
-    sys.stampCurrentSource(a, b, iPrev);
+    sys.stampCurrentSource(a, b, iEq);
   },
   getFlowPath() {
     // Straight through the inductor coils
@@ -212,15 +276,32 @@ const inductor: ComponentPlugin = {
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = `ind_${comp?.id ?? `${a}_${b}`}`;
+    const method = sim.method ?? 'euler';
     const dt = Math.max(sim.dt, 1e-12);
     const iPrev = st[key] ?? (params.initialI as number);
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
-    const iCurr = iPrev + (v / L) * dt;
+    // Integrate the inductor current with the selected method. The stored
+    // `_i` (this step's current) doubles as the readout for current displays
+    // and, for Gear, `_i2` keeps i_{n−2}; `_vp` keeps v_{n−1} for trapezoidal.
+    let iCurr: number;
+    if (method === 'trap') {
+      const vPrev = (st[key + '_vp'] as number | undefined) ?? 0;
+      iCurr = iPrev + (dt / (2 * L)) * (v + vPrev);
+    } else if (method === 'gear') {
+      const iPrev2 = st[key + '_i2'] as number | undefined;
+      iCurr = iPrev2 === undefined
+        ? iPrev + (v / L) * dt
+        : (4 * iPrev - iPrev2) / 3 + ((2 * dt) / (3 * L)) * v;
+    } else {
+      iCurr = iPrev + (v / L) * dt;
+    }
     // Store the current BEFORE updating iPrev.
     // I = iCurr (the inductor's state variable IS its current)
-    // This must be done HERE because after we update st[key], the old iPrev
-    // is lost and computeComponentCurrents would compute a stale current.
     st[key + '_i'] = iCurr;
+    if (method === 'gear') {
+      st[key + '_i2'] = iPrev;
+    }
+    st[key + '_vp'] = v;
     // Now update iPrev for the next step's stamp()
     st[key] = iCurr;
   },

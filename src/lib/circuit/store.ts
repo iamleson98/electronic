@@ -1681,10 +1681,12 @@ export const useEditor = create<EditorState>((set, get) => ({
       subSteps = 1;
     }
     const dt = s.dt;
-    // Build simOptions from the editor's settings (temperature, .IC, .NODESET)
+    // Build simOptions from the editor's settings (temperature, .IC, .NODESET,
+    // and the integration method selected in the Options dialog).
     const simOpts = {
       initialConditions: s.simOptions?.initialConditions,
       nodeSets: s.simOptions?.nodeSets,
+      method: s.simOptions?.method ?? 'euler',
     };
     let result: { sim: SimContext; branchCurrentSize: number; nodeMap: any } | null = null;
     for (let i = 0; i < subSteps; i++) {

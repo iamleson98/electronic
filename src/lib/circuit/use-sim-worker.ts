@@ -82,7 +82,7 @@ export function useSimWorker() {
   }, []);
 
   const stepAsync = useCallback(
-    (components: CircuitComponent[], wires: Wire[], prev: any, dt: number): Promise<WorkerResult | null> => {
+    (components: CircuitComponent[], wires: Wire[], prev: any, dt: number, method?: 'euler' | 'trap' | 'gear'): Promise<WorkerResult | null> => {
       if (!workerRef.current || !isWorkerReady) {
         // Fallback: synchronous execution
         const plugins = new Map<string, any>();
@@ -90,7 +90,7 @@ export function useSimWorker() {
           const p = getPlugin(c.type);
           if (p) plugins.set(c.type, p);
         }
-        const result = simulateStep(components, wires, plugins, prev, dt);
+        const result = simulateStep(components, wires, plugins, prev, dt, method ? { method } : undefined);
         return Promise.resolve(result ? { sim: result.sim, branchCurrentSize: result.branchCurrentSize } : null);
       }
       // Async via worker
@@ -105,6 +105,7 @@ export function useSimWorker() {
           wires,
           prev,
           dt,
+          method,
           pluginsSnapshot,
         });
       });
@@ -113,7 +114,7 @@ export function useSimWorker() {
   );
 
   const batchAsync = useCallback(
-    (components: CircuitComponent[], wires: Wire[], prev: any, dt: number, count: number): Promise<WorkerResult[] | null> => {
+    (components: CircuitComponent[], wires: Wire[], prev: any, dt: number, count: number, method?: 'euler' | 'trap' | 'gear'): Promise<WorkerResult[] | null> => {
       if (!workerRef.current || !isWorkerReady) {
         // Fallback: synchronous
         const plugins = new Map<string, any>();
@@ -124,7 +125,7 @@ export function useSimWorker() {
         const results: WorkerResult[] = [];
         let currentPrev = prev;
         for (let i = 0; i < count; i++) {
-          const result = simulateStep(components, wires, plugins, currentPrev, dt);
+          const result = simulateStep(components, wires, plugins, currentPrev, dt, method ? { method } : undefined);
           if (!result) return Promise.resolve(null);
           results.push({ sim: result.sim, branchCurrentSize: result.branchCurrentSize });
           currentPrev = {
@@ -154,6 +155,7 @@ export function useSimWorker() {
           prev,
           dt,
           count,
+          method,
           pluginsSnapshot,
         });
       });
