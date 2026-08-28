@@ -77,11 +77,19 @@ const runSimulationTool: Tool = {
       voltages[key] = sim.nodeVoltage[nodeIdx] ?? 0;
     }
 
+    // Trapezoidal ringing-guard telemetry: how many times the (−1)^n mode was
+    // detected and suppressed. A large count hints the timestep is too coarse
+    // for the circuit's time constants (or there are very sharp edges).
+    const trapRings = method === 'trap'
+      ? ((sim.state as any)?.__global?.__trapRingCount as number | undefined) ?? 0
+      : undefined;
+
     return {
       ok: true,
       result: {
         stepsCompleted,
         ...(lastError ? { stoppedEarly: true, stopReason: lastError } : {}),
+        ...(trapRings !== undefined ? { trapRingsSuppressed: trapRings } : {}),
         finalTime: sim.time,
         nodeVoltages: voltages,
         componentCurrents: Array.from(compCurrents.entries()).map(([id, i]) => ({ componentId: id, currentA: i })),

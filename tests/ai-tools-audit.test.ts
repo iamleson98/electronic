@@ -592,3 +592,51 @@ describe('design.buildPattern power-supply RMS fix', () => {
     expect(acSource.parameters.amplitude).toBeCloseTo(8 * Math.SQRT2, 6);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// simulate.run: integration-method support + trapezoidal ringing telemetry
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('simulate.run integration method + ringing telemetry', () => {
+  it('trap on a dt >> tau RC reports trapRingsSuppressed > 0 and settles correctly', async () => {
+    const { runSimulationTool } = await import('../src/lib/ai/tools/simulation-tools');
+    // R=1k, C=1nF (tau=1µs) with dt=1ms → classic trapezoidal ringing case.
+    const comps = [
+      mkComp('dcVoltage', 'V1', { voltage: 5 }),
+      mkComp('resistor', 'R1', { resistance: 1000 }),
+      mkComp('capacitor', 'C1', { capacitance: 1e-9, initialV: 0 }),
+      mkComp('ground', 'GND'),
+    ];
+    const wires = [
+      mkWire('w1', 'V1', 'p', 'R1', 'a'),
+      mkWire('w2', 'R1', 'b', 'C1', 'a'),
+      mkWire('w3', 'V1', 'n', 'GND', 'g'),
+      mkWire('w4', 'C1', 'b', 'GND', 'g'),
+    ];
+    const res = await runSimulationTool.execute({ steps: 20, dt: 1e-3, method: 'trap' }, mkCtx(comps, wires)) as any;
+    expect(res.ok).toBe(true);
+    expect(res.result.stepsCompleted).toBe(20);
+    expect(res.result.trapRingsSuppressed).toBeGreaterThanOrEqual(1);
+    // guard suppressed the (−1)^n mode → cap sits at 5 V
+    expect(res.result.nodeVoltages['C1:a']).toBeCloseTo(5, 2);
+  });
+
+  it('euler runs carry no trapRingsSuppressed field', async () => {
+    const { runSimulationTool } = await import('../src/lib/ai/tools/simulation-tools');
+    const comps = [
+      mkComp('dcVoltage', 'V1', { voltage: 5 }),
+      mkComp('resistor', 'R1', { resistance: 1000 }),
+      mkComp('capacitor', 'C1', { capacitance: 1e-9 }),
+      mkComp('ground', 'GND'),
+    ];
+    const wires = [
+      mkWire('w1', 'V1', 'p', 'R1', 'a'),
+      mkWire('w2', 'R1', 'b', 'C1', 'a'),
+      mkWire('w3', 'V1', 'n', 'GND', 'g'),
+      mkWire('w4', 'C1', 'b', 'GND', 'g'),
+    ];
+    const res = await runSimulationTool.execute({ steps: 20, dt: 1e-3, method: 'euler' }, mkCtx(comps, wires)) as any;
+    expect(res.ok).toBe(true);
+    expect(res.result.trapRingsSuppressed).toBeUndefined();
+  });
+});

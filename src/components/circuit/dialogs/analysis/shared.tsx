@@ -50,6 +50,11 @@ export function ResultDisplay({ result }: { result: AnalysisResult }) {
       {result.report.message && (
         <div className="text-xs text-amber-400 bg-amber-500/10 p-2 rounded">{result.report.message}</div>
       )}
+      {(result.report as any).trapRings > 0 && (
+        <div className="text-xs text-sky-300 bg-sky-500/10 p-2 rounded">
+          Trapezoidal ringing guard engaged {(result.report as any).trapRings as number}× (numerical (−1)ⁿ mode suppressed with backward-Euler fallback steps). If this count is large, the timestep is coarse relative to a capacitor/inductor time constant — reduce the step or switch to Gear.
+        </div>
+      )}
       {Object.keys(result.scalars).length > 0 && (
         <div className="grid grid-cols-2 gap-1 bg-slate-950 p-2 rounded text-xs">
           {Object.entries(result.scalars).map(([k, v]) => (
