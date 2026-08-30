@@ -315,3 +315,71 @@ describe('API: Response shape compatibility', () => {
     expect(data.circuit.isExample).toBe(true);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 2-c: POST /api/spice/import — client-input problems must be 400s,
+// not 500s (bad JSON body, schema failure, parser-rejected netlist).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('API: POST /api/spice/import', () => {
+  it('imports a valid netlist', async () => {
+    const { POST } = await import('../src/app/api/spice/import/route');
+    const req = new NextRequest('http://localhost/api/spice/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ netlist: 'V1 p 0 DC 5\nR1 p out 1k\nR2 out 0 1k\n.end' }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.document.components.length).toBeGreaterThan(0);
+  });
+
+  it('returns 400 for an invalid JSON body (was 500)', async () => {
+    const { POST } = await import('../src/app/api/spice/import/route');
+    const req = new NextRequest('http://localhost/api/spice/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: 'not json',
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toMatch(/Invalid JSON/);
+  });
+
+  it('returns 400 when netlist is missing or not a string', async () => {
+    const { POST } = await import('../src/app/api/spice/import/route');
+    const req = new NextRequest('http://localhost/api/spice/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ netlist: 123 }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when the parser rejects the netlist, with the parser message (was 500)', async () => {
+    const { POST } = await import('../src/app/api/spice/import/route');
+    const req = new NextRequest('http://localhost/api/spice/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ netlist: 'X1 a b MISSING_SUBCKT' }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toMatch(/Invalid netlist: .*subcircuit/i);
+  });
+
+  it('returns 415 for a non-JSON content type', async () => {
+    const { POST } = await import('../src/app/api/spice/import/route');
+    const req = new NextRequest('http://localhost/api/spice/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: 'V1 p 0 DC 5',
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(415);
+  });
+});

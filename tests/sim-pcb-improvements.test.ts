@@ -12,6 +12,8 @@ import { solveDCWithPseudoTran } from '../src/lib/circuit/convergence';
 import { runAC } from '../src/lib/circuit/analysis';
 import { runDRC, DEFAULT_DRC_CONFIG } from '../src/lib/pcb/drc';
 import { generateSOIC, generateQFP, generateQFN, generateDIP, generateSOT23, generateChip, getParametricFootprint } from '../src/lib/pcb/parametric-footprints';
+import { getFootprintDef } from '../src/lib/pcb/footprints';
+import { createPCBFromSchematic } from '../src/lib/pcb/netlist-sync';
 import '../src/lib/circuit/components';
 import { getPlugin } from '../src/lib/circuit/registry';
 import type { CircuitComponent, Wire, SimContext } from '../src/lib/circuit/types';
@@ -119,6 +121,23 @@ describe('Integration Adapter', () => {
     updateInductorState(1, 2, sim, 'l1', 'euler');
     const state = sim.state.__global['ind_l1'];
     expect(state.vPrev).toBe(5);
+  });
+
+  it('updateInductorState Gear-2 uses i_{n-2} BEFORE overwriting it (history-shift ordering)', () => {
+    // Regression: the old code set state.iPrev2 = state.iPrev first and then
+    // used state.iPrev2 in the formula — collapsing (4a − b)/3 to (4a − a)/3 = a
+    // (Euler with a 2/3 coefficient) and losing the second-order history.
+    const sim = mkSim(5);
+    sim.dt = 1e-4;
+    sim.nodeVoltage[1] = 2;  // vNow = 2 V across the inductor
+    sim.nodeVoltage[2] = 0;
+    sim.state.__global = { ind_lg: { vPrev: 1, iPrev: 0.5, iPrev2: 0.1 } };
+    updateInductorState(1, 2, sim, 'lg', 'gear', 1e-3);
+    const st = sim.state.__global['ind_lg'];
+    const L = 1e-3, dt = 1e-4;
+    const expected = (4 * 0.5 - 0.1) / 3 + ((2 * dt) / (3 * L)) * 2;
+    expect(st.iPrev).toBeCloseTo(expected, 12);
+    expect(st.iPrev2).toBeCloseTo(0.5, 12); // shifted to the old i_{n-1}
   });
 });
 
@@ -440,6 +459,178 @@ describe('Parametric Footprint Generator', () => {
     if (leftPads.length >= 2) {
       const pitch = Math.abs(leftPads[1].position.y - leftPads[0].position.y);
       expect(pitch).toBeCloseTo(1.27, 2);
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DRC cross-layer semantics + PCB store regression tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+import type { Footprint, Pad } from '../src/lib/pcb/types';
+import { usePCB } from '../src/lib/pcb/store';
+
+function drcPad(id: string, x: number, y: number, net: string, layer: 'top' | 'bottom', drill = 0): Pad {
+  return {
+    id,
+    componentId: `comp_${id}`,
+    terminalId: 'a',
+    position: { x, y },
+    shape: drill > 0 ? 'circle' : 'rect',
+    size: { width: 1.0, height: 1.0 },
+    layer,
+    net,
+    drill,
+  };
+}
+
+function drcFootprint(id: string, x: number, y: number, pads: Pad[], side: 'top' | 'bottom' = 'top'): Footprint {
+  return {
+    id,
+    componentId: id,
+    componentType: 'resistor',
+    refdes: id.toUpperCase(),
+    position: { x, y },
+    rotation: 0,
+    bodySize: { width: 3.2, height: 1.6 },
+    pads,
+    side,
+  };
+}
+
+describe('DRC cross-layer pad semantics', () => {
+  it('SMD pads on opposite layers do NOT conflict (was: every top/bottom pair flagged as short)', () => {
+    const fpTop = drcFootprint('r1', 10, 10, [drcPad('p1', 10, 10, 'N1', 'top')]);
+    const fpBottom = drcFootprint('r2', 10, 10, [drcPad('p2', 10, 10, 'N2', 'bottom')], 'bottom');
+    const errors = runDRC([fpTop, fpBottom], [], [], [], { width: 50, height: 50 }, DEFAULT_DRC_CONFIG);
+    expect(errors.filter((e) => e.type === 'short' || e.type === 'clearance')).toHaveLength(0);
+  });
+
+  it('a bottom trace overlapping a top THT pad (drill > 0) of another net IS a short', () => {
+    const tht = drcFootprint('r1', 10, 10, [drcPad('p1', 10, 10, 'N1', 'top', 0.6)]);
+    const trace = {
+      id: 't1', net: 'N2', layer: 'bottom' as const, width: 0.3,
+      segments: [{ start: { x: 10, y: 10 }, end: { x: 20, y: 10 }, width: 0.3 }],
+    };
+    const errors = runDRC([tht], [trace], [], [], { width: 50, height: 50 }, DEFAULT_DRC_CONFIG);
+    expect(errors.some((e) => e.type === 'short')).toBe(true);
+  });
+
+  it('annular ring uses the pad drill field when present (not the 60% estimate)', () => {
+    // 2.0mm pad with a 1.9mm drill → ring 0.05mm < default min 0.15mm → flagged.
+    const fp = drcFootprint('r1', 10, 10, [drcPad('p1', 10, 10, 'N1', 'top', 1.9)]);
+    fp.pads[0].size = { width: 2.0, height: 2.0 };
+    const errors = runDRC([fp], [], [], [], { width: 50, height: 50 }, DEFAULT_DRC_CONFIG);
+    const ring = errors.find((e) => e.type === 'annular_ring');
+    expect(ring).toBeDefined();
+    expect(ring!.message).toContain('0.050');
+  });
+});
+
+describe('PCB store regressions', () => {
+  beforeEach(() => {
+    usePCB.getState().clearPCB();
+  });
+
+  it('flipFootprint mirrors pads around the footprint position (not around x=0)', () => {
+    // Place a footprint at x=40 with a pad at x=42 — the old code mirrored
+    // the pad to x=-42 (off the board).
+    usePCB.setState({
+      footprints: [drcFootprint('r1', 40, 30, [drcPad('p1', 42, 30, 'N1', 'top')])],
+    });
+    usePCB.getState().flipFootprint('r1');
+    const fp = usePCB.getState().footprints[0];
+    expect(fp.side).toBe('bottom');
+    expect(fp.pads[0].position.x).toBeCloseTo(38, 6); // 2*40 - 42
+    expect(fp.pads[0].position.y).toBeCloseTo(30, 6);
+    expect(fp.pads[0].layer).toBe('bottom');
+  });
+
+  it('runDRC passes the PCB net classes to the DRC engine', () => {
+    usePCB.setState({
+      footprints: [],
+      traces: [{
+        id: 't1', net: 'PWR', layer: 'top' as const, width: 0.2,
+        segments: [{ start: { x: 5, y: 5 }, end: { x: 15, y: 5 }, width: 0.2 }],
+      }],
+      netClasses: [{ name: 'Power', traceWidth: 0.5, clearance: 0.3, viaDiameter: 0.6, viaDrill: 0.3, nets: ['PWR'] }],
+    });
+    usePCB.getState().runDRC();
+    const errors = usePCB.getState().drcErrors;
+    const widthError = errors.find((e) => e.type === 'min_width');
+    expect(widthError).toBeDefined();
+    expect(widthError!.message).toContain('NetClass');
+  });
+
+  it('flipFootprint recomputes the ratsnest', () => {
+    usePCB.setState({
+      footprints: [
+        drcFootprint('r1', 40, 30, [drcPad('p1', 42, 30, 'N1', 'top')]),
+        drcFootprint('r2', 20, 30, [drcPad('p2', 18, 30, 'N1', 'top')]),
+      ],
+      ratsnest: [{ fromPadId: 'p1', toPadId: 'p2', net: 'N1', from: { x: 42, y: 30 }, to: { x: 18, y: 30 } }],
+      padNets: new Map([['comp_p1:a', 'N1'], ['comp_p2:a', 'N1']]),
+    });
+    usePCB.getState().flipFootprint('r1');
+    const rn = usePCB.getState().ratsnest;
+    expect(rn.length).toBeGreaterThan(0);
+    // The airwire endpoint must track the flipped pad (x = 38 now)
+    const end = rn.find((r) => r.toPadId === 'p1' || r.fromPadId === 'p1');
+    expect(end).toBeDefined();
+    const flippedEnd = end!.toPadId === 'p1' ? end!.to : end!.from;
+    expect(flippedEnd.x).toBeCloseTo(38, 6);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Copper pour island removal
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { generateCopperPour } from '../src/lib/pcb/copper-pour';
+
+describe('Copper pour island removal', () => {
+  it('removes fill islands not connected to a same-net pad', () => {
+    const board = { width: 20, height: 20 };
+    // GND pad near the left edge; a huge OTHER-net keep-out strip (as a fat
+    // trace) divides the board into a connected west region and an isolated
+    // east island.
+    const gndFp = drcFootprint('g1', 3, 10, [drcPad('gp', 3, 10, 'GND', 'top', 0.6)]);
+    const divider: any = {
+      id: 'wall', net: 'OTHER', layer: 'top', width: 2,
+      segments: [{ start: { x: 8, y: 0 }, end: { x: 8, y: 20 }, width: 2 }],
+    };
+    const pour = generateCopperPour('top', 'GND', [gndFp], [divider], [], board, 0.3);
+    expect(pour.cells.length).toBeGreaterThan(0);
+    // No filled cell to the east of the divider (col > 16 = x > 8)
+    const eastCells = pour.cells.filter((c) => c.x > 9);
+    expect(eastCells).toHaveLength(0);
+    // The connected west region survives
+    const westCells = pour.cells.filter((c) => c.x < 7);
+    expect(westCells.length).toBeGreaterThan(0);
+  });
+
+  it('keeps the full fill when the pour net has no anchors (nothing to compare against)', () => {
+    const board = { width: 10, height: 10 };
+    const pour = generateCopperPour('top', 'GND', [], [], [], board, 0.3);
+    expect(pour.cells.length).toBeGreaterThan(100); // 20x20 grid, nothing avoided
+  });
+});
+
+describe('Footprint drill propagation', () => {
+  it('built-in THT footprint defs carry a 1.0mm drill', () => {
+    const def = getFootprintDef('switch');
+    expect(def.pads.every((p) => p.drill === 1.0)).toBe(true);
+  });
+
+  it('createPCBFromSchematic propagates pad drills to the PCB pads', () => {
+    const comp = {
+      id: 'sw1', type: 'pushButton', position: { x: 5, y: 5 }, rotation: 0, parameters: {},
+    } as any;
+    const { footprints } = createPCBFromSchematic([comp], []);
+    expect(footprints).toHaveLength(1);
+    expect(footprints[0].pads.length).toBeGreaterThan(0);
+    for (const p of footprints[0].pads) {
+      expect(p.drill).toBe(1.0);
     }
   });
 });

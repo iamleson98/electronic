@@ -15,7 +15,11 @@ export function createMnaSystem(numNodes: number, numExtra: number): MnaSystem {
     A: new Float64Array(size * size),
     z: new Float64Array(size),
     nextExtra: numNodes,
-    addExtra: () => sys.nextExtra++,
+    addExtra: () => {
+      const i = sys.nextExtra++;
+      if (i >= sys.size) ensureExtraCapacity(sys, i);
+      return i;
+    },
     stampConductance: (n1, n2, g) => stampConductance(sys, n1, n2, g),
     stampCurrentSource: (n1, n2, current) => stampCurrentSource(sys, n1, n2, current),
     stampVoltageSource: (n1, n2, voltage) => stampVoltageSource(sys, n1, n2, voltage),
@@ -55,6 +59,7 @@ function stampCurrentSource(sys: MnaSystem, n1: number, n2: number, current: num
 function stampVoltageSource(sys: MnaSystem, n1: number, n2: number, voltage: number): number {
   // introduce a new branch current i, flowing from n1 to n2 through the source
   const i = sys.addExtra();
+  ensureExtraCapacity(sys, i);
   const s = sys.size;
   // KCL at n1: +i ; at n2: -i
   if (n1 > 0) sys.A[idx(n1 - 1, i, s)] += 1;
@@ -69,6 +74,7 @@ function stampVoltageSource(sys: MnaSystem, n1: number, n2: number, voltage: num
 function stampVCVS(sys: MnaSystem, a: number, b: number, c: number, d: number, mu: number): number {
   // V(a) - V(b) = mu * (V(c) - V(d))
   const i = sys.addExtra();
+  ensureExtraCapacity(sys, i);
   const s = sys.size;
   if (a > 0) sys.A[idx(a - 1, i, s)] += 1;
   if (b > 0) sys.A[idx(b - 1, i, s)] -= 1;
@@ -103,6 +109,7 @@ function stampCCCS(sys: MnaSystem, n1: number, n2: number, extraIndex: number, b
 function stampCCVS(sys: MnaSystem, a: number, b: number, extraIndex: number, r: number): number {
   // V(a) - V(b) = r * I_branch(extraIndex)
   const i = sys.addExtra();
+  ensureExtraCapacity(sys, i);
   const s = sys.size;
   if (a > 0) sys.A[idx(a - 1, i, s)] += 1;
   if (b > 0) sys.A[idx(b - 1, i, s)] -= 1;
@@ -111,6 +118,34 @@ function stampCCVS(sys: MnaSystem, a: number, b: number, extraIndex: number, r: 
   sys.A[idx(i, extraIndex, s)] -= r;
   sys.z[i] = 0;
   return i;
+}
+
+/**
+ * Grow the matrix/RHS when a plugin allocates more branch-current unknowns
+ * than the engine's pre-computed budget (components.length*4 + 8 + declared
+ * extraVars). Without this, stamps past the budget write outside the used
+ * block: the dense layout silently lands ±1 KCL entries in the WRONG cells
+ * (flat index still in bounds) and drops the branch-equation rows — corrupt
+ * voltages with no error. Growth re-lays the existing block out at the new
+ * stride, so earlier stamps keep their meaning. O(size²) but only on the
+ * rare over-budget path.
+ */
+function ensureExtraCapacity(sys: MnaSystem, index: number): void {
+  if (index < sys.size) return;
+  const oldSize = sys.size;
+  const newSize = Math.max(index + 8, oldSize * 2);
+  const newA = new Float64Array(newSize * newSize);
+  for (let r = 0; r < oldSize; r++) {
+    for (let c = 0; c < oldSize; c++) {
+      newA[r * newSize + c] = sys.A[r * oldSize + c];
+    }
+  }
+  sys.A = newA;
+  const newZ = new Float64Array(newSize);
+  newZ.set(sys.z);
+  sys.z = newZ;
+  sys.size = newSize;
+  sys.numExtra = newSize - sys.numNodes;
 }
 
 /**

@@ -18,6 +18,7 @@ import type { CircuitDocument, CircuitComponent, Wire } from '@/lib/circuit/type
 import { getPlugin } from '@/lib/circuit/registry';
 import { buildSystemPrompt, MUTATING_TOOL_NAMES, runAutoVerify, autoVerifyNeedsAttention, buildAutoVerifyMessages } from '@/lib/ai/system-prompt';
 import { ensurePlugins } from '@/lib/ai/tools/helpers';
+import { checkRateLimit, clientIpFromRequest } from '@/lib/ai/rate-limit';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;  // 5 min — allows for long retry sequences on rate limits
@@ -35,6 +36,16 @@ interface RequestBody {
 }
 
 export async function POST(req: NextRequest) {
+  // The AI loop can run for minutes and drives paid provider APIs — rate
+  // limit per client so it can't be hammered.
+  const rl = checkRateLimit(clientIpFromRequest(req));
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: 'Too many AI requests. Please wait a moment and try again.' },
+      { status: 429, headers: { 'Retry-After': String(rl.retryAfterSec) } },
+    );
+  }
+
   try {
     const body: RequestBody = await req.json();
 
@@ -67,10 +78,12 @@ export async function POST(req: NextRequest) {
     const toolDefs = getToolDefinitions();
 
     // Build the message history (prepend the shared system prompt — includes
-    // the live component catalog from the plugin registry)
+    // the live component catalog from the plugin registry). Cap the history at
+    // the most recent 60 messages so a long session can't grow the prompt
+    // without bound and blow the model's context window.
     const messages: ChatMessage[] = [
       { role: 'system', content: buildSystemPrompt() },
-      ...body.messages,
+      ...body.messages.slice(-60),
     ];
 
     // AI loop: call provider, execute tools, repeat.
@@ -82,7 +95,22 @@ export async function POST(req: NextRequest) {
     let autoVerifyCount = 0;
 
     for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-      const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 8192 });
+      // Client disconnected — stop the loop instead of burning provider
+      // tokens (and up to 10 min of retry backoff) on a response nobody will
+      // receive. Partial results are returned for observability.
+      if (req.signal.aborted) {
+        return NextResponse.json(
+          {
+            response: '',
+            toolCalls: executedToolCalls,
+            circuit: { components: ctx.doc.components, wires: ctx.doc.wires },
+            warning: 'Client disconnected',
+          },
+          { status: 499 },
+        );
+      }
+
+      const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 8192, signal: req.signal });
 
       // If the AI wants to call tools, execute them
       if (result.tool_calls && result.tool_calls.length > 0) {
@@ -196,6 +224,11 @@ export async function POST(req: NextRequest) {
       warning: 'Max iterations reached',
     });
   } catch (e) {
+    // Client went away mid-loop (provider.chat throws on abort) — nothing to
+    // deliver; report it as such instead of a misleading 500.
+    if (req.signal.aborted) {
+      return NextResponse.json({ error: 'Client disconnected' }, { status: 499 });
+    }
     console.error('AI chat error:', e);
     return NextResponse.json({
       error: `AI chat failed: ${(e as Error).message}`,

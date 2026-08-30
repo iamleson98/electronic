@@ -65,6 +65,14 @@ export function PCB3DViewer() {
   const materialCacheRef = useRef(createMaterialCache());
   const probeLabelsRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const probeLayerRef = useRef<HTMLDivElement | null>(null);
+  // Cache the (expensive) nodeMap used by voltage-probe labels, keyed on the
+  // components/wires array identities — it only changes on topology edits,
+  // but updateProbeLabels runs EVERY FRAME while probes are enabled.
+  const nodeMapCacheRef = useRef<{
+    components: unknown; wires: unknown; nodeMap: ReturnType<typeof buildNodeMap>;
+  } | null>(null);
+  // Assembly-play animation interval (cleared on unmount)
+  const assemblyIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -95,6 +103,12 @@ export function PCB3DViewer() {
   useEffect(() => { stateRef.current.assembly = assemblyProgress; }, [assemblyProgress]);
   useEffect(() => { stateRef.current.showVoltageProbes = showVoltageProbes; }, [showVoltageProbes]);
   useEffect(() => { stateRef.current.highQuality = highQuality; }, [highQuality]);
+
+  // Clear the assembly-play interval if the viewer unmounts mid-animation
+  // (previously the interval kept firing setState on an unmounted component).
+  useEffect(() => () => {
+    if (assemblyIntervalRef.current) clearInterval(assemblyIntervalRef.current);
+  }, []);
 
   // PCB data
   const simContext = useEditor((s) => s.simContext);
@@ -400,8 +414,10 @@ export function PCB3DViewer() {
     for (const fp of footprints) {
       // Pads
       for (const pad of fp.pads) {
-        const padW = pad.shape === 'circle' ? (pad.drill || 0.6) : (pad.size?.width || 0.6);
-        const padH = pad.shape === 'circle' ? (pad.drill || 0.6) : (pad.size?.height || 0.6);
+        // Copper size comes from pad.size (the drill hole is drawn separately
+        // below) — using pad.drill here shrank every THT pad to its hole size.
+        const padW = pad.size?.width || 0.6;
+        const padH = pad.size?.height || 0.6;
         const padGeo = new THREE.BoxGeometry(padW, PAD_HEIGHT, padH);
         const padMesh = new THREE.Mesh(padGeo, padMat);
         const padY = fp.side === 'bottom' ? -BOARD_THICKNESS - PAD_HEIGHT : PAD_HEIGHT;
@@ -421,7 +437,6 @@ export function PCB3DViewer() {
             0,
             fp.position.y + pad.position.y,
           );
-          drillMesh.rotation.x = Math.PI / 2;
           (drillMesh as any).__baseY = 0;
           group.add(drillMesh);
         }
@@ -579,6 +594,25 @@ export function PCB3DViewer() {
     const h = layer.clientHeight;
     const seen = new Set<string>();
 
+    // buildNodeMap is O(components + wires) — compute it ONCE per frame (it
+    // used to run once PER FOOTPRINT, i.e. O(F·(V+E)) every animation frame).
+    const editorState = useEditor.getState();
+    if (!nodeMapCacheRef.current ||
+        nodeMapCacheRef.current.components !== editorState.components ||
+        nodeMapCacheRef.current.wires !== editorState.wires) {
+      const plugins = new Map<string, NonNullable<ReturnType<typeof getPlugin>>>();
+      for (const c of editorState.components) {
+        const p = getPlugin(c.type);
+        if (p) plugins.set(c.type, p);
+      }
+      nodeMapCacheRef.current = {
+        components: editorState.components,
+        wires: editorState.wires,
+        nodeMap: buildNodeMap(editorState.components, editorState.wires, plugins),
+      };
+    }
+    const nodeMap = nodeMapCacheRef.current.nodeMap;
+
     for (const fp of footprints) {
       const pos = new THREE.Vector3(fp.position.x, 2, fp.position.y);
       pos.project(camera);
@@ -590,16 +624,11 @@ export function PCB3DViewer() {
       // Compute voltage label
       let label = `${fp.refdes || fp.id}: —`;
       if (simContext) {
-        const comp = useEditor.getState().components.find((c) => c.id === fp.componentId);
+        const comp = editorState.components.find((c) => c.id === fp.componentId);
         if (comp) {
           const plugin = getPlugin(comp.type);
           if (plugin) {
             try {
-              const nodeMap = buildNodeMap(
-                useEditor.getState().components,
-                useEditor.getState().wires,
-                new Map(),
-              );
               const terms = getTerminalsForComponent(comp, plugin, nodeMap);
               const firstTerm = terms[0];
               if (firstTerm) {
@@ -690,10 +719,11 @@ export function PCB3DViewer() {
             </div>
             <button onClick={() => {
                 setAssemblyProgress(0);
+                if (assemblyIntervalRef.current) clearInterval(assemblyIntervalRef.current);
                 let p = 0;
-                const interval = setInterval(() => {
+                assemblyIntervalRef.current = setInterval(() => {
                   p += 0.02;
-                  if (p >= 1) { p = 1; clearInterval(interval); }
+                  if (p >= 1) { p = 1; if (assemblyIntervalRef.current) clearInterval(assemblyIntervalRef.current); assemblyIntervalRef.current = null; }
                   setAssemblyProgress(p);
                 }, 30);
               }}

@@ -134,6 +134,8 @@ export function runDRC(
     net: string;
     layer: CopperLayer;
     id: string;
+    /** > 0 means THT — copper (and conflict potential) exists on ALL layers */
+    drill: number;
   }
   const copperPads: CopperPad[] = [];
   for (const fp of footprints) {
@@ -144,6 +146,7 @@ export function runDRC(
         net: pad.net ?? '',
         layer: pad.layer,
         id: pad.id,
+        drill: pad.drill ?? 0,
       });
     }
   }
@@ -169,7 +172,7 @@ export function runDRC(
           severity: minDist < 0 ? 'error' : 'warning',
           message: minDist < 0
             ? `Short circuit between nets "${a.net}" and "${b.net}"`
-            : `Clearance violation: ${minDist.toFixed(3)}mm < ${config.minClearance}mm`,
+            : `Clearance violation: ${minDist.toFixed(3)}mm < ${requiredClearance.toFixed(3)}mm`,
           position: mid,
           layer: a.layer,
         });
@@ -177,15 +180,18 @@ export function runDRC(
     }
   }
 
-  // 5. Check trace-to-pad clearance (different nets, same layer)
+  // 5. Check trace-to-pad clearance (different nets, same layer).
+  //    THT pads (drill > 0) have copper on every layer, so a trace on ANY
+  //    layer can short them — SMD pads only conflict on their own layer.
   for (const seg of copperSegs) {
     for (const pad of copperPads) {
-      if (seg.layer !== pad.layer) continue;
+      if (seg.layer !== pad.layer && pad.drill <= 0) continue;
       if (seg.net === pad.net) continue;
       const dist = segToPointDistance(seg.start, seg.end, pad.pos);
       const padRadius = Math.max(pad.size.width, pad.size.height) / 2;
       const minDist = dist - seg.width / 2 - padRadius;
-      if (minDist < config.minClearance) {
+      const requiredClearance = Math.max(getClearance(seg.net), getClearance(pad.net));
+      if (minDist < requiredClearance) {
         errors.push({
           type: minDist < 0 ? 'short' : 'clearance',
           severity: minDist < 0 ? 'error' : 'warning',
@@ -199,19 +205,24 @@ export function runDRC(
     }
   }
 
-  // 6. Check pad-to-pad clearance (different nets)
+  // 6. Check pad-to-pad clearance (different nets).
+  //    Pads on DIFFERENT copper layers cannot conflict unless at least one
+  //    is a through-hole pad (whose plated barrel spans all layers).
+  //    Previously every top/bottom SMD pad pair was flagged as a short.
   for (let i = 0; i < copperPads.length; i++) {
     for (let j = i + 1; j < copperPads.length; j++) {
       const a = copperPads[i];
       const b = copperPads[j];
       if (a.net === b.net) continue;
+      if (a.layer !== b.layer && a.drill <= 0 && b.drill <= 0) continue;
       const dx = a.pos.x - b.pos.x;
       const dy = a.pos.y - b.pos.y;
       const dist = Math.hypot(dx, dy);
       const aR = Math.max(a.size.width, a.size.height) / 2;
       const bR = Math.max(b.size.width, b.size.height) / 2;
       const minDist = dist - aR - bR;
-      if (minDist < config.minClearance) {
+      const requiredClearance = Math.max(getClearance(a.net), getClearance(b.net));
+      if (minDist < requiredClearance) {
         errors.push({
           type: minDist < 0 ? 'short' : 'clearance',
           severity: minDist < 0 ? 'error' : 'warning',
@@ -265,12 +276,14 @@ export function runDRC(
     }
   }
 
-  // 9. Check annular ring on THT pads (circle pads = through-hole)
+  // 9. Check annular ring on THT pads. Uses the pad's real drill diameter
+  //    when defined; falls back to the historical 60%-of-pad estimate for
+  //    legacy pads that carry no drill info.
   for (const fp of footprints) {
     for (const pad of fp.pads) {
       if (pad.shape !== 'circle') continue;
       const padDiameter = Math.max(pad.size.width, pad.size.height);
-      const drillDiameter = padDiameter * 0.6; // estimated drill = 60% of pad
+      const drillDiameter = pad.drill && pad.drill > 0 ? pad.drill : padDiameter * 0.6;
       const ring = (padDiameter - drillDiameter) / 2;
       if (ring < config.minAnnularRing) {
         errors.push({

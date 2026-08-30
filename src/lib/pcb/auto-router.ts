@@ -15,7 +15,7 @@
 // - Single-layer routing per net (no auto-via placement)
 // But it produces clean, professional-looking routes.
 
-import type { Footprint, Trace, TraceSegment, Via, Ratsnest, Pad, BoardOutline } from './types';
+import type { Footprint, Trace, TraceSegment, Via, Ratsnest, Pad, BoardOutline, CopperLayer } from './types';
 
 export interface AutoRouteResult {
   traces: Trace[];
@@ -85,15 +85,24 @@ export function autoRoute(
     Array.from({ length: cols }, () => ({ cost: -1, blocked: false, visited: false, parent: null })),
   );
 
-  const padPositions: { x: number; y: number; net: string }[] = [];
+  const padPositions: { x: number; y: number; net: string; layer: CopperLayer; isTht: boolean }[] = [];
   for (const fp of footprints) {
     for (const pad of fp.pads) {
-      padPositions.push({ x: pad.position.x, y: pad.position.y, net: pad.net ?? '' });
+      padPositions.push({
+        x: pad.position.x,
+        y: pad.position.y,
+        net: pad.net ?? '',
+        layer: pad.layer,
+        isTht: (pad.drill ?? 0) > 0,
+      });
     }
   }
 
+  // Only traces ON THE ROUTING LAYER are obstacles — a bottom-layer trace
+  // can't block a top-layer route (and vice versa).
   const traceObstacles: { x1: number; y1: number; x2: number; y2: number; width: number }[] = [];
   for (const trace of existingTraces) {
+    if (trace.layer !== layer) continue;
     for (const seg of trace.segments) {
       traceObstacles.push({ x1: seg.start.x, y1: seg.start.y, x2: seg.end.x, y2: seg.end.y, width: seg.width });
     }
@@ -117,9 +126,13 @@ export function autoRoute(
         markObstacle(grid, via.x, via.y, via.radius, cols, rows);
       }
 
-      // Mark pads of OTHER nets as obstacles (pads of this net are walkable)
+      // Mark pads of OTHER nets as obstacles (pads of this net are walkable).
+      // Only pads on the routing layer — or THT pads, whose copper spans
+      // every layer — can block the route. (Previously bottom-side SMD pads
+      // blocked top-layer routing, causing spurious route failures.)
       for (const pad of padPositions) {
         if (pad.net === net) continue;
+        if (pad.layer !== layer && !pad.isTht) continue;
         markObstacle(grid, pad.x, pad.y, 0.4, cols, rows);
       }
 

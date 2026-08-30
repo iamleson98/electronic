@@ -18,7 +18,20 @@
 //   - TERMINAL: component terminal (routing endpoint, always accessible)
 
 import type { Vec2, Wire, CircuitComponent, ComponentPlugin } from './types';
-import { getTerminalsForComponent } from './engine';
+import { rotateTerminal } from './components/draw';
+
+/** Absolute grid position of a terminal, honoring the component's quarter-turn
+ *  rotation — the same transform the canvas renderer uses. The router used to
+ *  ignore rotation, so wires on rotated components were routed/marked at the
+ *  unrotated pin positions. */
+function terminalGridPos(
+  comp: CircuitComponent,
+  term: { id: string; position: Vec2 },
+  plugin: ComponentPlugin,
+): Vec2 {
+  const rotated = rotateTerminal(term as never, comp.rotation, plugin.boundingBox);
+  return { x: comp.position.x + rotated.position.x, y: comp.position.y + rotated.position.y };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -75,25 +88,25 @@ export function buildRoutingGrid(
     new Array(width).fill('free' as CellType),
   );
 
-  // Mark component bodies as blocked (but NOT their terminals).
+  // Mark component bodies as blocked. Terminal cells that fall INSIDE the
+  // body region stay blocked too — findRoute() force-frees the route's own
+  // start/end cells, and the integration tests encode this behavior. (The
+  // old "clear terminals" loop here was dead code that marked nothing.)
   for (const comp of components) {
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
     const bb = plugin.boundingBox;
+    // A 90°/270°-rotated component occupies width↔height swapped extents.
+    const bw = comp.rotation % 2 === 1 ? bb.height : bb.width;
+    const bh = comp.rotation % 2 === 1 ? bb.width : bb.height;
     const x0 = Math.max(0, Math.floor(comp.position.x));
     const y0 = Math.max(0, Math.floor(comp.position.y));
-    const x1 = Math.min(width - 1, Math.ceil(comp.position.x + bb.width) - 1);
-    const y1 = Math.min(height - 1, Math.ceil(comp.position.y + bb.height) - 1);
+    const x1 = Math.min(width - 1, Math.ceil(comp.position.x + bw) - 1);
+    const y1 = Math.min(height - 1, Math.ceil(comp.position.y + bh) - 1);
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
         cells[y][x] = 'blocked';
       }
-    }
-    // Clear terminals (make them accessible)
-    const terms = getTerminalsForComponent(comp, plugin, { terminalNode: new Map(), numNodes: 0, netNames: new Map() });
-    for (const term of terms) {
-      // Terminal position is relative to component + rotation
-      const tx = Math.round(comp.position.x + (term.nodeId % 100) * 0);  // simplified
     }
   }
 
@@ -132,14 +145,14 @@ export function getWireGridPath(
   const toTerm = toPlugin.terminals.find(t => t.id === wire.to.terminalId);
   if (!fromTerm || !toTerm) return [];
 
-  // Calculate terminal positions in grid coordinates
+  // Calculate terminal positions in grid coordinates (rotation-aware)
   const fromPos = {
-    x: Math.round(fromComp.position.x + fromTerm.position.x),
-    y: Math.round(fromComp.position.y + fromTerm.position.y),
+    x: Math.round(terminalGridPos(fromComp, fromTerm, fromPlugin).x),
+    y: Math.round(terminalGridPos(fromComp, fromTerm, fromPlugin).y),
   };
   const toPos = {
-    x: Math.round(toComp.position.x + toTerm.position.x),
-    y: Math.round(toComp.position.y + toTerm.position.y),
+    x: Math.round(terminalGridPos(toComp, toTerm, toPlugin).x),
+    y: Math.round(terminalGridPos(toComp, toTerm, toPlugin).y),
   };
 
   const path: Vec2[] = [fromPos];
@@ -348,8 +361,9 @@ function isAtTerminal(
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
     for (const term of plugin.terminals) {
-      const tx = Math.round(comp.position.x + term.position.x);
-      const ty = Math.round(comp.position.y + term.position.y);
+      const tp = terminalGridPos(comp, term, plugin);
+      const tx = Math.round(tp.x);
+      const ty = Math.round(tp.y);
       if (tx === pos.x && ty === pos.y) return true;
     }
   }
@@ -390,12 +404,11 @@ export function snapToNearestTerminal(
       if (excludeTerminal && comp.id === excludeTerminal.componentId && term.id === excludeTerminal.terminalId) {
         continue;
       }
-      const tx = comp.position.x + term.position.x;
-      const ty = comp.position.y + term.position.y;
-      const dist = Math.hypot(cursor.x - tx, cursor.y - ty);
+      const tp = terminalGridPos(comp, term, plugin);
+      const dist = Math.hypot(cursor.x - tp.x, cursor.y - tp.y);
       if (dist < nearestDist) {
         nearestDist = dist;
-        nearest = { x: tx, y: ty };
+        nearest = { x: tp.x, y: tp.y };
       }
     }
   }

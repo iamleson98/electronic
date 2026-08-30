@@ -217,3 +217,53 @@ describe('getProvider — ProviderName type', () => {
     expect(x).toBe('anthropic');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 2-c: in-memory AI rate limiter (used by the AI chat routes).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('checkRateLimit (AI endpoint limiter)', () => {
+  it('allows up to the limit and then blocks with a retry hint', async () => {
+    const { checkRateLimit } = await import('../src/lib/ai/rate-limit');
+    const key = `test-rl-${Math.random()}`;
+    const opts = { limit: 3, windowMs: 1000 };
+    expect(checkRateLimit(key, opts).ok).toBe(true);
+    expect(checkRateLimit(key, opts).ok).toBe(true);
+    const third = checkRateLimit(key, opts);
+    expect(third.ok).toBe(true);
+    expect(third.remaining).toBe(0);
+    const blocked = checkRateLimit(key, opts);
+    expect(blocked.ok).toBe(false);
+    expect(blocked.retryAfterSec).toBeGreaterThanOrEqual(1);
+    expect(blocked.retryAfterSec).toBeLessThanOrEqual(1);
+  });
+
+  it('a blocked request does not extend the window (no new timestamp recorded)', async () => {
+    const { checkRateLimit } = await import('../src/lib/ai/rate-limit');
+    const key = `test-rl2-${Math.random()}`;
+    const opts = { limit: 1, windowMs: 200 };
+    expect(checkRateLimit(key, opts).ok).toBe(true);
+    expect(checkRateLimit(key, opts).ok).toBe(false);
+    // window expires → allowed again
+    await new Promise(r => setTimeout(r, 250));
+    expect(checkRateLimit(key, opts).ok).toBe(true);
+  });
+
+  it('separate keys have separate windows', async () => {
+    const { checkRateLimit } = await import('../src/lib/ai/rate-limit');
+    const opts = { limit: 1, windowMs: 5000 };
+    expect(checkRateLimit('k-a', opts).ok).toBe(true);
+    expect(checkRateLimit('k-b', opts).ok).toBe(true);
+    expect(checkRateLimit('k-a', opts).ok).toBe(false);
+    expect(checkRateLimit('k-b', opts).ok).toBe(false);
+  });
+
+  it('clientIpFromRequest reads x-forwarded-for chains', async () => {
+    const { clientIpFromRequest } = await import('../src/lib/ai/rate-limit');
+    const req = new Request('http://localhost/x', { headers: { 'x-forwarded-for': '203.0.113.7, 10.0.0.1' } });
+    expect(clientIpFromRequest(req)).toBe('203.0.113.7');
+    const req2 = new Request('http://localhost/x', { headers: { 'x-real-ip': '198.51.100.9' } });
+    expect(clientIpFromRequest(req2)).toBe('198.51.100.9');
+    expect(clientIpFromRequest(new Request('http://localhost/x'))).toBe('unknown');
+  });
+});

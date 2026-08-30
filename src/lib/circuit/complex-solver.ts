@@ -100,6 +100,7 @@ export function cStampCurrentSource(sys: ComplexMnaSystem, n1: number, n2: numbe
 
 export function cStampVoltageSource(sys: ComplexMnaSystem, n1: number, n2: number, voltage: Complex): number {
   const i = sys.nextExtra++;
+  ensureComplexCapacity(sys, i);
   if (n1 > 0) {
     addComplex(sys, n1 - 1, i, { re: 1, im: 0 });
     addComplex(sys, i, n1 - 1, { re: 1, im: 0 });
@@ -124,11 +125,40 @@ export function cStampVCCS(sys: ComplexMnaSystem, n1: number, n2: number, c: num
 
 export function cStampVCVS(sys: ComplexMnaSystem, a: number, b: number, c: number, d: number, mu: Complex): number {
   const i = sys.nextExtra++;
+  ensureComplexCapacity(sys, i);
   if (a > 0) { addComplex(sys, a - 1, i, { re: 1, im: 0 }); addComplex(sys, i, a - 1, { re: 1, im: 0 }); }
   if (b > 0) { addComplex(sys, b - 1, i, { re: -1, im: 0 }); addComplex(sys, i, b - 1, { re: -1, im: 0 }); }
   if (c > 0) addComplex(sys, i, c - 1, { re: -mu.re, im: -mu.im });
   if (d > 0) addComplex(sys, i, d - 1, mu);
   return i;
+}
+
+/**
+ * Grow the interleaved complex matrix/RHS when more branch-current unknowns
+ * are allocated than the pre-computed budget. Without this, an over-budget
+ * stamp writes its ±1 entries at flat indices that can still land in bounds
+ * — corrupting a DIFFERENT matrix cell — and silently drops the branch
+ * equation. Re-layout preserves all earlier stamps.
+ */
+function ensureComplexCapacity(sys: ComplexMnaSystem, index: number): void {
+  if (index < sys.size) return;
+  const oldSize = sys.size;
+  const newSize = Math.max(index + 8, oldSize * 2);
+  const newA = new Float64Array(2 * newSize * newSize);
+  for (let r = 0; r < oldSize; r++) {
+    for (let c = 0; c < oldSize; c++) {
+      const src = 2 * (r * oldSize + c);
+      const dst = 2 * (r * newSize + c);
+      newA[dst] = sys.A[src];
+      newA[dst + 1] = sys.A[src + 1];
+    }
+  }
+  sys.A = newA;
+  const newZ = new Float64Array(2 * newSize);
+  newZ.set(sys.z);
+  sys.z = newZ;
+  sys.size = newSize;
+  sys.numExtra = newSize - sys.numNodes;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

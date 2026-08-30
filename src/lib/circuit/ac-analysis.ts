@@ -167,7 +167,10 @@ export function runACAnalysis(opts: ACAnalysisOptions): ACAnalysisResult {
   // This is done using a simplified version of the complex MNA solver.
 
   for (const freq of freqs) {
-    const omega = 2 * Math.PI * freq;
+    // Clamp ω away from zero: a linear sweep starting at 0 Hz would make the
+    // inductor admittance −1/(ωL) = −Infinity and poison the solve with NaN
+    // (the log-sweep path already clamps its start frequency the same way).
+    const omega = 2 * Math.PI * Math.max(freq, 1e-12);
     const vOut = computeOutputVoltage(components, wires, plugins, nodeMap, source, outNode, refNode, omega, acMag, dc, dcCurrents);
     const mag = Math.hypot(vOut.re, vOut.im);
     const phase = Math.atan2(vOut.im, vOut.re) * 180 / Math.PI;

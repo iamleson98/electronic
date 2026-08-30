@@ -43,7 +43,6 @@ export function generateCopperPour(
   const cellSize = 0.5; // mm per cell
   const cols = Math.ceil(board.width / cellSize);
   const rows = Math.ceil(board.height / cellSize);
-  const cells: { x: number; y: number }[] = [];
   const thermalPads: { pos: { x: number; y: number }; spokeWidth: number; padRadius: number }[] = [];
   const thermalRelief = options.thermalRelief ?? true; // default on
 
@@ -58,10 +57,12 @@ export function generateCopperPour(
   // then add 4 spokes connecting the pad to the pour)
   const sameNetPads: { pos: { x: number; y: number }; radius: number }[] = [];
 
-  // Pads — same net get thermal relief, different net get clearance
+  // Pads — same net get thermal relief, different net get clearance.
+  // THT pads (drill > 0) have copper on BOTH layers and must be avoided on
+  // both; SMD pads only on their own side.
   for (const fp of footprints) {
-    if (fp.side !== layer) continue;
     for (const pad of fp.pads) {
+      if ((pad.drill ?? 0) <= 0 && pad.layer !== layer && fp.side !== layer) continue;
       const padR = Math.max(pad.size.width, pad.size.height) / 2;
       if (pad.net === net) {
         // Same net — thermal relief: avoid pad + small gap, but add spokes
@@ -147,6 +148,7 @@ export function generateCopperPour(
   }
 
   // Fill grid cells
+  const filledCells: { col: number; row: number }[] = [];
   for (let row = 0; row < rows; row++) {
     for (let col = 0; col < cols; col++) {
       const cx = (col + 0.5) * cellSize;
@@ -154,7 +156,7 @@ export function generateCopperPour(
 
       // If this is a spoke cell, fill it (thermal relief connection)
       if (spokeCells.has(`${col},${row}`)) {
-        cells.push({ x: cx, y: cy });
+        filledCells.push({ col, row });
         continue;
       }
 
@@ -181,9 +183,65 @@ export function generateCopperPour(
       if (avoid) continue;
 
       // Cell is clear — fill it
-      cells.push({ x: cx, y: cy });
+      filledCells.push({ col, row });
     }
   }
+
+  // ── Island removal ──────────────────────────────────────────────────────
+  // Keep only the copper that is actually connected to the pour net (via
+  // same-net pads or their thermal spokes). Isolated islands of fill are a
+  // manufacturing/reliability hazard and every real EDA tool removes them.
+  // If there are no same-net anchors on this layer there is nothing to
+  // measure connectivity against — keep the fill as before.
+  let keptCells = filledCells;
+  if (sameNetPads.length > 0) {
+    const filled = new Set<string>();
+    for (const c of filledCells) filled.add(`${c.col},${c.row}`);
+
+    // Seeds: spoke cells + every filled cell touching a same-net pad's
+    // thermal-relief neighbourhood (padRadius + spoke + one cell).
+    const seeds: string[] = [];
+    for (const key of spokeCells) {
+      if (filled.has(key)) seeds.push(key);
+    }
+    for (const sp of sameNetPads) {
+      const anchorR = sp.radius + 0.5 + cellSize; // gap + spoke + 1 cell
+      const c0 = Math.floor((sp.pos.x - anchorR) / cellSize);
+      const c1 = Math.ceil((sp.pos.x + anchorR) / cellSize);
+      const r0 = Math.floor((sp.pos.y - anchorR) / cellSize);
+      const r1 = Math.ceil((sp.pos.y + anchorR) / cellSize);
+      for (let r = r0; r <= r1; r++) {
+        for (let c = c0; c <= c1; c++) {
+          const key = `${c},${r}`;
+          if (!filled.has(key)) continue;
+          const cx = (c + 0.5) * cellSize;
+          const cy = (r + 0.5) * cellSize;
+          if (Math.hypot(cx - sp.pos.x, cy - sp.pos.y) <= anchorR) seeds.push(key);
+        }
+      }
+    }
+
+    // Flood fill (8-connected) from the seeds
+    const connected = new Set<string>();
+    const stack = [...seeds];
+    while (stack.length > 0) {
+      const key = stack.pop()!;
+      if (connected.has(key)) continue;
+      connected.add(key);
+      const [c, r] = key.split(',').map(Number);
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          if (dr === 0 && dc === 0) continue;
+          const nk = `${c + dc},${r + dr}`;
+          if (filled.has(nk) && !connected.has(nk)) stack.push(nk);
+        }
+      }
+    }
+
+    keptCells = filledCells.filter((c) => connected.has(`${c.col},${c.row}`));
+  }
+
+  const cells = keptCells.map((c) => ({ x: (c.col + 0.5) * cellSize, y: (c.row + 0.5) * cellSize }));
 
   return { layer, net, cells, cellSize, thermalPads };
 }

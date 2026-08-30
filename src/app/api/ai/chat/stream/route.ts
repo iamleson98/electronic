@@ -16,6 +16,7 @@ import type { CircuitDocument } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
 import { buildSystemPrompt, MUTATING_TOOL_NAMES, runAutoVerify, autoVerifyNeedsAttention, buildAutoVerifyMessages } from '@/lib/ai/system-prompt';
 import { ensurePlugins } from '@/lib/ai/tools/helpers';
+import { checkRateLimit, clientIpFromRequest } from '@/lib/ai/rate-limit';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;  // 5 min — allows for long retry sequences on rate limits
@@ -99,18 +100,55 @@ function buildContextPreamble(body: RequestBody, doc: CircuitDocument): string |
 }
 
 export async function POST(req: NextRequest) {
+  // The AI loop can run for minutes and drives paid provider APIs — rate
+  // limit per client so it can't be hammered. Must happen BEFORE the stream
+  // is created (a 429 has to be a regular JSON response).
+  const rl = checkRateLimit(clientIpFromRequest(req));
+  if (!rl.ok) {
+    return new Response(
+      JSON.stringify({ error: 'Too many AI requests. Please wait a moment and try again.' }),
+      {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'Retry-After': String(rl.retryAfterSec) },
+      },
+    );
+  }
+
   const encoder = new TextEncoder();
+  // Set when the HTTP client disconnects (request aborted or stream
+  // cancelled). Once true, no further provider calls are made and all
+  // controller writes are skipped — enqueueing into a cancelled stream
+  // throws, which used to escalate into an unhandled rejection.
+  let clientGone = false;
+  const onAbort = () => { clientGone = true; };
+  if (req.signal.aborted) clientGone = true;
+  else req.signal.addEventListener('abort', onAbort, { once: true });
+
   const stream = new ReadableStream({
     async start(controller) {
       const send = (event: string, data: any) => {
-        controller.enqueue(encoder.encode(sseEvent(event, data)));
+        if (clientGone) return;
+        try {
+          controller.enqueue(encoder.encode(sseEvent(event, data)));
+        } catch {
+          // Stream errored/cancelled (client went away mid-write) — stop
+          // writing; the loop checks clientGone and bails.
+          clientGone = true;
+        }
+      };
+      const closeStream = () => {
+        try {
+          controller.close();
+        } catch {
+          // Already closed or cancelled (client gone) — nothing to do.
+        }
       };
 
       try {
         const body = await req.json();
         if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
           send('error', { message: 'messages array is required' });
-          controller.close();
+          closeStream();
           return;
         }
 
@@ -150,7 +188,9 @@ export async function POST(req: NextRequest) {
         const messages: ChatMessage[] = [
           { role: 'system', content: buildSystemPrompt() },
           ...(contextPreamble ? [{ role: 'system' as const, content: contextPreamble }] : []),
-          ...body.messages,
+          // Cap the history at the most recent 60 messages so a long session
+          // can't grow the prompt without bound and blow the context window.
+          ...body.messages.slice(-60),
         ];
 
         const executedToolCalls: any[] = [];
@@ -161,7 +201,14 @@ export async function POST(req: NextRequest) {
         let autoVerifyCount = 0;
 
         for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-          const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 8192 });
+          // Client disconnected — stop the loop instead of burning provider
+          // tokens (and up to 10 min of retry backoff) writing to nobody.
+          if (clientGone || req.signal.aborted) {
+            clientGone = true;
+            break;
+          }
+
+          const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 8192, signal: req.signal });
 
           // If tool calls, execute them (text streamed here narrates the tool use)
           if (result.tool_calls && result.tool_calls.length > 0) {
@@ -293,11 +340,12 @@ export async function POST(req: NextRequest) {
             model: provider.model,
             usage: result.usage,
           });
-          controller.close();
+          closeStream();
           return;
         }
 
-        // Max iterations reached
+        // Max iterations reached (or client disconnected mid-loop — still
+        // close the stream so the connection doesn't hang open).
         send('done', {
           response: 'I reached the maximum number of tool-call iterations. Here is what I managed to do so far. Please continue with a follow-up message if you need more.',
           toolCalls: executedToolCalls,
@@ -305,14 +353,21 @@ export async function POST(req: NextRequest) {
             components: ctx.doc.components,
             wires: ctx.doc.wires,
           },
-          warning: 'Max iterations reached',
+          warning: clientGone ? 'Client disconnected' : 'Max iterations reached',
         });
-        controller.close();
+        closeStream();
       } catch (e) {
         console.error('AI chat stream error:', e);
         send('error', { message: `AI chat failed: ${(e as Error).message}` });
-        controller.close();
+        closeStream();
+      } finally {
+        req.signal.removeEventListener('abort', onAbort);
       }
+    },
+    // Consumer cancelled the response body (client closed the tab / aborted
+    // the fetch) — flip the flag so the in-flight loop stops early.
+    cancel() {
+      clientGone = true;
     },
   });
 

@@ -46,7 +46,12 @@ export function loadFromShareURL(hash: string): CircuitDocument | null {
     const json = typeof atob !== 'undefined'
       ? decodeURIComponent(escape(atob(base64)))
       : Buffer.from(base64, 'base64').toString('utf-8');
-    return JSON.parse(json) as CircuitDocument;
+    const doc = JSON.parse(json) as CircuitDocument;
+    // Shape check: a syntactically-valid hash of a non-document payload
+    // (e.g. {"foo":1}) previously flowed into loadDocument, whose
+    // components.map(...) then threw and crashed the page.
+    if (!Array.isArray(doc.components) || !Array.isArray(doc.wires)) return null;
+    return doc;
   } catch { return null; }
 }
 

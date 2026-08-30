@@ -63,7 +63,7 @@ export interface AIProvider {
   chat(
     messages: ChatMessage[],
     tools?: ToolDefinition[],
-    options?: { temperature?: number; max_tokens?: number },
+    options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal },
   ): Promise<ChatResult>;
 }
 
@@ -238,8 +238,9 @@ class ZaiProvider implements AIProvider {
     }
   }
 
-  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number }): Promise<ChatResult> {
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
     const zai = await this.createZAI();
+    const signal = options?.signal;
 
     const body: any = {
       model: this.model,
@@ -267,6 +268,12 @@ class ZaiProvider implements AIProvider {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      // The caller (API route) aborts this signal when the HTTP client
+      // disconnects — stop retrying instead of burning the provider for
+      // another ~10 minutes with nobody listening.
+      if (signal?.aborted) {
+        throw new Error('Z.ai request aborted (client disconnected)');
+      }
       try {
         const response = await zai.chat.completions.create(body);
         const choice = response.choices[0];
@@ -299,7 +306,18 @@ class ZaiProvider implements AIProvider {
         const waitMs = attempt < backoffSchedule.length ? backoffSchedule[attempt] : 30000;
         const errorType = isRateLimit ? 'Rate limited' : 'Server error';
         console.warn(`[zai] ${errorType}, retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
-        await new Promise(r => setTimeout(r, waitMs));
+        await new Promise<void>((resolve) => {
+          // Wake early on abort so the loop-exit check above fires immediately
+          const onAbort = () => { clearTimeout(timer); resolve(); };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          }, waitMs);
+          if (signal) {
+            if (signal.aborted) { clearTimeout(timer); resolve(); return; }
+            signal.addEventListener('abort', onAbort, { once: true });
+          }
+        });
       }
     }
 
@@ -320,7 +338,7 @@ class OpenAIProvider implements AIProvider {
     this.model = model || process.env.OPENAI_MODEL || 'gpt-4o-mini';
   }
 
-  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number }): Promise<ChatResult> {
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
     const body: any = {
       model: this.model,
       messages,
@@ -339,6 +357,7 @@ class OpenAIProvider implements AIProvider {
         'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify(body),
+      signal: options?.signal,
     });
 
     if (!response.ok) {
@@ -375,7 +394,7 @@ class AnthropicProvider implements AIProvider {
     this.model = model || process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-20241022';
   }
 
-  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number }): Promise<ChatResult> {
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
     // Separate system message from conversation
     const systemMsg = messages.find(m => m.role === 'system');
     const conversationMsgs = messages.filter(m => m.role !== 'system');
@@ -451,6 +470,7 @@ class AnthropicProvider implements AIProvider {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(body),
+      signal: options?.signal,
     });
 
     if (!response.ok) {

@@ -48,6 +48,10 @@ export function generateFootprints(
         shape: padDef.shape,
         size: { ...padDef.size },
         layer: padDef.layer ?? 'top' as const,
+        // Propagate the drill so THT pad defs (e.g. parametric DIP-14 with
+        // 0.8mm drills) keep their through-hole nature on the PCB — the DRC,
+        // Gerber/Excellon export and copper pour all read Pad.drill.
+        ...(padDef.drill != null ? { drill: padDef.drill } : {}),
       };
     });
 

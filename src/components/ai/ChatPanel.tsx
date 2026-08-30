@@ -230,6 +230,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
   const runAutoRoute = usePCB(s => s.runAutoRoute);
   const runTopoRoute = usePCB(s => s.runTopoRoute);
   const runDRC = usePCB(s => s.runDRC);
+  const runNetlistVerify = usePCB(s => s.runNetlistVerify);
   const importFromSchematic = usePCB(s => s.importFromSchematic);
   const setBoardSize = usePCB(s => s.setBoardSize);
   const setDefaultTraceWidth = usePCB(s => s.setDefaultTraceWidth);
@@ -242,6 +243,17 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // Abort controller for the in-flight AI request — aborted on unmount so
+  // closing the panel mid-stream doesn't leave a zombie fetch looping (the
+  // server also stops via its request-signal abort).
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
+  // Synchronous in-flight guard — `isLoading` state can be stale for events
+  // arriving between the setState and the re-render (e.g. a queued
+  // 'circuitlab:ai-prompt' firing through the old sendRef closure), which
+  // used to allow two concurrent streams writing to the same message list.
+  const inFlightRef = useRef(false);
 
   const applyCircuitUpdate = useCallback((newComponents: any[], newWires: any[], isFinal: boolean) => {
     // Push current state to undo stack BEFORE applying (so Ctrl+Z reverts the AI change)
@@ -296,11 +308,21 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     } else if (tc.name === 'pcb.generateTeardrops') {
       generateTeardrops();
       toast.success('Teardrops generated');
+    } else if (tc.name === 'pcb.verifyNetlist') {
+      const r = runNetlistVerify();
+      if (!r) {
+        toast.error('Netlist verify: no PCB to verify — import the schematic first');
+      } else if (r.ok) {
+        toast.success(`Netlist verify: PCB matches schematic (${r.stats.matchedNets} nets)`);
+      } else {
+        toast.error(`Netlist verify: ${r.errors.length} issue(s) — see the PCB tab`);
+      }
     }
-  }, [setRunning, reset, setSpeed, importFromSchematic, runAutoRoute, runTopoRoute, runDRC, setBoardSize, setDefaultTraceWidth, setActiveLayer, addCopperPour, generateTeardrops]);
+  }, [setRunning, reset, setSpeed, importFromSchematic, runAutoRoute, runTopoRoute, runDRC, setBoardSize, setDefaultTraceWidth, setActiveLayer, addCopperPour, generateTeardrops, runNetlistVerify]);
 
   const sendMessage = useCallback(async (text: string) => {
-    if (!text.trim() || isLoading) return;
+    if (!text.trim() || isLoading || inFlightRef.current) return;
+    inFlightRef.current = true;
     setIsLoading(true);
     setInput('');
 
@@ -337,19 +359,25 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     const simRunning = editorState.running;
     const selectedComponentId = editorState.selection?.type === 'component' ? editorState.selection.id : null;
 
-    // Build message history for the API
+    // Build message history for the API. Capped at the last 40 messages so a
+    // long session doesn't grow the prompt (and the upload) without bound —
+    // the server re-caps at 60 defensively.
     const apiMessages = [
-      ...messages.filter(m => !m.loading && !m.error).map(m => ({
+      ...messages.filter(m => !m.loading && !m.error).slice(-40).map(m => ({
         role: m.role,
         content: m.content,
       })),
       { role: 'user' as const, content: text },
     ];
 
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const response = await fetch('/api/ai/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           messages: apiMessages,
           circuit: circuitSnapshot,
@@ -374,6 +402,10 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
       let textContent = '';
       const toolCalls: ToolCallEntry[] = [];
       let pendingCircuitUpdate: CircuitSnapshot | null = null;
+      // The payload that was last applied via an intermediate circuit_update
+      // event — used to skip the redundant final re-apply at `done` (it used to
+      // push a duplicate undo checkpoint, so one Ctrl+Z appeared to do nothing).
+      let lastAppliedUpdate: CircuitSnapshot | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -443,6 +475,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                 // If auto-apply is on, apply immediately; otherwise store as pending diff
                 if (autoApply) {
                   applyCircuitUpdate(data.components, data.wires, false);
+                  lastAppliedUpdate = pendingCircuitUpdate;
                 } else {
                   // Compute diff summary
                   const addedComps = data.components.length - circuitSnapshot.components.length;
@@ -491,8 +524,15 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                       : m
                   ));
                 } else if (autoApply && pendingCircuitUpdate) {
-                  // Final apply with toast
-                  applyCircuitUpdate(pendingCircuitUpdate.components, pendingCircuitUpdate.wires, true);
+                  // Final apply — but skip the redundant re-apply when the last
+                  // circuit_update payload was already applied above (it would
+                  // only push a duplicate undo checkpoint). Still toast so the
+                  // user learns Ctrl+Z reverts the whole AI turn.
+                  if (pendingCircuitUpdate !== lastAppliedUpdate) {
+                    applyCircuitUpdate(pendingCircuitUpdate.components, pendingCircuitUpdate.wires, true);
+                  } else {
+                    toast.success('Circuit updated by AI — press Ctrl+Z to undo');
+                  }
                   setMessages(prev => prev.map(m =>
                     m.id === assistantMsgId
                       ? { ...m, content: textContent, toolCalls, loading: false }
@@ -515,6 +555,9 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
         }
       }
     } catch (e) {
+      // Aborted because the panel was closed — drop the message quietly
+      // (setState after unmount is a no-op anyway, but don't show an error).
+      if ((e as Error).name === 'AbortError') return;
       setMessages(prev => prev.map(m =>
         m.id === assistantMsgId
           ? {
@@ -527,6 +570,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
       ));
       toast.error('AI request failed');
     } finally {
+      inFlightRef.current = false;
       setIsLoading(false);
     }
   }, [isLoading, components, wires, messages, autoApply, selectedProvider, selectedModel, applyCircuitUpdate, handleClientSideAction]);

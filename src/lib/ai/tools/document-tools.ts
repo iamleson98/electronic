@@ -72,9 +72,48 @@ const loadDocumentTool: Tool = {
     required: ['components', 'wires'],
   },
   execute(args, ctx) {
-    ctx.doc.components = args.components;
+    // Shape-validate the model-supplied document: a hallucinated non-array
+    // (or array of non-components) would corrupt ctx.doc for the rest of the
+    // loop — every later tool and the auto-verify pass would throw, failing
+    // the whole request AFTER mutations were already applied.
+    if (!Array.isArray(args.components) || !Array.isArray(args.wires)) {
+      return { ok: false, error: 'components and wires must be arrays. Each component: {id, type, position:{x,y}, rotation, parameters}; each wire: {id, from:{componentId,terminalId}, to:{componentId,terminalId}}.' };
+    }
+    const badComponent = args.components.find((c: any) =>
+      !c || typeof c !== 'object' ||
+      typeof c.type !== 'string' ||
+      !c.position || typeof c.position !== 'object' ||
+      typeof c.position.x !== 'number' || typeof c.position.y !== 'number' ||
+      (c.parameters !== undefined && typeof c.parameters !== 'object'));
+    if (badComponent !== undefined) {
+      return { ok: false, error: `Invalid component entry: ${JSON.stringify(badComponent)?.slice(0, 200)}. Every component needs {type: string, position: {x, y}} (parameters optional — plugin defaults are filled in).` };
+    }
+    const badWire = args.wires.find((w: any) => !w || typeof w !== 'object' || !w.from || !w.to);
+    if (badWire !== undefined) {
+      return { ok: false, error: `Invalid wire entry: ${JSON.stringify(badWire)?.slice(0, 200)}. Every wire needs {from: {componentId, terminalId}, to: {componentId, terminalId}}.` };
+    }
+    // Normalize optional fields the later tools/validators dereference:
+    // missing `parameters` → plugin defaults (addComponentTool semantics),
+    // missing `rotation` → 0. Keeps diagnose/validatePhysics from throwing
+    // on a hand-written document.
+    const components = args.components.map((c: any) => {
+      if (c.parameters && c.rotation !== undefined) return c;
+      const plugin = getPlugin(c.type);
+      const defaults: Record<string, any> = {};
+      for (const p of plugin?.parameters ?? []) defaults[p.key] = p.default;
+      return {
+        ...c,
+        parameters: c.parameters ?? defaults,
+        rotation: c.rotation ?? 0,
+      };
+    });
+    ctx.doc.components = components;
     ctx.doc.wires = args.wires;
-    return { ok: true, result: { componentsLoaded: args.components.length, wiresLoaded: args.wires.length } };
+    // Whole-document replacement changes topology — node ids are renumbered,
+    // so any cached simContext (node voltages from the PREVIOUS circuit)
+    // must be discarded or getVoltage/getCurrent would silently read wrong nodes.
+    ctx.simContext = null;
+    return { ok: true, result: { componentsLoaded: components.length, wiresLoaded: args.wires.length } };
   },
 };
 

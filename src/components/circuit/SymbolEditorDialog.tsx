@@ -538,13 +538,14 @@ export function SymbolEditorDialog({ open, onClose, onSaved, initialDesign }: Pr
     void e;
   }, [finalizeDraft]);
 
-  const onWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    const rect = e.currentTarget.getBoundingClientRect();
-    const sx = e.clientX - rect.left;
-    const sy = e.clientY - rect.top;
+  const zoomAt = useCallback((clientX: number, clientY: number, deltaY: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const sx = clientX - rect.left;
+    const sy = clientY - rect.top;
     const cam = cameraRef.current;
-    const factor = e.deltaY > 0 ? 0.9 : 1.1;
+    const factor = deltaY > 0 ? 0.9 : 1.1;
     const newZoom = clamp(cam.zoom * factor, 0.2, 6);
     // Zoom around cursor — keep grid point under cursor fixed
     const gx = (sx - cam.x) / (CELL_SIZE * cam.zoom);
@@ -552,6 +553,22 @@ export function SymbolEditorDialog({ open, onClose, onSaved, initialDesign }: Pr
     const newX = sx - gx * CELL_SIZE * newZoom;
     const newY = sy - gy * CELL_SIZE * newZoom;
     setCamera({ x: newX, y: newY, zoom: newZoom });
+  }, []);
+
+  // Native non-passive wheel listener so preventDefault actually works
+  // (React registers JSX onWheel as passive — preventDefault there was a
+  // silent no-op and the dialog body scrolled while zooming).
+  const zoomAtRef = useRef(zoomAt);
+  useEffect(() => { zoomAtRef.current = zoomAt; }, [zoomAt]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const listener = (e: WheelEvent) => {
+      e.preventDefault();
+      zoomAtRef.current(e.clientX, e.clientY, e.deltaY);
+    };
+    canvas.addEventListener('wheel', listener, { passive: false });
+    return () => canvas.removeEventListener('wheel', listener);
   }, []);
 
   const onDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -798,7 +815,6 @@ export function SymbolEditorDialog({ open, onClose, onSaved, initialDesign }: Pr
                 onMouseMove={onMouseMove}
                 onMouseUp={onMouseUp}
                 onMouseLeave={onMouseUp}
-                onWheel={onWheel}
                 onDoubleClick={onDoubleClick}
                 onContextMenu={onContextMenu}
                 className="block h-full w-full cursor-crosshair"

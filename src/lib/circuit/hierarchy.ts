@@ -67,7 +67,13 @@ export function flattenHierarchy(
     sheet: HierarchicalSheet,
     parentPrefix: string,
     parentSheetBoxId: string,
+    ancestors: ReadonlySet<string>,
   ) {
+    // Cycle guard: a sheet whose document (transitively) references its own
+    // fileName would recurse without bound until the stack overflows. Only
+    // ANCESTORS are skipped — sibling boxes may legitimately instantiate the
+    // same sub-sheet file multiple times.
+    if (ancestors.has(sheet.fileName)) return;
     const childDoc = childSheets[sheet.fileName];
     if (!childDoc) return;
 
@@ -141,15 +147,17 @@ export function flattenHierarchy(
     // Recurse into the sub-sheet's own sub-sheets (nested hierarchy)
     const childSheetsOfChild = (childDoc as any).sheets as HierarchicalSheet[] | undefined;
     if (childSheetsOfChild) {
+      const childAncestors = new Set(ancestors);
+      childAncestors.add(sheet.fileName);
       for (const grandchild of childSheetsOfChild) {
-        inlineSheet(grandchild, prefix, sheet.id);
+        inlineSheet(grandchild, prefix, sheet.id, childAncestors);
       }
     }
   }
 
   // Inline each top-level sheet on the root document
   for (const sheet of rootDoc.sheets ?? []) {
-    inlineSheet(sheet, '', sheet.id);
+    inlineSheet(sheet, '', sheet.id, new Set());
   }
 
   return { components: flatComponents, wires: flatWires, prefix: '' };
@@ -231,8 +239,9 @@ export function collectCrossSheetConnections(
   childSheets: Record<string, CircuitDocument>,
 ): CrossSheetConnection[] {
   const result: CrossSheetConnection[] = [];
-  function walk(sheets: HierarchicalSheet[]) {
+  function walk(sheets: HierarchicalSheet[], ancestors: ReadonlySet<string>) {
     for (const sheet of sheets) {
+      if (ancestors.has(sheet.fileName)) continue; // cycle guard
       const childDoc = childSheets[sheet.fileName];
       if (!childDoc) continue;
       for (const pin of sheet.pins) {
@@ -253,9 +262,13 @@ export function collectCrossSheetConnections(
       }
       // Recurse
       const childSubSheets = (childDoc as any).sheets as HierarchicalSheet[] | undefined;
-      if (childSubSheets) walk(childSubSheets);
+      if (childSubSheets) {
+        const childAncestors = new Set(ancestors);
+        childAncestors.add(sheet.fileName);
+        walk(childSubSheets, childAncestors);
+      }
     }
   }
-  walk(rootDoc.sheets ?? []);
+  walk(rootDoc.sheets ?? [], new Set());
   return result;
 }

@@ -38,6 +38,7 @@ const SPICE_SUFFIXES: Record<string, number> = {
   'p': 1e-12,
   'n': 1e-9,
   'u': 1e-6,  // also "µ" but we accept ASCII
+  'µ': 1e-6,
   'm': 1e-3,
   'k': 1e3,
   'meg': 1e6,
@@ -403,13 +404,16 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
             continue;
           }
           const id = tokens[0];
-          // Look for SINE(...) or DC <value>
+          // Look for SINE(...) or DC <value>. Arguments may carry SPICE
+          // engineering suffixes (SINE(0 1 1k) = 1 kHz) — parse each captured
+          // group through parseSpiceValue instead of bare parseFloat.
           const joined = tokens.slice(3).join(' ');
-          const sineMatch = joined.match(/SINE\s*\(\s*([\d.eE+-]+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)/i);
+          const sineArg = '([-+]?[\\d.]+(?:[eE][-+]?\\d+)?[a-zµ%]*)';
+          const sineMatch = joined.match(new RegExp(`SINE\\s*\\(\\s*${sineArg}\\s+${sineArg}\\s+${sineArg}`, 'i'));
           if (sineMatch) {
-            const voff = parseFloat(sineMatch[1]);
-            const vamp = parseFloat(sineMatch[2]);
-            const freq = parseFloat(sineMatch[3]);
+            const voff = parseSpiceValue(sineMatch[1]);
+            const vamp = parseSpiceValue(sineMatch[2]);
+            const freq = parseSpiceValue(sineMatch[3]);
             const plugin = getPlugin('acVoltage');
             const params: any = {};
             if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;

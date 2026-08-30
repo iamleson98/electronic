@@ -22,13 +22,12 @@ const importToPCBTool: Tool = {
   category: 'PCB',
   description: 'Import the current schematic into the PCB layout editor. Creates footprints for each component and a ratsnest showing what needs to be routed. The user will need to switch to the PCB tab to see the result.',
   parameters: { type: 'object', properties: {} },
-  execute(_args, ctx) {
-    if (!ctx.pcb) {
-      return { ok: false, error: 'PCB context not available. This tool only works when the PCB store is initialized (user is on the PCB tab).' };
-    }
-    // This is a no-op on the server side — the actual import happens client-side
-    // when the result is returned. We just acknowledge the request.
-    return { ok: true, result: { message: 'Import request queued. The client will import the schematic into the PCB editor.' } };
+  // NOTE: the server never carries a live PCB store (ctx.pcb is unset on the
+  // API routes) — these tools are CLIENT-EXECUTED, like simulate.start etc.
+  // Returning ok:false here would tell the model the action failed (it would
+  // apologize/retry) while the client actually ran it successfully.
+  execute() {
+    return { ok: true, result: { action: 'importFromSchematic', message: 'Import queued. The client will import the schematic into the PCB editor — tell the user to switch to the PCB tab to see it.' } };
   },
 };
 
@@ -37,11 +36,8 @@ const runAutoRouteTool: Tool = {
   category: 'PCB',
   description: 'Run the auto-router on the PCB layout. Routes all unrouted nets using the Lee BFS algorithm. Returns statistics on routes completed vs failed.',
   parameters: { type: 'object', properties: {} },
-  execute(_args, ctx) {
-    if (!ctx.pcb) return { ok: false, error: 'PCB context not available.' };
-    // We need the ratsnest — the client will provide it
-    // For now, just acknowledge
-    return { ok: true, result: { message: 'Auto-route request queued. The client will run the router.' } };
+  execute() {
+    return { ok: true, result: { action: 'autoRoute', message: 'Auto-route queued. The client will run the Lee BFS router and report routed vs failed nets.' } };
   },
 };
 
@@ -50,9 +46,8 @@ const runDRCTool: Tool = {
   category: 'PCB',
   description: 'Run the Design Rule Check on the PCB layout. Checks clearance, trace width, drill size, annular ring, courtyard, and netlist match. Returns a list of errors.',
   parameters: { type: 'object', properties: {} },
-  execute(_args, ctx) {
-    if (!ctx.pcb) return { ok: false, error: 'PCB context not available.' };
-    return { ok: true, result: { message: 'DRC request queued. The client will run the check.' } };
+  execute() {
+    return { ok: true, result: { action: 'runDRC', message: 'DRC queued. The client will run the check and display the results in the PCB tab.' } };
   },
 };
 
@@ -61,9 +56,8 @@ const runTopoRouteTool: Tool = {
   category: 'PCB',
   description: 'Run the topological (push-and-shove) router with A* and 45° snapping. Higher quality than autoRoute but slower.',
   parameters: { type: 'object', properties: {} },
-  execute(_args, ctx) {
-    if (!ctx.pcb) return { ok: false, error: 'PCB context not available.' };
-    return { ok: true, result: { message: 'Topo-route request queued.' } };
+  execute() {
+    return { ok: true, result: { action: 'topoRoute', message: 'Topo-route queued. The client will run the topological router.' } };
   },
 };
 

@@ -592,6 +592,13 @@ export function sampleStimulus(stimulus: Stimulus, times: Float64Array): Float64
       }
       case 'pwl': {
         const pts = (stimulus.params.points as number[]) ?? [];
+        // SPICE PWL semantics: hold the FIRST value before the first point
+        // and the LAST value after the last one (the old code returned 0
+        // outside the defined range).
+        if (pts.length >= 2) {
+          if (t <= pts[0]) { out[i] = pts[1]; break; }
+          if (t >= pts[pts.length - 2]) { out[i] = pts[pts.length - 1]; break; }
+        }
         // find segment
         for (let j = 0; j < pts.length - 2; j += 2) {
           if (t >= pts[j] && t <= pts[j + 2]) {

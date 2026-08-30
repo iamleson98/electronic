@@ -31,6 +31,14 @@ export const COMP_ID_STATE_PREFIXES = [
   'lm565',
   // RGB LED: per-channel diode conduction hysteresis
   'rgbled',
+  // DC motor: rotor speed (omega) integrator state
+  'dcmotor',
+  // rail-limited op-amp: saturation region latch
+  'opampRails',
+  // optocoupler: output-transistor saturation latch
+  'opto',
+  // transformer magnetizing-inductance current history
+  'xfmr_lm',
 ];
 
 // Optional suffixes appended to state keys (`npn_<id>_ib`, `mos_<id>_vgs`,

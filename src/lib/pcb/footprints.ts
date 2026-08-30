@@ -277,3 +277,16 @@ export function getFootprintDef(type: string): FootprintDef {
     ],
   };
 }
+
+// Mark all THT-style pads (the shared 1.8mm PAD_THT circles) as plated
+// through-holes with a 1.0mm drill, matching the PAD_THT definition comment.
+// With `drill` set, the DRC (annular ring), Gerber copper export (pads appear
+// on BOTH copper layers), Excellon drill export, copper pour and the 3D viewer
+// all treat these as real through-hole pads instead of guessing.
+for (const def of Object.values(footprintDefs)) {
+  for (const pad of def.pads) {
+    if (pad.shape === 'circle' && pad.size === PAD_THT && pad.drill == null) {
+      pad.drill = 1.0;
+    }
+  }
+}

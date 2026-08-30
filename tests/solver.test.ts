@@ -1,6 +1,7 @@
 // Unit tests for the MNA solver and engine core.
 import { describe, it, expect, beforeAll } from 'vitest';
 import { simulateStep, solveDC, computeComponentCurrents, computeWireCurrents, buildNodeMap } from '../src/lib/circuit/engine';
+import { createMnaSystem, solveMna } from '../src/lib/circuit/solver';
 import { getPlugin } from '../src/lib/circuit/registry';
 import type { CircuitComponent, Wire, ComponentPlugin } from '../src/lib/circuit/types';
 
@@ -292,3 +293,41 @@ import { getTerminalsForComponent } from '../src/lib/circuit/engine';
 function getTerminalsHelper(comp: CircuitComponent, plugin: ComponentPlugin, nodeMap: any) {
   return getTerminalsForComponent(comp, plugin, nodeMap);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression: branch-current budget overflow must grow the system, not
+// corrupt it. Plugins can allocate more MNA extra unknowns than the engine's
+// pre-computed budget (components.length*4 + 8 + extraVars); before the fix
+// the dense layout silently wrote ±1 KCL entries into the WRONG cells (flat
+// index still in bounds) and dropped the branch equations — corrupted node
+// voltages with no error.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('MNA Solver — extra-variable budget overflow', () => {
+  it('over-budget voltage sources solve exactly (dense path)', () => {
+    // 6 non-ground nodes, an artificially small budget of 2 extras (size 8):
+    // stamping 6 voltage sources needs 6 extras — indices 8..11 overflow.
+    const sys = createMnaSystem(6, 2);
+    sys.nextExtra = 6;
+    for (let k = 1; k <= 6; k++) sys.stampConductance(k, 0, 1e-3); // 1k loads
+    for (let k = 1; k <= 6; k++) sys.stampVoltageSource(k, 0, k);   // V(k) = k
+    // engine-style shrink to the used block
+    const actualSize = sys.nextExtra;
+    if (actualSize < sys.size) {
+      const newA = new Float64Array(actualSize * actualSize);
+      const newZ = new Float64Array(actualSize);
+      for (let r = 0; r < actualSize; r++) {
+        for (let c = 0; c < actualSize; c++) newA[r * actualSize + c] = sys.A[r * sys.size + c];
+        newZ[r] = sys.z[r];
+      }
+      sys.A = newA; sys.z = newZ; sys.size = actualSize; sys.numExtra = actualSize - 6;
+    }
+    expect(sys.size).toBe(12); // all six branch rows present (was: stuck at 8)
+    const x = solveMna(sys);
+    expect(x).not.toBeNull();
+    for (let k = 1; k <= 6; k++) {
+      expect(x![k - 1]).toBeCloseTo(k, 9);
+      // branch current = source driving its 1k load: k volts / 1k
+      expect(Math.abs(x![5 + k])).toBeCloseTo(k * 1e-3, 9);
+    }
+  });
+});

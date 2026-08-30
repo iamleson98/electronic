@@ -167,9 +167,12 @@ export function exportSPICENetlist(doc: CircuitDocument, title: string = 'Circui
     else if (comp.type === 'inductor') value = formatSpiceValue(comp.parameters.inductance as number, 'H');
     else if (comp.type === 'dcVoltage') value = `${comp.parameters.voltage ?? 5}`;
     else if (comp.type === 'acVoltage') {
+      // Round-trip the offset too — exporting SINE(0 ...) silently discarded
+      // the user's DC offset on every export→import cycle.
+      const off = comp.parameters.offset ?? 0;
       const amp = comp.parameters.amplitude ?? 1;
       const freq = comp.parameters.frequency ?? 50;
-      value = `SINE(0 ${amp} ${freq})`;
+      value = `SINE(${off} ${amp} ${freq})`;
     } else if (comp.type === 'bvSource' || comp.type === 'biSource') {
       // ngspice B-element: B1 n+ n- V=expr (voltage) or I=expr (current).
       // Quoted so expressions containing spaces/commas survive one line.
@@ -325,7 +328,7 @@ export function buildBOMRows(doc: CircuitDocument): BOMRow[] {
     const manufacturer = comp.fields?.find((f) => f.key === 'Manufacturer')?.value;
     const digikeyPN = comp.fields?.find((f) => f.key === 'DigiKeyPN')?.value;
     const mouserPN = comp.fields?.find((f) => f.key === 'MouserPN')?.value;
-    const value = String(comp.parameters.resistance ?? comp.parameters.voltage ?? comp.parameters.capacitance ?? comp.type);
+    const value = String(comp.parameters.resistance ?? comp.parameters.voltage ?? comp.parameters.capacitance ?? comp.parameters.inductance ?? comp.type);
 
     // group by (footprint, value, mpn)
     const key = `${footprint}|${value}|${mpn ?? ''}`;

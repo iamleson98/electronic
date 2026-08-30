@@ -5,6 +5,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { simulateStep, solveDC } from '../src/lib/circuit/engine';
 import { getPlugin, getAllPlugins } from '../src/lib/circuit/registry';
 import { runACAnalysis } from '../src/lib/circuit/ac-analysis';
+import { runAC } from '../src/lib/circuit/analysis';
 import type { CircuitComponent, Wire } from '../src/lib/circuit/types';
 
 beforeAll(async () => {
@@ -180,5 +181,118 @@ describe('simplified AC analysis source stamping', () => {
     const pt = res.points[0];
     expect(pt.real).toBeCloseTo(0, 6);
     expect(pt.imag).toBeCloseTo(1, 6);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. Frequency-sweep guards: a 0 Hz start must not hang or poison the solve
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('AC sweep zero-frequency guards', () => {
+  it('linear sweep from 0 Hz yields finite points (inductor −1/(ωL) clamped)', () => {
+    // RL circuit probed at the R/L junction. Before the ω clamp, the 0 Hz
+    // point made the inductor admittance −Infinity and every magnitude NaN.
+    const comps = [
+      comp('dcVoltage', 'V1', { voltage: 5 }),
+      comp('resistor', 'R1', { resistance: 1000 }),
+      comp('inductor', 'L1', { inductance: 1e-3 }),
+      comp('ground', 'GND'),
+    ];
+    const ws = [
+      wire('w1', 'V1', 'p', 'R1', 'a'),
+      wire('w2', 'R1', 'b', 'L1', 'a'),
+      wire('w3', 'L1', 'b', 'GND', 'g'),
+      wire('w4', 'V1', 'n', 'GND', 'g'),
+    ];
+    const res = runACAnalysis({
+      components: comps, wires: ws, fStart: 0, fStop: 1000, nPoints: 5,
+      sweep: 'lin', sourceId: 'V1', acMag: 1, outputNode: 'R1:b',
+    });
+    expect(res.points.length).toBe(5);
+    for (const p of res.points) {
+      expect(Number.isFinite(p.magnitude)).toBe(true);
+      expect(Number.isFinite(p.phase)).toBe(true);
+      expect(Number.isFinite(p.real)).toBe(true);
+      expect(Number.isFinite(p.imag)).toBe(true);
+    }
+    // At ~DC the inductor is a short: |V(junction)| ≈ 0.
+    expect(res.points[0].magnitude).toBeLessThan(0.01);
+  });
+
+  it('decade sweep with fStart=0 terminates with a bounded point count', () => {
+    // generateSweepFrequencies used log10(fStop/fStart) = +Infinity when
+    // fStart = 0 — an unbounded loop pushing f = 0 points forever (hang/OOM).
+    const comps = [
+      comp('dcVoltage', 'V1', { voltage: 5 }),
+      comp('resistor', 'R1', { resistance: 1000 }),
+      comp('capacitor', 'C1', { capacitance: 1e-6 }),
+      comp('ground', 'GND'),
+    ];
+    const ws = [
+      wire('w1', 'V1', 'p', 'R1', 'a'),
+      wire('w2', 'R1', 'b', 'C1', 'a'),
+      wire('w3', 'C1', 'b', 'GND', 'g'),
+      wire('w4', 'V1', 'n', 'GND', 'g'),
+    ];
+    const res = runACAnalysis({
+      components: comps, wires: ws, fStart: 0, fStop: 100000, nPoints: 10,
+      sweep: 'dec', sourceId: 'V1', acMag: 1, outputNode: 'R1:b',
+    });
+    expect(res.points.length).toBeGreaterThan(0);
+    expect(res.points.length).toBeLessThanOrEqual(1000);
+    for (const p of res.points) expect(Number.isFinite(p.magnitude)).toBe(true);
+  });
+});
+
+describe('full AC engine sweep guards (analysis.ts runAC)', () => {
+  it('runAC dec sweep with fStart=0 terminates (was: infinite loop)', () => {
+    const comps = [
+      comp('dcVoltage', 'V1', { voltage: 5 }),
+      comp('resistor', 'R1', { resistance: 1000 }),
+      comp('capacitor', 'C1', { capacitance: 1e-6 }),
+      comp('ground', 'GND'),
+    ];
+    const ws = [
+      wire('w1', 'V1', 'p', 'R1', 'a'),
+      wire('w2', 'R1', 'b', 'C1', 'a'),
+      wire('w3', 'C1', 'b', 'GND', 'g'),
+      wire('w4', 'V1', 'n', 'GND', 'g'),
+    ];
+    // Before the guard this never returned: log10(1e5/0) = Infinity points.
+    const res = runAC(comps, ws, plugins(), {
+      type: 'ac', sweep: 'dec', nPoints: 10, fStart: 0, fStop: 100000,
+      sourceId: 'V1', acMag: 1, outputNode: 'R1:b',
+    });
+    expect(res.traces.length).toBeGreaterThan(0);
+    const xs = res.traces[0].xValues;
+    expect(xs.length).toBeGreaterThan(0);
+    expect(xs.length).toBeLessThanOrEqual(1000);
+    for (let i = 0; i < xs.length; i++) {
+      expect(Number.isFinite(xs[i])).toBe(true);
+    }
+  });
+
+  it('runAC linear sweep from 0 Hz yields finite complex values', () => {
+    const comps = [
+      comp('dcVoltage', 'V1', { voltage: 5 }),
+      comp('resistor', 'R1', { resistance: 1000 }),
+      comp('inductor', 'L1', { inductance: 1e-3 }),
+      comp('ground', 'GND'),
+    ];
+    const ws = [
+      wire('w1', 'V1', 'p', 'R1', 'a'),
+      wire('w2', 'R1', 'b', 'L1', 'a'),
+      wire('w3', 'L1', 'b', 'GND', 'g'),
+      wire('w4', 'V1', 'n', 'GND', 'g'),
+    ];
+    const res = runAC(comps, ws, plugins(), {
+      type: 'ac', sweep: 'lin', nPoints: 5, fStart: 0, fStop: 1000,
+      sourceId: 'V1', acMag: 1, outputNode: 'R1:b',
+    });
+    const ys = res.traces[0].yValues;
+    expect(ys.length).toBe(10);
+    for (let i = 0; i < ys.length; i++) {
+      expect(Number.isFinite(ys[i])).toBe(true);
+    }
   });
 });

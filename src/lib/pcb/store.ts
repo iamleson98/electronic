@@ -433,7 +433,10 @@ export const usePCB = create<PCBState>((set, get) => ({
 
   runDRC: () => {
     const s = get();
-    const errors = runDRCCheck(s.footprints, s.traces, s.vias, s.ratsnest, s.board, DEFAULT_DRC_CONFIG);
+    // Pass the PCB net classes so per-net clearance/width rules are enforced
+    // (previously the classes were silently ignored by the DRC run).
+    const netClasses = s.netClasses.map((c) => ({ id: c.name, ...c }));
+    const errors = runDRCCheck(s.footprints, s.traces, s.vias, s.ratsnest, s.board, DEFAULT_DRC_CONFIG, netClasses);
     set({ drcErrors: errors });
   },
 
@@ -504,21 +507,30 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   // ===== Flip footprint =====
-  flipFootprint: (id) => set((s) => ({
-    footprints: s.footprints.map((fp) => {
-      if (fp.id !== id) return fp;
-      const newSide = fp.side === 'top' ? 'bottom' : 'top';
-      return {
-        ...fp,
-        side: newSide,
-        pads: fp.pads.map((p) => ({
-          ...p,
-          position: { x: -p.position.x, y: p.position.y },
-          layer: newSide,
-        })),
-      };
-    }),
-  })),
+  flipFootprint: (id) => {
+    set((s) => ({
+      footprints: s.footprints.map((fp) => {
+        if (fp.id !== id) return fp;
+        const newSide = fp.side === 'top' ? 'bottom' : 'top';
+        return {
+          ...fp,
+          side: newSide,
+          pads: fp.pads.map((p) => ({
+            ...p,
+            // Mirror around the FOOTPRINT'S position (pad positions are
+            // absolute board coordinates — mirroring x alone used to teleport
+            // every pad to negative x, off the board).
+            position: { x: 2 * fp.position.x - p.position.x, y: p.position.y },
+            layer: newSide,
+          })),
+        };
+      }),
+    }));
+    // Recompute ratsnest — pad positions changed
+    const state = get();
+    const { ratsnest } = computeRatsnestFromState(state);
+    set({ ratsnest });
+  },
 
   // ===== Multi-selection =====
   toggleFootprintSelection: (id) => set((s) => {
@@ -653,6 +665,10 @@ export const usePCB = create<PCBState>((set, get) => ({
           pads: fp.pads.map(p => ({ ...p, position: { x: p.position.x + dx, y: p.position.y + dy } })) };
       }),
     });
+    // Recompute ratsnest — pad positions changed
+    const alignedState = get();
+    const { ratsnest: alignedRatsnest } = computeRatsnestFromState(alignedState);
+    set({ ratsnest: alignedRatsnest });
   },
 
   distributeSelected: (axis) => {
@@ -678,6 +694,10 @@ export const usePCB = create<PCBState>((set, get) => ({
         return { ...fp, position: newPos, pads: fp.pads.map(p => ({ ...p, position: { x: p.position.x + dx, y: p.position.y + dy } })) };
       }),
     });
+    // Recompute ratsnest — pad positions changed
+    const distState = get();
+    const { ratsnest: distRatsnest } = computeRatsnestFromState(distState);
+    set({ ratsnest: distRatsnest });
   },
 }));
 

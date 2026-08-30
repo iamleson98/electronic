@@ -590,6 +590,9 @@ const designBuildPatternTool: Tool = {
     try {
       const args = { ...(rawArgs.args || {}), x: rawArgs.x, y: rawArgs.y };
       const result = def.build(ctx, args);
+      // The pattern added components + wires — topology changed, so any cached
+      // simContext (node voltages for the OLD node numbering) is now invalid.
+      ctx.simContext = null;
       return {
         ok: true,
         result: {

@@ -798,3 +798,30 @@ describe('Sparse solver: refactorization reuse', () => {
     expect(vCap).toBeCloseTo(expected, 2);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression: branch-current budget overflow. A plugin that allocates more
+// MNA extras than the pre-computed budget used to push triplets with column
+// indices ≥ sys.size — z[i] silently dropped (typed-array OOB write) and
+// solveSparse crashed with a TypeError (colRows[c] undefined).
+// ─────────────────────────────────────────────────────────────────────────────
+describe('sparse solver — extra-variable budget overflow', () => {
+  it('over-budget voltage sources solve exactly (engine-style truncate + solve)', () => {
+    // 6 non-ground nodes, budget of 2 extras; 6 voltage sources need 6.
+    const sys = createSparseMnaSystem(6, 2);
+    sys.nextExtra = 6;
+    for (let k = 1; k <= 6; k++) sys.stampConductance(k, 0, 1e-3); // 1k loads
+    for (let k = 1; k <= 6; k++) sys.stampVoltageSource(k, 0, k);   // V(k) = k
+    const actualSize = sys.nextExtra;
+    if (actualSize < sys.size) {
+      sys.truncate(actualSize);
+    }
+    expect(sys.size).toBe(12);
+    const x = solveSparse(sys);
+    expect(x).not.toBeNull();
+    for (let k = 1; k <= 6; k++) {
+      expect(x![k - 1]).toBeCloseTo(k, 9);
+      expect(Math.abs(x![5 + k])).toBeCloseTo(k * 1e-3, 9);
+    }
+  });
+});

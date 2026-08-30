@@ -125,30 +125,36 @@ export function routeTopologically(
 
   for (const netEntry of netsToRoute) {
     result.stats.iterations++;
-    const routeResult = routeOneNet(
-      netEntry,
-      result.traces,
-      result.vias,
-      padsByNet,
-      board,
-      options,
-    );
-    if (routeResult.success) {
-      result.traces = routeResult.traces;
-      result.vias = routeResult.vias;
-      result.stats.routed++;
-      result.stats.shoved += routeResult.shoved;
-      result.stats.rippedUp += routeResult.rippedUp;
-      result.stats.vias += routeResult.viasAdded;
-      result.stats.totalLengthMm += routeResult.lengthMm;
-    } else {
-      result.unrouted.push({
-        net: netEntry.net,
-        from: netEntry.connections[0].from,
-        to: netEntry.connections[0].to,
-        reason: routeResult.reason,
-      });
-      result.stats.failed++;
+    // Route EVERY connection of the net (a net with 3+ pads has multiple
+    // ratsnest legs). Previously only connections[0] was routed, silently
+    // leaving the remaining pads of multi-pad nets unrouted.
+    for (const conn of netEntry.connections) {
+      const routeResult = routeOneNet(
+        netEntry.net,
+        conn,
+        result.traces,
+        result.vias,
+        padsByNet,
+        board,
+        options,
+      );
+      if (routeResult.success) {
+        result.traces = routeResult.traces;
+        result.vias = routeResult.vias;
+        result.stats.routed++;
+        result.stats.shoved += routeResult.shoved;
+        result.stats.rippedUp += routeResult.rippedUp;
+        result.stats.vias += routeResult.viasAdded;
+        result.stats.totalLengthMm += routeResult.lengthMm;
+      } else {
+        result.unrouted.push({
+          net: netEntry.net,
+          from: conn.from,
+          to: conn.to,
+          reason: routeResult.reason,
+        });
+        result.stats.failed++;
+      }
     }
   }
 
@@ -205,20 +211,20 @@ interface NetRouteResult {
 }
 
 function routeOneNet(
-  netEntry: NetEntry,
+  net: string,
+  conn: { from: Vec2; to: Vec2; distMm: number },
   existingTraces: Trace[],
   existingVias: Via[],
   padsByNet: Map<string, Pad[]>,
   board: BoardOutline,
   options: TopologicalRouterOptions,
 ): NetRouteResult {
-  const conn = netEntry.connections[0];
   const source = conn.from;
   const target = conn.to;
 
   // Try direct routing first
   const attempt = attemptRoute(
-    source, target, netEntry.net,
+    source, target, net,
     existingTraces, existingVias, padsByNet, board, options,
   );
 
@@ -244,12 +250,12 @@ function routeOneNet(
   for (const blockingId of blockingTraces) {
     const removedTrace = existingTraces.find((t) => t.id === blockingId);
     if (!removedTrace) continue;
-    if (removedTrace.net === netEntry.net) continue; // never rip up same net
+    if (removedTrace.net === net) continue; // never rip up same net
 
     // Remove the blocking trace, retry
     const reducedTraces = existingTraces.filter((t) => t.id !== blockingId);
     const retry = attemptRoute(
-      source, target, netEntry.net,
+      source, target, net,
       reducedTraces, existingVias, padsByNet, board, options,
     );
     if (retry.success) {

@@ -150,7 +150,11 @@ export function createSparseMnaSystem(numNodes: number, numExtra: number): Spars
       sys.z = sys.z.slice(0, newSize);
       sys.size = newSize;
     },
-    addExtra: () => sys.nextExtra++,
+    addExtra: () => {
+      const i = sys.nextExtra++;
+      if (i >= sys.size) ensureSparseCapacity(sys, i);
+      return i;
+    },
     stampConductance: (n1, n2, g) => stampConductance(sys, n1, n2, g),
     stampCurrentSource: (n1, n2, current) => stampCurrentSource(sys, n1, n2, current),
     stampVoltageSource: (n1, n2, voltage) => stampVoltageSource(sys, n1, n2, voltage),
@@ -182,6 +186,7 @@ function stampCurrentSource(sys: SparseMnaSystem, n1: number, n2: number, curren
 
 function stampVoltageSource(sys: SparseMnaSystem, n1: number, n2: number, voltage: number): number {
   const i = sys.addExtra();
+  ensureSparseCapacity(sys, i);
   const t = sys.triplets;
   if (n1 > 0) t.push(n1 - 1, i, 1);
   if (n2 > 0) t.push(n2 - 1, i, -1);
@@ -193,6 +198,7 @@ function stampVoltageSource(sys: SparseMnaSystem, n1: number, n2: number, voltag
 
 function stampVCVS(sys: SparseMnaSystem, a: number, b: number, c: number, d: number, mu: number): number {
   const i = sys.addExtra();
+  ensureSparseCapacity(sys, i);
   const t = sys.triplets;
   if (a > 0) t.push(a - 1, i, 1);
   if (b > 0) t.push(b - 1, i, -1);
@@ -223,6 +229,7 @@ function stampCCCS(sys: SparseMnaSystem, n1: number, n2: number, extraIndex: num
 
 function stampCCVS(sys: SparseMnaSystem, a: number, b: number, extraIndex: number, r: number): number {
   const i = sys.addExtra();
+  ensureSparseCapacity(sys, i);
   const t = sys.triplets;
   if (a > 0) t.push(a - 1, i, 1);
   if (b > 0) t.push(b - 1, i, -1);
@@ -236,6 +243,25 @@ function stampCCVS(sys: SparseMnaSystem, a: number, b: number, extraIndex: numbe
 // ─────────────────────────────────────────────────────────────────────────────
 // solveSparse — entry point used by the engine.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Grow the RHS/system size when a plugin allocates more branch-current
+ * unknowns than the engine's pre-computed budget. Without this, an
+ * over-budget stampVoltageSource pushes a triplet whose column index is
+ * ≥ sys.size — z[i] silently drops (typed-array OOB write) and the column
+ * index later crashes solveSparse with a TypeError (colRows[c] undefined).
+ * Triplet (row, col) pairs are layout-agnostic, so only z and size need
+ * updating.
+ */
+function ensureSparseCapacity(sys: SparseMnaSystem, index: number): void {
+  if (index < sys.size) return;
+  const newSize = Math.max(index + 8, sys.size * 2);
+  const newZ = new Float64Array(newSize);
+  newZ.set(sys.z);
+  sys.z = newZ;
+  sys.size = newSize;
+  sys.numExtra = newSize - sys.numNodes;
+}
 
 /**
  * KLU-style refactorization reuse.

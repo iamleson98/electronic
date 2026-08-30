@@ -93,6 +93,28 @@ interface SpiceModel {
   params: Record<string, number>;
 }
 
+/**
+ * Find the .model name in a Q/M card. The model token position is ambiguous
+ * (Q/M may have an extra substrate/bulk node, and M allows trailing L=/W=
+ * inline params), so prefer a token that is a KNOWN model name and fall back
+ * to the first non-key=value token after the required nodes. Previously this
+ * took tokens[tokens.length-1], which misread "M1 d g s MOD L=5u W=20u" as
+ * model "W=20u" (silently losing the model card).
+ */
+function findModelName(
+  tokens: string[],
+  startIdx: number,
+  models: Map<string, SpiceModel>,
+): string | undefined {
+  let fallback: string | undefined;
+  for (let i = startIdx; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (models.has(t.toLowerCase())) return t;
+    if (fallback === undefined && !/=/.test(t)) fallback = t;
+  }
+  return fallback;
+}
+
 interface SubCkt {
   name: string;
   pins: string[];
@@ -277,54 +299,107 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
   // components are placed, using the compTermNodes array.
   const allNodes = new Set<string>();
 
-  // Sub-circuit expansion: flatten X-calls
-  // For each X<name> <pins...> <subcktName>, expand the subckt's body lines with
-  // pin name substitution.
-  const expandedLines: string[] = [];
-  for (const line of lines) {
-    if (!line || line.startsWith('*') || line.startsWith(';')) continue;
+  // SPICE title-line heuristic (same convention as spice-import.ts): the first
+  // line of a netlist is always the title. Only skip it when it can't possibly
+  // be a well-formed element card, so fixture netlists whose first line IS a
+  // real element (e.g. "V1 1 0 5") keep working.
+  const MIN_CARD_TOKENS: Record<string, number> = {
+    R: 4, C: 4, L: 4, V: 4, I: 4, B: 4, D: 4, Q: 5, M: 5, S: 6,
+    T: 5, O: 6, X: 4, E: 5, F: 5, G: 5, H: 5, K: 4, W: 4, Z: 4, N: 4, P: 4,
+  };
+  function isTitleLine(line: string): boolean {
+    if (line.startsWith('*') || line.startsWith(';') || line.startsWith('.')) return false;
     const tokens = tokenize(line);
-    if (tokens.length === 0) continue;
-    const head = tokens[0];
-    const headLower = head.toLowerCase();
-    if (headLower === '.subckt' || headLower === '.ends' || headLower === '.model') continue;
-    if (headLower.startsWith('.option') || headLower.startsWith('.tran') ||
-        headLower.startsWith('.dc') || headLower.startsWith('.ac') || headLower.startsWith('.ic') ||
-        headLower.startsWith('.end')) {
-      // skip simulation control (note: .ic will be handled separately below)
-      continue;
-    }
-    if (head[0] === 'X' || head[0] === 'x') {
-      // subckt call: X<name> <pin1> <pin2> ... <subcktName>
-      const subcktName = tokens[tokens.length - 1].toLowerCase();
-      const pins = tokens.slice(1, -1);
-      const sub = subckts.get(subcktName);
-      if (!sub) {
-        throw new Error(`Unknown subcircuit: ${subcktName}`);
+    if (tokens.length === 0) return false;
+    const letter = tokens[0][0].toUpperCase();
+    const min = MIN_CARD_TOKENS[letter];
+    return min === undefined || tokens.length < min;
+  }
+  let sawFirstCard = false;
+
+  // Sub-circuit expansion: flatten X-calls (iteratively, so nested .subckt
+  // calls — an X card whose body contains another X call — expand too).
+  // For each X<name> <pins...> <subcktName>, expand the subckt's body lines
+  // with pin name substitution.
+  //
+  // Renamed elements keep their DEVICE letter first (`R1_X1`, not `X1_R1`)
+  // so the card-type switch below still recognizes them — the old X-prefixed
+  // names made every expanded element look like an X card and it was skipped.
+  function expandOnce(input: string[]): { out: string[]; expanded: boolean } {
+    const out: string[] = [];
+    let expanded = false;
+    let inSubcktDef = false;
+    for (let li = 0; li < input.length; li++) {
+      const line = input[li];
+      if (!line || line.startsWith('*') || line.startsWith(';')) continue;
+      const tokens = tokenize(line);
+      if (tokens.length === 0) continue;
+      const head = tokens[0];
+      const headLower = head.toLowerCase();
+      if (headLower === '.subckt') { inSubcktDef = true; continue; }
+      if (headLower === '.ends') { inSubcktDef = false; continue; }
+      // Lines INSIDE a .subckt definition must NOT be instantiated at top
+      // level — they only exist through X-call expansion. The old code leaked
+      // them through as top-level elements on the subckt's FORMAL pin names.
+      if (inSubcktDef) continue;
+      if (headLower === '.model') continue;
+      if (headLower.startsWith('.option') || headLower.startsWith('.tran') ||
+          headLower.startsWith('.dc') || headLower.startsWith('.ac') || headLower.startsWith('.ic') ||
+          headLower.startsWith('.end')) {
+        // skip simulation control (note: .ic will be handled separately below)
+        continue;
       }
-      // map subckt's formal pins to actual pins
-      const pinMap: Record<string, string> = {};
-      sub.pins.forEach((formal, i) => {
-        pinMap[formal] = pins[i] || '0';
-      });
-      // expand body, substituting node names
-      for (const bodyLine of sub.body) {
-        const bTokens = tokenize(bodyLine);
-        if (bTokens.length === 0) continue;
-        // rename: prefix the component name with parent call name, substitute nodes
-        const newName = `${head}_${bTokens[0]}`;
-        const newTokens = [newName];
-        for (let i = 1; i < bTokens.length; i++) {
-          const t = bTokens[i];
-          // if it's a node name (matches a formal pin), substitute
-          if (pinMap[t] !== undefined) newTokens.push(pinMap[t]);
-          else newTokens.push(t);
+      if (!sawFirstCard) {
+        sawFirstCard = true;
+        if (isTitleLine(line)) continue;
+      }
+      if (head[0] === 'X' || head[0] === 'x') {
+        // subckt call: X<name> <pin1> <pin2> ... <subcktName>
+        const subcktName = tokens[tokens.length - 1].toLowerCase();
+        const pins = tokens.slice(1, -1);
+        const sub = subckts.get(subcktName);
+        if (!sub) {
+          throw new Error(`Unknown subcircuit: ${subcktName}`);
         }
-        expandedLines.push(newTokens.join(' '));
+        // map subckt's formal pins to actual pins (SPICE is case-insensitive)
+        const pinMap: Record<string, string> = {};
+        sub.pins.forEach((formal, i) => {
+          pinMap[formal.toLowerCase()] = pins[i] || '0';
+        });
+        // expand body, substituting node names
+        for (const bodyLine of sub.body) {
+          const bTokens = tokenize(bodyLine);
+          if (bTokens.length === 0) continue;
+          // rename: keep the device letter first (R1_X1), substitute nodes
+          const newName = `${bTokens[0]}_${head}`;
+          const newTokens = [newName];
+          for (let i = 1; i < bTokens.length; i++) {
+            const t = bTokens[i];
+            // if it's a node name (matches a formal pin), substitute
+            const mapped = pinMap[t.toLowerCase()];
+            if (mapped !== undefined) newTokens.push(mapped);
+            else newTokens.push(t);
+          }
+          out.push(newTokens.join(' '));
+          expanded = true;
+        }
+        continue;
       }
-      continue;
+      out.push(line);
     }
-    expandedLines.push(line);
+    return { out, expanded };
+  }
+  let expandedLines = lines;
+  {
+    const first = expandOnce(lines);
+    expandedLines = first.out;
+    // Nested subckts: keep expanding until no X cards remain (depth-capped so
+    // a recursive .subckt definition can't loop forever).
+    for (let depth = 0; depth < 10 && first.expanded; depth++) {
+      const next = expandOnce(expandedLines);
+      expandedLines = next.out;
+      if (!next.expanded) break;
+    }
   }
 
   // Process .ic v(node)=value (initial conditions) for capacitors
@@ -495,10 +570,10 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
         break;
       }
       case 'Q': {
-        // Q<name> nc nb ne [ns] <model>
+        // Q<name> nc nb ne [ns] <model> [area/off params]
         const nc = tokens[1], nb = tokens[2], ne = tokens[3];
-        const modelName = tokens[tokens.length - 1];
-        const model = models.get(modelName?.toLowerCase());
+        const modelName = findModelName(tokens, 4, models);
+        const model = models.get((modelName ?? '').toLowerCase());
         const type = model?.type || 'npn';
         allNodes.add(nc); allNodes.add(nb); allNodes.add(ne);
         const pluginType = type === 'pnp' ? 'pnp' : 'npn';
@@ -531,8 +606,8 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
       case 'M': {
         // M<name> nd ng ns [nb] <model> [L=...] [W=...]
         const nd = tokens[1], ng = tokens[2], ns = tokens[3];
-        const modelName = tokens[tokens.length - 1];
-        const model = models.get(modelName?.toLowerCase());
+        const modelName = findModelName(tokens, 4, models);
+        const model = models.get((modelName ?? '').toLowerCase());
         const type = model?.type || 'nmos';
         allNodes.add(nd); allNodes.add(ng); allNodes.add(ns);
         const pluginType = type === 'pmos' ? 'pmos' : 'nmos';
@@ -581,10 +656,13 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
     }
   }
 
-  // 3. Create a ground component for node "0" if any component references it
-  // (We do this implicitly via the wire graph: any terminal whose node is "0"
-  // gets a ground added and wired.)
-  const needsGround = Array.from(allNodes).includes('0');
+  // 3. Create a ground component for node "0" (or its aliases gnd/ground —
+  // ngspice maps those to 0; KiCad netlists use GND) if any component
+  // references it. (We do this implicitly via the wire graph: any terminal
+  // whose node is a ground alias gets a ground added and wired.)
+  const isGroundNode = (n: string | undefined): boolean =>
+    n === '0' || n?.toLowerCase() === 'gnd' || n?.toLowerCase() === 'ground';
+  const needsGround = Array.from(allNodes).some(isGroundNode);
   let groundId: string | null = null;
   if (needsGround) {
     const g = addComponent('ground', 'gnd', []);
@@ -603,7 +681,7 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
   }
 
   for (const [node, terminals] of nodesToTerminals) {
-    if (node === '0' && groundId) {
+    if (isGroundNode(node) && groundId) {
       // connect each terminal to ground
       for (const t of terminals) {
         const wire: Wire = {

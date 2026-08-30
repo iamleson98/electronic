@@ -640,3 +640,112 @@ describe('simulate.run integration method + ringing telemetry', () => {
     expect(res.result.trapRingsSuppressed).toBeUndefined();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 2-c audit regressions: stale-simContext invalidation, loadDocument
+// validation, client-executed PCB tools.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('AI audit: simContext invalidation on whole-doc mutations', () => {
+  it('examples.load drops the cached simContext (node ids belonged to the old circuit)', async () => {
+    const { loadExampleTool } = await import('../src/lib/ai/tools/examples-tools');
+    const ctx = mkCtx(
+      [mkComp('dcVoltage', 'V1', { voltage: 5 }), mkComp('resistor', 'R1', { resistance: 100 }), mkComp('ground', 'GND')],
+      [mkWire('w1', 'V1', 'p', 'R1', 'a'), mkWire('w2', 'R1', 'b', 'GND', 'g'), mkWire('w3', 'V1', 'n', 'GND', 'g')],
+    );
+    (ctx as any).simContext = { nodeVoltage: [0, 5, 2.5], branchCurrent: [0.05], state: {}, time: 0, dt: 1e-4 };
+    const res = await loadExampleTool.execute({ name: 'LED + Resistor' }, ctx) as any;
+    expect(res.ok).toBe(true);
+    expect(ctx.simContext).toBeNull();
+  });
+
+  it('schematic.loadDocument drops the cached simContext', async () => {
+    const { loadDocumentTool } = await import('../src/lib/ai/tools/document-tools');
+    const ctx = mkCtx([], []);
+    (ctx as any).simContext = { nodeVoltage: [0, 5], branchCurrent: [], state: {}, time: 0, dt: 1e-4 };
+    const res = await loadDocumentTool.execute({
+      components: [mkComp('resistor', 'r1', { resistance: 330 })],
+      wires: [],
+    }, ctx) as any;
+    expect(res.ok).toBe(true);
+    expect(ctx.simContext).toBeNull();
+  });
+
+  it('design.buildPattern drops the cached simContext (it changes topology)', async () => {
+    const { designBuildPatternTool } = await import('../src/lib/ai/tools/design-patterns');
+    const ctx = mkCtx([], []);
+    (ctx as any).simContext = { nodeVoltage: [0, 5], branchCurrent: [], state: {}, time: 0, dt: 1e-4 };
+    const res = await designBuildPatternTool.execute({ pattern: 'led-driver', args: { supplyV: 5 } }, ctx) as any;
+    expect(res.ok).toBe(true);
+    expect(ctx.simContext).toBeNull();
+  });
+});
+
+describe('AI audit: schematic.loadDocument argument validation', () => {
+  it('rejects non-array components without corrupting the document', async () => {
+    const { loadDocumentTool } = await import('../src/lib/ai/tools/document-tools');
+    const ctx = mkCtx([mkComp('ground', 'GND')], []);
+    const res = await loadDocumentTool.execute({ components: 'r1,r2', wires: [] }, ctx) as any;
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/arrays/);
+    // the doc must be untouched — later tools and auto-verify rely on it
+    expect(ctx.doc.components).toHaveLength(1);
+    expect(ctx.doc.components[0].type).toBe('ground');
+  });
+
+  it('rejects a components array containing non-components', async () => {
+    const { loadDocumentTool } = await import('../src/lib/ai/tools/document-tools');
+    const ctx = mkCtx([], []);
+    const res = await loadDocumentTool.execute({ components: [42], wires: [] }, ctx) as any;
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/Invalid component entry/);
+    expect(ctx.doc.components).toHaveLength(0);
+  });
+
+  it('fills plugin parameter defaults + rotation for hand-written components', async () => {
+    const { loadDocumentTool } = await import('../src/lib/ai/tools/document-tools');
+    const ctx = mkCtx([], []);
+    const res = await loadDocumentTool.execute({
+      components: [{ id: 'rX', type: 'resistor', position: { x: 5, y: 5 } }],
+      wires: [],
+    }, ctx) as any;
+    expect(res.ok).toBe(true);
+    const comp = ctx.doc.components[0] as any;
+    expect(comp.rotation).toBe(0);
+    expect(comp.parameters.resistance).toBeDefined(); // plugin default merged
+  });
+
+  it('rejects components with malformed position', async () => {
+    const { loadDocumentTool } = await import('../src/lib/ai/tools/document-tools');
+    const ctx = mkCtx([], []);
+    const res = await loadDocumentTool.execute({
+      components: [{ id: 'rX', type: 'resistor', position: 'left' }],
+      wires: [],
+    }, ctx) as any;
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/Invalid component entry/);
+  });
+
+  it('rejects wires without from/to endpoints', async () => {
+    const { loadDocumentTool } = await import('../src/lib/ai/tools/document-tools');
+    const ctx = mkCtx([], []);
+    const res = await loadDocumentTool.execute({
+      components: [mkComp('ground', 'GND')],
+      wires: [{ id: 'w1' }],
+    }, ctx) as any;
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/Invalid wire entry/);
+  });
+});
+
+describe('AI audit: client-executed PCB tools report success, not a phantom error', () => {
+  it('pcb.* tools return ok:true queued acknowledgements (the client executes them)', async () => {
+    const { TOOLS_BY_NAME } = await import('../src/lib/ai/tools');
+    for (const name of ['pcb.importFromSchematic', 'pcb.autoRoute', 'pcb.topoRoute', 'pcb.runDRC', 'pcb.verifyNetlist']) {
+      const tool = TOOLS_BY_NAME.get(name)!;
+      const res = await tool.execute({}, mkCtx([], [])) as any;
+      expect(res.ok, name).toBe(true);
+      expect(res.error, name).toBeUndefined();
+    }
+  });
+});

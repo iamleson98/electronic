@@ -749,12 +749,11 @@ export function PCBCanvas() {
 
   const onMouseUp = () => { panRef.current = null; dragRef.current = null; };
 
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault(); // Prevent page scroll while zooming PCB
+  const handleWheel = (clientX: number, clientY: number, deltaY: number) => {
     const rect = canvasRef.current!.getBoundingClientRect();
-    const sx = e.clientX - rect.left;
-    const sy = e.clientY - rect.top;
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    const sx = clientX - rect.left;
+    const sy = clientY - rect.top;
+    const factor = deltaY < 0 ? 1.1 : 1 / 1.1;
     const newZoom = Math.max(1, Math.min(10, zoom * factor));
     const mmX = (sx - pan.x) / (PX_PER_MM * zoom);
     const mmY = (sy - pan.y) / (PX_PER_MM * zoom);
@@ -762,8 +761,32 @@ export function PCBCanvas() {
     setPan({ x: sx - mmX * PX_PER_MM * newZoom, y: sy - mmY * PX_PER_MM * newZoom });
   };
 
+  // Native non-passive wheel listener — React registers onWheel as PASSIVE
+  // at the root, so a JSX handler could not preventDefault (page scrolled
+  // while zooming + a console warning per wheel tick).
+  const wheelCbRef = useRef(handleWheel);
+  useEffect(() => { wheelCbRef.current = handleWheel; }, [handleWheel]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const listener = (e: WheelEvent) => {
+      e.preventDefault();
+      wheelCbRef.current(e.clientX, e.clientY, e.deltaY);
+    };
+    canvas.addEventListener('wheel', listener, { passive: false });
+    return () => canvas.removeEventListener('wheel', listener);
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Never hijack keys while the user is typing in an input/dialog —
+      // typing "r" in a text field used to rotate the selected footprint and
+      // Backspace deleted the selected trace mid-edit.
+      const target = e.target as HTMLElement | null;
+      if (target && (
+        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' || target.isContentEditable
+      )) return;
       if (e.key === 'Escape') { cancelRouting(); selectFootprint(null); }
       else if (e.key === 'r' || e.key === 'R') { if (selectedFootprintId) rotateFootprint(selectedFootprintId); }
       else if (e.key === 'Delete' || e.key === 'Backspace') { if (selectedTraceId) usePCB.getState().deleteTrace(selectedTraceId); }
@@ -786,7 +809,6 @@ export function PCBCanvas() {
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseUp}
-        onWheel={onWheel}
       />
       {hoveredDRC && (
         <div

@@ -50,6 +50,10 @@ const loadExampleTool: Tool = {
     // Replace the doc contents in-place
     ctx.doc.components = JSON.parse(JSON.stringify(ex.doc.components));
     ctx.doc.wires = JSON.parse(JSON.stringify(ex.doc.wires));
+    // Topology completely changed — drop any cached simContext (its node
+    // numbering belongs to the PREVIOUS circuit, so getVoltage/getCurrent
+    // would silently read wrong nodes until the next simulate.run).
+    ctx.simContext = null;
     return { ok: true, result: { loaded: args.name, components: ctx.doc.components.length, wires: ctx.doc.wires.length } };
   },
 };

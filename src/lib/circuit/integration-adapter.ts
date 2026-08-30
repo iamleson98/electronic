@@ -203,9 +203,14 @@ export function updateInductorState(
   const LSafe = Math.max(L, 1e-15);
 
   if (method === 'gear') {
-    state.iPrev2 = state.iPrev;
     // Gear-2: i_n = (4·i_{n−1} − i_{n−2})/3 + (2dt/3L)·v_n
-    state.iPrev = (4 * (state.iPrev ?? 0) - (state.iPrev2 ?? 0)) / 3 + (2 * dt / (3 * LSafe)) * vNow;
+    // Capture the OLD i_{n−1}/i_{n−2} BEFORE shifting the history — the
+    // previous code overwrote iPrev2 with iPrev first, collapsing the formula
+    // to (4a − a)/3 = i_{n−1} + (2dt/3L)·v_n (Euler with a 2/3 coefficient).
+    const iPrevOld = state.iPrev ?? 0;
+    const iPrev2Old = state.iPrev2 ?? iPrevOld;
+    state.iPrev = (4 * iPrevOld - iPrev2Old) / 3 + (2 * dt / (3 * LSafe)) * vNow;
+    state.iPrev2 = iPrevOld;
   } else if (method === 'trap') {
     // Trapezoidal: i_n = i_{n−1} + (dt/2L)·(v_n + v_{n−1})
     state.iPrev = (state.iPrev ?? 0) + (dt / (2 * LSafe)) * (vNow + (state.vPrev ?? 0));

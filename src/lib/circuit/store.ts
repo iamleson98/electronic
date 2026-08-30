@@ -26,6 +26,7 @@ import { getPlugin, getAllPlugins } from './registry';
 import { simulateStep, getTerminalsForComponent } from './engine';
 import { cleanupComponentState } from './memory';
 import { findRoute, buildRoutingGrid, pathToWaypoints } from './smart-wire-router';
+import { rotateTerminal } from './components/draw';
 import { validatePhysics, type PhysicsViolation } from './physics-validator';
 import { runFullERC } from './erc';
 import { snapshotSheet, flattenHierarchy } from './hierarchy';
@@ -586,6 +587,9 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((s2) => ({
       components: s2.components.filter((c) => c.id !== id),
       wires: s2.wires.filter((w) => w.from.componentId !== id && w.to.componentId !== id),
+      // Dangling No-Connect markers (component gone) are inert but got
+      // serialized forever — drop them with the component.
+      noConnects: s2.noConnects.filter((n) => n.componentId !== id),
       selection: { type: null, id: null },
       traces: s2.traces.filter((t) => t.componentId !== id),
     }));
@@ -729,6 +733,9 @@ export const useEditor = create<EditorState>((set, get) => ({
         components: remaining,
         wires: s.wires.filter((w) => !wiresToDelete.has(w.id) &&
           !idsToDelete.has(w.from.componentId) && !idsToDelete.has(w.to.componentId)),
+        // Dangling No-Connect markers (component gone) are inert but got
+        // serialized forever — drop them with the components.
+        noConnects: s.noConnects.filter((n) => !idsToDelete.has(n.componentId)),
         selection: { type: null, id: null },
         multiSelection: { components: new Set(), wires: new Set() },
         traces: s.traces.filter((t) => !idsToDelete.has(t.componentId)),
@@ -953,6 +960,10 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   // ===== Net classes =====
   addNetClass: (name, description) => {
+    // Push history BEFORE mutating — updateNetClass/removeNetClass already
+    // do; without this, adding a net class was silently rolled back by the
+    // next undo (which restored a snapshot taken before the add).
+    get().pushHistory();
     const id = genId('nc');
     set((s) => ({
       netClasses: [...s.netClasses, { id, name, description: description ?? '', nets: [], color: '#22d3ee' }],
@@ -1390,8 +1401,13 @@ export const useEditor = create<EditorState>((set, get) => ({
         const fromTerm = (plugins.get(fromComp.type) as any)?.terminals.find((t: any) => t.id === draft.from.terminalId);
         const toTerm = (plugins.get(toComp.type) as any)?.terminals.find((t: any) => t.id === to.terminalId);
         if (fromTerm && toTerm) {
-          const startPos = { x: fromComp.position.x + fromTerm.position.x, y: fromComp.position.y + fromTerm.position.y };
-          const endPos = { x: toComp.position.x + toTerm.position.x, y: toComp.position.y + toTerm.position.y };
+          // Rotation-aware terminal positions (same transform as the canvas
+          // renderer) — the old unrotated math routed wires to the wrong
+          // endpoints for any component with rotation 1/2/3.
+          const fromRot = rotateTerminal(fromTerm, fromComp.rotation, (plugins.get(fromComp.type) as any).boundingBox);
+          const toRot = rotateTerminal(toTerm, toComp.rotation, (plugins.get(toComp.type) as any).boundingBox);
+          const startPos = { x: fromComp.position.x + fromRot.position.x, y: fromComp.position.y + fromRot.position.y };
+          const endPos = { x: toComp.position.x + toRot.position.x, y: toComp.position.y + toRot.position.y };
           const route = findRoute(grid, startPos, endPos);
           if (route.path.length > 2) {
             waypoints = pathToWaypoints(route.path);

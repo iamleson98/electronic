@@ -142,7 +142,17 @@ export default function Home() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); setShowCommandPalette(true); }
       if ((e.ctrlKey || e.metaKey) && e.key === 'j') { e.preventDefault(); setShowAI(s => !s); }
-      if (e.key === '?' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); openHelp(); }
+      if (e.key === '?' && !e.ctrlKey && !e.metaKey) {
+        // Don't hijack "?" while the user is typing in an input/textarea —
+        // previously this made it impossible to type a literal "?" anywhere.
+        const target = e.target as HTMLElement | null;
+        if (target && (
+          target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' || target.isContentEditable
+        )) return;
+        e.preventDefault();
+        openHelp();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);

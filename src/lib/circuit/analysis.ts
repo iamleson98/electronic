@@ -393,41 +393,48 @@ export function runAC(
   // 2. Generate frequency list
   const freqs = generateSweepFrequencies(config.sweep, config.nPoints, config.fStart, config.fStop);
 
-  // 3. For each frequency, build complex MNA and solve
+  // 3. Resolve the probe nodes ONCE (the node map is identical at every
+  //    frequency — resolving it inside the loop rescanned every terminal
+  //    per point, O(freqs × terminals)).
+  const probeNodeMap = buildNodeMap(components, wires, plugins);
+  const outputNodeName = config.outputNode;
+  const outputRefName = config.outputRef;
+  let vOutNode = 0;
+  let vRefNode = 0;
+  if (outputNodeName) {
+    // look up node by net label / component terminal
+    for (const [key, nodeId] of probeNodeMap.terminalNode) {
+      if (key.endsWith(`:${outputNodeName}`) || key === outputNodeName) {
+        vOutNode = nodeId;
+        break;
+      }
+    }
+    if (outputRefName) {
+      for (const [key, nodeId] of probeNodeMap.terminalNode) {
+        if (key.endsWith(`:${outputRefName}`) || key === outputRefName) {
+          vRefNode = nodeId;
+          break;
+        }
+      }
+    }
+  }
+
+  // 4. For each frequency, build complex MNA and solve
   const traces: ComplexTrace[] = [];
   const outputXValues = new Float64Array(freqs.length);
   const outputYValues = new Float64Array(2 * freqs.length);
 
   for (let i = 0; i < freqs.length; i++) {
     const f = freqs[i];
-    const omega = 2 * Math.PI * f;
+    // A 0 Hz point (linear sweep starting at 0) would make the inductor
+    // admittance −1/(ωL) = −Infinity and poison the whole complex solve with
+    // NaN. Clamp ω the same way the log-sweep path clamps its start decade.
+    const omega = 2 * Math.PI * Math.max(f, 1e-12);
     const built = buildACSystemAtFrequency(components, wires, plugins, dcOp, omega, config, options.gmin, options.temp);
     if (!built) continue;
     const x = solveComplexMna(built.sys);
     if (!x) continue;
     outputXValues[i] = f;
-    // get voltage at output node
-    const outputNodeName = config.outputNode;
-    const outputRefName = config.outputRef;
-    let vOutNode = 0;
-    let vRefNode = 0;
-    if (outputNodeName) {
-      // look up node by net label / component terminal
-      for (const [key, nodeId] of built.nodeMap.terminalNode) {
-        if (key.endsWith(`:${outputNodeName}`) || key === outputNodeName) {
-          vOutNode = nodeId;
-          break;
-        }
-      }
-      if (outputRefName) {
-        for (const [key, nodeId] of built.nodeMap.terminalNode) {
-          if (key.endsWith(`:${outputRefName}`) || key === outputRefName) {
-            vRefNode = nodeId;
-            break;
-          }
-        }
-      }
-    }
     const vOut = vOutNode > 0 ? x[vOutNode - 1] : { re: 0, im: 0 };
     const vRef = vRefNode > 0 ? x[vRefNode - 1] : { re: 0, im: 0 };
     const vDiff = { re: vOut.re - vRef.re, im: vOut.im - vRef.im };
@@ -459,19 +466,20 @@ function generateSweepFrequencies(sweep: ACSweepType, n: number, fStart: number,
       const f = fStart + (fStop - fStart) * (i / Math.max(1, n - 1));
       freqs.push(f);
     }
-  } else if (sweep === 'dec') {
-    const decades = Math.log10(fStop / fStart);
-    const totalPts = Math.max(1, Math.ceil(n * decades));
-    for (let i = 0; i <= totalPts; i++) {
-      const f = fStart * Math.pow(10, i / n);
-      if (f <= fStop * 1.0001) freqs.push(f);
-    }
-  } else { // oct
-    const octaves = Math.log2(fStop / fStart);
-    const totalPts = Math.max(1, Math.ceil(n * octaves));
-    for (let i = 0; i <= totalPts; i++) {
-      const f = fStart * Math.pow(2, i / n);
-      if (f <= fStop * 1.0001) freqs.push(f);
+  } else {
+    // Log sweeps need a strictly positive start: fStart = 0 makes
+    // decades/octaves = +Infinity and the loop below pushes f = 0 points
+    // forever (unbounded memory, UI hang). Clamp to the same floor the
+    // standalone AC wrapper uses; NaN/negative bounds yield an empty sweep.
+    const fs = Math.max(fStart, 1e-12);
+    if (Number.isFinite(fs) && Number.isFinite(fStop) && fStop >= fs) {
+      const ratio = fStop / fs;
+      const total = sweep === 'dec' ? Math.log10(ratio) : Math.log2(ratio);
+      const totalPts = Math.max(1, Math.ceil(n * total));
+      for (let i = 0; i <= totalPts; i++) {
+        const f = fs * Math.pow(sweep === 'dec' ? 10 : 2, i / n);
+        if (f <= fStop * 1.0001) freqs.push(f);
+      }
     }
   }
   return freqs;
