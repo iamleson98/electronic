@@ -76,10 +76,11 @@ A detailed, honest comparison against KiCad 8.x / 9.x. Generated after a full co
 | Footprint editor | Full WYSIWYG | **Full WYSIWYG canvas editor** with Pin/Rect/Line/Text tools, properties panel, sample footprints (SOIC-8, 0805, TSSOP-20, DIP-8), save-as-plugin (this update) | ✅ |
 | KiCad footprint import (.pretty) | Native | `parseKiCadFootprint()` built | ✅ |
 | 3D model association | Per-footprint, with offset/rotation | `Footprint.modelUrl?` field, async fetch + cache | ✅ |
-| Manual routing (interactive) | Push-and-shove | Single-segment + 45° mode + topological A* router (Priority #2) | 🟡 |
-| Auto-router | External (Freerouting) | Two built-in: legacy BFS + new topological A* (Priority #2) | ✅ |
-| Push-and-shove | Full walk-around | Single-direction perpendicular shove (Priority #2) | 🟡 |
-| Rip-up and retry | Yes | Yes (Priority #2) | ✅ |
+| Manual routing (interactive) | Push-and-shove | Single-segment + 45° mode + **live clearance conflict preview + same-net pad highlighting + V-key mid-route via + Backspace undo waypoint** (v2 router update) | ✅ |
+| Auto-router | External (Freerouting) | **v2 engine: 2-layer A* with exact clearance geometry, automatic via placement, 45°-normalized routes, rip-up/reroute, net-class-aware widths, keepout-aware** — 24-component board routes 37/37 in <1s with zero DRC errors (legacy single-layer API kept for compatibility) | ✅ |
+| Component auto-placement | External (Freerouting) | **Connectivity-driven placement**: schematic-position seeds + force relaxation + rotation alignment + courtyard separation with routing channels (v2 router update) | ✅ |
+| Push-and-shove | Full walk-around | Replaced by hard-obstacle + rip-up/reroute model (the old perpendicular shove tore traces apart) | ✅ |
+| Rip-up and retry | Yes | Yes — corridor-based rip-up with net re-route + restore on failure (v2 engine) | ✅ |
 | Differential pair routing | Yes | Yes — `routeDiffPair(padA, padB, netP, netN)` action; P+N traces with parallel offset, pairedTraceId linking (this update) | ✅ |
 | Differential pair aware DRC | Yes | Yes — skew check (>0.5mm length diff warning) + coupling check (different-layer error) (this update) | ✅ |
 | Length tuning / serpentine | Yes | Yes — `lengthTuneTrace(id, targetMm)` action adds serpentine meander; Length Tune dialog with target length input (this update) | ✅ |
@@ -402,7 +403,7 @@ A detailed, honest comparison against KiCad 8.x / 9.x. Generated after a full co
 5. **DRC engine expansion** (3-5 days) — add 20+ more checks (copper island, starved thermal, etc.)
 6. **Yjs real-time collaboration** (5-7 days) — install Yjs + WebSocket server + awareness provider
 7. **Custom DRC/ERC rules** (5-7 days) — user-defined rule scripts (TypeScript subset)
-8. **Full push-and-shove walk-around** (5-7 days) — replace single-direction perpendicular shove
+8. ~~**Full push-and-shove walk-around**~~ DONE differently — the v2 router uses hard obstacles + rip-up/reroute (no shove needed; shoving existing traces distorts user work)
 9. **GPU-accelerated 2D rendering** (7-10 days) — migrate Canvas 2D to WebGL/WebGPU
 10. **CLI / headless mode** (3-5 days) — Node.js CLI for batch processing
 

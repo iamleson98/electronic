@@ -26,7 +26,8 @@ import type { DRCError } from './drc';
 import { generateCopperPour } from './copper-pour';
 import type { CopperPour } from './copper-pour';
 import { exportAllGerbers } from './gerber-export';
-import { autoRoute } from './auto-router';
+import { autoRoute, DEFAULT_AUTOROUTE_OPTIONS } from './auto-router';
+import type { AutoRouteResult, AutoRouteOptions } from './auto-router';
 import { routeTopologically, DEFAULT_ROUTER_OPTIONS } from './topological-router';
 import { verifyNetlist } from './netlist-verify';
 import type { NetlistVerifyResult } from './netlist-verify';
@@ -114,9 +115,15 @@ interface PCBState {
   addCopperPour: (layer: 'top' | 'bottom', net: string) => void;
   removeCopperPour: (layer: 'top' | 'bottom') => void;
   exportGerbers: () => void;
-  runAutoRoute: () => void;
+  runAutoRoute: () => AutoRouteResult['stats'] & { unroutedCount: number };
   /** Topological push-and-shove router — replaces Lee's BFS. Real A* + 45° snapping + shove + rip-up. */
   runTopoRoute: () => { routed: number; failed: number; shoved: number; rippedUp: number };
+  /** Remove ALL traces + vias (keeps footprints) — re-run auto-route cleanly. */
+  unrouteAll: () => void;
+  /** Remove the last routing waypoint while interactively routing (Backspace). */
+  removeLastRoutingPoint: () => void;
+  /** Place a via at the current routing position and continue on the other layer. */
+  addRoutingVia: (pos?: { x: number; y: number }) => void;
   runNetlistVerify: () => NetlistVerifyResult | null;
   // keepout
   addKeepout: (rect: { x: number; y: number; width: number; height: number }, layers: 'all' | string[], reason?: string) => void;
@@ -169,20 +176,14 @@ export const usePCB = create<PCBState>((set, get) => ({
   copperPours: [],
 
   importFromSchematic: (components, wires) => {
-    const { footprints, ratsnest, padNets } = createPCBFromSchematic(components, wires);
-    // Auto-size board based on footprint positions
-    let maxX = 50, maxY = 50;
-    for (const fp of footprints) {
-      maxX = Math.max(maxX, fp.position.x + fp.bodySize.width / 2 + 5);
-      maxY = Math.max(maxY, fp.position.y + fp.bodySize.height / 2 + 5);
-    }
+    const { footprints, ratsnest, padNets, board } = createPCBFromSchematic(components, wires);
     set({
       footprints,
       ratsnest,
       padNets,
       traces: [],
       vias: [],
-      board: { width: Math.ceil(maxX), height: Math.ceil(maxY) },
+      board,
       selectedFootprintId: null,
       selectedTraceId: null,
       routingFrom: null,
@@ -270,6 +271,12 @@ export const usePCB = create<PCBState>((set, get) => ({
       set({ routingFrom: null, routingPath: [] });
       return;
     }
+    // Net-safety: interactive routing may only finish on copper of the SAME
+    // net (prevents accidental shorts — routing VCC onto a GND pad used to
+    // silently create a short).
+    if (to && to.net && to.net !== s.routingFrom.net) {
+      return; // caller shows a toast; routing continues
+    }
     const trace: Trace = {
       id: genId('trace'),
       net: s.routingFrom.net,
@@ -293,6 +300,53 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   cancelRouting: () => set({ routingFrom: null, routingPath: [] }),
+
+  removeLastRoutingPoint: () => {
+    set((s) => {
+      if (!s.routingFrom || s.routingPath.length <= 1) return {};
+      return { routingPath: s.routingPath.slice(0, -1) };
+    });
+  },
+
+  addRoutingVia: (pos) => {
+    const s = get();
+    if (!s.routingFrom) return;
+    const last = pos ?? s.routingPath[s.routingPath.length - 1];
+    const snapped = { x: Math.round(last.x * 2) / 2, y: Math.round(last.y * 2) / 2 };
+    // append the via point to the current path, then flip the active layer —
+    // the next routing points continue on the new layer
+    const path = [...s.routingPath];
+    const lastPt = path[path.length - 1];
+    if (!lastPt || lastPt.x !== snapped.x || lastPt.y !== snapped.y) path.push(snapped);
+    const otherLayer = s.activeLayer === 'top' ? 'bottom' : 'top';
+    const via: Via = {
+      id: genId('via'),
+      position: { ...snapped },
+      diameter: 0.6,
+      drill: 0.3,
+      net: s.routingFrom.net,
+      type: 'tht',
+      fromLayer: s.activeLayer,
+      toLayer: otherLayer,
+    };
+    // close the current segment run on the OLD layer, switch layer, restart path at the via
+    const trace: Trace = {
+      id: genId('trace'),
+      net: s.routingFrom.net,
+      layer: s.activeLayer,
+      segments: [],
+      width: s.defaultTraceWidth,
+    };
+    for (let i = 0; i < path.length - 1; i++) {
+      trace.segments.push({ start: path[i], end: path[i + 1], width: s.defaultTraceWidth });
+    }
+    set((st) => ({
+      traces: trace.segments.length > 0 ? [...st.traces, trace] : st.traces,
+      vias: [...st.vias, via],
+      activeLayer: otherLayer,
+      routingPath: [{ ...snapped }],
+    }));
+  },
 
   addVia: (pos, net) => {
     const via: Via = {
@@ -470,12 +524,22 @@ export const usePCB = create<PCBState>((set, get) => ({
 
   runAutoRoute: () => {
     const s = get();
-    const result = autoRoute(
-      s.footprints, s.traces, s.vias, s.ratsnest, s.board,
-      s.activeLayer, s.defaultTraceWidth,
-    );
+    const options: Partial<AutoRouteOptions> = {
+      ...DEFAULT_AUTOROUTE_OPTIONS,
+      traceWidth: s.defaultTraceWidth,
+      clearance: DEFAULT_DRC_CONFIG.minClearance,
+      netClasses: s.netClasses.map((c) => ({
+        name: c.name, traceWidth: c.traceWidth, clearance: c.clearance,
+        viaDiameter: c.viaDiameter, viaDrill: c.viaDrill, nets: c.nets,
+      })),
+      keepouts: s.keepouts.map((k) => ({ rect: k.rect, layers: k.layers })),
+    };
+    const result = autoRoute(s.footprints, s.traces, s.vias, s.ratsnest, s.board, options);
     set({ traces: result.traces, vias: result.vias });
+    return { ...result.stats, unroutedCount: result.unrouted.length };
   },
+
+  unrouteAll: () => set({ traces: [], vias: [], routingFrom: null, routingPath: [], selectedTraceId: null }),
 
   runTopoRoute: () => {
     const s = get();
@@ -486,6 +550,10 @@ export const usePCB = create<PCBState>((set, get) => ({
         clearance: DEFAULT_DRC_CONFIG.minClearance,
         traceWidth: s.defaultTraceWidth,
       },
+      s.netClasses.map((c) => ({
+        name: c.name, traceWidth: c.traceWidth, clearance: c.clearance,
+        viaDiameter: c.viaDiameter, viaDrill: c.viaDrill, nets: c.nets,
+      })),
     );
     set({ traces: result.traces, vias: result.vias });
     return {

@@ -16,6 +16,7 @@
 
 import type { Footprint, Trace, Via, Ratsnest, Pad, BoardOutline, CopperLayer } from './types';
 import type { NetClass } from '../circuit/types';
+import { computeNetCompletion } from './netlist-verify';
 
 export interface DRCError {
   type: 'clearance' | 'short' | 'unrouted' | 'outside_board' | 'overlap' |
@@ -87,20 +88,23 @@ export function runDRC(
     return config.minTraceWidth;
   };
 
-  // 1. Check unrouted nets
-  const routedNets = new Set<string>();
-  for (const trace of traces) {
-    routedNets.add(trace.net);
-  }
-  for (const rn of ratsnest) {
-    if (!routedNets.has(rn.net)) {
-      errors.push({
-        type: 'unrouted',
-        severity: 'warning',
-        message: `Net "${rn.net}" is unrouted`,
-        position: { x: (rn.from.x + rn.to.x) / 2, y: (rn.from.y + rn.to.y) / 2 },
-        layer: 'both',
-      });
+  // 1. Check unrouted nets — a net is unrouted when its pads are not all
+  //    connected through traces/vias (proper connectivity analysis; the old
+  //    check considered a net routed as soon as ANY trace carried its name,
+  //    so partially-routed multi-pad nets slipped through).
+  {
+    const completion = computeNetCompletion(footprints, traces, vias);
+    for (const nc of completion.nets) {
+      if (!nc.complete) {
+        const pad = nc.unconnectedPads[0];
+        errors.push({
+          type: 'unrouted',
+          severity: 'warning',
+          message: `Net "${nc.net}" is unrouted (${nc.unconnectedPads.length} of ${nc.padCount} pads unconnected)`,
+          position: pad ? { ...pad.position } : { x: 0, y: 0 },
+          layer: 'both',
+        });
+      }
     }
   }
 
@@ -136,6 +140,8 @@ export function runDRC(
     id: string;
     /** > 0 means THT — copper (and conflict potential) exists on ALL layers */
     drill: number;
+    /** pad copper shape — rects use exact rect distance, circles use radius */
+    shape: 'circle' | 'rect' | 'oval' | 'polygon';
   }
   const copperPads: CopperPad[] = [];
   for (const fp of footprints) {
@@ -147,6 +153,7 @@ export function runDRC(
         layer: pad.layer,
         id: pad.id,
         drill: pad.drill ?? 0,
+        shape: pad.shape,
       });
     }
   }
@@ -183,15 +190,26 @@ export function runDRC(
   // 5. Check trace-to-pad clearance (different nets, same layer).
   //    THT pads (drill > 0) have copper on every layer, so a trace on ANY
   //    layer can short them — SMD pads only conflict on their own layer.
+  //    Shape-aware: circle pads use their radius; rect/oval pads use the
+  //    EXACT rectangle distance (a circle approximation of an elongated
+  //    rect pad, e.g. 1.5×0.8 SMD, produced false positives on traces that
+  //    legally pass the pad's short side).
   for (const seg of copperSegs) {
     for (const pad of copperPads) {
       if (seg.layer !== pad.layer && pad.drill <= 0) continue;
       if (seg.net === pad.net) continue;
-      const dist = segToPointDistance(seg.start, seg.end, pad.pos);
-      const padRadius = Math.max(pad.size.width, pad.size.height) / 2;
-      const minDist = dist - seg.width / 2 - padRadius;
-      const requiredClearance = Math.max(getClearance(seg.net), getClearance(pad.net));
-      if (minDist < requiredClearance) {
+      const padClearance = Math.max(getClearance(seg.net), getClearance(pad.net));
+      let minDist: number;
+      if (pad.shape === 'circle') {
+        const dist = segToPointDistance(seg.start, seg.end, pad.pos);
+        const padRadius = Math.max(pad.size.width, pad.size.height) / 2;
+        minDist = dist - seg.width / 2 - padRadius;
+      } else {
+        // rect / oval / polygon: exact axis-aligned rectangle distance
+        const dist = segToRectDistance(seg.start, seg.end, pad.pos, pad.size);
+        minDist = dist - seg.width / 2;
+      }
+      if (minDist < padClearance) {
         errors.push({
           type: minDist < 0 ? 'short' : 'clearance',
           severity: minDist < 0 ? 'error' : 'warning',
@@ -503,6 +521,28 @@ function segToSegDistance(
     segToPointDistance(b1, b2, a2),
     segToPointDistance(a1, a2, b1),
     segToPointDistance(a1, a2, b2),
+  );
+}
+
+/** Distance from a segment to an axis-aligned rectangle (0 = touching/inside) */
+function segToRectDistance(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  center: { x: number; y: number },
+  size: { width: number; height: number },
+): number {
+  const hw = size.width / 2, hh = size.height / 2;
+  // endpoints inside the rect → 0
+  if (Math.abs(a.x - center.x) <= hw && Math.abs(a.y - center.y) <= hh) return 0;
+  if (Math.abs(b.x - center.x) <= hw && Math.abs(b.y - center.y) <= hh) return 0;
+  // otherwise min distance to the 4 rect edges
+  const ex = center.x + hw, sx = center.x - hw;
+  const ey = center.y + hh, sy = center.y - hh;
+  return Math.min(
+    segToSegDistance(a, b, { x: sx, y: sy }, { x: ex, y: sy }),
+    segToSegDistance(a, b, { x: ex, y: sy }, { x: ex, y: ey }),
+    segToSegDistance(a, b, { x: ex, y: ey }, { x: sx, y: ey }),
+    segToSegDistance(a, b, { x: sx, y: ey }, { x: sx, y: sy }),
   );
 }
 

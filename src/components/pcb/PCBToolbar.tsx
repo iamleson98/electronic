@@ -13,7 +13,7 @@ import {
 import {
   Download, MousePointer2, Route, Plus, RotateCw, Trash2, Grid3x3, Eye, Zap,
   ShieldCheck, Layers, Layers3, FileDown, Wand2, GitCompare, Upload, GitBranch, Activity,
-  ShieldOff, Droplet, AlignLeft, FlipHorizontal, ChevronDown, Frame, CircleDot, SlidersHorizontal,
+  ShieldOff, Droplet, AlignLeft, FlipHorizontal, ChevronDown, Frame, CircleDot, SlidersHorizontal, Eraser,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { exportBOM, exportIPC2581 } from '@/lib/pcb/additional-exports';
@@ -50,7 +50,6 @@ export function PCBToolbar() {
   const copperPours = usePCB((s) => s.copperPours);
   const exportGerbers = usePCB((s) => s.exportGerbers);
   const runAutoRoute = usePCB((s) => s.runAutoRoute);
-  const runTopoRoute = usePCB((s) => s.runTopoRoute);
   const runNetlistVerify = usePCB((s) => s.runNetlistVerify);
 
   const components = useEditor((s) => s.components);
@@ -149,27 +148,40 @@ export function PCBToolbar() {
 
   const handleAutoRoute = () => {
     if (usePCB.getState().footprints.length === 0) {
-      toast.error('No footprints to route');
+      toast.error('No footprints to route — import the schematic first');
       return;
     }
-    // Use the new topological push-and-shove router (A* + 45° + shove + rip-up).
-    // Falls back to legacy BFS if it fails completely.
-    const stats = runTopoRoute();
-    const state = usePCB.getState();
-    const topoCount = state.traces.filter(t => t.id.startsWith('topo_')).length;
-    if (stats.routed === 0 && topoCount === 0) {
-      // Topo router produced nothing — try legacy
-      runAutoRoute();
-      const legacyCount = usePCB.getState().traces.filter(t => t.id.startsWith('auto_')).length;
-      toast.success(`Legacy BFS router: ${legacyCount} traces added`);
-    } else {
-      toast.success(
-        `Topological router: ${stats.routed} routed` +
-        (stats.failed ? ` · ${stats.failed} failed` : '') +
-        (stats.shoved ? ` · ${stats.shoved} shoved` : '') +
-        (stats.rippedUp ? ` · ${stats.rippedUp} ripped` : ''),
-      );
+    const t0 = performance.now();
+    const stats = runAutoRoute();
+    const wallMs = performance.now() - t0;
+    if (stats.routed === 0 && stats.unroutedCount > 0) {
+      toast.error(`Auto-route: 0/${stats.routed + stats.unroutedCount} connections routed — try moving components apart or widening the board`);
+      return;
     }
+    const parts = [
+      `${stats.routed}/${stats.routed + stats.unroutedCount} connections`,
+      `${stats.vias} vias`,
+      `${stats.totalLength.toFixed(0)}mm copper`,
+      `${(wallMs / 1000).toFixed(1)}s`,
+    ];
+    if (stats.rippedUp > 0) parts.push(`${stats.rippedUp} rip-ups`);
+    if (stats.unroutedCount > 0) {
+      toast.warning(`Auto-route: ${parts.join(' · ')} — ${stats.unroutedCount} unrouted`);
+    } else {
+      toast.success(`Auto-route complete: ${parts.join(' · ')}`);
+    }
+  };
+
+  const handleUnrouteAll = () => {
+    const s = usePCB.getState();
+    if (s.traces.length === 0 && s.vias.length === 0) {
+      toast.info('Nothing to unroute');
+      return;
+    }
+    const n = s.traces.length;
+    const v = s.vias.length;
+    s.unrouteAll();
+    toast.success(`Removed ${n} trace${n === 1 ? '' : 's'} and ${v} via${v === 1 ? '' : 's'}`);
   };
 
   const handleNetlistVerify = () => {
@@ -414,14 +426,23 @@ export function PCBToolbar() {
           <TooltipContent>Toggle GND copper pour on {activeLayer} layer</TooltipContent>
         </Tooltip>
 
-        {/* Auto-route */}
+        {/* Auto-route + unroute */}
         <Tooltip>
           <TooltipTrigger asChild>
             <Button size="sm" variant="ghost" onClick={handleAutoRoute} className="text-purple-400 hover:text-purple-300">
               <Wand2 size={14} />
+              <span className="ml-1 hidden lg:inline">Auto-Route</span>
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Auto-route all unrouted nets (Lee's algorithm)</TooltipContent>
+          <TooltipContent>Auto-route all unrouted nets — 2-layer A* with 45° traces, vias and rip-up/reroute</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button size="sm" variant="ghost" onClick={handleUnrouteAll} className="text-slate-400 hover:text-slate-300">
+              <Eraser size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Unroute all (remove every trace + via, keep footprints)</TooltipContent>
         </Tooltip>
 
         {/* Differential pair routing */}

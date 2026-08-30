@@ -12,8 +12,12 @@ import {
   findDRCErrorAt,
 } from '@/lib/pcb/pcb-overlays';
 import type { DRCError } from '@/lib/pcb/drc';
+import { DEFAULT_DRC_CONFIG } from '@/lib/pcb/drc';
+import { segmentHasClearanceConflict } from '@/lib/pcb/auto-router';
+import { computeNetCompletion } from '@/lib/pcb/netlist-verify';
 import { useAutoDRC } from '@/lib/auto-rule-hooks';
 import { LAYER_COLORS } from '@/lib/pcb/types';
+import { toast } from 'sonner';
 
 const PX_PER_MM = 8;
 
@@ -36,6 +40,8 @@ export function PCBCanvas() {
   const [cursor, setCursor] = useState({ x: 0, y: 0 });
   const dragRef = useRef<{ footprintId: string; offset: { x: number; y: number } } | null>(null);
   const panRef = useRef<{ start: { x: number; y: number }; origin: { x: number; y: number } } | null>(null);
+  /** latest cursor position in mm — used by the V-key via shortcut */
+  const cursorRef = useRef({ x: 0, y: 0 });
 
   // PCB store
   const board = usePCB((s) => s.board);
@@ -72,7 +78,10 @@ export function PCBCanvas() {
   const finishRouting = usePCB((s) => s.finishRouting);
   const cancelRouting = usePCB((s) => s.cancelRouting);
   const addVia = usePCB((s) => s.addVia);
+  const addRoutingVia = usePCB((s) => s.addRoutingVia);
+  const removeLastRoutingPoint = usePCB((s) => s.removeLastRoutingPoint);
   const setTool = usePCB((s) => s.setTool);
+  const netClasses = usePCB((s) => s.netClasses);
 
   useAutoDRC(true);
   const [hoveredDRC, setHoveredDRC] = useState<DRCError | null>(null);
@@ -390,27 +399,12 @@ export function PCBCanvas() {
       ctx.stroke();
     }
 
-    // ── Routing preview — smooth with 45° angle snapping visualization ──
+    // ── Routing preview — 45° snapping + LIVE CLEARANCE CHECK ───────────
     if (routingFrom && routingPath.length > 0) {
       const traceW = Math.max(1.5, defaultTraceWidth * PX_PER_MM * zoom);
 
-      // Glow
-      ctx.strokeStyle = 'rgba(251, 191, 36, 0.3)';
-      ctx.lineWidth = traceW + 4;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      const first = mmToScreen(routingPath[0].x, routingPath[0].y);
-      ctx.moveTo(first.x, first.y);
-      for (let i = 1; i < routingPath.length; i++) {
-        const p = mmToScreen(routingPath[i].x, routingPath[i].y);
-        ctx.lineTo(p.x, p.y);
-      }
-      // Line to cursor with 45° snap
+      // 45° snap for the segment to the cursor
       const lastPt = routingPath[routingPath.length - 1];
-      const last = mmToScreen(lastPt.x, lastPt.y);
-      const cur = mmToScreen(cursor.x, cursor.y);
-      // 45° snap for preview
       const dx = cursor.x - lastPt.x;
       const dy = cursor.y - lastPt.y;
       const angle = Math.atan2(dy, dx);
@@ -421,11 +415,40 @@ export function PCBCanvas() {
         y: lastPt.y + Math.sin(snappedAngle) * len,
       };
       const snappedScreen = mmToScreen(snappedEnd.x, snappedEnd.y);
+
+      // live clearance conflict check on the pending segment (and committed
+      // waypoints against other-net copper) — draws red when violating
+      let conflictPt: { x: number; y: number } | null = null;
+      let hasConflict = false;
+      const netClass = netClasses.find((nc) => nc.nets.includes(routingFrom.net));
+      const clearance = netClass?.clearance ?? DEFAULT_DRC_CONFIG.minClearance;
+      const halfW = defaultTraceWidth / 2;
+      if (len > 0.05) {
+        const res = segmentHasClearanceConflict(
+          lastPt, snappedEnd, routingFrom.net, activeLayer as CopperLayer,
+          halfW, clearance, footprints, traces, vias,
+        );
+        hasConflict = res.conflict;
+        conflictPt = res.point;
+      }
+
+      // halo
+      ctx.strokeStyle = hasConflict ? 'rgba(239, 68, 68, 0.35)' : 'rgba(251, 191, 36, 0.3)';
+      ctx.lineWidth = traceW + 4;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      const first = mmToScreen(routingPath[0].x, routingPath[0].y);
+      ctx.moveTo(first.x, first.y);
+      for (let i = 1; i < routingPath.length; i++) {
+        const p = mmToScreen(routingPath[i].x, routingPath[i].y);
+        ctx.lineTo(p.x, p.y);
+      }
       ctx.lineTo(snappedScreen.x, snappedScreen.y);
       ctx.stroke();
 
-      // Main preview line
-      ctx.strokeStyle = '#fbbf24';
+      // main preview line (red when the pending segment violates clearance)
+      ctx.strokeStyle = hasConflict ? '#ef4444' : '#fbbf24';
       ctx.lineWidth = traceW;
       ctx.beginPath();
       ctx.moveTo(first.x, first.y);
@@ -436,8 +459,8 @@ export function PCBCanvas() {
       ctx.lineTo(snappedScreen.x, snappedScreen.y);
       ctx.stroke();
 
-      // Vertex points (small dots at each routing waypoint)
-      ctx.fillStyle = '#fbbf24';
+      // vertex points (small dots at each routing waypoint)
+      ctx.fillStyle = hasConflict ? '#ef4444' : '#fbbf24';
       for (const pt of routingPath) {
         const sp = mmToScreen(pt.x, pt.y);
         ctx.beginPath();
@@ -445,16 +468,34 @@ export function PCBCanvas() {
         ctx.fill();
       }
 
-      // Angle indicator at cursor
+      // conflict marker
+      if (hasConflict && conflictPt) {
+        const cp = mmToScreen(conflictPt.x, conflictPt.y);
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(cp.x, cp.y, 7, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cp.x - 4, cp.y - 4); ctx.lineTo(cp.x + 4, cp.y + 4);
+        ctx.moveTo(cp.x + 4, cp.y - 4); ctx.lineTo(cp.x - 4, cp.y + 4);
+        ctx.stroke();
+        ctx.fillStyle = '#ef4444';
+        ctx.font = 'bold 10px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('clearance!', cp.x, cp.y - 10);
+      }
+
+      // angle indicator at cursor
       const angleDeg = Math.round(snappedAngle * 180 / Math.PI);
-      if (angleDeg < 0) { /* keep negative for display */ }
-      ctx.fillStyle = '#fbbf24';
+      ctx.fillStyle = hasConflict ? '#ef4444' : '#fbbf24';
       ctx.font = 'bold 11px ui-monospace, monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText(`${angleDeg}°`, snappedScreen.x, snappedScreen.y + 8);
 
-      // Net name label
+      // net name label
       if (routingFrom.net) {
         ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
         const label = routingFrom.net;
@@ -463,6 +504,35 @@ export function PCBCanvas() {
         ctx.fillStyle = '#fbbf24';
         ctx.fillText(label, first.x, first.y - 14);
       }
+    }
+
+    // ── Same-net pad highlights while routing (valid finish targets) ────
+    if (routingFrom) {
+      ctx.save();
+      for (const fp of footprints) {
+        for (const pad of fp.pads) {
+          const net = padNets.get(`${pad.componentId}:${pad.terminalId}`) ?? pad.net ?? '';
+          if (net !== routingFrom.net) continue;
+          const p = mmToScreen(pad.position.x, pad.position.y);
+          const r = Math.max(pad.size.width, pad.size.height) / 2 * PX_PER_MM * zoom + 3;
+          const isStart = Math.hypot(pad.position.x - routingPath[0].x, pad.position.y - routingPath[0].y) < 0.1;
+          ctx.strokeStyle = isStart ? 'rgba(34, 197, 94, 0.9)' : 'rgba(74, 222, 128, 0.85)';
+          ctx.lineWidth = isStart ? 1.5 : 2;
+          ctx.setLineDash(isStart ? [] : [3, 2]);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          if (!isStart && zoom > 1.5) {
+            ctx.fillStyle = 'rgba(74, 222, 128, 0.9)';
+            ctx.font = '9px ui-monospace, monospace';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText('end', p.x, p.y - r - 2);
+          }
+        }
+      }
+      ctx.restore();
     }
 
     // ── Footprints — rendered with silk layer + realistic pads ─────────
@@ -601,11 +671,10 @@ export function PCBCanvas() {
       drawDRCErrors(drcErrors, ctx, mmToScreen, hoveredDRC, zoom);
     }
 
-    // ── Routing completion ──────────────────────────────────────────────
-    const totalNets = ratsnest.length;
-    const routedNets = new Set(traces.map((t) => t.net)).size;
-    if (totalNets > 0) {
-      drawRoutingCompletion(ctx, size.width, size.height, routedNets, totalNets);
+    // ── Routing completion (true connectivity-based) ─────────────────────
+    const completion = computeNetCompletion(footprints, traces, vias);
+    if (completion.totalNets > 0) {
+      drawRoutingCompletion(ctx, size.width, size.height, completion.routedNets, completion.totalNets);
     }
 
     // ── Status bar — modern dark glass ─────────────────────────────────
@@ -696,9 +765,21 @@ export function PCBCanvas() {
         }
       }
       if (pad) {
-        const net = padNets.get(`${pad.componentId}:${pad.terminalId}`) ?? 'unrouted';
-        if (!routingFrom) { startRouting({ x: pad.position.x, y: pad.position.y, net }); }
-        else { addRoutingPoint(pad.position); finishRouting({ x: pad.position.x, y: pad.position.y, net }); }
+        const net = padNets.get(`${pad.componentId}:${pad.terminalId}`) ?? pad.net ?? '';
+        if (!routingFrom) {
+          if (!net) {
+            toast.error('Cannot start routing from an unconnected pad');
+            return;
+          }
+          startRouting({ x: pad.position.x, y: pad.position.y, net });
+        } else if (net === routingFrom.net) {
+          // same net → finish cleanly on the pad center
+          addRoutingPoint(pad.position);
+          finishRouting({ x: pad.position.x, y: pad.position.y, net });
+        } else {
+          // WRONG NET — never silently create a short
+          toast.error(`Wrong net: pad belongs to "${net || 'unconnected'}" — finish on net "${routingFrom.net}" or press Esc`);
+        }
       } else {
         if (routingFrom) addRoutingPoint(snapped);
       }
@@ -731,6 +812,7 @@ export function PCBCanvas() {
     const sy = e.clientY - rect.top;
     const mm = screenToMm(sx, sy);
     setCursor({ x: mm.x, y: mm.y });
+    cursorRef.current = { x: mm.x, y: mm.y };
     setMousePos({ x: sx, y: sy });
     if (drcErrors.length > 0) {
       const hit = findDRCErrorAt(drcErrors, sx, sy, mmToScreen);
@@ -787,16 +869,26 @@ export function PCBCanvas() {
         target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' ||
         target.tagName === 'SELECT' || target.isContentEditable
       )) return;
+      const routing = usePCB.getState().routingFrom;
       if (e.key === 'Escape') { cancelRouting(); selectFootprint(null); }
+      else if ((e.key === 'v' || e.key === 'V') && routing) {
+        // place a via at the cursor and continue on the other layer
+        e.preventDefault();
+        addRoutingVia(cursorRef.current);
+      }
+      else if (e.key === 'Backspace' && routing) {
+        e.preventDefault();
+        removeLastRoutingPoint();
+      }
       else if (e.key === 'r' || e.key === 'R') { if (selectedFootprintId) rotateFootprint(selectedFootprintId); }
-      else if (e.key === 'Delete' || e.key === 'Backspace') { if (selectedTraceId) usePCB.getState().deleteTrace(selectedTraceId); }
+      else if ((e.key === 'Delete' || e.key === 'Backspace') && !routing) { if (selectedTraceId) usePCB.getState().deleteTrace(selectedTraceId); }
       else if (e.key === '1') setTool('select');
       else if (e.key === '2') setTool('route');
       else if (e.key === '3') setTool('via');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [cancelRouting, selectFootprint, selectedFootprintId, rotateFootprint, selectedTraceId, setTool]);
+  }, [cancelRouting, selectFootprint, selectedFootprintId, rotateFootprint, selectedTraceId, setTool, addRoutingVia, removeLastRoutingPoint]);
 
   return (
     <div ref={containerRef} className="relative h-full w-full overflow-hidden bg-[#070d15]"
