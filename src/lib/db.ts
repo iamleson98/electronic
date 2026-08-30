@@ -1,4 +1,4 @@
-// Drizzle ORM database client — Turso (libsql).
+// Drizzle ORM database client — Turso (libsql) or local SQLite file.
 // ─────────────────────────────────────────────────────────────────────────────
 // Exports:
 //   - `getDb()` — async getter that returns the initialized Drizzle instance.
@@ -7,12 +7,15 @@
 //      src/instrumentation.ts on server startup so the first request after a
 //      deploy doesn't pay the migration cost.
 //
-// Requires two env vars:
-//   TURSO_DATABASE_URL  — e.g. libsql://your-db.turso.io
-//   TURSO_AUTH_TOKEN    — the Turso auth token
+// Database URL resolution (see resolveDbConfig below):
+//   TURSO_DATABASE_URL + TURSO_AUTH_TOKEN  → remote Turso (production)
+//   DATABASE_URL=file:…                    → local libsql file (dev)
+//   file:./db/custom.db                    → local default (dev)
 //
 // Migrations live in ./drizzle/. The __drizzle_migrations table tracks applied
-// migrations so each only runs once (idempotent across deploys).
+// migrations so each only runs once (idempotent across deploys). If the schema
+// was created by `drizzle-kit push` instead (local dev bootstrap), the
+// migrator baselines itself — see baselineIfPushed().
 //
 // After applying pending migrations, runMigrations() also rebuilds the derived
 // tag/FTS indexes (circuit_tags + circuits_fts) from the TEXT `tags` column —
@@ -22,18 +25,45 @@
 // During `next build`, returns a no-op stub — the real DB is only needed at
 // runtime when API routes handle requests.
 
-import { createClient } from '@libsql/client';
+import { createClient, type Client } from '@libsql/client';
 import { drizzle } from 'drizzle-orm/libsql';
 import { migrate } from 'drizzle-orm/libsql/migrator';
 import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { savedCircuits } from './schema';
 import { rebuildTagsAndFts } from './circuits-service';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config — read env vars lazily so tests can override them.
+//
+// Resolution order:
+//   1. TURSO_DATABASE_URL + TURSO_AUTH_TOKEN  — remote Turso (production)
+//   2. TURSO_DATABASE_URL alone               — remote libsql without auth
+//   3. DATABASE_URL                            — local libsql file (dev)
+//   4. file:./db/custom.db                     — local default (dev)
+//
+// `file:` URLs are plain local SQLite — no auth token needed — so local
+// development works out of the box without any Turso credentials.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const MIGRATIONS_FOLDER = resolve(process.cwd(), 'drizzle');
+
+interface DbConfig {
+  url: string;
+  authToken?: string;
+}
+
+function resolveDbConfig(): DbConfig {
+  const url =
+    process.env.TURSO_DATABASE_URL ||
+    process.env.DATABASE_URL ||
+    'file:./db/custom.db';
+  const authToken = process.env.TURSO_AUTH_TOKEN || undefined;
+  // file: URLs never need an auth token; passing one is harmless but noisy.
+  if (url.startsWith('file:')) return { url };
+  return { url, authToken };
+}
 
 const globalForDb = globalThis as unknown as {
   __drizzleDb: ReturnType<typeof createDrizzleDb> | undefined;
@@ -44,14 +74,78 @@ const globalForDb = globalThis as unknown as {
   __shutdownRegistered: boolean | undefined;
 };
 
-function createDrizzleDb() {
-  const client = createClient({
-    url: process.env.TURSO_DATABASE_URL!,
-    authToken: process.env.TURSO_AUTH_TOKEN!,
-  });
-  const db = drizzle(client, { schema: { savedCircuits } });
-  globalForDb.__libsqlClient = client;
+function createDrizzleDb(client?: Client) {
+  const c = client ?? (() => {
+    const { url, authToken } = resolveDbConfig();
+    return createClient(authToken ? { url, authToken } : { url });
+  })();
+  const db = drizzle(c, { schema: { savedCircuits } });
+  globalForDb.__libsqlClient = c;
   return db;
+}
+
+/**
+ * Self-heal the `drizzle-kit push` ↔ `migrate()` conflict.
+ *
+ * Local bootstrap (`.zscripts/dev.sh`) syncs the schema with
+ * `drizzle-kit push`, which creates the tables WITHOUT recording anything
+ * in `__drizzle_migrations`. The migrator would then fail with
+ * "table `saved_circuits` already exists".
+ *
+ * Fix: when the schema already exists but no migrations are recorded,
+ * insert every journal entry into `__drizzle_migrations` (baselining), so
+ * `migrate()` cleanly skips them and only applies genuinely new ones.
+ */
+async function baselineIfPushed(client: Client): Promise<void> {
+  const schemaExists = await client.execute(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='saved_circuits'",
+  );
+  if (schemaExists.rows.length === 0) return; // fresh DB — migrate() creates everything
+
+  const migrationsTableExists = await client.execute(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='__drizzle_migrations'",
+  );
+  let recorded = 0;
+  if (migrationsTableExists.rows.length > 0) {
+    const rows = await client.execute(
+      'SELECT count(*) AS n FROM __drizzle_migrations',
+    );
+    recorded = Number((rows.rows[0] as { n?: number | string } | undefined)?.n ?? 0);
+  }
+  if (recorded > 0) return; // migrator tracks its own progress
+
+  // Read the journal and re-derive each migration's recorded identity the
+  // same way drizzle's migrator does: hash = sha256(<tag>.sql content),
+  // created_at = journal `when` (see drizzle-orm/migrator.js readMigrationFiles).
+  let entries: Array<{ tag: string; when: number }> = [];
+  try {
+    const journal = JSON.parse(
+      readFileSync(resolve(MIGRATIONS_FOLDER, 'meta', '_journal.json'), 'utf8'),
+    ) as { entries?: Array<{ tag: string; when: number }> };
+    entries = (journal.entries ?? []).map((e) => ({ tag: e.tag, when: e.when }));
+  } catch {
+    return; // no journal → nothing to baseline
+  }
+  if (entries.length === 0) return;
+
+  await client.execute(
+    'CREATE TABLE IF NOT EXISTS __drizzle_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, hash text NOT NULL, created_at numeric)',
+  );
+  for (const e of entries) {
+    let hash: string;
+    try {
+      hash = createHash('sha256')
+        .update(readFileSync(resolve(MIGRATIONS_FOLDER, `${e.tag}.sql`), 'utf8'))
+        .digest('hex');
+    } catch {
+      continue; // migration file missing — skip (migrate() will surface it)
+    }
+    await client.execute({
+      sql: 'INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)',
+      args: [hash, e.when],
+    });
+  }
+  console.log(`[db] baselined ${entries.length} migration(s) — schema was created by drizzle-kit push`);
 }
 
 /**
@@ -75,28 +169,32 @@ export async function runMigrations(): Promise<void> {
       globalForDb.__migrationsApplied = true;
       return;
     }
-    if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
-      // Defer to initDb()'s error message
-      return;
-    }
-    const db = createDrizzleDb();
+    const { url, authToken } = resolveDbConfig();
+    const client = createClient(authToken ? { url, authToken } : { url });
+    globalForDb.__libsqlClient = client;
+    await baselineIfPushed(client);
+    const db = createDrizzleDb(client);
     await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
     // Backfill/self-heal the derived tag + FTS tables from the TEXT tags
     // column (idempotent — delete + reinsert per circuit; see
     // circuits-service.ts). Best-effort: a failure here must not break
     // startup — reads degrade to LIKE filters and the next deploy retries.
-    if (globalForDb.__libsqlClient) {
-      try {
-        await rebuildTagsAndFts(globalForDb.__libsqlClient);
-      } catch (backfillErr) {
-        console.error('[db] tags/FTS backfill failed (will retry next start):', backfillErr);
-      }
+    try {
+      await rebuildTagsAndFts(client);
+    } catch (backfillErr) {
+      console.error('[db] tags/FTS backfill failed (will retry next start):', backfillErr);
     }
     globalForDb.__migrationsApplied = true;
     if (process.env.NODE_ENV !== 'production') {
       globalForDb.__drizzleDb = db;
     }
-  })();
+  })().catch((err) => {
+    // Don't cache a failed migration run — let the next call retry
+    // (e.g. a transient network error to Turso should not brick the
+    // process for its entire lifetime).
+    globalForDb.__migrationsPromise = undefined;
+    throw err;
+  });
 
   return globalForDb.__migrationsPromise;
 }
@@ -110,13 +208,6 @@ async function initDb(): Promise<ReturnType<typeof createDrizzleDb>> {
       return { stub: true } as any;
     }
 
-    if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
-      throw new Error(
-        'Missing TURSO_DATABASE_URL or TURSO_AUTH_TOKEN. ' +
-        'Set these env vars in .env (local) or Vercel Project Settings (production).',
-      );
-    }
-
     // If migrations haven't been applied yet (e.g., instrumentation hook
     // didn't run, or this is a test), apply them now as a fallback.
     if (!globalForDb.__migrationsApplied) {
@@ -127,7 +218,12 @@ async function initDb(): Promise<ReturnType<typeof createDrizzleDb>> {
     // otherwise create a new one.
     if (globalForDb.__drizzleDb) return globalForDb.__drizzleDb;
     return createDrizzleDb();
-  })();
+  })().catch((err) => {
+    // Don't cache a rejected init — a later getDb() call retries instead of
+    // returning the same failure forever.
+    globalForDb.__dbPromise = undefined;
+    throw err;
+  });
 
   return globalForDb.__dbPromise;
 }
@@ -147,6 +243,8 @@ export async function getDb() {
 }
 
 // Graceful shutdown — close the libsql client cleanly on process exit.
+// NOTE: only registered on real SIGTERM/SIGINT; process.exit(0) would kill the
+// Next.js dev server's other handlers if called from arbitrary contexts.
 if (!globalForDb.__shutdownRegistered) {
   globalForDb.__shutdownRegistered = true;
   const shutdown = () => {
@@ -155,8 +253,13 @@ if (!globalForDb.__shutdownRegistered) {
     } catch {
       // Ignore errors during shutdown
     }
-    process.exit(0);
   };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.once('SIGTERM', () => {
+    shutdown();
+    process.exit(0);
+  });
+  process.once('SIGINT', () => {
+    shutdown();
+    process.exit(0);
+  });
 }
