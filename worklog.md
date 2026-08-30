@@ -318,3 +318,24 @@ Work Log:
 Stage Summary:
 - FIXED (9 files + 1 new): stale-simContext on loadDocument/examples.load/buildPattern (P1 wrong-numbers-to-model); loadDocument hallucination validation + default normalization (P1 loop-killer); pcb.* phantom failures (P1 model misinfo); spice/import 400s (P1 HTTP semantics); stream-route client-disconnect cleanup (P1 unhandled-rejection + 5-min burn); non-stream abort + provider AbortSignal plumbing (P2); AI rate limiting (P2); ChatPanel double-apply/undo-break (P2) + AbortController + send-race guard + history caps + verifyNetlist wiring (P2).
 - DEFERRED (documented, left alone): cursor pagination not consumed (pre-existing, documented in circuits-service + TODO); LIKE fallback doesn't escape %/_ wildcards (legacy path only; FTS handles the main path); updatedAt second-granularity tie ordering; vercel.json functions maxDuration 60 vs route export 300 (route config wins; Hobby-plan deploy may reject 300 — needs product decision); zai 20-retry backoff (479s of sleep) exceeds maxDuration 300; error-monitoring duplicate captureException branch (harmless, wrapped in try/catch); Available-models marketing labels (e.g. "GPT-4o most capable") stale; Anthropic consecutive tool_result user-messages untested (no key in env); api/route.ts "Hello, world!" placeholder; stream route counts invalid-body requests against the rate limit (standard behavior).
+
+---
+Task ID: 3
+Agent: main (Z.ai Code — session orchestrator)
+Task: Replace sandbox project with iamleson98/electronic repo, deep-audit + fix all domains, push
+
+Work Log:
+- Saved GitHub credentials permanently (git credential.helper store + ~/.git-credentials, chmod 600; identity iamleson98).
+- Stopped the previous audiobook-player project, wiped /home/z/my-project (kept the upload mount), cloned electronic.git into it (kept .git/remote), restored skills/.
+- Fixed local dev boot: db.ts/drizzle.config.ts URL resolution (TURSO_* → DATABASE_URL → file:./db/custom.db; no token needed for file URLs); baselineIfPushed() self-heals the drizzle-kit-push ↔ migrate() conflict; failed init/migration no longer cached forever; untracked .env, removed junk (3000 crash log, tool-results/).
+- Verified baseline: 2497 tests / tsc clean / eslint 0 errors; app boots on :3000 with DB healthy.
+- Launched 4 parallel audit agents (2-a simulation core, 2-b circuit app layer, 2-c AI+API+DB, 2-d PCB+React UI) with strict file ownership; 2-c hit a rate limit and was relaunched successfully.
+- Personally fixed the P0 the agents cross-flagged: sub-circuit virtual internal nodes (raw addExtra() row used as node id → singular matrix; step() numbering mismatch → NaN transients). Full fix: +1 convention, stamp→step node-map cache, makeSimView() exposing virtual voltages via branchCurrent, SimContext.numNodes, plugin.extraVars(); 5 regression tests.
+- Full-suite verification after all agents: 2573 tests pass (76 new), tsc 0 errors, eslint 0 errors.
+- Browser E2E: app loads, tutorial dismiss works, example loads, simulation runs (▶ running + VLM-verified schematic), AI Assistant end-to-end (design.buildPattern + simulate.run tools executed, circuit changes offered, no errors), PCB tab renders, no console errors. The single 429 in dev.log is the NEW rate limiter correctly rejecting the 21st request in 60s from the test.
+- Committed in 3 commits (896334a, 0cfc2c9, ff3412f) and pushed to origin/main.
+
+Stage Summary:
+- Repo now runs in the sandbox on :3000 with a local file DB; credentials saved permanently.
+- 45+ bugs fixed across all four domains, including 4 P0s (MNA budget overflow, Gerber aperture snapping, flipFootprint mirror, subcircuit singular matrix) and the AI tool-context staleness family.
+- Product state: 2573 green tests, clean types/lint, AI-assisted circuit design verified working end-to-end in-browser, all work pushed.
