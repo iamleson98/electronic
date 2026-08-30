@@ -1219,6 +1219,9 @@ export function simulateStep(
   const sim: SimContext = {
     nodeVoltage,
     branchCurrent,
+    // Total node count (incl. ground) — lets sub-circuits translate their
+    // extra-row-backed virtual node ids into branchCurrent slots.
+    numNodes,
     state: stateMap,
     time,
     dt,
@@ -1249,7 +1252,10 @@ export function simulateStep(
   // like SPICE's "no DC path to ground"), and plugin state mutated during
   // the first stamp (edge counters, region latches) is rolled back first
   // so the re-stamp applies every transition exactly once.
-  const hasGroundRef = [...nodeMap.terminalNode.values()].some((n: number) => n === 0);
+  let hasGroundRef = false;
+  for (const n of nodeMap.terminalNode.values()) {
+    if (n === 0) { hasGroundRef = true; break; }
+  }
   let stateSnapshot: Record<string, any> | null = null;
   if (hasGroundRef && typeof (globalThis as any).structuredClone === 'function') {
     try { stateSnapshot = (globalThis as any).structuredClone(stateMap); } catch { stateSnapshot = null; }
@@ -1310,6 +1316,16 @@ export function simulateStep(
     restoreStateInPlace(stateMap, stateSnapshot);
     attempt = buildAndSolve(true);
     x = attempt.x;
+  }
+
+  // A plugin that allocates more branch-current unknowns than the budget
+  // (the solver now grows its matrix accordingly) also needs a bigger
+  // branchCurrent array — otherwise the solved currents past the budget are
+  // silently dropped (typed-array OOB write) and stay stale at 0.
+  if (x && attempt.sys.numExtra > sim.branchCurrent.length) {
+    const grownBranch = new Float64Array(attempt.sys.numExtra);
+    grownBranch.set(sim.branchCurrent);
+    sim.branchCurrent = grownBranch;
   }
 
   // ── Gauss–Seidel outer iteration for behavioral (feedback) sources ─────

@@ -64,6 +64,14 @@ export function createSubCircuitPlugin(def: SubCircuitDefinition): ComponentPlug
     default: p.default,
   }));
 
+  // stamp()-time internal node maps, keyed by instance id prefix. step()
+  // reuses the exact node ids stamp computed (external pins → real parent
+  // node ids; internal-only nodes → virtual ids backed by extra rows), so
+  // reactive internal components (capacitors/inductors) read the RIGHT
+  // voltages in transient instead of a freshly re-derived numbering that
+  // never matches the stamps.
+  const stampNodeMaps = new Map<string, Map<string, number>>();
+
   const plugin: ComponentPlugin = {
     type: def.type,
     name: def.name,
@@ -212,22 +220,37 @@ export function createSubCircuitPlugin(def: SubCircuitDefinition): ComponentPlug
         const root = find(n);
         if (!rootToId.has(root)) {
           // need to grow the system - we allocate extras
-          // Note: extras have index >= sys.numNodes in the original layout, but our
-          // MnaSystem doesn't actually grow on demand in the simple version.
-          // As a workaround, we allocate them as "fake nodes" that share row/col
-          // with the existing extras. This is INCORRECT for full generality but
-          // works for many cases (voltage dividers, etc.).
+          // addExtra() returns a flat MATRIX row index; the stamp helpers take
+          // NODE ids (row = id − 1). Same convention as every other pseudo-node
+          // user (advanced-devices.ts, advanced-semi.ts, p2-components.ts):
+          // node id = extra row + 1. Using the raw row index here stamped the
+          // conductances onto the LAST REAL node's row and left the allocated
+          // extra row empty → singular matrix → solveDC returned null for ANY
+          // sub-circuit with an internal node.
           const newId = sys.addExtra();
-          rootToId.set(root, newId);
+          rootToId.set(root, newId + 1);
           nextExtra = Math.max(nextExtra, newId + 1);
         }
       }
       for (const [k, n] of termNode) {
         termNode.set(k, rootToId.get(find(n))!);
       }
+      // Remember the final internal node map for step() — see stampNodeMaps.
+      stampNodeMaps.set(instancePrefix, new Map(termNode));
 
       // 3. Stamp each internal component
+      // Internal components see a sim view whose nodeVoltage ALSO exposes
+      // the sub-circuit's virtual internal nodes (ids ≥ sim.numNodes backed
+      // by extra rows — the solved value lives in branchCurrent, see
+      // makeSimView). Behavioral sources inside the sub-circuit can then
+      // read V(internalNode) just like any other node.
+      const simView = makeSimView(sim, termNode);
       for (const comp of internalComponents) {
+        // Self-recursion guard: a sub-circuit whose internal document contains
+        // an instance of ITSELF would recurse without bound at stamp time
+        // (each level re-dispatches into the same definition) until the stack
+        // overflows. Skip such instances — the definition is malformed anyway.
+        if (comp.type === def.type) continue;
         const plugin = internalPlugins.get(comp.type);
         if (!plugin || !plugin.stamp) continue;
         // Apply sub-circuit parameter overrides
@@ -250,34 +273,51 @@ export function createSubCircuitPlugin(def: SubCircuitDefinition): ComponentPlug
           // that two instances of the same sub-circuit keep independent
           // per-component sim state (e.g. `amp1.Q1` vs `amp2.Q1`).
           const instance: CircuitComponent = { ...comp, id: `${instancePrefix}${comp.id}` };
-          plugin.stamp(overriddenParams, internalTerminals, sys, sim, instance);
+          plugin.stamp(overriddenParams, internalTerminals, sys, simView, instance);
         } catch (e) {
           console.error(`sub-circuit stamp error in ${comp.type} (${comp.id}):`, e);
         }
       }
     },
     step(params, terminals, sim, instance) {
-      // Re-dispatch step to internal components with proper terminal mapping
+      // Re-dispatch step to internal components. Node ids MUST match the
+      // ones stamp() used — reactive components (capacitors/inductors) read
+      // sim.nodeVoltage[terminalNodeId] to update their companion state, so
+      // a mismatched numbering poisons the transient solution. We reuse the
+      // map cached by the most recent stamp() for this instance.
       const instancePrefix = instance ? `${instance.id}.` : '';
       const internalPlugins = new Map<string, ComponentPlugin>();
       for (const c of def.document.components) {
         const p = getPlugin(c.type);
         if (p) internalPlugins.set(c.type, p);
       }
-      // Re-derive internal node ids (same logic as in stamp)
-      const pinToNode = new Map<string, number>();
-      for (const pm of def.pinMap) {
-        const extTerm = terminals.find(t => t.terminalId === pm.pinId);
-        if (extTerm) pinToNode.set(`${pm.componentId}:${pm.terminalId}`, extTerm.nodeId);
+      let internalNodeMap: Map<string, number>;
+      let simView = sim;
+      const cached = stampNodeMaps.get(instancePrefix);
+      if (cached) {
+        internalNodeMap = cached;
+        simView = makeSimView(sim, cached);
+      } else {
+        // Fallback (stamp has not run for this instance — should not happen
+        // since the engine always stamps before stepping): re-derive. The
+        // numbering may not match stamp's virtual ids, but it is the best
+        // available without a system to allocate extras from.
+        const pinToNode = new Map<string, number>();
+        for (const pm of def.pinMap) {
+          const extTerm = terminals.find((t) => t.terminalId === pm.pinId);
+          if (extTerm) pinToNode.set(`${pm.componentId}:${pm.terminalId}`, extTerm.nodeId);
+        }
+        internalNodeMap = buildInternalNodeMap(def.document, internalPlugins, pinToNode);
       }
-      const internalNodeMap = buildInternalNodeMap(def.document, internalPlugins, pinToNode);
       for (const comp of def.document.components) {
+        // Self-recursion guard (see stamp()).
+        if (comp.type === def.type) continue;
         const plugin = internalPlugins.get(comp.type);
         if (!plugin || !plugin.step) continue;
         const internalTerms = getInternalTerminals(comp, plugin, internalNodeMap);
         try {
           const inner: CircuitComponent = { ...comp, id: `${instancePrefix}${comp.id}` };
-          plugin.step(comp.parameters, internalTerms, sim, inner);
+          plugin.step(comp.parameters, internalTerms, simView, inner);
         } catch (e) {
           console.error(`sub-circuit step error in ${comp.type} (${comp.id}):`, e);
         }
@@ -291,9 +331,53 @@ export function createSubCircuitPlugin(def: SubCircuitDefinition): ComponentPlug
         unit: 'V',
       }));
     },
+    // Declare the number of internal-only (virtual) nodes so the engine can
+    // size the MNA matrix / branchCurrent array up front. Upper bound: run
+    // union-find over the internal document with NO pins forced — every
+    // distinct non-ground root is a potential virtual node (unwired pins in
+    // the parent also become virtual nodes). Over-declaring only wastes a
+    // few rows; under-declaring triggers the on-demand growth path.
+    extraVars() {
+      const plugins = new Map<string, ComponentPlugin>();
+      for (const c of def.document.components) {
+        const p = getPlugin(c.type);
+        if (p) plugins.set(c.type, p);
+      }
+      const m = buildInternalNodeMap(def.document, plugins, new Map());
+      const roots = new Set<number>();
+      for (const v of m.values()) if (v !== 0) roots.add(v);
+      return roots.size;
+    },
   };
 
   return plugin;
+}
+
+/**
+ * Build a SimContext view in which the sub-circuit's virtual internal nodes
+ * (ids ≥ sim.numNodes, backed by extra rows) are readable through
+ * nodeVoltage. The engine stores extra-row solutions in `branchCurrent`
+ * (branchCurrent[i] = x[numNodes − 1 + i]) and a virtual node with id v
+ * lives at extra row v − 1, so its voltage is branchCurrent[v − numNodes].
+ * Real node ids (< numNodes) pass through unchanged. If the map holds no
+ * virtual ids (or sim.numNodes is unavailable) the original sim is returned.
+ */
+function makeSimView(sim: SimContext, nodeMap: Map<string, number>): SimContext {
+  const n = sim.numNodes;
+  if (!n) return sim;
+  let maxId = 0;
+  let hasVirtual = false;
+  for (const v of nodeMap.values()) {
+    if (v > maxId) maxId = v;
+    if (v >= n) hasVirtual = true;
+  }
+  if (!hasVirtual) return sim;
+  const nv = new Float64Array(maxId + 1);
+  nv.set(sim.nodeVoltage.subarray(0, Math.min(sim.nodeVoltage.length, maxId + 1)));
+  for (let v = n; v <= maxId; v++) {
+    nv[v] = sim.branchCurrent[v - n] ?? 0;
+  }
+  return { ...sim, nodeVoltage: nv };
 }
 
 /**
@@ -366,7 +450,9 @@ export function registerBuiltinSubCircuits() {
       { pinId: 'b', componentId: 'd_b', terminalId: 'a' },
       { pinId: 'y', componentId: 'r_pullup', terminalId: 'a' },
     ],
-    boundingBox: { width: 5, height: 4 },
+    // Bounding box contains every pin — pins outside the box made rotation
+    // orbit the wrong center and drew pin dots off the symbol body.
+    boundingBox: { width: 5, height: 9 },
   };
   registerSubCircuit(dlandDef);
 
@@ -398,7 +484,8 @@ export function registerBuiltinSubCircuits() {
       { pinId: 'out', componentId: 'r1', terminalId: 'b' },
       { pinId: 'gnd', componentId: 'gnd', terminalId: 'g' },
     ],
-    boundingBox: { width: 5, height: 4 },
+    // Bounding box contains every pin (GND pin sits at y=6).
+    boundingBox: { width: 5, height: 7 },
     parameters: [
       { key: 'r1', label: 'R1', default: 1000, componentId: 'r1', paramKey: 'resistance' },
       { key: 'r2', label: 'R2', default: 1000, componentId: 'r2', paramKey: 'resistance' },

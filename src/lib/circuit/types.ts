@@ -96,6 +96,14 @@ export interface SimContext {
   nodeVoltage: Float64Array;
   /** branch currents (extra vars) */
   branchCurrent: Float64Array;
+  /**
+   * Total node count including ground (0). Set by the engine on every solve.
+   * Plugins that allocate "virtual" internal nodes in extra rows
+   * (e.g. sub-circuits) use it to distinguish real node ids (< numNodes)
+   * from extra-row-backed ids — the solved value of extra row r is
+   * branchCurrent[r − (numNodes − 1)].
+   */
+  numNodes?: number;
   /** per-component state object (mutable) - plugins keep memory here */
   state: Record<string, any>;
   /** current simulation time, in seconds */
