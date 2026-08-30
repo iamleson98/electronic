@@ -10,11 +10,12 @@
 //   - error: { message }                          — error occurred
 
 import { NextRequest } from 'next/server';
-import { getProvider, type ChatMessage, type ProviderName } from '@/lib/ai/provider';
+import { getProvider, AIProviderConfigError, type ChatMessage, type ProviderName } from '@/lib/ai/provider';
 import { TOOLS_BY_NAME, getToolDefinitions, type ToolContext } from '@/lib/ai/tools';
 import type { CircuitDocument } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
 import { buildSystemPrompt, MUTATING_TOOL_NAMES, runAutoVerify, autoVerifyNeedsAttention, buildAutoVerifyMessages } from '@/lib/ai/system-prompt';
+import { buildContextPreamble } from '@/lib/ai/netlist-summary';
 import { ensurePlugins } from '@/lib/ai/tools/helpers';
 import { checkRateLimit, clientIpFromRequest } from '@/lib/ai/rate-limit';
 
@@ -50,53 +51,6 @@ interface RequestBody {
 
 function sseEvent(event: string, data: any): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-}
-
-/**
- * Build a system-message preamble that gives the AI immediate visibility into
- * the circuit's live state. This means the AI can answer "why doesn't this
- * work?" without first calling simulate.run — it already knows the error and
- * the current voltages.
- */
-function buildContextPreamble(body: RequestBody, doc: CircuitDocument): string | null {
-  const parts: string[] = [];
-
-  // Circuit summary
-  if (doc.components.length > 0) {
-    const compTypes = doc.components.reduce((acc, c) => {
-      acc[c.type] = (acc[c.type] || 0) + 1;
-      return acc;
-    }, {} as Record<string, number>);
-    const summary = Object.entries(compTypes).map(([t, n]) => `${n}× ${t}`).join(', ');
-    parts.push(`## Current Circuit\n${doc.components.length} components (${summary}), ${doc.wires.length} wires.`);
-  } else {
-    parts.push('## Current Circuit\nThe canvas is empty. No components or wires yet.');
-  }
-
-  // Simulation state
-  if (body.simRunning !== undefined) {
-    parts.push(`## Simulation State\nStatus: ${body.simRunning ? 'RUNNING' : 'STOPPED'}.`);
-  }
-  if (body.simContext) {
-    const nodeCount = body.simContext.nodeVoltage.length;
-    const nonZeroNodes = body.simContext.nodeVoltage.filter(v => Math.abs(v) > 1e-6).length;
-    parts.push(`Sim time: ${(body.simContext.time * 1000).toFixed(2)}ms. ${nodeCount} nodes (${nonZeroNodes} non-zero).`);
-  }
-
-  // Simulation error (CRITICAL — this is what lets the AI diagnose immediately)
-  if (body.simError) {
-    parts.push(`## ⚠️ SIMULATION ERROR\nThe user's simulation is failing with this error:\n"${body.simError}"\nThis is likely the root cause of whatever the user is asking about. Call ai.diagnose to get a full analysis.`);
-  }
-
-  // Selected component
-  if (body.selectedComponentId) {
-    const comp = doc.components.find(c => c.id === body.selectedComponentId);
-    if (comp) {
-      parts.push(`## Selected Component\nThe user has selected ${comp.id} (${comp.type}) at position (${comp.position.x}, ${comp.position.y}). If they ask "explain this" or "what's wrong with this", they mean this component.`);
-    }
-  }
-
-  return parts.length > 0 ? parts.join('\n\n') : null;
 }
 
 export async function POST(req: NextRequest) {
@@ -181,9 +135,15 @@ export async function POST(req: NextRequest) {
         const toolDefs = getToolDefinitions();
 
         // Build a context preamble that gives the AI immediate visibility into
-        // the circuit's live state (so it doesn't have to call simulate.run
-        // just to see if the circuit is working).
-        const contextPreamble = buildContextPreamble(body, doc);
+        // the circuit's live state (full netlist + operating point + errors) so
+        // it can diagnose "why doesn't this work?" without a single tool call.
+        const contextPreamble = buildContextPreamble({
+          doc,
+          simContext: body.simContext ?? null,
+          simError: body.simError ?? null,
+          simRunning: body.simRunning,
+          selectedComponentId: body.selectedComponentId ?? null,
+        });
 
         const messages: ChatMessage[] = [
           { role: 'system', content: buildSystemPrompt() },
@@ -208,13 +168,19 @@ export async function POST(req: NextRequest) {
             break;
           }
 
-          const result = await provider.chat(messages, toolDefs, { temperature: 0.4, max_tokens: 8192, signal: req.signal });
+          const result = await provider.chatStream(
+            messages,
+            toolDefs,
+            { temperature: 0.4, max_tokens: 8192, signal: req.signal },
+            // Token-level streaming: every text fragment goes straight to the
+            // client as a text_delta SSE event (was: one big blob per iteration).
+            (delta) => send('text_delta', { text: delta }),
+          );
 
-          // If tool calls, execute them (text streamed here narrates the tool use)
+          // If tool calls, execute them. NOTE: any narration text was already
+          // streamed token-by-token via the onTextDelta callback — do NOT send
+          // result.content again (it would duplicate on the client).
           if (result.tool_calls && result.tool_calls.length > 0) {
-            if (result.content) {
-              send('text_delta', { text: result.content });
-            }
             messages.push({
               role: 'assistant',
               content: result.content,
@@ -326,9 +292,9 @@ export async function POST(req: NextRequest) {
             }
           }
 
-          if (result.content) {
-            send('text_delta', { text: result.content });
-          }
+          // Final response — already streamed token-by-token via onTextDelta;
+          // `done` carries the full assembled text (the client replaces, not
+          // appends, so no duplication).
           send('done', {
             response: result.content,
             toolCalls: executedToolCalls,
@@ -358,7 +324,14 @@ export async function POST(req: NextRequest) {
         closeStream();
       } catch (e) {
         console.error('AI chat stream error:', e);
-        send('error', { message: `AI chat failed: ${(e as Error).message}` });
+        // Configuration problems get their own machine-readable code so the
+        // ChatPanel can render actionable setup guidance instead of a scary
+        // generic error (typical on a fresh deployment without an API key).
+        if (e instanceof AIProviderConfigError) {
+          send('error', { code: 'AI_NOT_CONFIGURED', message: e.message });
+        } else {
+          send('error', { message: `AI chat failed: ${(e as Error).message}` });
+        }
         closeStream();
       } finally {
         req.signal.removeEventListener('abort', onAbort);

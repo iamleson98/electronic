@@ -8,7 +8,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { ChevronDown, ChevronRight, Send, Sparkles, Loader2, X, AlertCircle, CheckCircle2, Wrench, Undo2, Eye, GitBranch, Cpu } from 'lucide-react';
+import { ChevronDown, ChevronRight, Send, Sparkles, Loader2, X, AlertCircle, CheckCircle2, Wrench, Undo2, Eye, GitBranch, Cpu, KeyRound, ExternalLink } from 'lucide-react';
 import { toast } from 'sonner';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -30,6 +30,8 @@ interface ProviderInfo {
   requiresKey: string | null;
   model: string;
   models: ModelInfo[];
+  /** How the Z.ai backend is wired: 'api-key' (public API — works on any domain), 'sandbox' (Z.ai sandbox gateway), 'unconfigured'. */
+  mode?: 'api-key' | 'sandbox' | 'unconfigured';
 }
 
 const PROVIDER_STORAGE_KEY = 'circuit-lab.ai-provider';
@@ -77,6 +79,8 @@ interface ChatMessage {
   timestamp: number;
   loading?: boolean;
   error?: string;
+  /** 'config' = the AI backend isn't configured (deployment missing API keys) — renders a setup card. */
+  errorKind?: 'config';
   pendingDiff?: {
     components: any[];
     wires: any[];
@@ -180,7 +184,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
         // Network or server error — default to Z.ai (always available).
         if (!cancelled) {
           setProviders([
-            { name: 'zai', label: 'Z.ai (GLM)', available: true, requiresKey: null, model: 'glm-4.6', models: [
+            { name: 'zai', label: 'Z.ai (GLM)', available: true, requiresKey: null, model: 'glm-4.6', mode: 'sandbox', models: [
               { id: 'glm-4.6', label: 'GLM-4.6 (Default, Free)', description: 'Z.ai built-in model.', free: true },
             ] },
           ]);
@@ -391,7 +395,18 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        // Non-SSE failure (e.g. 429 rate limit, 503 unconfigured) — try to
+        // surface the server's JSON error body.
+        let detail = `HTTP ${response.status}: ${response.statusText}`;
+        let code: string | undefined;
+        try {
+          const j = await response.json();
+          if (j?.error) detail = j.error;
+          if (j?.code) code = j.code;
+        } catch { /* body wasn't JSON — keep the HTTP status line */ }
+        const err = new Error(detail);
+        (err as any).code = code;
+        throw err;
       }
 
       const reader = response.body?.getReader();
@@ -546,7 +561,11 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                   ));
                 }
               } else if (eventType === 'error') {
-                throw new Error(data.message);
+                const err = new Error(data.message || 'AI request failed');
+                // Attach the machine-readable code (AI_NOT_CONFIGURED) so the
+                // catch block can render the setup card.
+                (err as any).code = data.code;
+                throw err;
               }
             }
             eventType = '';
@@ -558,17 +577,22 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
       // Aborted because the panel was closed — drop the message quietly
       // (setState after unmount is a no-op anyway, but don't show an error).
       if ((e as Error).name === 'AbortError') return;
+      const message = (e as Error).message || 'Unknown error';
+      // A deployment without any AI backend configured gets a friendly setup
+      // card instead of a scary stack-ish error string.
+      const isConfigError = (e as any).code === 'AI_NOT_CONFIGURED' || /not configured|ZAI_API_KEY|set the .*API_KEY/i.test(message);
       setMessages(prev => prev.map(m =>
         m.id === assistantMsgId
           ? {
               ...m,
-              content: `Sorry, I encountered an error: ${(e as Error).message}`,
+              content: isConfigError ? 'AI backend not configured on this server.' : `Sorry, I encountered an error: ${message}`,
               loading: false,
               error: 'true',
+              errorKind: isConfigError ? 'config' : undefined,
             }
           : m
       ));
-      toast.error('AI request failed');
+      toast.error(isConfigError ? 'AI backend not configured — see setup instructions' : 'AI request failed');
     } finally {
       inFlightRef.current = false;
       setIsLoading(false);
@@ -818,10 +842,49 @@ function MessageBubble({ message, onApplyDiff, onDismissDiff, onUndo }: { messag
                 <span>Thinking...</span>
               </div>
             ) : (
-              <div className="whitespace-pre-wrap break-words">{message.content || (message.loading ? '...' : '')}</div>
+              <div className="whitespace-pre-wrap break-words">
+                {message.content || (message.loading ? '...' : '')}
+                {message.loading && message.content && (
+                  <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-purple-400 align-middle" aria-hidden="true" />
+                )}
+              </div>
             )}
           </div>
         </div>
+
+        {/* Provider-not-configured setup card (deployment without an API key) */}
+        {message.errorKind === 'config' && (
+          <div className="ml-6 rounded-lg border border-amber-700/50 bg-amber-950/20 p-3 text-xs text-slate-300">
+            <div className="mb-2 flex items-center gap-2">
+              <KeyRound className="h-4 w-4 text-amber-400" />
+              <span className="font-medium text-amber-300">Enable the AI assistant on this server</span>
+            </div>
+            <p className="mb-2 text-slate-400">
+              The AI backend works inside the Z.ai sandbox out of the box. On any other deployment (Vercel, Docker,
+              your own domain), set <strong>one</strong> of these environment variables and restart — all requests
+              run server-to-server, so it works from any domain with no CORS setup:
+            </p>
+            <ul className="mb-2 list-disc space-y-1 pl-4 text-slate-400">
+              <li>
+                <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">ZAI_API_KEY</code>
+                {' '}— Z.ai public API (recommended). Create a key at{' '}
+                <a href="https://z.ai/manage-apikey/apikey-list" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-0.5 text-purple-300 underline hover:text-purple-200">
+                  z.ai <ExternalLink className="h-3 w-3" />
+                </a>
+                {' '}(GLM-4.6 / GLM-4.5 / GLM-4 Flash). Optionally set <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">ZAI_BASE_URL</code> to use a different OpenAI-compatible endpoint.
+              </li>
+              <li>
+                <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">OPENAI_API_KEY</code>
+                {' '}— OpenAI (GPT-4o, GPT-4.1 …)
+              </li>
+              <li>
+                <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">ANTHROPIC_API_KEY</code>
+                {' '}— Anthropic (Claude)
+              </li>
+            </ul>
+            <p className="text-slate-500">Then reload this page — the provider dropdown will pick it up automatically.</p>
+          </div>
+        )}
 
         {/* Pending diff preview */}
         {message.pendingDiff && (

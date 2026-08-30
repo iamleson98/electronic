@@ -12,11 +12,12 @@
 //      can apply the mutations)
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getProvider, type ChatMessage, type ProviderName } from '@/lib/ai/provider';
+import { getProvider, AIProviderConfigError, type ChatMessage, type ProviderName } from '@/lib/ai/provider';
 import { TOOLS_BY_NAME, getToolDefinitions, type ToolContext } from '@/lib/ai/tools';
 import type { CircuitDocument, CircuitComponent, Wire } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
 import { buildSystemPrompt, MUTATING_TOOL_NAMES, runAutoVerify, autoVerifyNeedsAttention, buildAutoVerifyMessages } from '@/lib/ai/system-prompt';
+import { buildContextPreamble } from '@/lib/ai/netlist-summary';
 import { ensurePlugins } from '@/lib/ai/tools/helpers';
 import { checkRateLimit, clientIpFromRequest } from '@/lib/ai/rate-limit';
 
@@ -29,6 +30,19 @@ interface RequestBody {
     components: CircuitComponent[];
     wires: Wire[];
   };
+  /** Live simulation context from the client (optional — same fields the stream route accepts). */
+  simContext?: {
+    nodeVoltage: number[];
+    branchCurrent: number[];
+    time: number;
+    dt: number;
+  } | null;
+  /** Current simulation error message, if any. */
+  simError?: string | null;
+  /** Whether the simulation is currently running. */
+  simRunning?: boolean;
+  /** Currently selected component ID, if any. */
+  selectedComponentId?: string | null;
   /** Per-request provider override (chosen from the AI panel dropdown). */
   provider?: ProviderName;
   /** Per-request model override (chosen from the AI panel model dropdown). */
@@ -77,12 +91,23 @@ export async function POST(req: NextRequest) {
     const provider = getProvider(body.provider, body.model);
     const toolDefs = getToolDefinitions();
 
+    // Context preamble — the same netlist + operating-point visibility the
+    // stream route gives the model (kept in sync via buildContextPreamble).
+    const contextPreamble = buildContextPreamble({
+      doc,
+      simContext: body.simContext ?? null,
+      simError: body.simError ?? null,
+      simRunning: body.simRunning,
+      selectedComponentId: body.selectedComponentId ?? null,
+    });
+
     // Build the message history (prepend the shared system prompt — includes
     // the live component catalog from the plugin registry). Cap the history at
     // the most recent 60 messages so a long session can't grow the prompt
     // without bound and blow the model's context window.
     const messages: ChatMessage[] = [
       { role: 'system', content: buildSystemPrompt() },
+      ...(contextPreamble ? [{ role: 'system' as const, content: contextPreamble }] : []),
       ...body.messages.slice(-60),
     ];
 
@@ -224,6 +249,14 @@ export async function POST(req: NextRequest) {
       warning: 'Max iterations reached',
     });
   } catch (e) {
+    // No AI backend configured (fresh deployment without an API key) — tell
+    // the caller exactly what to set instead of an opaque 500.
+    if (e instanceof AIProviderConfigError) {
+      return NextResponse.json(
+        { error: e.message, code: 'AI_NOT_CONFIGURED' },
+        { status: 503 },
+      );
+    }
     // Client went away mid-loop (provider.chat throws on abort) — nothing to
     // deliver; report it as such instead of a misleading 500.
     if (req.signal.aborted) {

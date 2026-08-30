@@ -8,7 +8,7 @@
 // factory and metadata logic, not the chat() method.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { getProvider, getAvailableProviders, type ProviderName } from '../src/lib/ai/provider';
+import { getProvider, getAvailableProviders, _resetSandboxConfigCache, type ProviderName } from '../src/lib/ai/provider';
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -19,11 +19,18 @@ beforeEach(() => {
   delete process.env.OPENAI_MODEL;
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.ANTHROPIC_MODEL;
+  delete process.env.ZAI_API_KEY;
+  delete process.env.Z_AI_API_KEY;
+  delete process.env.ZAI_MODEL;
+  delete process.env.ZAI_BASE_URL;
+  delete process.env.ZAI_CONFIG;
+  _resetSandboxConfigCache();
 });
 
 afterEach(() => {
   // Restore original env
   process.env = { ...ORIGINAL_ENV };
+  _resetSandboxConfigCache();
 });
 
 describe('getProvider — default selection', () => {
@@ -146,11 +153,25 @@ describe('getAvailableProviders', () => {
     expect(list.map(p => p.name)).toEqual(['zai', 'openai', 'anthropic']);
   });
 
-  it('zai is always available regardless of env vars', () => {
+  it('zai availability reflects the environment (api-key > sandbox > unconfigured)', () => {
     const zai = getAvailableProviders().find(p => p.name === 'zai')!;
+    // In the Z.ai sandbox → 'sandbox' (zero-config); in CI (no config) →
+    // 'unconfigured'; with ZAI_API_KEY → 'api-key'. All three are valid states
+    // depending on where the suite runs — but they must be self-consistent.
+    expect(['api-key', 'sandbox', 'unconfigured']).toContain(zai.mode);
+    expect(zai.available).toBe(zai.mode !== 'unconfigured');
+    expect(zai.model).toBe('glm-4.6');
+    if (zai.mode === 'unconfigured') {
+      expect(zai.requiresKey).toBe('ZAI_API_KEY');
+    }
+  });
+
+  it('ZAI_API_KEY switches zai to public-API mode (works on any domain)', () => {
+    process.env.ZAI_API_KEY = 'zai-key-test';
+    const zai = getAvailableProviders().find(p => p.name === 'zai')!;
+    expect(zai.mode).toBe('api-key');
     expect(zai.available).toBe(true);
     expect(zai.requiresKey).toBeNull();
-    expect(zai.model).toBe('glm-4.6');
   });
 
   it('openai.available=false when OPENAI_API_KEY not set', () => {

@@ -1,61 +1,40 @@
 // AI Provider Abstraction Layer
 // ─────────────────────────────────────────────────────────────────────────────
 // Supports multiple LLM providers via a unified interface:
-//   - Z.ai (GLM-4.6) — default, no API key needed (built into this environment)
+//   - Z.ai (GLM-4.6) — two mutually-exclusive modes:
+//       • "api-key"  : ZAI_API_KEY env var → calls the PUBLIC OpenAI-compatible
+//                       endpoint (https://api.z.ai/api/paas/v4). Works from ANY
+//                       deployment (Vercel/Netlify/Docker/any domain) because the
+//                       call is server-to-server — browsers/CORS are never involved.
+//       • "sandbox"  : no API key, but the Z.ai sandbox config exists
+//                       (/etc/.z-ai-config, ~/.z-ai-config, ./.z-ai-config, or the
+//                       ZAI_CONFIG env var) → uses z-ai-web-dev-sdk against the
+//                       sandbox-internal gateway. This is the zero-config default
+//                       inside the Z.ai coding sandbox.
 //   - OpenAI — set OPENAI_API_KEY in .env
 //   - Anthropic — set ANTHROPIC_API_KEY in .env
 //
 // Provider + model selection (in priority order):
 //   1. Per-request override — caller passes `provider` + `model` to getProvider()
 //      (e.g., user picks a different model in the ChatPanel dropdown)
-//   2. AI_PROVIDER / OPENAI_MODEL / ANTHROPIC_MODEL env vars — server-side defaults
-//   3. 'zai' / 'glm-4.6' — built-in fallback (no API key required)
+//   2. AI_PROVIDER / ZAI_MODEL / OPENAI_MODEL / ANTHROPIC_MODEL env vars
+//   3. 'zai' / 'glm-4.6' — built-in fallback
 //
-// All providers expose the same interface: a chat() method that takes
-// messages + tools, and returns either a text response or a tool-call request.
+// All providers expose the same interface:
+//   chat()       — one-shot completion (text and/or tool calls)
+//   chatStream() — token-level streaming variant; invokes onTextDelta as
+//                  fragments arrive and resolves to the same ChatResult shape
+//                  (falls back to chat() for providers without SSE support).
+
+import fsSync from 'fs';
+import path from 'path';
+import os from 'os';
+import type { ToolCall, ChatMessage, ToolDefinition, ChatResult } from './provider-types';
+import { accumulateOpenAiStream } from './sse';
+
+export type { ToolCall, ToolDefinition, ChatMessage, ChatResult } from './provider-types';
 
 export type ProviderName = 'zai' | 'openai' | 'anthropic';
-
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
-  tool_calls?: ToolCall[];
-  tool_call_id?: string;  // for role: 'tool' messages
-  name?: string;           // tool name (for role: 'tool')
-}
-
-export interface ToolCall {
-  id: string;
-  type: 'function';
-  function: {
-    name: string;
-    arguments: string;  // JSON string
-  };
-}
-
-export interface ToolDefinition {
-  type: 'function';
-  function: {
-    name: string;
-    description: string;
-    parameters: {
-      type: 'object';
-      properties: Record<string, any>;
-      required?: string[];
-    };
-  };
-}
-
-export interface ChatResult {
-  content: string;            // text response (may be empty if tool_calls present)
-  tool_calls?: ToolCall[];    // tool calls the model wants to execute
-  finish_reason: 'stop' | 'tool_calls' | 'length' | 'content_filter';
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-}
 
 export interface AIProvider {
   name: ProviderName;
@@ -65,7 +44,46 @@ export interface AIProvider {
     tools?: ToolDefinition[],
     options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal },
   ): Promise<ChatResult>;
+  /**
+   * Streaming variant of chat(). Calls `onTextDelta(text)` as tokens arrive
+   * (server-sent events), then resolves with the assembled full result —
+   * identical semantics to chat(), so the tool-calling loop in the API routes
+   * works unchanged. Default implementations fall back to a single delta.
+   */
+  chatStream(
+    messages: ChatMessage[],
+    tools?: ToolDefinition[],
+    options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal },
+    onTextDelta?: (text: string) => void,
+  ): Promise<ChatResult>;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Configuration errors — surfaced to the UI with actionable setup guidance
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Error thrown when no AI backend is configured at all (deployed without keys). */
+export class AIProviderConfigError extends Error {
+  code = 'AI_NOT_CONFIGURED';
+  constructor(message: string) {
+    super(message);
+    this.name = 'AIProviderConfigError';
+  }
+}
+
+/** Helper: does this look like a network-level failure (unreachable host)? */
+function isNetworkError(e: unknown): boolean {
+  const msg = String((e as Error)?.message || e);
+  const cause = String((e as any)?.cause?.code || (e as any)?.cause?.message || '');
+  return /fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|EAI_AGAIN|ECONNRESET|EPIPE|socket hang up|network|terminated/i
+    .test(msg + ' ' + cause);
+}
+
+/** Standard deployment guidance appended to sandbox-network failures. */
+const SANDBOX_NETWORK_HINT =
+  'The Z.ai sandbox gateway (internal-api.z.ai) is only reachable from inside the Z.ai coding sandbox — ' +
+  'this deployment is running elsewhere. To use the AI assistant here, set the ZAI_API_KEY environment variable ' +
+  '(create a key at https://z.ai → API Keys) and restart. Server-to-server API calls work from any domain.';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Available models per provider — curated list of top free / low-cost models.
@@ -80,9 +98,9 @@ export interface ModelInfo {
 
 export const AVAILABLE_MODELS: Record<ProviderName, ModelInfo[]> = {
   zai: [
-    { id: 'glm-4.6', label: 'GLM-4.6 (Default, Free)', description: 'Z.ai built-in model. No API key needed.', free: true },
-    { id: 'glm-4.5', label: 'GLM-4.5 (Free)', description: 'Previous generation Z.ai model.', free: true },
-    { id: 'glm-4-flash', label: 'GLM-4 Flash (Free, Fast)', description: 'Lighter model for fast responses.', free: true },
+    { id: 'glm-4.6', label: 'GLM-4.6 (Default)', description: 'Most capable Z.ai model — best for complex circuit design.', free: true },
+    { id: 'glm-4.5', label: 'GLM-4.5', description: 'Previous generation flagship.', free: true },
+    { id: 'glm-4-flash', label: 'GLM-4 Flash (Fast)', description: 'Lighter model for fast responses.', free: true },
   ],
   openai: [
     { id: 'gpt-4o-mini', label: 'GPT-4o mini (Cheapest)', description: 'Fast and affordable. Best for most tasks.', free: false },
@@ -92,112 +110,267 @@ export const AVAILABLE_MODELS: Record<ProviderName, ModelInfo[]> = {
   ],
   anthropic: [
     { id: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku (Fastest)', description: 'Fast and affordable Claude.', free: false },
-    { id: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet', description: 'Most capable Claude model.', free: false },
+    { id: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet', description: 'Most capable Claude.', free: false },
   ],
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Anthropic helpers
+// Z.ai configuration detection (shared by the factory + providers route)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Clamp max_tokens to the model's output limit. The Anthropic API returns a
- * 400 invalid_request_error when max_tokens exceeds the model's cap, so an
- * unclamped 16384 default would fail EVERY request on claude-3-* models.
- */
-export function clampAnthropicMaxTokens(model: string, requested: number): number {
-  // Claude 3.5 family caps at 8192 output tokens; Claude 3 (opus/sonnet) at 4096.
-  const cap = model.includes('3-5') || model.includes('3.5') ? 8192 : 4096;
-  return Math.max(1, Math.min(requested, cap));
+/** The public Z.ai OpenAI-compatible endpoint (international). */
+export const ZAI_PUBLIC_BASE_URL = 'https://api.z.ai/api/paas/v4';
+
+/** Env var names accepted for the public Z.ai API key (first match wins). */
+function zaiApiKey(): string | undefined {
+  return process.env.ZAI_API_KEY || process.env.Z_AI_API_KEY || undefined;
 }
 
-/** Map Anthropic stop_reason values onto the OpenAI-style finish_reason union. */
-function mapAnthropicStopReason(reason: string | undefined): 'stop' | 'length' | 'content_filter' {
-  switch (reason) {
-    case 'max_tokens': return 'length';
-    case 'refusal': return 'content_filter';
-    default: return 'stop';
+interface ZaiSandboxConfig {
+  baseUrl: string;
+  apiKey: string;
+  chatId?: string;
+  userId?: string;
+  token?: string;
+}
+
+let sandboxConfigCache: { found: boolean; config?: ZaiSandboxConfig } | null = null;
+
+/**
+ * Locate the sandbox-mode Z.ai config the same way z-ai-web-dev-sdk does:
+ * ZAI_CONFIG env var (JSON string) first — it is the documented way to carry
+ * the sandbox identity to a non-sandbox host — then ./.z-ai-config,
+ * ~/.z-ai-config, /etc/.z-ai-config. Returns undefined when none exists.
+ * (Result cached; the config never changes within a process.)
+ */
+export function findSandboxZaiConfig(): ZaiSandboxConfig | undefined {
+  if (sandboxConfigCache) return sandboxConfigCache.config;
+  let config: ZaiSandboxConfig | undefined;
+  const envJson = process.env.ZAI_CONFIG;
+  if (envJson) {
+    try {
+      const parsed = JSON.parse(envJson);
+      if (parsed.baseUrl && parsed.apiKey) config = parsed;
+    } catch { /* malformed ZAI_CONFIG — fall through to files */ }
+  }
+  if (!config) {
+    const candidates = [
+      path.join(process.cwd(), '.z-ai-config'),
+      path.join(os.homedir(), '.z-ai-config'),
+      '/etc/.z-ai-config',
+    ];
+    for (const filePath of candidates) {
+      try {
+        const parsed = JSON.parse(fsSync.readFileSync(filePath, 'utf-8'));
+        if (parsed.baseUrl && parsed.apiKey) { config = parsed; break; }
+      } catch { /* not found / invalid — try next */ }
+    }
+  }
+  sandboxConfigCache = { found: !!config, config };
+  return config;
+}
+
+/** For test isolation. */
+export function _resetSandboxConfigCache() {
+  sandboxConfigCache = null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared retry policy — rate limits (429) and transient 5xx never fail the
+// request outright; we back off and retry instead.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BACKOFF_SCHEDULE = [2000, 4000, 8000, 15000, 30000];
+const MAX_ATTEMPTS = 20;
+
+function sleepRespectingAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const onAbort = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    if (signal) {
+      if (signal.aborted) { clearTimeout(timer); resolve(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
+function isRetryableProviderError(e: unknown): boolean {
+  const msg = String((e as Error)?.message || e);
+  const isRateLimit = msg.includes('429') || msg.includes('Too many requests') || msg.includes('rate limit');
+  const isServerError = msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('504')
+    || msg.includes('Bad Gateway') || msg.includes('Service Unavailable') || msg.includes('Internal Server Error')
+    || msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('socket hang up');
+  return isRateLimit || isServerError;
+}
+
+/**
+ * Run an async provider call with retry-on-429/5xx backoff. The abort signal
+ * (client disconnect) breaks the loop immediately.
+ */
+async function runWithRetries<T>(
+  fn: () => Promise<T>,
+  label: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    if (signal?.aborted) throw new Error(`${label} request aborted (client disconnected)`);
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e as Error;
+      if (!isRetryableProviderError(e)) throw e;
+      const waitMs = attempt < BACKOFF_SCHEDULE.length ? BACKOFF_SCHEDULE[attempt] : 30000;
+      const isRateLimit = /429|rate limit|Too many requests/i.test(String((e as Error).message));
+      console.warn(`[${label}] ${isRateLimit ? 'Rate limited' : 'Server error'}, retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
+      await sleepRespectingAbort(waitMs, signal);
+    }
+  }
+  throw lastError || new Error(`${label} request failed after ${MAX_ATTEMPTS} retry attempts`);
+}
+
+/** Combine an optional caller signal with a timeout into one abort signal. */
+function combineSignals(timeoutMs: number, signal?: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
+  const timeoutCtrl = new AbortController();
+  const timer = setTimeout(() => timeoutCtrl.abort(new Error(`Request timed out after ${timeoutMs / 1000}s`)), timeoutMs);
+  const callerAborted = () => timeoutCtrl.abort(new Error('Request aborted (client disconnected)'));
+  if (signal) {
+    if (signal.aborted) callerAborted();
+    else signal.addEventListener('abort', callerAborted, { once: true });
+  }
+  return {
+    signal: timeoutCtrl.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', callerAborted);
+    },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Z.ai — PUBLIC API mode (ZAI_API_KEY): works from any deployment/domain.
+// Direct OpenAI-compatible fetch, SSE streaming, no SDK involvement.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class ZaiPublicProvider implements AIProvider {
+  name: ProviderName = 'zai';
+  model: string;
+  private baseUrl: string;
+  private apiKey: string;
+
+  constructor(model?: string) {
+    this.model = model || process.env.ZAI_MODEL || 'glm-4.6';
+    this.baseUrl = (process.env.ZAI_BASE_URL || ZAI_PUBLIC_BASE_URL).replace(/\/+$/, '');
+    this.apiKey = zaiApiKey()!;
+  }
+
+  private async doFetch(body: any, timeoutMs: number, signal?: AbortSignal): Promise<Response> {
+    const { signal: combined, cleanup } = combineSignals(timeoutMs, signal);
+    try {
+      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: combined,
+      });
+      if (!response.ok) {
+        const errorBody = await response.text();
+        // Enrich auth failures so users see exactly what to fix.
+        if (response.status === 401 || response.status === 403) {
+          throw new Error(`Z.ai API rejected the credentials (HTTP ${response.status}): ${errorBody.slice(0, 300)} — check the ZAI_API_KEY environment variable.`);
+        }
+        throw new Error(`Z.ai API error ${response.status}: ${errorBody.slice(0, 500)}`);
+      }
+      return response;
+    } catch (e) {
+      if (isNetworkError(e)) {
+        throw new Error(`Could not reach the Z.ai API at ${this.baseUrl}: ${(e as Error).message}. If this host cannot reach the public internet, check ZAI_BASE_URL. ${SANDBOX_NETWORK_HINT}`);
+      }
+      throw e;
+    } finally {
+      cleanup();
+    }
+  }
+
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
+    const body: any = {
+      model: this.model,
+      messages,
+      temperature: options?.temperature ?? 0.4,
+      max_tokens: options?.max_tokens ?? 16384,
+    };
+    if (tools && tools.length > 0) {
+      body.tools = tools;
+      body.tool_choice = 'auto';
+    }
+    return runWithRetries(async () => {
+      // 180s covers long 8k-token completions on slow models.
+      const response = await this.doFetch(body, 180_000, options?.signal);
+      const data = await response.json();
+      const choice = data.choices?.[0];
+      if (!choice?.message) throw new Error(`Z.ai API returned a malformed response: ${JSON.stringify(data).slice(0, 300)}`);
+      return {
+        content: choice.message.content || '',
+        tool_calls: choice.message.tool_calls,
+        finish_reason: choice.finish_reason === 'tool_calls' ? 'tool_calls' : choice.finish_reason,
+        usage: data.usage ? {
+          prompt_tokens: data.usage.prompt_tokens,
+          completion_tokens: data.usage.completion_tokens,
+          total_tokens: data.usage.total_tokens,
+        } : undefined,
+      } as ChatResult;
+    }, 'zai', options?.signal);
+  }
+
+  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }, onTextDelta?: (text: string) => void): Promise<ChatResult> {
+    const body: any = {
+      model: this.model,
+      messages,
+      temperature: options?.temperature ?? 0.4,
+      max_tokens: options?.max_tokens ?? 16384,
+      stream: true,
+    };
+    if (tools && tools.length > 0) {
+      body.tools = tools;
+      body.tool_choice = 'auto';
+    }
+    return runWithRetries(async () => {
+      // Timeout applies to establishing the response (headers); the streamed
+      // body itself may legitimately run for minutes.
+      const response = await this.doFetch(body, 60_000, options?.signal);
+      if (!response.body) throw new Error('Z.ai API returned no stream body');
+      const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+      try {
+        const result = await accumulateOpenAiStream(reader, onTextDelta);
+        return {
+          content: result.content,
+          tool_calls: result.tool_calls,
+          finish_reason: result.finish_reason,
+          usage: result.usage,
+        } as ChatResult;
+      } finally {
+        // If the caller aborted mid-stream, release the connection.
+        if (options?.signal?.aborted) {
+          try { await reader.cancel(); } catch { /* already closed */ }
+        }
+      }
+    }, 'zai', options?.signal);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Provider factory
+// Z.ai — SANDBOX mode: z-ai-web-dev-sdk against the internal gateway.
+// Zero-config inside the Z.ai coding sandbox; carries the sandbox identity
+// from the ZAI_CONFIG env var on hosts that replicate it.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Resolve a provider. Priority:
- *   1. Explicit `requested` argument (per-request override from the UI)
- *   2. AI_PROVIDER env var (server-side default)
- *   3. 'zai' (built-in fallback)
- *
- * The `model` parameter overrides the provider's default model.
- */
-export function getProvider(requested?: ProviderName, model?: string): AIProvider {
-  const name = (requested || process.env.AI_PROVIDER || 'zai').toLowerCase() as ProviderName;
-  switch (name) {
-    case 'openai':
-      if (!process.env.OPENAI_API_KEY) {
-        if (requested) {
-          throw new Error(
-            'OpenAI provider selected but OPENAI_API_KEY is not set. ' +
-            'Add it to your .env file or choose a different provider in the AI panel.',
-          );
-        }
-        return new ZaiProvider(model);
-      }
-      return new OpenAIProvider(model);
-    case 'anthropic':
-      if (!process.env.ANTHROPIC_API_KEY) {
-        if (requested) {
-          throw new Error(
-            'Anthropic provider selected but ANTHROPIC_API_KEY is not set. ' +
-            'Add it to your .env file or choose a different provider in the AI panel.',
-          );
-        }
-        return new ZaiProvider(model);
-      }
-      return new AnthropicProvider(model);
-    case 'zai':
-    default:
-      return new ZaiProvider(model);
-  }
-}
-
-/** Returns the list of providers available given the current env. */
-export function getAvailableProviders(): Array<{ name: ProviderName; label: string; available: boolean; requiresKey: string | null; model: string; models: ModelInfo[] }> {
-  return [
-    {
-      name: 'zai',
-      label: 'Z.ai (GLM)',
-      available: true,
-      requiresKey: null,
-      model: 'glm-4.6',
-      models: AVAILABLE_MODELS.zai,
-    },
-    {
-      name: 'openai',
-      label: 'OpenAI (GPT)',
-      available: !!process.env.OPENAI_API_KEY,
-      requiresKey: 'OPENAI_API_KEY',
-      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-      models: AVAILABLE_MODELS.openai,
-    },
-    {
-      name: 'anthropic',
-      label: 'Anthropic (Claude)',
-      available: !!process.env.ANTHROPIC_API_KEY,
-      requiresKey: 'ANTHROPIC_API_KEY',
-      model: process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-20241022',
-      models: AVAILABLE_MODELS.anthropic,
-    },
-  ];
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Z.ai (GLM-4.6) — OpenAI-compatible API
-// ─────────────────────────────────────────────────────────────────────────────
-
-class ZaiProvider implements AIProvider {
+class ZaiSandboxProvider implements AIProvider {
   name: ProviderName = 'zai';
   model: string;
 
@@ -205,80 +378,66 @@ class ZaiProvider implements AIProvider {
     this.model = model || 'glm-4.6';
   }
 
-  /**
-   * Create a ZAI SDK instance.
-   *
-   * On the local dev environment, /etc/.z-ai-config exists and ZAI.create()
-   * reads it automatically.
-   *
-   * On Vercel (or any environment where the config file is missing), we
-   * bypass the file and construct the instance directly from the ZAI_CONFIG
-   * env var (a JSON string with baseUrl, apiKey, token, userId, chatId).
-   */
+  /** Create a ZAI SDK instance (lazily — construction must never throw). */
   private async createZAI(): Promise<any> {
     const { default: ZAI } = await import('z-ai-web-dev-sdk');
+    // The SDK itself checks cwd/.z-ai-config, ~/.z-ai-config and
+    // /etc/.z-ai-config — try it first.
     try {
-      // Try the normal file-based config first (works locally)
       return await ZAI.create();
     } catch {
-      // File not found — construct from env var (Vercel deployment)
+      // No config file — construct from the ZAI_CONFIG env var if present.
       const configJson = process.env.ZAI_CONFIG;
       if (!configJson) {
-        throw new Error(
-          'Z.ai config file not found and ZAI_CONFIG env var not set. ' +
-          'On Vercel: set ZAI_CONFIG to the JSON config from /etc/.z-ai-config. ' +
-          'Locally: ensure /etc/.z-ai-config exists.'
+        throw new AIProviderConfigError(
+          'The Z.ai AI backend is not configured for this deployment. ' +
+          'Set the ZAI_API_KEY environment variable to use the public Z.ai API (recommended — works from any domain; ' +
+          'create a key at https://z.ai → API Keys), or copy the sandbox JSON config into ZAI_CONFIG. ' +
+          'OpenAI (OPENAI_API_KEY) and Anthropic (ANTHROPIC_API_KEY) are also supported.',
         );
       }
-      const config = JSON.parse(configJson);
-      // The constructor is private in the type declarations but works at runtime.
-      // We cast to any to bypass the TypeScript private check — this is the only
-      // way to initialize the SDK without a config file on Vercel.
-      return new (ZAI as any)(config);
+      try {
+        const config = JSON.parse(configJson);
+        return new (ZAI as any)(config);
+      } catch (e) {
+        throw new AIProviderConfigError(`ZAI_CONFIG env var is set but invalid: ${(e as Error).message}`);
+      }
     }
   }
 
-  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
-    const zai = await this.createZAI();
-    const signal = options?.signal;
+  /**
+   * The internal gateway (internal-api.z.ai) resolves to private IPs — only
+   * reachable from inside the Z.ai sandbox. When a deployment outside the
+   * sandbox tries to use it, convert the opaque network failure into an
+   * actionable message instead of a mysterious hang/timeout.
+   */
+  private wrapSandboxNetworkError(e: unknown): Error {
+    if (isNetworkError(e)) {
+      const cfg = findSandboxZaiConfig();
+      if (!cfg || /internal-api/i.test(cfg.baseUrl)) {
+        return new Error(`${(e as Error).message}. ${SANDBOX_NETWORK_HINT}`);
+      }
+    }
+    return e as Error;
+  }
 
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
     const body: any = {
       model: this.model,
       messages,
       temperature: options?.temperature ?? 0.4,
-      // Default to 16K tokens — complex circuits with many components/wires
-      // can produce very long tool-call sequences. GLM-4.6 supports up to 16K
-      // output tokens. The API caps at the model's actual limit.
       max_tokens: options?.max_tokens ?? 16384,
     };
     if (tools && tools.length > 0) {
       body.tools = tools;
       body.tool_choice = 'auto';
     }
-
-    // Retry indefinitely on rate-limit (429) and server errors (5xx).
-    // The AI feature should NEVER fail due to rate limiting — it just keeps
-    // retrying with backoff until the request succeeds. We cap at 20 attempts
-    // (max ~10 minutes total) as a safety net against infinite loops, but
-    // in practice the rate limit always clears within 1-2 minutes.
-    //
-    // Backoff schedule: 2s, 4s, 8s, 15s, 30s, then 30s for all subsequent attempts.
-    const backoffSchedule = [2000, 4000, 8000, 15000, 30000];
-    const MAX_ATTEMPTS = 20;
-    let lastError: Error | null = null;
-
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-      // The caller (API route) aborts this signal when the HTTP client
-      // disconnects — stop retrying instead of burning the provider for
-      // another ~10 minutes with nobody listening.
-      if (signal?.aborted) {
-        throw new Error('Z.ai request aborted (client disconnected)');
-      }
+    return runWithRetries(async () => {
+      const zai = await this.createZAI();
       try {
         const response = await zai.chat.completions.create(body);
         const choice = response.choices[0];
         const message = choice.message;
-
         return {
           content: message.content || '',
           tool_calls: message.tool_calls,
@@ -288,46 +447,80 @@ class ZaiProvider implements AIProvider {
             completion_tokens: response.usage.completion_tokens,
             total_tokens: response.usage.total_tokens,
           } : undefined,
-        };
-      } catch (e: any) {
-        lastError = e;
-        const msg = String(e?.message || e);
-        // Rate-limit (429) and transient server errors (5xx) are retryable.
-        // Everything else (400 Bad Request, 401 Unauthorized, etc.) fails immediately.
-        const isRateLimit = msg.includes('429') || msg.includes('Too many requests') || msg.includes('rate limit');
-        const isServerError = msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('504') || msg.includes('Bad Gateway') || msg.includes('Service Unavailable') || msg.includes('Internal Server Error') || msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('socket hang up');
-
-        if (!isRateLimit && !isServerError) {
-          // Non-retryable error — throw immediately
-          throw e;
-        }
-
-        // Calculate wait time: use the backoff schedule, then 30s for all later attempts
-        const waitMs = attempt < backoffSchedule.length ? backoffSchedule[attempt] : 30000;
-        const errorType = isRateLimit ? 'Rate limited' : 'Server error';
-        console.warn(`[zai] ${errorType}, retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
-        await new Promise<void>((resolve) => {
-          // Wake early on abort so the loop-exit check above fires immediately
-          const onAbort = () => { clearTimeout(timer); resolve(); };
-          const timer = setTimeout(() => {
-            signal?.removeEventListener('abort', onAbort);
-            resolve();
-          }, waitMs);
-          if (signal) {
-            if (signal.aborted) { clearTimeout(timer); resolve(); return; }
-            signal.addEventListener('abort', onAbort, { once: true });
-          }
-        });
+        } as ChatResult;
+      } catch (e) {
+        // Config errors pass through untouched; network errors get the hint.
+        if (e instanceof AIProviderConfigError) throw e;
+        throw this.wrapSandboxNetworkError(e);
       }
-    }
+    }, 'zai', options?.signal);
+  }
 
-    // Exhausted all 20 attempts — this should be extremely rare (10+ minutes of retries)
-    throw lastError || new Error('Z.ai request failed after 20 retry attempts');
+  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }, onTextDelta?: (text: string) => void): Promise<ChatResult> {
+    const body: any = {
+      model: this.model,
+      messages,
+      temperature: options?.temperature ?? 0.4,
+      max_tokens: options?.max_tokens ?? 16384,
+      stream: true,
+    };
+    if (tools && tools.length > 0) {
+      body.tools = tools;
+      body.tool_choice = 'auto';
+    }
+    return runWithRetries(async () => {
+      const zai = await this.createZAI();
+      let streamOrResponse: any;
+      try {
+        // The SDK returns response.body (a ReadableStream) when stream:true
+        // and the content type is text/event-stream or text/plain.
+        streamOrResponse = await zai.chat.completions.create(body);
+      } catch (e) {
+        if (e instanceof AIProviderConfigError) throw e;
+        throw this.wrapSandboxNetworkError(e);
+      }
+      // Defensive: if the gateway ignored stream:true and returned a full
+      // completion object, degrade gracefully to non-streaming behavior.
+      if (!streamOrResponse || typeof streamOrResponse.getReader !== 'function') {
+        const choice = streamOrResponse?.choices?.[0];
+        const message = choice?.message;
+        if (!message) throw new Error('Z.ai sandbox gateway returned a malformed response.');
+        const content = message.content || '';
+        if (content && onTextDelta) onTextDelta(content);
+        return {
+          content,
+          tool_calls: message.tool_calls,
+          finish_reason: choice.finish_reason === 'tool_calls' ? 'tool_calls' : choice.finish_reason,
+          usage: streamOrResponse.usage ? {
+            prompt_tokens: streamOrResponse.usage.prompt_tokens,
+            completion_tokens: streamOrResponse.usage.completion_tokens,
+            total_tokens: streamOrResponse.usage.total_tokens,
+          } : undefined,
+        } as ChatResult;
+      }
+      const reader = streamOrResponse.getReader() as ReadableStreamDefaultReader<Uint8Array>;
+      try {
+        const result = await accumulateOpenAiStream(reader, onTextDelta);
+        return {
+          content: result.content,
+          tool_calls: result.tool_calls,
+          finish_reason: result.finish_reason,
+          usage: result.usage,
+        } as ChatResult;
+      } catch (e) {
+        if (options?.signal?.aborted) throw new Error('zai request aborted (client disconnected)');
+        throw this.wrapSandboxNetworkError(e);
+      } finally {
+        if (options?.signal?.aborted) {
+          try { await reader.cancel(); } catch { /* already closed */ }
+        }
+      }
+    }, 'zai', options?.signal);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OpenAI provider
+// OpenAI provider (with SSE streaming)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class OpenAIProvider implements AIProvider {
@@ -338,18 +531,22 @@ class OpenAIProvider implements AIProvider {
     this.model = model || process.env.OPENAI_MODEL || 'gpt-4o-mini';
   }
 
-  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
+  private buildBody(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }, stream = false): any {
     const body: any = {
       model: this.model,
       messages,
       temperature: options?.temperature ?? 0.4,
       max_tokens: options?.max_tokens ?? 16384,
     };
+    if (stream) body.stream = true;
     if (tools && tools.length > 0) {
       body.tools = tools;
       body.tool_choice = 'auto';
     }
+    return body;
+  }
 
+  private async doFetch(body: any, signal?: AbortSignal): Promise<Response> {
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -357,33 +554,55 @@ class OpenAIProvider implements AIProvider {
         'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify(body),
-      signal: options?.signal,
+      signal,
     });
-
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`OpenAI API error ${response.status}: ${text}`);
+      throw new Error(`OpenAI API error ${response.status}: ${text.slice(0, 500)}`);
     }
+    return response;
+  }
 
-    const data = await response.json();
-    const choice = data.choices[0];
-    const message = choice.message;
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
+    const body = this.buildBody(messages, tools, options);
+    return runWithRetries(async () => {
+      const response = await this.doFetch(body, options?.signal);
+      const data = await response.json();
+      const choice = data.choices[0];
+      const message = choice.message;
+      return {
+        content: message.content || '',
+        tool_calls: message.tool_calls,
+        finish_reason: choice.finish_reason === 'tool_calls' ? 'tool_calls' : choice.finish_reason,
+        usage: data.usage ? {
+          prompt_tokens: data.usage.prompt_tokens,
+          completion_tokens: data.usage.completion_tokens,
+          total_tokens: data.usage.total_tokens,
+        } : undefined,
+      } as ChatResult;
+    }, 'openai', options?.signal);
+  }
 
-    return {
-      content: message.content || '',
-      tool_calls: message.tool_calls,
-      finish_reason: choice.finish_reason === 'tool_calls' ? 'tool_calls' : choice.finish_reason,
-      usage: data.usage ? {
-        prompt_tokens: data.usage.prompt_tokens,
-        completion_tokens: data.usage.completion_tokens,
-        total_tokens: data.usage.total_tokens,
-      } : undefined,
-    };
+  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }, onTextDelta?: (text: string) => void): Promise<ChatResult> {
+    const body = this.buildBody(messages, tools, options, true);
+    return runWithRetries(async () => {
+      const response = await this.doFetch(body, options?.signal);
+      if (!response.body) throw new Error('OpenAI API returned no stream body');
+      const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+      const result = await accumulateOpenAiStream(reader, onTextDelta);
+      return {
+        content: result.content,
+        tool_calls: result.tool_calls,
+        finish_reason: result.finish_reason,
+        usage: result.usage,
+      } as ChatResult;
+    }, 'openai', options?.signal);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Anthropic Claude provider — translates OpenAI-style tool calls to Claude's API
+// (non-streaming; chatStream emits the complete text as a single delta)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class AnthropicProvider implements AIProvider {
@@ -509,4 +728,143 @@ class AnthropicProvider implements AIProvider {
       } : undefined,
     };
   }
+
+  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }, onTextDelta?: (text: string) => void): Promise<ChatResult> {
+    // Anthropic streaming uses a different SSE schema (content_block_delta
+    // events) — for now, complete non-streaming and emit one delta.
+    const result = await this.chat(messages, tools, options);
+    if (result.content && onTextDelta) onTextDelta(result.content);
+    return result;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Anthropic helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Clamp max_tokens to the model's output limit. The Anthropic API returns a
+ * 400 invalid_request_error when max_tokens exceeds the model's cap, so an
+ * unclamped 16384 default would fail EVERY request on claude-3-* models.
+ */
+export function clampAnthropicMaxTokens(model: string, requested: number): number {
+  // Claude 3.5 family caps at 8192 output tokens; Claude 3 (opus/sonnet) at 4096.
+  const cap = model.includes('3-5') || model.includes('3.5') ? 8192 : 4096;
+  return Math.max(1, Math.min(requested, cap));
+}
+
+/** Map Anthropic stop_reason values onto the OpenAI-style finish_reason union. */
+function mapAnthropicStopReason(reason: string | undefined): 'stop' | 'length' | 'content_filter' {
+  switch (reason) {
+    case 'max_tokens': return 'length';
+    case 'refusal': return 'content_filter';
+    default: return 'stop';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provider factory
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve a provider. Priority:
+ *   1. Explicit `requested` argument (per-request override from the UI)
+ *   2. AI_PROVIDER env var (server-side default)
+ *   3. 'zai' (built-in fallback)
+ *
+ * The `model` parameter overrides the provider's default model.
+ */
+export function getProvider(requested?: ProviderName, model?: string): AIProvider {
+  const name = (requested || process.env.AI_PROVIDER || 'zai').toLowerCase() as ProviderName;
+  switch (name) {
+    case 'openai':
+      if (!process.env.OPENAI_API_KEY) {
+        if (requested) {
+          throw new Error(
+            'OpenAI provider selected but OPENAI_API_KEY is not set. ' +
+            'Add it to your .env file or choose a different provider in the AI panel.',
+          );
+        }
+        return createZaiProvider(model);
+      }
+      return new OpenAIProvider(model);
+    case 'anthropic':
+      if (!process.env.ANTHROPIC_API_KEY) {
+        if (requested) {
+          throw new Error(
+            'Anthropic provider selected but ANTHROPIC_API_KEY is not set. ' +
+            'Add it to your .env file or choose a different provider in the AI panel.',
+          );
+        }
+        return createZaiProvider(model);
+      }
+      return new AnthropicProvider(model);
+    case 'zai':
+    default:
+      return createZaiProvider(model);
+  }
+}
+
+/**
+ * Pick the Z.ai implementation for this environment:
+ *   - ZAI_API_KEY set          → public API provider (works on any domain)
+ *   - sandbox config available → sandbox provider (zero-config in sandbox)
+ *   - neither                  → sandbox provider anyway; chat() will throw an
+ *                                actionable AIProviderConfigError at request time
+ *                                (construction stays non-throwing so the
+ *                                providers listing route never 500s).
+ */
+function createZaiProvider(model?: string): AIProvider {
+  if (zaiApiKey()) return new ZaiPublicProvider(model);
+  return new ZaiSandboxProvider(model);
+}
+
+export interface ProviderInfoEntry {
+  name: ProviderName;
+  label: string;
+  available: boolean;
+  requiresKey: string | null;
+  model: string;
+  models: ModelInfo[];
+  /**
+   * How the Z.ai backend is wired on this host:
+   *   'api-key'  — ZAI_API_KEY set → public API, works from any domain
+   *   'sandbox'  — sandbox gateway config found (zero-config, sandbox-only)
+   *   'unconfigured' — no Z.ai backend available
+   */
+  mode?: 'api-key' | 'sandbox' | 'unconfigured';
+}
+
+/** Returns the list of providers available given the current env. */
+export function getAvailableProviders(): ProviderInfoEntry[] {
+  const apiKey = zaiApiKey();
+  const sandboxCfg = findSandboxZaiConfig();
+  const zaiMode: 'api-key' | 'sandbox' | 'unconfigured' = apiKey ? 'api-key' : sandboxCfg ? 'sandbox' : 'unconfigured';
+  return [
+    {
+      name: 'zai',
+      label: apiKey ? 'Z.ai (GLM) — API key' : 'Z.ai (GLM)',
+      available: zaiMode !== 'unconfigured',
+      requiresKey: zaiMode === 'unconfigured' ? 'ZAI_API_KEY' : null,
+      model: process.env.ZAI_MODEL || 'glm-4.6',
+      models: AVAILABLE_MODELS.zai,
+      mode: zaiMode,
+    },
+    {
+      name: 'openai',
+      label: 'OpenAI (GPT)',
+      available: !!process.env.OPENAI_API_KEY,
+      requiresKey: 'OPENAI_API_KEY',
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      models: AVAILABLE_MODELS.openai,
+    },
+    {
+      name: 'anthropic',
+      label: 'Anthropic (Claude)',
+      available: !!process.env.ANTHROPIC_API_KEY,
+      requiresKey: 'ANTHROPIC_API_KEY',
+      model: process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-20241022',
+      models: AVAILABLE_MODELS.anthropic,
+    },
+  ];
 }
