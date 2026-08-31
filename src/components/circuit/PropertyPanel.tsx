@@ -4,8 +4,8 @@ import { useMemo } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import { getPlugin } from '@/lib/circuit/registry';
 import { buildNodeMap, getTerminalsForComponent } from '@/lib/circuit/engine';
-import type { ParameterDef } from '@/lib/circuit/types';
-import { RotateCw, Trash2, X, Info, Sparkles } from 'lucide-react';
+import type { ComponentPlugin, ParameterDef, PinElecType, TerminalDef } from '@/lib/circuit/types';
+import { RotateCw, Trash2, X, Info, Sparkles, Pin, Cable, Activity, Pause, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -19,6 +19,159 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Category badges / pin electrical-type colour coding (matches the palette:
+// inputs cyan · outputs emerald · power amber · bidirectional violet ·
+// passive/other slate)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const categoryLabels: Record<string, string> = {
+  io: 'I/O',
+  source: 'Source',
+  passive: 'Passive',
+  semiconductor: 'Semiconductor',
+  ic: 'IC',
+  logic: 'Logic',
+  meter: 'Meter',
+  mcu: 'MCU',
+  sensor: 'Sensor',
+};
+
+function prettyCategory(category: string): string {
+  return categoryLabels[category] ?? category.charAt(0).toUpperCase() + category.slice(1);
+}
+
+const PIN_ELEC_COLORS: Record<PinElecType, string> = {
+  input: '#22d3ee', // cyan-400
+  tri_state: '#22d3ee',
+  output: '#34d399', // emerald-400
+  open_collector: '#34d399',
+  open_emitter: '#34d399',
+  bidirectional: '#a78bfa', // violet-400
+  power_in: '#fbbf24', // amber-400
+  power_out: '#fbbf24',
+  passive: '#94a3b8', // slate-400
+  unconnected: '#64748b',
+  nc: '#64748b',
+  free: '#94a3b8',
+  unspecified: '#94a3b8',
+};
+
+const PIN_ELEC_LABELS: Record<PinElecType, string> = {
+  input: 'Input',
+  output: 'Output',
+  bidirectional: 'Bidirectional',
+  tri_state: 'Tri-state',
+  passive: 'Passive',
+  power_in: 'Power In',
+  power_out: 'Power Out',
+  open_collector: 'Open Collector',
+  open_emitter: 'Open Emitter',
+  unconnected: 'Unconnected',
+  nc: 'No Connect',
+  free: 'Free',
+  unspecified: 'Unspecified',
+};
+
+function pinColor(type: PinElecType | undefined): string {
+  return PIN_ELEC_COLORS[type ?? 'passive'] ?? '#94a3b8';
+}
+
+function pinLabel(type: PinElecType | undefined): string {
+  return PIN_ELEC_LABELS[type ?? 'passive'] ?? 'Passive';
+}
+
+/** Coarse colour group (for the compact legend under the pin table). */
+function pinGroup(type: PinElecType | undefined): { label: string; color: string } {
+  switch (type) {
+    case 'input':
+    case 'tri_state':
+      return { label: 'Input', color: '#22d3ee' };
+    case 'output':
+    case 'open_collector':
+    case 'open_emitter':
+      return { label: 'Output', color: '#34d399' };
+    case 'power_in':
+    case 'power_out':
+      return { label: 'Power', color: '#fbbf24' };
+    case 'bidirectional':
+      return { label: 'Bidirectional', color: '#a78bfa' };
+    default:
+      return { label: 'Passive', color: '#94a3b8' };
+  }
+}
+
+/** Colored dot marking a terminal's electrical type. */
+function PinDot({ type, className = '' }: { type: PinElecType | undefined; className?: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={`inline-block h-2 w-2 shrink-0 rounded-full border border-black/40 ${className}`}
+      style={{ backgroundColor: pinColor(type) }}
+    />
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Formatting helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** SI-prefixed value formatting: 1000 → "1.00 k", 4.7e-6 → "4.70 µ". */
+function formatSI(v: number, unit?: string): string {
+  if (!isFinite(v)) return String(v);
+  const a = Math.abs(v);
+  const suffix = (prefix: string) => `${prefix}${unit ?? ''}`.trim();
+  if (a === 0) return `0 ${suffix('')}`.trim();
+  const steps: [number, string][] = [
+    [1e18, 'E'],
+    [1e15, 'P'],
+    [1e12, 'T'],
+    [1e9, 'G'],
+    [1e6, 'M'],
+    [1e3, 'k'],
+    [1, ''],
+    [1e-3, 'm'],
+    [1e-6, 'µ'],
+    [1e-9, 'n'],
+    [1e-12, 'p'],
+  ];
+  for (const [scale, prefix] of steps) {
+    if (a >= scale) {
+      const n = v / scale;
+      const digits = Math.abs(n) >= 100 ? 0 : Math.abs(n) >= 10 ? 1 : 2;
+      return `${n.toFixed(digits)} ${suffix(prefix)}`.trim();
+    }
+  }
+  return `${v.toExponential(2)} ${suffix('')}`.trim();
+}
+
+/** Voltage formatting with adaptive units: 12 V · 0.65 V · 4.2 mV · 12.0 µV. */
+function formatVolts(v: number): string {
+  if (!isFinite(v)) return '—';
+  const a = Math.abs(v);
+  if (a >= 100) return `${v.toFixed(1)} V`;
+  if (a >= 1) return `${v.toFixed(2)} V`;
+  if (a >= 0.001) return `${(v * 1000).toFixed(2)} mV`;
+  if (a >= 1e-6) return `${(v * 1e6).toFixed(1)} µV`;
+  return v === 0 ? '0 V' : `${(v * 1e6).toFixed(1)} µV`;
+}
+
+/** True when the current value differs from the parameter's default. */
+function valueDiffersFromDefault(
+  def: ParameterDef,
+  value: number | string | boolean | undefined,
+): boolean {
+  if (value === undefined || def.default === undefined) return false;
+  if (def.type === 'number') {
+    return typeof value === 'number' && value !== Number(def.default);
+  }
+  return value !== def.default;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Panel
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function PropertyPanel() {
   const selection = useEditor((s) => s.selection);
@@ -41,12 +194,30 @@ export function PropertyPanel() {
 
   const plugin = useMemo(() => (comp ? getPlugin(comp.type) : null), [comp]);
 
+  // Resolve each terminal of the selected component to its electrical node,
+  // so the pin table can show live node voltages. (buildNodeMap is cached on
+  // components/wires identity, so the extra call is cheap.)
+  const terminalNodes = useMemo(() => {
+    if (!comp || !plugin) return null;
+    try {
+      const plugins = new Map<string, ComponentPlugin>();
+      for (const c of components) {
+        const p = getPlugin(c.type);
+        if (p) plugins.set(c.type, p);
+      }
+      const nodeMap = buildNodeMap(components, wires, plugins);
+      return getTerminalsForComponent(comp, plugin, nodeMap);
+    } catch {
+      return null;
+    }
+  }, [comp, plugin, components, wires]);
+
   // find measurements for this component
   const measurements = useMemo(() => {
     if (!comp || !plugin || !plugin.measure || !simContext) return [];
     try {
       // Build node map to resolve terminal node IDs
-      const plugins = new Map<string, any>();
+      const plugins = new Map<string, ComponentPlugin>();
       for (const c of components) {
         const p = getPlugin(c.type);
         if (p) plugins.set(c.type, p);
@@ -58,6 +229,17 @@ export function PropertyPanel() {
       return [];
     }
   }, [comp, plugin, simContext, components, wires]);
+
+  // Live voltages are only trustworthy while the simulation is running.
+  const liveVoltages = useMemo(() => {
+    if (!running || !simContext) return null;
+    const nv = simContext.nodeVoltage;
+    return (nodeId: number) => {
+      if (nodeId < 0 || nodeId >= nv.length) return null;
+      const v = nv[nodeId];
+      return isFinite(v) ? v : null;
+    };
+  }, [running, simContext]);
 
   // Multi-edit mode: when 2+ components are selected, show common parameters
   const multiCompIds = new Set(multiSelection.components);
@@ -142,46 +324,64 @@ export function PropertyPanel() {
 
   if (!comp || !plugin) {
     return (
-      <div className="flex h-full flex-col bg-slate-900">
+      <div className="flex h-full flex-col bg-slate-900" role="complementary" aria-label="Property panel">
         <div className="border-b border-slate-800 p-3">
           <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Properties</h2>
         </div>
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
-          <Info size={28} className="text-slate-600" />
+        <div className="flex flex-1 flex-col items-center justify-center gap-2.5 p-6 text-center">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-slate-800 bg-slate-800/40">
+            <Info size={18} className="text-slate-600" />
+          </div>
           <p className="text-xs text-slate-500">Select a component on the canvas to edit its parameters.</p>
         </div>
       </div>
     );
   }
 
+  const nodeIdByTerminal = new Map<string, number>();
+  if (terminalNodes) {
+    for (const t of terminalNodes) nodeIdByTerminal.set(t.terminalId, t.nodeId);
+  }
+  // Which terminals of the selected component have a wire attached? (A pin
+  // that resolves to node 0 without being wired is floating, not grounded.)
+  const wiredTerminals = new Set<string>();
+  for (const w of wires) {
+    if (w.from.componentId === comp.id) wiredTerminals.add(w.from.terminalId);
+    if (w.to.componentId === comp.id) wiredTerminals.add(w.to.terminalId);
+  }
+
   return (
-    <div className="flex h-full flex-col bg-slate-900">
+    <div className="flex h-full flex-col bg-slate-900" role="complementary" aria-label="Property panel">
       {/* Header */}
       <div className="border-b border-slate-800 p-3">
         <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <div className="flex h-7 w-7 items-center justify-center rounded bg-slate-950 text-sm font-bold text-cyan-300">
-                {plugin.symbol}
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-cyan-500/30 bg-gradient-to-br from-cyan-500/20 via-slate-900 to-slate-950 text-sm font-bold text-cyan-300 shadow-inner">
+              {plugin.symbol}
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-sm font-semibold text-slate-100">{plugin.name}</span>
               </div>
-              <div className="min-w-0">
-                <div className="truncate text-sm font-semibold text-slate-100">{plugin.name}</div>
-                <Badge variant="outline" className="mt-0.5 border-slate-700 text-[10px] text-slate-400">
-                  {plugin.category}
+              <div className="mt-0.5 flex items-center gap-1.5">
+                <Badge variant="outline" className="border-slate-700 px-1.5 text-[9px] uppercase tracking-wider text-slate-400">
+                  {prettyCategory(plugin.category)}
                 </Badge>
+                <span className="font-mono text-[9px] text-slate-500">{plugin.terminals.length} {plugin.terminals.length === 1 ? 'pin' : 'pins'}</span>
               </div>
             </div>
-            <p className="mt-2 text-xs leading-snug text-slate-400">{plugin.description}</p>
           </div>
           <Button
             size="icon"
             variant="ghost"
-            className="h-6 w-6 text-slate-400 hover:text-slate-200"
+            className="h-6 w-6 shrink-0 text-slate-400 hover:text-slate-200"
             onClick={() => setSelection({ type: null, id: null })}
+            title="Deselect"
           >
             <X size={14} />
           </Button>
         </div>
+        <p className="mt-2 text-xs leading-snug text-slate-400">{plugin.description}</p>
       </div>
 
       {/* Actions */}
@@ -227,18 +427,37 @@ export function PropertyPanel() {
         </Button>
       </div>
 
-      {/* Parameters */}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className={`p-3 ${running ? 'pointer-events-none opacity-50' : ''}`}>
+        {/* Pins — terminal table with live node voltages (read-only, stays
+            interactive while the simulation runs). */}
+        <PinsSection
+          plugin={plugin}
+          nodeIdByTerminal={nodeIdByTerminal}
+          wiredTerminals={wiredTerminals}
+          getVoltage={liveVoltages}
+        />
+
+        {/* Parameters */}
+        <div className={`border-b border-slate-800 p-3 ${running ? 'pointer-events-none opacity-50' : ''}`}>
+          <div className="mb-2 flex items-center justify-between">
+            <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+              <SlidersHorizontal size={11} className="text-slate-500" />
+              Parameters
+            </div>
+            {plugin.parameters.length > 0 && (
+              <span className="font-mono text-[9px] text-slate-500">{plugin.parameters.length}</span>
+            )}
+          </div>
           {running && (
-            <div className="mb-3 rounded-md border border-amber-700/50 bg-amber-950/30 p-2 text-center text-[11px] text-amber-300">
-              ⏸ Pause simulation to edit parameters
+            <div className="mb-3 flex items-center justify-center gap-1.5 rounded-md border border-amber-700/50 bg-amber-950/30 px-2 py-1.5 text-[11px] text-amber-300">
+              <Pause size={10} />
+              Pause simulation to edit parameters
             </div>
           )}
           {plugin.parameters.length === 0 ? (
             <p className="py-4 text-center text-xs text-slate-500">No editable parameters.</p>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               {plugin.parameters.map((p) => (
                 <ParameterEditor
                   key={p.key}
@@ -249,9 +468,35 @@ export function PropertyPanel() {
               ))}
             </div>
           )}
+        </div>
 
-          {/* Position info */}
-          <div className="mt-4 rounded border border-slate-800 bg-slate-950/50 p-2">
+        {/* Live measurements (while the simulation runs) */}
+        {measurements.length > 0 && (
+          <div className="border-b border-slate-800 p-3">
+            <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+              <Activity size={11} className="text-emerald-400" />
+              Live Measurements
+            </div>
+            <div className="space-y-1">
+              {measurements.map((m, i) => (
+                <div
+                  key={`${m.label}-${i}`}
+                  className="flex items-baseline justify-between gap-2 rounded-md border border-slate-800/60 bg-slate-950/40 px-2 py-1"
+                >
+                  <span className="text-[10px] text-slate-400">{m.label}</span>
+                  <span className="font-mono text-[11px] tabular-nums text-cyan-200">
+                    {m.value}
+                    {m.unit ? ` ${m.unit}` : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Position info */}
+        <div className="p-3">
+          <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-2">
             <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Instance</div>
             <div className="font-mono text-[10px] text-slate-400">{comp.id}</div>
             <div className="mt-1 font-mono text-[10px] text-slate-500">
@@ -264,6 +509,164 @@ export function PropertyPanel() {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Pins section — terminal table with electrical types + live voltages
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PinsSection({
+  plugin,
+  nodeIdByTerminal,
+  wiredTerminals,
+  getVoltage,
+}: {
+  plugin: ComponentPlugin;
+  nodeIdByTerminal: Map<string, number>;
+  wiredTerminals: Set<string>;
+  getVoltage: ((nodeId: number) => number | null) | null;
+}) {
+  // Legend entries: unique electrical-type groups used by this component.
+  const legend = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const t of plugin.terminals) {
+      const g = pinGroup(t.electricalType);
+      if (!seen.has(g.label)) seen.set(g.label, g.color);
+    }
+    return Array.from(seen, ([label, color]) => ({ label, color }));
+  }, [plugin]);
+
+  return (
+    <div className="border-b border-slate-800 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+          <Pin size={11} className="text-cyan-400" />
+          Pins
+        </div>
+        <span className="font-mono text-[9px] text-slate-500">
+          {plugin.terminals.length} {plugin.terminals.length === 1 ? 'terminal' : 'terminals'}
+        </span>
+      </div>
+
+      <div className="max-h-80 divide-y divide-slate-800/60 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/50 shadow-inner">
+        {plugin.terminals.map((t) => {
+          const nodeId = nodeIdByTerminal.get(t.id);
+          // Hidden power pins are auto-connected by net name — treat as wired.
+          const wired = wiredTerminals.has(t.id) || !!t.hidden;
+          const voltage = wired && nodeId !== undefined && getVoltage ? getVoltage(nodeId) : null;
+          return (
+            <PinRow
+              key={t.id}
+              terminal={t}
+              nodeId={nodeId}
+              voltage={voltage}
+              wired={wired}
+            />
+          );
+        })}
+      </div>
+
+      {/* Electrical-type colour legend */}
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 px-0.5">
+        {legend.map((g) => (
+          <span key={g.label} className="flex items-center gap-1 text-[9px] text-slate-500">
+            <span
+              aria-hidden="true"
+              className="h-1.5 w-1.5 rounded-full border border-black/40"
+              style={{ backgroundColor: g.color }}
+            />
+            {g.label}
+          </span>
+        ))}
+      </div>
+
+      {/* Wire hint */}
+      <div className="mt-2 flex items-start gap-1.5 rounded-md border border-slate-800/70 bg-slate-800/30 px-2 py-1.5 text-[9px] leading-snug text-slate-500">
+        <Cable size={10} className="mt-px shrink-0" />
+        Click a pin on the canvas or use the Wire tool (W) to connect
+      </div>
+    </div>
+  );
+}
+
+/** One terminal row: dot, label, id, pin number, electrical type, live voltage. */
+function PinRow({
+  terminal,
+  nodeId,
+  voltage,
+  wired,
+}: {
+  terminal: TerminalDef;
+  nodeId: number | undefined;
+  voltage: number | null;
+  wired: boolean;
+}) {
+  const color = pinColor(terminal.electricalType);
+  const isGround = wired && nodeId === 0;
+  return (
+    <div className="px-2 py-1.5">
+      <div className="flex items-center gap-1.5">
+        <PinDot type={terminal.electricalType} />
+        <span className="shrink-0 text-[11px] font-semibold text-slate-200">
+          {terminal.label || terminal.id}
+        </span>
+        <code className="min-w-0 truncate font-mono text-[10px] text-slate-500">{terminal.id}</code>
+        {terminal.number != null && terminal.number !== '' && (
+          <span className="shrink-0 rounded bg-slate-800 px-1 font-mono text-[9px] leading-4 text-slate-400">
+            #{terminal.number}
+          </span>
+        )}
+        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+          {isGround && (
+            <span
+              className="rounded bg-slate-800/80 px-1 text-[8px] leading-4 text-slate-400"
+              title="Connected to the ground node"
+            >
+              GND
+            </span>
+          )}
+          <span
+            className={`font-mono text-[10px] tabular-nums ${voltage !== null ? 'text-cyan-200' : 'text-slate-600'}`}
+            title={
+              voltage !== null
+                ? 'Live node voltage'
+                : wired
+                  ? 'Run the simulation to see live voltages'
+                  : 'Not connected — click a pin on the canvas or use the Wire tool (W)'
+            }
+          >
+            {voltage !== null ? formatVolts(voltage) : '—'}
+          </span>
+        </span>
+      </div>
+      <div className="mt-0.5 flex items-center gap-1.5 pl-3.5 text-[9px]">
+        <span className="shrink-0 font-medium uppercase tracking-wide" style={{ color }}>
+          {pinLabel(terminal.electricalType)}
+        </span>
+        {terminal.name && terminal.name !== terminal.label && (
+          <span className="min-w-0 truncate text-slate-500">· {terminal.name}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Parameter editor
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ResetToDefaultButton({ label, onReset }: { label: string; onReset: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onReset}
+      title="Reset to default"
+      aria-label={`Reset ${label} to default`}
+      className="shrink-0 rounded-full p-0.5 text-slate-500 transition-colors duration-150 hover:bg-slate-700/60 hover:text-cyan-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan-500/60"
+    >
+      <RotateCcw size={12} />
+    </button>
+  );
+}
+
 function ParameterEditor({
   def,
   value,
@@ -273,18 +676,26 @@ function ParameterEditor({
   value: number | string | boolean | undefined;
   onChange: (v: number | string | boolean) => void;
 }) {
+  const differs = valueDiffersFromDefault(def, value);
+
   if (def.type === 'boolean') {
     return (
-      <div className="flex items-center justify-between gap-2">
-        <Label className="text-xs text-slate-300">{def.label}</Label>
+      <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <Label className="cursor-pointer text-xs text-slate-300">{def.label}</Label>
+          {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
+        </div>
         <Switch checked={!!value} onCheckedChange={(v) => onChange(v)} />
       </div>
     );
   }
   if (def.type === 'select') {
     return (
-      <div className="space-y-1">
-        <Label className="text-xs text-slate-300">{def.label}</Label>
+      <div className="space-y-1 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
+        <div className="flex items-center justify-between gap-1.5">
+          <Label className="text-xs text-slate-300">{def.label}</Label>
+          {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
+        </div>
         <Select value={String(value ?? '')} onValueChange={(v) => onChange(v)}>
           <SelectTrigger className="h-8 border-slate-700 bg-slate-800 text-xs text-slate-200">
             <SelectValue />
@@ -297,13 +708,17 @@ function ParameterEditor({
             ))}
           </SelectContent>
         </Select>
+        {def.description && <p className="text-[10px] leading-snug text-slate-500">{def.description}</p>}
       </div>
     );
   }
   if (def.type === 'color') {
     return (
-      <div className="space-y-1">
-        <Label className="text-xs text-slate-300">{def.label}</Label>
+      <div className="space-y-1 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
+        <div className="flex items-center justify-between gap-1.5">
+          <Label className="text-xs text-slate-300">{def.label}</Label>
+          {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
+        </div>
         <div className="flex items-center gap-2">
           <input
             type="color"
@@ -392,13 +807,17 @@ goto loop`,
       );
     }
     return (
-      <div className="space-y-1">
-        <Label className="text-xs text-slate-300">{def.label}</Label>
+      <div className="space-y-1 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
+        <div className="flex items-center justify-between gap-1.5">
+          <Label className="text-xs text-slate-300">{def.label}</Label>
+          {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
+        </div>
         <Input
           value={String(value ?? '')}
           onChange={(e) => onChange(e.target.value)}
           className="h-8 border-slate-700 bg-slate-800 text-xs text-slate-200"
         />
+        {def.description && <p className="text-[10px] leading-snug text-slate-500">{def.description}</p>}
       </div>
     );
   }
@@ -409,11 +828,17 @@ goto loop`,
   const range = max - min;
   // use slider only for "reasonable" ranges
   const useSlider = range > 0 && range <= 100000 && (def.step ?? 1) <= 1;
+  const hasRange = def.min != null && def.max != null;
   return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between">
-        <Label className="text-xs text-slate-300">{def.label}</Label>
-        {def.unit && <span className="font-mono text-[10px] text-slate-500">{def.unit}</span>}
+    <div className="space-y-1.5 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
+      <div className="flex items-center justify-between gap-1.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <Label className="truncate text-xs text-slate-300">{def.label}</Label>
+          {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
+        </div>
+        <span className="shrink-0 font-mono text-[10px] tabular-nums text-cyan-300/90">
+          {formatSI(numVal, def.unit)}
+        </span>
       </div>
       {useSlider ? (
         <div className="flex items-center gap-2">
@@ -446,7 +871,17 @@ goto loop`,
           className="h-8 border-slate-700 bg-slate-800 font-mono text-xs text-slate-200"
         />
       )}
-      {def.description && <p className="text-[10px] text-slate-500">{def.description}</p>}
+      {(def.description || hasRange) && (
+        <p className="text-[10px] leading-snug text-slate-500">
+          {def.description}
+          {hasRange && (
+            <span className="text-slate-600">
+              {def.description ? ' · ' : 'Range '}
+              {formatSI(def.min as number, def.unit)} – {formatSI(def.max as number, def.unit)}
+            </span>
+          )}
+        </p>
+      )}
     </div>
   );
 }
