@@ -1,12 +1,14 @@
 // Tests for the rate-limit-aware provider retry policy + honest turn
 // finalization (the "endless spinning" fix):
 //
-//   1. Persistent 429s → EXACTLY 3 provider attempts (was 8), patient
-//      30s/60s-style backoff, terminal `error` event with code
-//      AI_RATE_LIMITED and an actionable message — never a 5-minute
-//      silent spinner that ends in a misleading "I ran out of time" done.
-//   2. Transient 429s that recover → the patient retries land the turn as
-//      `done` with the correct response.
+//   1. Persistent 429s → EXACTLY 2 provider attempts (was 8) with a short
+//      12s confirmation retry, then a terminal `error` event with code
+//      AI_RATE_LIMITED and an actionable message — never a multi-minute
+//      silent spinner (patient 30s/60s ladders were removed: the observed
+//      account-level quota block persists for HOURS, so waiting only
+//      manufactured spinner time).
+//   2. Transient 429s that recover → the single 12s retry lands the turn
+//      as `done` with the correct response.
 //   3. Mid-stream network failure after partial text → provider retry emits
 //      `text_reset` so the retried stream cannot duplicate the narration.
 //   4. The shared gateway cooldown (globalThis) stops a second concurrent
@@ -131,13 +133,15 @@ afterEach(() => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('rate-limit retry policy', () => {
-  it('gives up after exactly 3 attempts on persistent 429s and finalizes with an actionable AI_RATE_LIMITED error', async () => {
+  it('gives up after exactly 2 attempts on persistent 429s and finalizes with an actionable AI_RATE_LIMITED error', async () => {
     vi.useFakeTimers();
     const { events, fetchCount } = await runTurnFakeTimers(mgr, BASE_PARAMS, () => rateLimitResponse());
 
     // THE regression: the old policy fired 8 provider attempts (+ up to 4
-    // loop-level restarts = ~32 requests) over ~5 minutes. Now: 3, period.
-    expect(fetchCount).toBe(3);
+    // loop-level restarts = ~32 requests) over ~5 minutes; the patient
+    // rewrite burned ~105s per turn on a quota block that lasts hours.
+    // Now: 2 attempts / ~12s, period.
+    expect(fetchCount).toBe(2);
 
     const err = events.find(e => e.type === 'error');
     expect(err).toBeDefined();
@@ -159,18 +163,19 @@ describe('rate-limit retry policy', () => {
     let call = 0;
     const { events, fetchCount } = await runTurnFakeTimers(mgr, BASE_PARAMS, () => {
       call++;
-      if (call <= 2) return rateLimitResponse();
+      if (call <= 1) return rateLimitResponse();
       return contentResponse('All better now.', { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 });
     });
 
-    expect(fetchCount).toBe(3);
+    // ONE transient 429 → the single 12s confirmation retry succeeds.
+    expect(fetchCount).toBe(2);
     const done = events.find(e => e.type === 'done');
     expect(done).toBeDefined();
     expect(done.data.response).toBe('All better now.');
     expect(events.some(e => e.type === 'error')).toBe(false);
   }, 20000);
 
-  it('waits at least the shared cooldown before re-attempting after a 429', async () => {
+  it('waits the short backoff before the single re-attempt (no rapid-fire, no long ladder)', async () => {
     vi.useFakeTimers();
     const attemptTimes: number[] = [];
     const started = Date.now();
@@ -178,13 +183,13 @@ describe('rate-limit retry policy', () => {
       attemptTimes.push(Date.now() - started);
       return rateLimitResponse();
     });
-    expect(fetchCount).toBe(3);
-    // First attempt fires immediately (cheap probe), but the second attempt
-    // must wait the extended cooldown (45s) and the third even longer —
-    // no 2s/4s/8s rapid-fire hammering.
-    expect(attemptTimes.length).toBe(3);
-    expect(attemptTimes[1]).toBeGreaterThanOrEqual(40_000);
-    expect(attemptTimes[2]).toBeGreaterThanOrEqual(attemptTimes[1] + 55_000);
+    expect(fetchCount).toBe(2);
+    // First attempt fires immediately (cheap probe — it also discovers quota
+    // recovery); the confirmation retry waits ~12s (≥11s under fake timers,
+    // never a 2s rapid-fire, never the old 45s+ chain).
+    expect(attemptTimes.length).toBe(2);
+    expect(attemptTimes[1]).toBeGreaterThanOrEqual(11_000);
+    expect(attemptTimes[1]).toBeLessThan(30_000);
   }, 20000);
 
   it('a concurrent request respects the shared cooldown (no gateway stampede)', async () => {
@@ -200,10 +205,10 @@ describe('rate-limit retry policy', () => {
     mgr.attach(idB, { onEvent: e => eventsB.push(e) });
 
     let advanced = 0;
-    // Two interleaved turns share the global cooldown, so their patient
-    // waits chain: worst case ~3 cooldown periods each (≈45s + 60s + 60s
-    // plus stagger) — 240s of fake time is a generous ceiling.
-    while ((mgr.getTurnStatus(idA) === 'running' || mgr.getTurnStatus(idB) === 'running') && advanced < 240_000) {
+    // Two interleaved turns share the global 12s cooldown, so their short
+    // waits chain: worst case ~2 attempts × 12s each (plus stagger) — 60s
+    // of fake time is a generous ceiling.
+    while ((mgr.getTurnStatus(idA) === 'running' || mgr.getTurnStatus(idB) === 'running') && advanced < 60_000) {
       await vi.advanceTimersByTimeAsync(5_000);
       advanced += 5_000;
     }
@@ -211,11 +216,11 @@ describe('rate-limit retry policy', () => {
     // Both turns terminal, both honest errors…
     expect(mgr.getTurnStatus(idA)).toBe('error');
     expect(mgr.getTurnStatus(idB)).toBe('error');
-    // …and the pair made at most 6 total attempts (3 each) — never the old
+    // …and the pair made at most 4 total attempts (2 each) — never the old
     // 8+8 interleaved storm. The cooldown's stagger keeps them from firing
     // in lockstep.
-    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(6);
-    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2);
   }, 20000);
 });
 

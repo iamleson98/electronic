@@ -211,8 +211,18 @@ export function _resetSandboxConfigCache() {
 // silent multi-minute spinner.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Rate-limit waits: patient, quota-reset-aware. 3 attempts total. */
-const RATE_LIMIT_BACKOFF_MS = [30_000, 60_000];
+/** Rate-limit waits: FAST — one retry after 12s, 2 attempts total.
+ *
+ * WHY NOT PATIENT 30s/60s ANYMORE: field evidence from this deployment —
+ * when the account-level quota is exhausted the gateway rejects in <50ms
+ * with 429 and the block persists for HOURS (it never self-clears inside
+ * a 30-60s window). A patient ladder therefore bought ~105s of silent
+ * spinner per turn with zero recovery probability, which users correctly
+ * read as "the AI is broken and spinning forever". A 12s confirmation
+ * retry (transient burst throttles DO clear that fast) followed by an
+ * honest terminal error is strictly better UX and still protects the
+ * gateway from hammering. */
+const RATE_LIMIT_BACKOFF_MS = [12_000];
 /** Transient (5xx/network) waits: fast recovery from blips. */
 const TRANSIENT_BACKOFF_MS = [2_000, 4_000, 8_000, 15_000, 30_000, 30_000, 30_000];
 const MAX_ATTEMPTS = 8;
@@ -315,8 +325,10 @@ async function runWithRetries<T>(
       if (isRateLimit) {
         rateLimitAttempts++;
         // We just saw a 429 — every OTHER in-flight/new request must now wait
-        // too (the throttle is account-wide, not per-request).
-        extendGatewayCooldown(45_000);
+        // too (the throttle is account-wide, not per-request). Kept SHORT
+        // (12s, aligned with the retry schedule): long cooldowns only chain
+        // spinner time; the staggering, not the duration, is what matters.
+        extendGatewayCooldown(12_000);
         if (rateLimitAttempts >= rateLimitMaxAttempts) {
           // Quota clearly exhausted for now — terminal, actionable error. Do
           // NOT keep hammering; do NOT let the loop layer re-hammer either.
@@ -324,18 +336,19 @@ async function runWithRetries<T>(
             `${label} provider ${RATE_LIMIT_ERROR_MARKER} after ${rateLimitAttempts} attempt(s) / ${Math.round((Date.now() - startedAt) / 1000)}s: ` +
             'the AI service quota is temporarily exhausted (HTTP 429 — every request is being rejected, including new ones). ' +
             'This is a temporary service-side limit, not a problem with your circuit or message. ' +
-            'Your message is saved — wait a minute or two, then press Retry.',
+            'Your message is saved — press Retry in a few minutes; the block clears on its own.',
           );
         }
       }
 
       const schedule = isRateLimit ? RATE_LIMIT_BACKOFF_MS : TRANSIENT_BACKOFF_MS;
       const scheduleWait = attempt < schedule.length ? schedule[attempt] : schedule[schedule.length - 1];
-      // The rate-limit path waits at least the shared cooldown (extended by
-      // the 429 we just saw) — never a fast re-fire.
-      const waitMs = isRateLimit
-        ? Math.max(scheduleWait, gatewayCooldownRemaining())
-        : scheduleWait;
+      // The rate-limit schedule IS the policy — a single 12s confirmation
+      // wait, never more. (Previously this took max(schedule, cooldown),
+      // which let a stale/long cooldown silently inflate the user-facing
+      // wait far beyond the documented policy.) Cross-request staggering
+      // is handled by the pre-wait + jitter at the top of the loop.
+      const waitMs = scheduleWait;
       const elapsed = Date.now() - startedAt;
 
       // Budget check (transient path only) — if this sleep would blow the

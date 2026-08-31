@@ -551,8 +551,8 @@ function finalizeError(rt: TurnRuntime, message: string, retryable: boolean, err
     const durationMs = Date.now() - (useChatSession.getState().active?.startedAt ?? Date.now());
     let friendly = `Sorry, I encountered an error: ${message}`;
     if (isRateLimit) {
-      friendly = 'The AI provider is currently rate-limiting requests (too many requests / 429). ' +
-        'The server retried automatically but kept hitting the limit. Please wait a minute, then press Retry — your message and circuit are preserved.';
+      friendly = 'The AI service quota is temporarily exhausted (429 — every request is being rejected right now). ' +
+        'This is a server-side limit that clears on its own — usually within a few minutes. Press Retry after a short wait — your message and circuit are preserved.';
     }
     patchAssistantMessage(rt.assistantMsgId, {
       content: isConfig ? 'AI backend not configured on this server.' : friendly,

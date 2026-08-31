@@ -252,14 +252,15 @@ describe('TurnManager: server-side PCB pipeline events', () => {
   }, 20000);
 
   it('provider-level 429 retries emit user-visible provider-retry status events (rateLimited)', async () => {
-    // Rate-limit backoffs are now PATIENT (45s+ between attempts — hammering
-    // a throttled gateway makes the 429 worse), so this test drives the turn
-    // under fake timers instead of waiting ~2 minutes of wall-clock time.
+    // Rate-limit backoffs are short (12s confirmation retry — the observed
+    // account-level quota block lasts hours, so waiting longer only
+    // manufactures spinner time), so this test drives the turn under fake
+    // timers instead of waiting wall-clock time.
     let call = 0;
     const fetchMock = vi.fn((_url: string, _init?: any) => {
       call++;
-      // Two 429s then success — the patient policy recovers on attempt 3.
-      if (call <= 2) return rateLimitedResponse();
+      // One transient 429 then success — the single retry recovers.
+      if (call <= 1) return rateLimitedResponse();
       return contentResponse('Recovered.');
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -281,15 +282,17 @@ describe('TurnManager: server-side PCB pipeline events', () => {
     }
 
     const retries = events.filter(e => e.type === 'status' && e.data.phase === 'provider-retry');
-    expect(retries.length).toBe(2);
+    expect(retries.length).toBe(1);
     expect(retries[0].data.attempt).toBe(1);
     expect(retries[0].data.reason).toMatch(/rate limited/i);
-    // Patient waits: at least the shared 45s cooldown, never a fast 2s re-fire.
-    expect(retries[0].data.delayMs).toBeGreaterThanOrEqual(30_000);
+    // Short confirmation backoff: ~12s — never a fast 2s re-fire, never the
+    // old 45s+ patient ladder.
+    expect(retries[0].data.delayMs).toBeGreaterThanOrEqual(11_000);
+    expect(retries[0].data.delayMs).toBeLessThan(30_000);
     const done = events.find(e => e.type === 'done');
     expect(done.data.response).toBe('Recovered.');
-    // Exactly three gateway touches — no hammering.
-    expect(fetchMock.mock.calls.length).toBe(3);
+    // Exactly two gateway touches — no hammering.
+    expect(fetchMock.mock.calls.length).toBe(2);
   }, 20000);
 });
 
