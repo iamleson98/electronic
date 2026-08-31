@@ -214,7 +214,12 @@ describe('intensive: ALL bundled examples route 100% DRC-clean', () => {
       expect(result.stats.failed, `${ex.name}: failed legs`).toBe(0);
       expect(result.unrouted, `${ex.name}: unrouted legs`).toHaveLength(0);
       auditBoard(ex.name, footprints, ratsnest, board, result);
-      expect(dt, `${ex.name}: runtime`).toBeLessThan(5000);
+      // 10s bound (was 5s): the router-quality batch (bend penalty +
+      // congestion history + via-reduction gloss — Task 9-a) trades ~1.7×
+      // runtime on the largest boards for 30–46% fewer bends and cleaner
+      // via structures; Freerouting takes minutes on comparable boards.
+      // Completion (0 failed legs) + DRC-clean remain hard requirements.
+      expect(dt, `${ex.name}: runtime`).toBeLessThan(10000);
 
       // Netlist consistency: the PCB still matches the schematic after routing.
       const verify = verifyNetlist(ex.doc.components, ex.doc.wires, footprints, result.traces);

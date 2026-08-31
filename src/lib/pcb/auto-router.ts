@@ -95,6 +95,24 @@ export const DEFAULT_AUTOROUTE_OPTIONS: AutoRouteOptions = {
   maxPasses: 6,
 };
 
+// ── Route-quality cost terms (Freerouting / Altium-gloss informed) ─────────
+/** Per-bend penalty (mm). Minimal corners is the #1 "hand-routed" visual
+ *  signal: pure shortest-path A* produces staircases on near-diagonal
+ *  runs. One bend ≈ 1.4 straight grid cells — enough to break cost ties
+ *  toward 1–2-bend routes, invisible against real detours. */
+const BEND_COST_MM = 0.35;
+/** Open-space bias: extra cost per near-count unit (mm) for cells close to
+ *  foreign copper. Flux-style "relaxed clearance": a few mils of detour for
+ *  clear separation beats obstacle-hugging. Capped so dense boards don't
+ *  detour absurdly. */
+const OPEN_SPACE_BIAS_MM = 0.02;
+const OPEN_SPACE_BIAS_CAP = 6;
+/** Negotiated-congestion history (PathFinder / Freerouting ripup escalation):
+ *  failed legs mark their corridor so other nets route around the jam,
+ *  leaving it clear for the retry on a later pass. */
+const HIST_INCREMENT_MM = 1.5;
+const HIST_MAX_MM = 12;
+
 export interface AutoRouteResult {
   traces: Trace[];
   vias: Via[];
@@ -108,9 +126,12 @@ export interface AutoRouteResult {
     vias: number;
     passes: number;
     rippedUp: number;
+    /** routes re-routed with fewer vias by the gloss pass */
+    viaReductions: number;
     elapsedMs: number;
   };
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Exact geometry helpers (shared with the interactive clearance preview)
@@ -455,6 +476,34 @@ const DIRS8: ReadonlyArray<readonly [number, number, number]> = [
   [1, 1, Math.SQRT2], [1, -1, Math.SQRT2], [-1, 1, Math.SQRT2], [-1, -1, Math.SQRT2],
 ];
 
+/** DIRS8 index for a unit step (dx,dy) — used by the bend-penalty's
+ *  arrival-direction lookup (dirState). Linear probe is fine: 8 entries. */
+function dirIndexOf(dx: number, dy: number): number {
+  for (let i = 0; i < DIRS8.length; i++) {
+    if (DIRS8[i][0] === dx && DIRS8[i][1] === dy) return i;
+  }
+  return -1;
+}
+
+// ── net priority routing order (Flux-style classification) ───────────────
+// Sensitive nets (clocks, SPI/I2C/UART, USB pairs, interrupts) route FIRST
+// so they get clean direct channels; power mid; ground rails LAST (they are
+// the most flexible — short local stubs + pours tolerate detours).
+const SENSITIVE_NET_RE = /clk|miso|mosi|sck|sclk|sda|scl|^rx|^tx|usb|int\b|\bcs\b|osc|can_|d\+|d-|dq|sda|scl/i;
+const GND_NET_RE = /gnd|ground|vss|earth/i;
+const POWER_NET_RE = /vcc|vdd|vee|v\+|5v|3v3|3\.3|12v|9v|vin|vbus|vbatt|avdd|dvdd/i;
+
+/** Route-order priority class for a net name: 0 = sensitive (first),
+ *  1 = default signal, 2 = power, 3 = ground rails (last). Exported for
+ *  tests and potential reuse by the AI net-class inference tool. */
+export function netPriorityClass(netName: string): 0 | 1 | 2 | 3 {
+  const n = netName.toLowerCase();
+  if (SENSITIVE_NET_RE.test(n)) return 0;
+  if (GND_NET_RE.test(n)) return 3;
+  if (POWER_NET_RE.test(n)) return 2;
+  return 1;
+}
+
 class Router {
   readonly board: BoardOutline;
   readonly grid: number;
@@ -485,12 +534,24 @@ class Router {
   private readonly gGen: Uint32Array;
   private readonly closedGen: Uint32Array;
   private readonly parent: Int32Array;
+  /** arrival direction (DIRS8 index) per state, -1 for start / via arrival —
+   *  lets the bend-penalty check run without decoding parent indices. */
+  private readonly dirState: Int8Array;
   private readonly heap = new MinHeap();
   private gen = 0;
   private readonly stateCount: number;
 
   private committed: CommittedRoute[] = [];
   private legsForNetCache = new Map<number, RouteLeg[]>();
+  /** Open-space bias applies only on small/medium boards: on very dense
+   *  boards (> 400k grid states) the added cost noise pushes A* past the
+   *  per-leg expansion cap and escalates extra rip-up passes — slower AND
+   *  more vias. Dense boards keep the (dominant) bend-cost quality win. */
+  private readonly useOpenSpaceBias: boolean;
+  /** Negotiated-congestion history cost per grid state (layer×row×col).
+   *  Failed legs mark their corridor; later routes pay this cost there and
+   *  steer around the jam (PathFinder-style negotiated congestion). */
+  private readonly hist: Float32Array;
 
   constructor(board: BoardOutline, options: AutoRouteOptions) {
     this.board = board;
@@ -509,10 +570,13 @@ class Router {
     this.allowVias = options.allowVias && this.layerCount > 1;
 
     this.stateCount = this.cols * this.rows * this.layerCount;
+    this.useOpenSpaceBias = this.stateCount <= 400_000;
     this.gScore = new Float32Array(this.stateCount);
     this.gGen = new Uint32Array(this.stateCount);
     this.closedGen = new Uint32Array(this.stateCount);
     this.parent = new Int32Array(this.stateCount);
+    this.dirState = new Int8Array(this.stateCount);
+    this.hist = new Float32Array(this.stateCount);
     this.layerIndexes = Array.from({ length: this.layerCount }, () => new LayerIndex(this.cols, this.rows, grid));
 
     // dilation margin must cover the largest check radius:
@@ -769,6 +833,10 @@ class Router {
     if (startIdx === goalIdx) return new Int32Array([startIdx]);
 
     const g = this.grid;
+    // NOTE: deliberately plain admissible octile h. Weighted A* (W·h) was
+    // tried to bound expansions against the bend/bias cost surface — it finds
+    // suboptimal paths that block later legs (completion collapsed on dense
+    // boards). The cost terms are kept small instead so h stays representative.
     const h = (r: number, c: number) => {
       const dx = Math.abs(c - dstCol), dy = Math.abs(r - dstRow);
       return ((dx + dy) + (Math.SQRT2 - 2) * Math.min(dx, dy)) * g;
@@ -780,6 +848,7 @@ class Router {
     this.gScore[startIdx] = 0;
     this.gGen[startIdx] = gen;
     this.parent[startIdx] = -1;
+    this.dirState[startIdx] = -1; // start has no arrival direction
     this.heap.push(h(srcRow, srcCol), startIdx);
 
     const maxExpansions = Math.min(1_200_000, this.stateCount * 4);
@@ -799,6 +868,7 @@ class Router {
         return cells;
       }
       expansions++;
+      this.totalExpansions++;
       const curLayer = Math.floor(cur / (rows * cols));
       const rem = cur % (rows * cols);
       const curRow = Math.floor(rem / cols);
@@ -825,11 +895,37 @@ class Router {
           const movesX = dx !== 0;
           if (curLayer === 0 ? !movesX : movesX) stepCost *= 1.35;
         }
+        // ── Bend penalty: minimal corners = the #1 "hand-routed" signal.
+        // Pure shortest-path ties produce staircases on diagonal runs; one
+        // bend ≈ 1.4 straight cells breaks the ties toward 1–2-bend routes.
+        // dirState[cur] is the DIRS8 index of the move that ARRIVED at cur
+        // (-1 for the start and after via hops — direction resets there).
+        const dirIdx = this.dirState[cur];
+        if (dirIdx >= 0 && (DIRS8[dirIdx][0] !== dx || DIRS8[dirIdx][1] !== dy)) {
+          stepCost += BEND_COST_MM;
+        }
+        // ── Open-space bias: cells near foreign copper cost slightly more —
+        // a few mils of detour for clear separation beats obstacle-hugging
+        // (Flux-style relaxed clearance). Gated at nearCount ≥ 2 so a single
+        // adjacent item (e.g. the destination pad itself) adds no noise;
+        // capped so dense boards don't detour absurdly; disabled on very
+        // dense boards (see useOpenSpaceBias).
+        if (this.useOpenSpaceBias) {
+          const near = this.layerIndexes[curLayer].nearCount[nr * cols + nc];
+          if (near > 1) {
+            stepCost += OPEN_SPACE_BIAS_MM * (near < OPEN_SPACE_BIAS_CAP ? near : OPEN_SPACE_BIAS_CAP);
+          }
+        }
+        // ── Negotiated-congestion history: failed corridors are expensive so
+        // other nets route around jams, leaving them clear for the retry.
+        const hv = this.hist[nIdx];
+        if (hv > 0) stepCost += hv;
         const tentative = this.gScore[cur] + stepCost;
         if (this.gGen[nIdx] !== gen || tentative < this.gScore[nIdx]) {
           this.gGen[nIdx] = gen;
           this.gScore[nIdx] = tentative;
           this.parent[nIdx] = cur;
+          this.dirState[nIdx] = dirIndexOf(dx, dy);
           this.heap.push(tentative + h(nr, nc), nIdx);
         }
       }
@@ -847,6 +943,7 @@ class Router {
             this.gGen[nIdx] = gen;
             this.gScore[nIdx] = tentative;
             this.parent[nIdx] = cur;
+            this.dirState[nIdx] = -1; // via arrival — direction resets
             this.heap.push(tentative + h(curRow, curCol), nIdx);
           }
         }
@@ -1114,6 +1211,7 @@ class Router {
     routedCount: number;
     rippedUp: number;
     passes: number;
+    viaReductions: number;
   } {
     const pending = new Map<number, RouteLeg[]>();
     let routedCount = 0;
@@ -1125,6 +1223,12 @@ class Router {
     }
 
     const netOrder = Array.from(pending.keys()).sort((a, b) => {
+      // Route-order priority: sensitive nets first (clean direct channels),
+      // default signals, power, then ground rails LAST (most flexible —
+      // stubs + pours tolerate detours). Flux-style net classification.
+      const pa = netPriorityClass(this.netNames[a] ?? '');
+      const pb = netPriorityClass(this.netNames[b] ?? '');
+      if (pa !== pb) return pa - pb;
       const la = (pending.get(a) ?? []).reduce((s, l) => s + l.dist, 0);
       const lb = (pending.get(b) ?? []).reduce((s, l) => s + l.dist, 0);
       return la - lb;
@@ -1167,19 +1271,91 @@ class Router {
             ripUpBudget -= res.budgetCost;
             if (res.success) { routed = true; routedCount++; }
           }
-          if (!routed) remaining.push(leg);
+          if (!routed) {
+            remaining.push(leg);
+            // Negotiated congestion: the failed corridor becomes expensive
+            // for every OTHER net, so subsequent routes leave it clear for
+            // this leg's retry on a later pass.
+            this.markCorridorHistory(leg, HIST_INCREMENT_MM);
+          }
         }
         if (remaining.length === 0) pending.delete(net);
         else pending.set(net, remaining);
       }
     }
 
+    // ── Gloss pass: via reduction. Routes carrying ≥ 2 vias are re-routed
+    // once with a doubled via cost; the cheaper-via result is kept only when
+    // it actually drops vias without inflating length by > 20% (all commits
+    // go through the exact-verification path). Freerouting BatchOptimizer
+    // analog — the cheapest via structure usually wins on re-inspection.
+    const viaReductions = this.reduceVias(pending.size > 0 ? 6.0 : 2.5);
+
     return {
       failedLegs: Array.from(pending.values()).flat().map((leg) => ({ leg, reason: 'no clear path found' })),
       routedCount,
       rippedUp,
       passes,
+      viaReductions,
     };
+  }
+
+  /** Mark a failed leg's swept corridor with history cost so other nets
+   *  route around the jam (negotiated congestion). Bounded per cell. */
+  private markCorridorHistory(leg: RouteLeg, amount: number): void {
+    const { cols, rows, layerCount } = this;
+    const margin = 2;
+    const mx = Math.min(leg.fromPt.x, leg.toPt.x) - margin;
+    const Mx = Math.max(leg.fromPt.x, leg.toPt.x) + margin;
+    const my = Math.min(leg.fromPt.y, leg.toPt.y) - margin;
+    const My = Math.max(leg.fromPt.y, leg.toPt.y) + margin;
+    const g = this.grid;
+    const c0 = Math.max(0, Math.floor(mx / g)), c1 = Math.min(cols - 1, Math.ceil(Mx / g));
+    const r0 = Math.max(0, Math.floor(my / g)), r1 = Math.min(rows - 1, Math.ceil(My / g));
+    for (let l = 0; l < layerCount; l++) {
+      const lBase = l * rows * cols;
+      for (let r = r0; r <= r1; r++) {
+        const rowBase = lBase + r * cols;
+        for (let c = c0; c <= c1; c++) {
+          const v = this.hist[rowBase + c];
+          if (v < HIST_MAX_MM) this.hist[rowBase + c] = v + amount;
+        }
+      }
+    }
+  }
+
+  /** Via-reduction gloss: re-route committed routes with ≥ 2 vias at a
+   *  doubled via cost; keep the new route only when it has fewer vias AND
+   * at most 20% more length. Returns the number of reduced routes. */
+  private reduceVias(viaCost: number): number {
+    // Bounded to the 15 most via-heavy routes: each attempt is a full A*
+    // re-route, and dense boards carry ~100 vias where the tail contributes
+    // nothing (Freerouting bounds its BatchOptimizer the same way).
+    const candidates = this.committed
+      .filter((r) => r.vias.length >= 2)
+      .sort((a, b) => b.vias.length - a.vias.length)
+      .slice(0, 15);
+    let reduced = 0;
+    for (const route of candidates) {
+      const snapshot = {
+        leg: route.leg,
+        traces: route.traces.map((t) => ({ ...t, segments: t.segments.map((s) => ({ ...s })) })),
+        vias: route.vias.map((v) => ({ ...v })),
+        lengthMm: route.lengthMm,
+      };
+      this.ripUpRoute(route);
+      if (this.tryRouteLeg(route.leg, viaCost * 2.5)) {
+        const nue = this.committed[this.committed.length - 1];
+        if (nue && nue !== route && nue.vias.length < route.vias.length && nue.lengthMm <= route.lengthMm * 1.2) {
+          reduced++;
+          continue; // keep the flatter route
+        }
+        // not an improvement — discard the new route, restore the original
+        if (nue && nue !== route) this.ripUpRoute(nue);
+      }
+      this.restoreRoute(snapshot);
+    }
+    return reduced;
   }
 
   /**
@@ -1368,7 +1544,7 @@ class Router {
     existingTraces: Trace[], existingVias: Via[],
     failedLegs: { leg: RouteLeg; reason: string }[],
     totalNets: number, totalLegs: number, routedCount: number,
-    rippedUp: number, passes: number, elapsedMs: number,
+    rippedUp: number, viaReductions: number, passes: number, elapsedMs: number,
   ): AutoRouteResult {
     const traces = [...existingTraces];
     const vias = [...existingVias];
@@ -1400,12 +1576,15 @@ class Router {
         vias: newVias,
         passes,
         rippedUp,
+        viaReductions,
         elapsedMs,
       },
     };
   }
 
   get netCount(): number { return this.netNames.length; }
+  /** total A* node expansions across this router's lifetime (diagnostics) */
+  totalExpansions = 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1481,10 +1660,11 @@ export function autoRoute(
 
   const totalNets = legsByNet.size;
   const totalLegs = Array.from(legsByNet.values()).reduce((s, l) => s + l.length, 0);
-  const { failedLegs, routedCount, rippedUp, passes } =
+  const { failedLegs, routedCount, rippedUp, passes, viaReductions } =
     router.routeAll(legsByNet, padsByNet, existingTraces, existingVias);
 
-  return router.result(existingTraces, existingVias, failedLegs, totalNets, totalLegs, routedCount, rippedUp, passes, Date.now() - t0);
+  if (process.env.DEBUG_ROUTER) console.error(`[router] expansions=${router.totalExpansions} ms=${Date.now() - t0}`);
+  return router.result(existingTraces, existingVias, failedLegs, totalNets, totalLegs, routedCount, rippedUp, viaReductions, passes, Date.now() - t0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

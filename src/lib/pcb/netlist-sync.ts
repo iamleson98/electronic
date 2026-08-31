@@ -395,7 +395,13 @@ export function computeSmartPlacement(
     // attraction along nets (intra-cluster weights are pre-boosted)
     for (const e of compEdges) {
       const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
-      const dist = Math.hypot(dx, dy);
+      // sqrt(x²+y²), NOT Math.hypot: hypot is implementation-defined across
+      // JS engines (Bun/JSC vs Node/V8 differ in the last ulp) — over 80
+      // chaotic relaxation passes that diverges into different layouts and
+      // breaks cross-engine placement parity (server vs client). sqrt of
+      // exact products is correctly rounded per spec, and our mm-scale
+      // magnitudes are far from hypot's overflow-protection domain.
+      const dist = Math.sqrt(dx * dx + dy * dy);
       if (dist < 1e-6) continue;
       const f = Math.min(kAtt * e.w * dist, maxAttStep) / dist;
       acc(e.a.comp.id, dx * f, dy * f);
@@ -439,7 +445,7 @@ export function computeSmartPlacement(
         for (const m of members) {
           const c = byId.get(m)!;
           const dx = cx - c.x, dy = cy - c.y;
-          const dist = Math.hypot(dx, dy);
+          const dist = Math.sqrt(dx * dx + dy * dy); // see compEdges note: no Math.hypot
           if (dist < 1e-6) continue;
           const f = Math.min(CLUSTER_CENTROID_K * dist, CLUSTER_CENTROID_MAX_STEP) / dist;
           acc(m, dx * f, dy * f);
@@ -456,7 +462,7 @@ export function computeSmartPlacement(
         }
         cx /= members.length; cy /= members.length;
         const dx = cx - c.x, dy = cy - c.y;
-        const dist = Math.hypot(dx, dy);
+        const dist = Math.sqrt(dx * dx + dy * dy); // see compEdges note: no Math.hypot
         if (dist < 1e-6) continue;
         const f = Math.min(ANCHOR_CENTROID_K * dist, ANCHOR_CENTROID_MAX_STEP) / dist;
         acc(id, dx * f, dy * f);
@@ -659,7 +665,7 @@ export function computeSmartPlacement(
         const rad = (rot * 90 * Math.PI) / 180;
         const ax = Math.abs(Math.cos(rad)), ay = Math.abs(Math.sin(rad)); // pad axis unit
         const dx = cx - c.x, dy = cy - c.y;
-        const len = Math.hypot(dx, dy);
+        const len = Math.sqrt(dx * dx + dy * dy); // see compEdges note: no Math.hypot
         if (len < 1e-6) continue;
         const dot = (Math.abs(dx) * ax + Math.abs(dy) * ay) / len;
         if (dot > bestDot) { bestDot = dot; bestRot = rot; }
