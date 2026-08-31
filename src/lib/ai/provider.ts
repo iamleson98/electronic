@@ -192,19 +192,58 @@ export function _resetSandboxConfigCache() {
 // Shared retry policy — rate limits (429) and transient 5xx never fail the
 // request outright; we back off and retry instead.
 //
-// BUDGET, not just attempt counts: the old policy (20 attempts × 30s) could
-// spin for ~10 minutes inside ONE model call while the turn hard-cap killed
-// the turn at ~5 min — the user saw an endless "retrying" loop and a dead
-// turn. Now the provider layer gives up after ~2.5 min TOTAL and hands the
-// error to the loop layer (turn-manager), which retries the whole model call
-// with visible status events and its own backoff — the user always sees
-// progress or a clear error, never a silent infinite loop.
+// TWO SEPARATE STRATEGIES (they were previously conflated, which caused the
+// user-visible "endless spinning" loop):
+//
+//   • 429 rate limits are ACCOUNT-level quota throttling — every request on
+//     the account is rejected until the quota window resets. Fast retries
+//     (2s/4s/8s…) are actively HARMFUL: each rejected request burns budget,
+//     re-triggers the limiter, and can sustain the 429 storm indefinitely
+//     (self-perpetuating). We therefore wait LONG (30s, 60s), cap at 3 total
+//     attempts, and coordinate ALL concurrent requests through a shared
+//     global cooldown so tabs/turns never stampede the gateway.
+//
+//   • 5xx / network blips ARE transient — retry fast (2s/4s/8s/15s), up to 8
+//     attempts inside a 150s budget, then hand off to the loop layer.
+//
+// Either way the user sees live "retrying in Ns" status events and always
+// gets a terminal outcome (result or clear actionable error) — never a
+// silent multi-minute spinner.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const BACKOFF_SCHEDULE = [2000, 4000, 8000, 15000, 30000];
+/** Rate-limit waits: patient, quota-reset-aware. 3 attempts total. */
+const RATE_LIMIT_BACKOFF_MS = [30_000, 60_000];
+/** Transient (5xx/network) waits: fast recovery from blips. */
+const TRANSIENT_BACKOFF_MS = [2_000, 4_000, 8_000, 15_000, 30_000, 30_000, 30_000];
 const MAX_ATTEMPTS = 8;
-/** Total wall-clock budget for provider-level retries within one model call. */
+/** Total wall-clock budget for provider-level retries within one model call
+ * (transient path only — the rate-limit path is bounded by its own schedule). */
 const MAX_RETRY_TOTAL_MS = 150_000;
+
+// Shared gateway cooldown: once ANY request observes a 429, every other
+// provider request in this process waits until the cooldown expires before
+// touching the gateway again. Stored on globalThis so Next.js dev HMR / route
+// module duplication cannot fork the state. A 429 on one request is strong
+// evidence the whole account is throttled — the others must NOT pile on.
+const globalForCooldown = globalThis as unknown as { __aiGatewayCooldownUntil?: number };
+function gatewayCooldownRemaining(): number {
+  return Math.max(0, (globalForCooldown.__aiGatewayCooldownUntil ?? 0) - Date.now());
+}
+function extendGatewayCooldown(ms: number): void {
+  globalForCooldown.__aiGatewayCooldownUntil = Math.max(
+    globalForCooldown.__aiGatewayCooldownUntil ?? 0,
+    Date.now() + ms,
+  );
+}
+
+/** Marker included in the terminal rate-limit error so the loop layer
+ * (turn-manager) and the client can route it to the friendly retryable UX. */
+export const RATE_LIMIT_ERROR_MARKER = 'rate-limited (429)';
+
+function isRateLimitError(e: unknown): boolean {
+  const msg = String((e as Error)?.message || e);
+  return /429|rate limit|too many requests|rate-limited/i.test(msg);
+}
 
 function sleepRespectingAbort(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -251,25 +290,68 @@ async function runWithRetries<T>(
 ): Promise<T> {
   let lastError: Error | null = null;
   const startedAt = Date.now();
+  // Rate-limit attempts get their own, much smaller cap — once exhausted we
+  // MUST stop touching the gateway (see policy comment above).
+  const rateLimitMaxAttempts = RATE_LIMIT_BACKOFF_MS.length + 1;
+  let rateLimitAttempts = 0;
+
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     if (signal?.aborted) throw new Error(`${label} request aborted (client disconnected)`);
+    // Another request already observed a 429 → respect the shared cooldown
+    // before even attempting (staggered by a little jitter so simultaneous
+    // waiters don't fire in lockstep and re-trigger the limiter).
+    const cooldown = gatewayCooldownRemaining();
+    if (cooldown > 0 && attempt > 0) {
+      const jitter = Math.floor(Math.random() * 3_000);
+      await sleepRespectingAbort(cooldown + jitter, signal);
+    }
     try {
       return await fn();
     } catch (e) {
       lastError = e as Error;
       if (!isRetryableProviderError(e)) throw e;
-      const waitMs = attempt < BACKOFF_SCHEDULE.length ? BACKOFF_SCHEDULE[attempt] : 30000;
-      const isRateLimit = /429|rate limit|Too many requests/i.test(String((e as Error).message));
+      const isRateLimit = isRateLimitError(e);
+
+      if (isRateLimit) {
+        rateLimitAttempts++;
+        // We just saw a 429 — every OTHER in-flight/new request must now wait
+        // too (the throttle is account-wide, not per-request).
+        extendGatewayCooldown(45_000);
+        if (rateLimitAttempts >= rateLimitMaxAttempts) {
+          // Quota clearly exhausted for now — terminal, actionable error. Do
+          // NOT keep hammering; do NOT let the loop layer re-hammer either.
+          throw new Error(
+            `${label} provider ${RATE_LIMIT_ERROR_MARKER} after ${rateLimitAttempts} attempt(s) / ${Math.round((Date.now() - startedAt) / 1000)}s: ` +
+            'the AI service quota is temporarily exhausted (HTTP 429 — every request is being rejected, including new ones). ' +
+            'This is a temporary service-side limit, not a problem with your circuit or message. ' +
+            'Your message is saved — wait a minute or two, then press Retry.',
+          );
+        }
+      }
+
+      const schedule = isRateLimit ? RATE_LIMIT_BACKOFF_MS : TRANSIENT_BACKOFF_MS;
+      const scheduleWait = attempt < schedule.length ? schedule[attempt] : schedule[schedule.length - 1];
+      // The rate-limit path waits at least the shared cooldown (extended by
+      // the 429 we just saw) — never a fast re-fire.
+      const waitMs = isRateLimit
+        ? Math.max(scheduleWait, gatewayCooldownRemaining())
+        : scheduleWait;
       const elapsed = Date.now() - startedAt;
-      // Budget check — if this sleep would blow the total budget, stop here
-      // and let the loop layer take over (it emits user-visible status).
-      if (elapsed + waitMs > MAX_RETRY_TOTAL_MS || attempt === MAX_ATTEMPTS - 1) {
+
+      // Budget check (transient path only) — if this sleep would blow the
+      // total budget, stop here and let the loop layer take over.
+      if (!isRateLimit && (elapsed + waitMs > MAX_RETRY_TOTAL_MS || attempt === MAX_ATTEMPTS - 1)) {
         throw new Error(
-          `${label} provider still ${isRateLimit ? 'rate-limited (429)' : 'unavailable'} after ${attempt + 1} attempt(s) / ${Math.round(elapsed / 1000)}s: ${(e as Error).message}. ` +
+          `${label} provider still unavailable after ${attempt + 1} attempt(s) / ${Math.round(elapsed / 1000)}s: ${(e as Error).message}. ` +
           'The AI will retry automatically — if it keeps failing, wait a minute and press Retry.',
         );
       }
-      console.warn(`[${label}] ${isRateLimit ? 'Rate limited' : 'Server error'}, retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_ATTEMPTS}, budget ${Math.round((MAX_RETRY_TOTAL_MS - elapsed) / 1000)}s left)`);
+
+      console.warn(
+        `[${label}] ${isRateLimit ? 'Rate limited' : 'Server error'}, retrying in ${Math.round(waitMs / 1000)}s ` +
+        `(attempt ${attempt + 1}${isRateLimit ? `/${rateLimitMaxAttempts} rate-limit` : `/${MAX_ATTEMPTS}`}, ` +
+        `${Math.round((MAX_RETRY_TOTAL_MS - Math.min(elapsed, MAX_RETRY_TOTAL_MS)) / 1000)}s budget left)`,
+      );
       // Surface the retry to the caller BEFORE sleeping — this drives the
       // user-visible "AI provider rate-limited — retrying in Ns" status.
       if (onRetry) {

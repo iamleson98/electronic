@@ -32,7 +32,7 @@
 // Concurrency: single-threaded Node — emit()/attach() are synchronous, so an
 // attach can never miss an event (the snapshot + live subscription are atomic).
 
-import { getProvider, AIProviderConfigError, type ChatMessage, type ProviderName } from './provider';
+import { getProvider, AIProviderConfigError, RATE_LIMIT_ERROR_MARKER, type ChatMessage, type ProviderName } from './provider';
 import { TOOLS_BY_NAME, getToolDefinitions, type ToolContext } from './tools';
 import type { CircuitDocument } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
@@ -101,6 +101,9 @@ export type TurnEventType =
   | 'turn'          // { turnId } — always the first event
   | 'status'        // { phase, attempt?, delayMs?, reason? } — progress info
   | 'text_delta'    // { text }
+  | 'text_reset'    // { reason } — the model call is restarting (retry);
+                     //   any text streamed by the aborted attempt is stale
+                     //   and must be dropped (prevents duplicate narration)
   | 'tool_call'     // { name, args, result?, error?, ok }
   | 'verify'        // { attempt, health, issueCount, dcConverged }
   | 'circuit_update'// { components, wires }
@@ -160,6 +163,16 @@ const SWEEP_INTERVAL_MS = 60_000;
 const MAX_TURNS = 100;                  // total buffered turns (evict oldest finalized)
 const MAX_ITERATIONS = 50;              // model ↔ tool loop rounds
 const LOOP_RETRY_DELAYS_MS = [5_000, 15_000, 30_000]; // loop-level provider retries
+
+/** Rate-limit exhaustion is TERMINAL for a turn: the provider layer already
+ * waited patiently (30s + 60s) and confirmed the account quota is throttled —
+ * re-running the model call just hammers the limiter, sustains the 429 storm,
+ * and delays the user's clear "press Retry later" error. Loop retries stay
+ * reserved for genuinely transient failures (5xx blips, provider restarts). */
+function isRateLimitExhaustion(e: unknown): boolean {
+  return String((e as Error)?.message || e).includes(RATE_LIMIT_ERROR_MARKER)
+    || /429|rate.?limit|too many requests/i.test(String((e as Error)?.message || e));
+}
 
 function sleepRespectingAbort(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -386,6 +399,10 @@ export class TurnManager {
     // Kept outside the try so the abort path can still deliver the circuit's
     // latest state (partial results beat lost results).
     let ctxRef: ToolContext | null = null;
+    /** Diagnostics for the catch path (must live outside the try scope). */
+    const executedToolCalls: any[] = [];
+    let lastProviderError: unknown = null;
+    let producedAnyOutput = false;
     try {
       const body = turn.params;
 
@@ -448,7 +465,6 @@ export class TurnManager {
         ...body.messages.slice(-60),
       ];
 
-      const executedToolCalls: any[] = [];
       let circuitModified = false;
       let pcbModified = false;
       let autoVerifyCount = 0;
@@ -458,13 +474,21 @@ export class TurnManager {
       for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
         if (turn.abort.signal.aborted) throw abortError();
 
+        /** Did the CURRENT model-call attempt stream any text? Emitted text
+         * from a failed attempt is stale — the retry restarts the model call
+         * from scratch, so a text_reset event drops it client-side and the
+         * narration never duplicates. Fresh flag per loop iteration. */
+        let rtTextEmitted = false;
+
         // Model call with loop-level retry — the provider already retries
         // 429/5xx/network errors internally (attempt-capped AND time-budgeted);
         // this second layer catches everything else (provider restarts, exotic
         // SDK failures) so a blip never kills the user's turn. Provider-level
         // retries are surfaced live via the onRetry → status event hook.
+        // EXCEPT rate-limit exhaustion: the provider layer's patient 30s/60s
+        // waits already proved the quota is down — looping would re-hammer.
         let result: Awaited<ReturnType<typeof provider.chatStream>> | null = null;
-        let lastProviderError: unknown = null;
+        lastProviderError = null;
         for (let attempt = 0; attempt <= LOOP_RETRY_DELAYS_MS.length; attempt++) {
           try {
             result = await provider.chatStream(
@@ -477,7 +501,14 @@ export class TurnManager {
                 onRetry: (info) => {
                   // Provider-level retry about to sleep — tell the client NOW
                   // so the status pill shows "rate-limited — retrying in Ns"
-                  // instead of a silent spinner.
+                  // instead of a silent spinner. Also drop any partial text
+                  // the aborted attempt streamed: the retry restarts the
+                  // model call from scratch, so keeping it would duplicate
+                  // the narration once the new stream replays it.
+                  if (rtTextEmitted) {
+                    rtTextEmitted = false;
+                    this.emit(turn, 'text_reset', { reason: info.rateLimited ? 'rate-limited retry' : 'provider retry' });
+                  }
                   this.emit(turn, 'status', {
                     phase: 'provider-retry',
                     attempt: info.attempt,
@@ -486,13 +517,21 @@ export class TurnManager {
                   });
                 },
               },
-              (delta) => this.emit(turn, 'text_delta', { text: delta }),
+              (delta) => {
+                rtTextEmitted = true;
+                this.emit(turn, 'text_delta', { text: delta });
+              },
             );
             break;
           } catch (e) {
             if (turn.abort.signal.aborted || (e as any)?.isTurnAbort) throw abortError();
             lastProviderError = e;
             if (isAuthOrConfigError(e)) throw e; // needs human action — no retry
+            if (isRateLimitExhaustion(e)) throw e; // quota down — do NOT re-hammer
+            if (rtTextEmitted) {
+              rtTextEmitted = false;
+              this.emit(turn, 'text_reset', { reason: 'loop retry' });
+            }
             if (attempt >= LOOP_RETRY_DELAYS_MS.length) break;
             const delayMs = LOOP_RETRY_DELAYS_MS[attempt];
             this.emit(turn, 'status', {
@@ -505,6 +544,7 @@ export class TurnManager {
             if (turn.abort.signal.aborted) throw abortError();
           }
         }
+        if (result) producedAnyOutput = true;
         if (!result) throw lastProviderError ?? new Error('model call failed');
 
         // ── tool calls ────────────────────────────────────────────────────
@@ -637,9 +677,24 @@ export class TurnManager {
       if ((e as any)?.isTurnAbort || turn.abort.signal.aborted) {
         if (turn.timedOut) {
           // Hard time cap — emit whatever doc state we have so the client
-          // keeps the partial circuit instead of losing it.
+          // keeps the partial circuit instead of losing it. If the turn
+          // produced literally NOTHING (e.g. it spent its whole life waiting
+          // out rate-limit backoffs), a cheerful "I ran out of time — send a
+          // follow-up" done message would be misleading: surface the real
+          // cause as an error so the client shows the Retry guidance.
+          const nothingProduced = !producedAnyOutput && executedToolCalls.length === 0;
+          const rlMsg = lastProviderError ? String((lastProviderError as Error).message) : '';
+          if (nothingProduced && isRateLimitExhaustion(lastProviderError)) {
+            this.finalize(turn, 'error', {
+              code: 'AI_RATE_LIMITED',
+              message: `AI chat failed: ${rlMsg}`,
+            });
+            return;
+          }
           this.finalize(turn, 'done', {
-            response: 'I ran out of time on this request. The circuit has whatever I completed so far — send a follow-up message to continue.',
+            response: nothingProduced
+              ? 'I could not reach the AI service before the turn time limit. ' + (rlMsg ? `Last error: ${rlMsg}` : 'No response was received — press Retry to try again.')
+              : 'I ran out of time on this request. The circuit has whatever I completed so far — send a follow-up message to continue.',
             toolCalls: [],
             circuit: ctxRef
               ? JSON.parse(JSON.stringify({ components: ctxRef.doc.components, wires: ctxRef.doc.wires }))
@@ -652,7 +707,11 @@ export class TurnManager {
         }
       } else {
         console.error('[turn-manager] AI turn error:', e);
-        this.finalize(turn, 'error', { message: `AI chat failed: ${(e as Error).message}` });
+        const msg = String((e as Error).message || e);
+        this.finalize(turn, 'error', {
+          code: isRateLimitExhaustion(e) ? 'AI_RATE_LIMITED' : undefined,
+          message: `AI chat failed: ${msg}`,
+        });
       }
     }
   }

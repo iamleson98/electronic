@@ -808,6 +808,13 @@ async function streamOnce(opts: EngineOptions, resume: { turnId: string } | null
     } else if (type === 'text_delta') {
       cur.text += data.text || '';
       updateAssistantFromRuntime(cur);
+    } else if (type === 'text_reset') {
+      // The model call restarted (provider/loop retry) — text streamed by the
+      // aborted attempt is stale (the retry re-narrates from scratch); drop
+      // it so the message never shows duplicated narration. Like text_delta,
+      // this is pure display state: apply on replay AND live.
+      cur.text = '';
+      updateAssistantFromRuntime(cur);
     } else if (type === 'tool_call') {
       cur.toolCalls.push({
         name: data.name,

@@ -252,22 +252,45 @@ describe('TurnManager: server-side PCB pipeline events', () => {
   }, 20000);
 
   it('provider-level 429 retries emit user-visible provider-retry status events (rateLimited)', async () => {
+    // Rate-limit backoffs are now PATIENT (45s+ between attempts — hammering
+    // a throttled gateway makes the 429 worse), so this test drives the turn
+    // under fake timers instead of waiting ~2 minutes of wall-clock time.
     let call = 0;
-    const events = await runTurnCollect(BASE_PARAMS, () => {
+    const fetchMock = vi.fn((_url: string, _init?: any) => {
       call++;
-      // Two 429s (~2s + ~4s backoff) then success
+      // Two 429s then success — the patient policy recovers on attempt 3.
       if (call <= 2) return rateLimitedResponse();
       return contentResponse('Recovered.');
     });
+    vi.stubGlobal('fetch', fetchMock);
+    const events: any[] = [];
+    vi.useFakeTimers();
+    try {
+      const turnId = mgr.startTurn(BASE_PARAMS);
+      const attached = mgr.attach(turnId, { onEvent: e => events.push(e) })!;
+      events.push(...attached.replay);
+      expect(attached.running).toBe(true);
+      let advanced = 0;
+      while (mgr.getTurnStatus(turnId) === 'running' && advanced < 180_000) {
+        await vi.advanceTimersByTimeAsync(5_000);
+        advanced += 5_000;
+      }
+      expect(mgr.getTurnStatus(turnId)).toBe('done');
+    } finally {
+      vi.useRealTimers();
+    }
 
     const retries = events.filter(e => e.type === 'status' && e.data.phase === 'provider-retry');
     expect(retries.length).toBe(2);
     expect(retries[0].data.attempt).toBe(1);
     expect(retries[0].data.reason).toMatch(/rate limited/i);
-    expect(retries[0].data.delayMs).toBeGreaterThan(0);
+    // Patient waits: at least the shared 45s cooldown, never a fast 2s re-fire.
+    expect(retries[0].data.delayMs).toBeGreaterThanOrEqual(30_000);
     const done = events.find(e => e.type === 'done');
     expect(done.data.response).toBe('Recovered.');
-  }, 30000);
+    // Exactly three gateway touches — no hammering.
+    expect(fetchMock.mock.calls.length).toBe(3);
+  }, 20000);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
 import { HoverCard, HoverCardTrigger, HoverCardContent } from '@/components/ui/hover-card';
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
 import { ComponentIcon } from './ComponentIcon';
@@ -308,9 +309,10 @@ export function ComponentPalette() {
         </div>
       </div>
 
-      {/* List — scrollable. The @container wrapper lets cards collapse to a
-          single column when the palette is resized very narrow. */}
-      <div className="@container min-h-0 flex-1 overflow-y-auto">
+      {/* List — scrollable (thin dark scrollbar, ChatPanel pattern). The
+          @container wrapper lets cards collapse to a single column when the
+          palette is resized very narrow. */}
+      <div className="@container min-h-0 max-h-[calc(100vh-13rem)] flex-1 overflow-y-auto [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-thumb:hover]:bg-slate-600">
         <div className="p-2">
           {filtered.length === 0 && (
             <div className="flex flex-col items-center gap-1.5 p-6 text-center">
@@ -342,7 +344,7 @@ export function ComponentPalette() {
                     type="button"
                     onClick={() => handlePlace(plugin.type)}
                     disabled={running}
-                    title={running ? 'Pause simulation to add components' : `${plugin.name} — ${plugin.description}`}
+                    title={running ? 'Simulation running — stop to edit' : `${plugin.name} — ${plugin.description}`}
                     aria-label={`Place ${plugin.name}`}
                     className="group flex max-w-full items-center gap-1.5 rounded-full border border-slate-700/70 bg-slate-800/50 py-0.5 pl-0.5 pr-2 transition-all duration-150 hover:border-cyan-500/60 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan-500/60"
                   >
@@ -384,9 +386,13 @@ export function ComponentPalette() {
                       <span className="min-w-0 flex-1 truncate text-[10px] font-semibold uppercase tracking-wider text-slate-400 transition-colors duration-150 group-hover:text-slate-200">
                         {label}
                       </span>
-                      <span className="shrink-0 rounded-full border border-slate-700/60 bg-slate-900/60 px-1.5 font-mono text-[9px] leading-4 text-slate-500">
+                      <Badge
+                        variant="outline"
+                        aria-label={`${group.plugins.length} components`}
+                        className="h-4 rounded-full border-slate-700/60 bg-slate-900/60 px-1.5 py-0 font-mono text-[9px] leading-none text-slate-500"
+                      >
                         {group.plugins.length}
-                      </span>
+                      </Badge>
                       <ChevronDown
                         size={12}
                         className={`shrink-0 text-slate-500 transition-transform duration-150 ${open ? '' : '-rotate-90'}`}
@@ -418,7 +424,7 @@ export function ComponentPalette() {
         {running ? (
           <div className="flex items-center justify-center gap-1.5 rounded-md border border-amber-700/40 bg-amber-950/20 px-2 py-1 text-[10px] text-amber-300/90">
             <Pause size={10} />
-            Pause simulation to edit
+            Simulation running — stop to edit
           </div>
         ) : (
           <div className="flex items-center justify-center gap-1.5 text-[10px] text-slate-500">
@@ -465,17 +471,24 @@ function PaletteCard({
           onClick={() => onPlace(plugin.type)}
           disabled={running}
           aria-label={`${plugin.name}: ${plugin.description}. ${pinCount} ${pinWord}.`}
-          title={running ? 'Pause simulation to add components' : `${plugin.name} — ${plugin.description}`}
-          className="group flex flex-col rounded-lg border border-slate-800/80 bg-slate-800/40 p-1.5 text-center transition-all duration-150 hover:-translate-y-0.5 hover:border-cyan-500/60 hover:bg-slate-800/80 hover:shadow-lg hover:shadow-cyan-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0 disabled:hover:border-slate-800/80 disabled:hover:bg-slate-800/40 disabled:hover:shadow-none"
+          title={running ? 'Simulation running — stop to edit' : `${plugin.name} — ${plugin.description}`}
+          className="group flex flex-col rounded-lg border border-slate-800/80 bg-slate-800/40 p-1.5 text-center transition-all duration-150 hover:-translate-y-0.5 hover:border-cyan-500/60 hover:bg-slate-800/80 hover:shadow-lg hover:shadow-cyan-500/10 hover:ring-1 hover:ring-cyan-500/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0 disabled:hover:border-slate-800/80 disabled:hover:bg-slate-800/40 disabled:hover:shadow-none disabled:hover:ring-0"
         >
           {/* Symbol preview on a subtle gradient (slate-950 → slate-900) */}
           <div className="relative mb-1 flex h-11 items-center justify-center overflow-hidden rounded-md border border-slate-900 bg-gradient-to-b from-slate-950 to-slate-900 transition-colors duration-150 group-hover:border-cyan-500/30">
             <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_45%,rgba(34,211,238,0.14),transparent_65%)] opacity-0 transition-opacity duration-150 group-hover:opacity-100" />
             <ComponentIcon type={plugin.type} size={38} />
-            {/* Pin-count badge — slides in on hover */}
+            {/* Mono symbol tag (the plugin's symbol string) */}
             <span
               aria-hidden="true"
-              className="pointer-events-none absolute right-1 top-1 inline-flex translate-y-1 items-center gap-0.5 rounded-sm border border-cyan-500/40 bg-slate-950/90 px-1 font-mono text-[8px] font-medium leading-4 text-cyan-300 opacity-0 shadow-sm shadow-black/50 transition-all duration-150 group-hover:translate-y-0 group-hover:opacity-100"
+              className="pointer-events-none absolute left-1 top-1 max-w-[45%] truncate whitespace-pre rounded-sm border border-slate-700/60 bg-slate-950/80 px-1 font-mono text-[8px] leading-3 text-slate-400 transition-colors duration-150 group-hover:text-slate-300"
+            >
+              {plugin.symbol}
+            </span>
+            {/* Pin-count badge — dimmed at rest, emphasised on hover */}
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute right-1 top-1 inline-flex items-center gap-0.5 rounded-sm border border-cyan-500/40 bg-slate-950/90 px-1 font-mono text-[8px] font-medium leading-4 text-cyan-300 opacity-70 shadow-sm shadow-black/50 transition-opacity duration-150 group-hover:opacity-100"
             >
               <Pin size={7} className="-ml-px" />
               {pinCount} {pinWord}
@@ -483,6 +496,9 @@ function PaletteCard({
           </div>
           <span className="block truncate text-[10px] font-medium leading-tight text-slate-300 transition-colors duration-150 group-hover:text-cyan-100">
             {plugin.name}
+          </span>
+          <span className="mt-0.5 line-clamp-1 text-[9px] leading-tight text-slate-500 transition-colors duration-150 group-hover:text-slate-400">
+            {plugin.description}
           </span>
         </button>
       </HoverCardTrigger>
@@ -508,7 +524,7 @@ function PaletteCard({
           <p className="mt-1.5 text-[10px] leading-snug text-slate-400">{plugin.description}</p>
         </div>
 
-        <div className="max-h-52 overflow-y-auto px-2 py-2">
+        <div className="max-h-52 overflow-y-auto px-2 py-2 [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700">
           {plugin.terminals.map((t) => (
             <PinRow key={t.id} terminal={t} />
           ))}

@@ -147,15 +147,12 @@ function formatSI(v: number, unit?: string): string {
   return `${v.toExponential(2)} ${suffix('')}`.trim();
 }
 
-/** Voltage formatting with adaptive units: 12 V · 0.65 V · 4.2 mV · 12.0 µV. */
-function formatVolts(v: number): string {
+/** Voltage in volts, 3 significant digits: "5.00 V" · "0.65 V" · "0.00 V".
+ *  (toPrecision keeps extreme magnitudes in exponent form — fine for a
+ *  mono readout and unambiguous.) */
+function formatVoltageV(v: number): string {
   if (!isFinite(v)) return '—';
-  const a = Math.abs(v);
-  if (a >= 100) return `${v.toFixed(1)} V`;
-  if (a >= 1) return `${v.toFixed(2)} V`;
-  if (a >= 0.001) return `${(v * 1000).toFixed(2)} mV`;
-  if (a >= 1e-6) return `${(v * 1e6).toFixed(1)} µV`;
-  return v === 0 ? '0 V' : `${(v * 1e6).toFixed(1)} µV`;
+  return `${v.toPrecision(3)} V`;
 }
 
 /** True when the current value differs from the parameter's default.
@@ -359,17 +356,23 @@ export function PropertyPanel() {
       <div className="border-b border-slate-800 p-3">
         <div className="flex items-start justify-between gap-2">
           <div className="flex min-w-0 flex-1 items-center gap-2.5">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-cyan-500/30 bg-gradient-to-br from-cyan-500/20 via-slate-900 to-slate-950 text-sm font-bold text-cyan-300 shadow-inner">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-cyan-500/20 bg-gradient-to-br from-cyan-500/10 to-transparent text-sm font-bold text-cyan-300 shadow-inner">
               {plugin.symbol}
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="truncate text-sm font-semibold text-slate-100">{plugin.name}</span>
               </div>
-              <div className="mt-0.5 flex items-center gap-1.5">
+              <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
                 <Badge variant="outline" className="border-slate-700 px-1.5 text-[9px] uppercase tracking-wider text-slate-400">
                   {prettyCategory(plugin.category)}
                 </Badge>
+                <code
+                  className="truncate rounded border border-slate-700/70 bg-slate-800/60 px-1 font-mono text-[9px] text-slate-400"
+                  title={plugin.type}
+                >
+                  {plugin.type}
+                </code>
                 <span className="font-mono text-[9px] text-slate-500">{plugin.terminals.length} {plugin.terminals.length === 1 ? 'pin' : 'pins'}</span>
               </div>
             </div>
@@ -545,9 +548,13 @@ function PinsSection({
           <Pin size={11} className="text-cyan-400" />
           Pins
         </div>
-        <span className="font-mono text-[9px] text-slate-500">
-          {plugin.terminals.length} {plugin.terminals.length === 1 ? 'terminal' : 'terminals'}
-        </span>
+        <Badge
+          variant="outline"
+          aria-label={`${plugin.terminals.length} pins`}
+          className="h-4 rounded-full border-slate-700/70 bg-slate-900/60 px-1.5 py-0 font-mono text-[9px] leading-none text-slate-500"
+        >
+          {plugin.terminals.length} {plugin.terminals.length === 1 ? 'pin' : 'pins'}
+        </Badge>
       </div>
 
       <div className="max-h-80 divide-y divide-slate-800/60 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/50 shadow-inner">
@@ -582,10 +589,18 @@ function PinsSection({
         ))}
       </div>
 
+      {/* Live-voltage hint — shown until simulation data exists */}
+      {getVoltage === null && (
+        <p className="mt-1.5 flex items-center gap-1 px-0.5 text-[9px] leading-snug text-slate-600">
+          <Activity size={9} className="shrink-0" />
+          Run simulation to see live pin voltages
+        </p>
+      )}
+
       {/* Wire hint */}
       <div className="mt-2 flex items-start gap-1.5 rounded-md border border-slate-800/70 bg-slate-800/30 px-2 py-1.5 text-[9px] leading-snug text-slate-500">
         <Cable size={10} className="mt-px shrink-0" />
-        Wire tool (W) connects pins — click a pin on the canvas
+        Click a pin on the canvas or use the Wire tool (W) to connect.
       </div>
     </div>
   );
@@ -628,7 +643,7 @@ function PinRow({
             </span>
           )}
           <span
-            className={`font-mono text-[10px] tabular-nums ${voltage !== null ? 'text-cyan-200' : 'text-slate-600'}`}
+            className={`font-mono text-[10px] tabular-nums ${voltage !== null ? 'text-emerald-300' : 'text-slate-600'}`}
             title={
               voltage !== null
                 ? 'Live node voltage'
@@ -637,7 +652,7 @@ function PinRow({
                   : 'Not connected — click a pin on the canvas or use the Wire tool (W)'
             }
           >
-            {voltage !== null ? formatVolts(voltage) : '—'}
+            {voltage !== null ? formatVoltageV(voltage) : '—'}
           </span>
         </span>
       </div>
@@ -657,13 +672,14 @@ function PinRow({
 // Parameter editor
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ResetToDefaultButton({ label, onReset }: { label: string; onReset: () => void }) {
+function ResetToDefaultButton({ def, onReset }: { def: ParameterDef; onReset: () => void }) {
+  const unit = def.unit ? ` ${def.unit}` : '';
   return (
     <button
       type="button"
       onClick={onReset}
-      title="Reset to default"
-      aria-label={`Reset ${label} to default`}
+      title={`Reset to ${def.default}${unit}`}
+      aria-label={`Reset ${def.label} to ${def.default}${unit}`}
       className="shrink-0 rounded-full p-0.5 text-slate-500 transition-colors duration-150 hover:bg-slate-700/60 hover:text-cyan-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan-500/60"
     >
       <RotateCcw size={12} />
@@ -684,12 +700,15 @@ function ParameterEditor({
 
   if (def.type === 'boolean') {
     return (
-      <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
-        <Label className="min-w-0 cursor-pointer truncate text-xs text-slate-300">{def.label}</Label>
-        <span className="flex shrink-0 items-center gap-1.5">
-          {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
-          <Switch checked={!!value} onCheckedChange={(v) => onChange(v)} />
-        </span>
+      <div className="space-y-1 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
+        <div className="flex items-center justify-between gap-2">
+          <Label className="min-w-0 cursor-pointer truncate text-xs text-slate-300">{def.label}</Label>
+          <span className="flex shrink-0 items-center gap-1.5">
+            {differs && <ResetToDefaultButton def={def} onReset={() => onChange(def.default)} />}
+            <Switch checked={!!value} onCheckedChange={(v) => onChange(v)} />
+          </span>
+        </div>
+        {def.description && <p className="text-[10px] leading-snug text-slate-500">{def.description}</p>}
       </div>
     );
   }
@@ -698,7 +717,7 @@ function ParameterEditor({
       <div className="space-y-1 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
         <div className="flex items-center justify-between gap-1.5">
           <Label className="text-xs text-slate-300">{def.label}</Label>
-          {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
+          {differs && <ResetToDefaultButton def={def} onReset={() => onChange(def.default)} />}
         </div>
         <Select value={String(value ?? '')} onValueChange={(v) => onChange(v)}>
           <SelectTrigger className="h-8 border-slate-700 bg-slate-800 text-xs text-slate-200">
@@ -721,7 +740,7 @@ function ParameterEditor({
       <div className="space-y-1 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
         <div className="flex items-center justify-between gap-1.5">
           <Label className="text-xs text-slate-300">{def.label}</Label>
-          {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
+          {differs && <ResetToDefaultButton def={def} onReset={() => onChange(def.default)} />}
         </div>
         <div className="flex items-center gap-2">
           <input
@@ -788,7 +807,7 @@ goto loop`,
           <div className="flex items-center justify-between gap-1.5">
             <Label className="min-w-0 truncate text-xs text-slate-300">{def.label}</Label>
             <span className="flex shrink-0 items-center gap-1.5">
-              {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
+              {differs && <ResetToDefaultButton def={def} onReset={() => onChange(def.default)} />}
               <Select onValueChange={(v) => onChange(sampleSketches[v] || '')}>
                 <SelectTrigger className="h-6 w-32 border-slate-700 bg-slate-800 text-[10px] text-slate-300">
                   <SelectValue placeholder="Load sample..." />
@@ -817,7 +836,7 @@ goto loop`,
       <div className="space-y-1 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
         <div className="flex items-center justify-between gap-1.5">
           <Label className="text-xs text-slate-300">{def.label}</Label>
-          {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
+          {differs && <ResetToDefaultButton def={def} onReset={() => onChange(def.default)} />}
         </div>
         <Input
           value={String(value ?? '')}
@@ -844,7 +863,7 @@ goto loop`,
           <span className="font-mono text-[10px] tabular-nums text-cyan-300/90">
             {formatSI(numVal, def.unit)}
           </span>
-          {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
+          {differs && <ResetToDefaultButton def={def} onReset={() => onChange(def.default)} />}
         </span>
       </div>
       {useSlider ? (
