@@ -3,6 +3,7 @@
 import { useRef, useState, type ReactNode } from 'react';
 import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
+import type { Pad } from '@/lib/pcb/types';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -309,24 +310,71 @@ export function PCBToolbar() {
   };
 
   const handleRouteDiffPair = () => {
-    // Use the active layer; for demo, route a diff pair on pads R1.1 ↔ R2.1
-    // (in a real implementation the user would pick the pads via a tool)
-    const footprints = usePCB.getState().footprints;
-    if (footprints.length < 2) {
-      toast.error('Need at least 2 footprints to route a diff pair');
+    // Resolve REAL differential-pair nets by naming convention (USB_D+/D-,
+    // DATA_P/DATA_N, CLK+/CLK-, TX_P/TX_N …). The old demo behavior grabbed
+    // the first pads of the first two footprints and fabricated
+    // "<net>_P"/"<net>_N" net names — routing phantom nets onto real copper
+    // (Task 6-b: fabricated-net short + off-pad endpoints).
+    const s = usePCB.getState();
+    const allPads: { pad: Pad; net: string }[] = [];
+    for (const fp of s.footprints) {
+      for (const p of fp.pads) {
+        const net = p.net ?? '';
+        if (net) allPads.push({ pad: p, net });
+      }
+    }
+    const netPads = new Map<string, Pad[]>();
+    for (const { pad, net } of allPads) {
+      const list = netPads.get(net) ?? [];
+      list.push(pad);
+      netPads.set(net, list);
+    }
+    const PAIR_RE = [
+      [/^(.+)_p$/i, /^(.+)_n$/i],
+      [/^(.+)[+]$/, /^(.+)[-]$/],
+      [/^(.+)_pos$/i, /^(.+)_neg$/i],
+    ];
+    let foundP: string | null = null;
+    let foundN: string | null = null;
+    for (const [pRe, nRe] of PAIR_RE) {
+      for (const net of netPads.keys()) {
+        const pm = net.match(pRe);
+        if (!pm) continue;
+        const base = pm[1];
+        for (const other of netPads.keys()) {
+          if (other !== net && nRe.test(other) && other.replace(nRe, '$1').toLowerCase() === base.toLowerCase()) {
+            if ((netPads.get(net)?.length ?? 0) >= 2 && (netPads.get(other)?.length ?? 0) >= 2) {
+              foundP = net;
+              foundN = other;
+              break;
+            }
+          }
+        }
+        if (foundP) break;
+      }
+      if (foundP) break;
+    }
+    if (!foundP || !foundN) {
+      toast.error('No differential-pair nets found. Name two nets like USB_D+ / USB_D- or DATA_P / DATA_N (each connecting two pads), then run this again.');
       return;
     }
-    const padA = footprints[0].pads[0];
-    const padB = footprints[1].pads[0];
-    if (!padA || !padB) {
-      toast.error('Could not find pads on the first two footprints');
-      return;
-    }
-    const result = usePCB.getState().routeDiffPair(padA.id, padB.id, `${padA.net ?? 'DATA'}_P`, `${padA.net ?? 'DATA'}_N`);
+    // P pads: the two pads of the P net (a diff-pair leg connects exactly two pads)
+    const pPads = netPads.get(foundP)!;
+    const nPads = netPads.get(foundN)!;
+    // pair them by proximity: P pads sorted, N pad nearest to each
+    const [pA, pB] = pPads;
+    const [nA, nB] = [
+      nPads.reduce((best, p) => (Math.hypot(p.position.x - pA.position.x, p.position.y - pA.position.y) < Math.hypot(best.position.x - pA.position.x, best.position.y - pA.position.y) ? p : best)),
+      nPads.reduce((best, p) => (Math.hypot(p.position.x - pB.position.x, p.position.y - pB.position.y) < Math.hypot(best.position.x - pB.position.x, best.position.y - pB.position.y) ? p : best)),
+    ];
+    const result = usePCB.getState().routeDiffPair(pA.id, pB.id, foundP, foundN);
+    void nA; void nB; // N endpoints are resolved inside the store by net + proximity
     if (result.routedP && result.routedN) {
-      toast.success('Differential pair routed (P + N traces added)');
+      toast.success(`Differential pair routed: ${foundP} + ${foundN}`);
+    } else if (result.routedP) {
+      toast.warning(`Routed ${foundP}; ${foundN} had no clear path — move obstacles or try again`);
     } else {
-      toast.error('Diff pair routing failed');
+      toast.error('Diff pair routing failed — no clear path for either net');
     }
   };
 

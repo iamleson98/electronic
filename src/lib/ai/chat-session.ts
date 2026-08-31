@@ -313,6 +313,12 @@ interface TurnRuntime {
   /** History checkpoint pushed for this turn already (one Ctrl+Z per turn). */
   historyPushed: boolean;
   finalized: boolean;
+  /** Length of narration that is STABLE (delivered before a tool_call
+   *  boundary) — a model-call retry's text_reset wipes only the tail. */
+  stableTextLen: number;
+  /** True while the status pill shows a provider-retry message (cleared by
+   *  the first forward-progress text_delta). */
+  activePhaseWasRetry: boolean;
   /** The original POST body (persisted so a page reload can resume). */
   requestBody?: any;
 }
@@ -421,7 +427,11 @@ function circuitDiffers(doc: CircuitSnapshot, original: CircuitSnapshot): boolea
   return (
     doc.components.length !== original.components.length ||
     doc.wires.length !== original.wires.length ||
-    JSON.stringify(doc.components) !== JSON.stringify(original.components)
+    JSON.stringify(doc.components) !== JSON.stringify(original.components) ||
+    // Wire ENDPOINT changes: a turn that only rewires (same count, moved
+    // endpoints) used to show no "Applied to schematic" bar, no Undo
+    // affordance and no appliedSummary (Task 6-a).
+    JSON.stringify(doc.wires) !== JSON.stringify(original.wires)
   );
 }
 
@@ -859,6 +869,7 @@ async function streamOnce(opts: EngineOptions, resume: { turnId: string } | null
         if (owesSideEffects && data.phase === 'provider-retry') {
           const reason = String(data.reason || '');
           const isRateLimit = /429|rate.?limit|too many requests/i.test(reason);
+          cur.activePhaseWasRetry = true;
           setStatusText(
             isRateLimit
               ? `AI provider rate-limited — retrying in ${Math.round((data.delayMs || 0) / 1000)}s (attempt ${data.attempt})…`
@@ -867,15 +878,30 @@ async function streamOnce(opts: EngineOptions, resume: { turnId: string } | null
         }
       } else if (type === 'text_delta') {
         cur.text += data.text || '';
+        // Forward progress clears a stale provider-retry pill — without this
+        // a pure-text answer kept showing "rate-limited — retrying in 12s"
+        // for its whole duration after a successful retry (Task 6-a: only a
+        // tool_call ever overwrote it).
+        if (cur.activePhaseWasRetry) {
+          cur.activePhaseWasRetry = false;
+          setStatusText('Thinking…');
+        }
         updateAssistantFromRuntime(cur);
       } else if (type === 'text_reset') {
-        // The model call restarted (provider/loop retry) — text streamed by the
-        // aborted attempt is stale (the retry re-narrates from scratch); drop
-        // it so the message never shows duplicated narration. Like text_delta,
-        // this is pure display state: apply on replay AND live.
-        cur.text = '';
+        // The model call restarted (provider/loop retry) — text streamed by
+        // the aborted ATTEMPT is stale (the retry re-narrates it); drop only
+        // that portion. Narration from EARLIER model calls of the same turn
+        // (before a tool_call boundary) is stable and must survive — the old
+        // full wipe made "Building the voltage divider…" vanish from the
+        // finished message (Task 6-a). Like text_delta, pure display state:
+        // apply on replay AND live.
+        const keep = typeof cur.stableTextLen === 'number' ? cur.stableTextLen : 0;
+        cur.text = cur.text.slice(0, Math.max(0, Math.min(keep, cur.text.length)));
         updateAssistantFromRuntime(cur);
       } else if (type === 'tool_call') {
+        // Narration that existed when a tool call runs is DELIVERED — mark
+        // it stable so a later model-call retry cannot wipe it.
+        cur.stableTextLen = cur.text.length;
         cur.toolCalls.push({
           name: data.name,
           args: safeJsonParse(data.args),
@@ -1108,6 +1134,8 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
       lastAppliedDocJson: null,
       finalDoc: null,
       historyPushed: false,
+      stableTextLen: 0,
+      activePhaseWasRetry: false,
       finalized: false,
     };
     runtime.requestBody = requestBody;
@@ -1187,13 +1215,26 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
       lastAppliedDocJson: null,
       finalDoc: null,
       historyPushed: false,
+      stableTextLen: 0,
+      activePhaseWasRetry: false,
       finalized: true,
     };
     applyCircuitUpdate(rt, { components: msg.pendingDiff.components, wires: msg.pendingDiff.wires }, 0);
     toast.success('Circuit updated — press Ctrl+Z to undo');
     set(s => ({ messages: s.messages.map(m => (
       m.id === msgId
-        ? { ...m, pendingDiff: undefined, applied: true, appliedSummary: msg.pendingDiff!.summary }
+        ? {
+            ...m,
+            pendingDiff: undefined,
+            applied: true,
+            appliedSummary: msg.pendingDiff!.summary,
+            // appliedDoc keeps the BOM/wire-connections card alive after the
+            // user applies a reviewed diff — it renders from
+            // appliedDoc ?? pendingDiff, so WITHOUT this the card vanished
+            // the moment the diff was applied (Task 6-a; auto-apply mode
+            // always set it).
+            appliedDoc: { components: msg.pendingDiff!.components, wires: msg.pendingDiff!.wires },
+          }
         : m
     )) }));
   },
@@ -1239,6 +1280,8 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
       lastAppliedDocJson: null,
       finalDoc: null,
       historyPushed: false,
+      stableTextLen: 0,
+      activePhaseWasRetry: false,
       finalized: false,
     };
     runtime.requestBody = rec.requestBody;

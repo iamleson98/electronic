@@ -23,7 +23,7 @@ import { computeNetCompletion } from './netlist-verify';
 
 export interface DRCError {
   type: 'clearance' | 'short' | 'unrouted' | 'outside_board' | 'overlap' |
-    'annular_ring' | 'min_width' | 'min_drill' | 'silk_over_pad' | 'courtyard' |
+    'annular_ring' | 'min_width' | 'min_drill' | 'silk_over_pad' | 'courtyard' | 'hole_to_hole' |
     'net_mismatch' | 'isolated_copper' | 'starved_thermal';
   severity: 'error' | 'warning';
   message: string;
@@ -45,6 +45,10 @@ export interface DRCConfig {
   /** minimum silk-to-pad clearance in mm */
   minSilkClearance: number;
 }
+
+/** Minimum substrate web between two drilled holes (KiCad hole_to_hole
+ *  parity — standard fab drill-breakage limit). */
+const HOLE_TO_HOLE_MIN = 0.25;
 
 export const DEFAULT_DRC_CONFIG: DRCConfig = {
   minClearance: 0.2,
@@ -319,12 +323,19 @@ export function runDRC(
       const b = copperPads[j];
       if (a.net === b.net) continue;
       if (a.layer !== b.layer && a.drill <= 0 && b.drill <= 0) continue;
-      const dx = a.pos.x - b.pos.x;
-      const dy = a.pos.y - b.pos.y;
-      const dist = Math.hypot(dx, dy);
-      const aR = Math.max(a.size.width, a.size.height) / 2;
-      const bR = Math.max(b.size.width, b.size.height) / 2;
-      const minDist = dist - aR - bR;
+      // Shape-aware exact distance: rect↔rect uses the true rect geometry
+      // (circle approximation false-positived legally spaced SMD pads);
+      // circles keep the radius form.
+      let gap: number;
+      if (a.shape !== 'circle' && b.shape !== 'circle') {
+        gap = rectToRectDistance(a.pos, a.size, b.pos, b.size);
+      } else {
+        const dist = Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y);
+        const aR = Math.max(a.size.width, a.size.height) / 2;
+        const bR = Math.max(b.size.width, b.size.height) / 2;
+        gap = dist - aR - bR;
+      }
+      const minDist = gap;
       const requiredClearance = Math.max(getClearance(a.net), getClearance(b.net));
       if (minDist < requiredClearance) {
         errors.push({
@@ -340,7 +351,10 @@ export function runDRC(
     }
   }
 
-  // 7. Check traces outside board boundary
+  // 7. Check board boundary: traces, pads, vias, footprint bodies.
+  //    Previously ONLY trace endpoints were checked — a footprint dragged
+  //    (or a board shrunk) past the edge kept its pads/vias outside the
+  //    outline with a clean DRC (Task 6-b probe: 0 errors).
   for (const seg of copperSegs) {
     const points = [seg.start, seg.end];
     for (const p of points) {
@@ -351,6 +365,74 @@ export function runDRC(
           message: `Trace on net "${seg.net}" is outside board boundary`,
           position: p,
           layer: seg.layer,
+        });
+      }
+    }
+  }
+  for (const fp of footprints) {
+    const halfW = fp.bodySize.width / 2;
+    const halfH = fp.bodySize.height / 2;
+    if (fp.position.x - halfW < 0 || fp.position.x + halfW > board.width
+      || fp.position.y - halfH < 0 || fp.position.y + halfH > board.height) {
+      errors.push({
+        type: 'outside_board',
+        severity: 'error',
+        message: `Footprint "${fp.refdes}" is outside board boundary`,
+        position: { x: fp.position.x, y: fp.position.y },
+        layer: fp.side,
+      });
+    }
+  }
+  for (const pad of copperPads) {
+    const halfW = pad.size.width / 2;
+    const halfH = pad.size.height / 2;
+    if (pad.pos.x - halfW < 0 || pad.pos.x + halfW > board.width
+      || pad.pos.y - halfH < 0 || pad.pos.y + halfH > board.height) {
+      errors.push({
+        type: 'outside_board',
+        severity: 'error',
+        message: `Pad "${pad.id}" is outside board boundary`,
+        position: { x: pad.pos.x, y: pad.pos.y },
+        layer: pad.layer,
+      });
+    }
+  }
+  for (const via of vias) {
+    const r = via.diameter / 2;
+    if (via.position.x - r < 0 || via.position.x + r > board.width
+      || via.position.y - r < 0 || via.position.y + r > board.height) {
+      errors.push({
+        type: 'outside_board',
+        severity: 'error',
+        message: `Via on net "${via.net}" is outside board boundary`,
+        position: { x: via.position.x, y: via.position.y },
+        layer: 'both',
+      });
+    }
+  }
+
+  // 7b. Hole-to-hole spacing (drill breakage limit): the gap between two
+  //     drilled holes must exceed ~0.25mm of substrate or the drill can
+  //     crack the web between them (KiCad hole_to_hole parity).
+  const HOLES: { x: number; y: number; r: number; label: string }[] = [];
+  for (const via of vias) HOLES.push({ x: via.position.x, y: via.position.y, r: via.drill / 2, label: `via "${via.net}"` });
+  for (const fp of footprints) {
+    for (const pad of fp.pads) {
+      if ((pad.drill ?? 0) > 0) HOLES.push({ x: pad.position.x, y: pad.position.y, r: pad.drill! / 2, label: `pad "${pad.id}"` });
+    }
+  }
+  for (let i = 0; i < HOLES.length; i++) {
+    for (let j = i + 1; j < HOLES.length; j++) {
+      const a = HOLES[i], b = HOLES[j];
+      if (a.label === b.label) continue;
+      const dist = Math.hypot(a.x - b.x, a.y - b.y) - a.r - b.r;
+      if (dist < HOLE_TO_HOLE_MIN) {
+        errors.push({
+          type: 'hole_to_hole',
+          severity: 'warning',
+          message: `Hole-to-hole ${dist.toFixed(3)}mm < ${HOLE_TO_HOLE_MIN}mm (${a.label} ↔ ${b.label})`,
+          position: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+          layer: 'both',
         });
       }
     }
@@ -610,6 +692,22 @@ function viaSpansOverlap(a: Via, b: Via): boolean {
 }
 
 /** Distance from a point to an axis-aligned rectangle (0 = inside/touching) */
+/** Exact distance between two axis-aligned rects (0 when overlapping).
+ *  The old pad-pad check approximated both pads as circles (max-dimension/2
+ *  radius) — legally spaced SMD rect pads stacked 1.5mm apart with a real
+ *  0.7mm gap were false-positive flagged as clearance violations (Task 6-b). */
+function rectToRectDistance(
+  aPos: { x: number; y: number }, aSize: { width: number; height: number },
+  bPos: { x: number; y: number }, bSize: { width: number; height: number },
+): number {
+  const dx = Math.abs(aPos.x - bPos.x) - (aSize.width + bSize.width) / 2;
+  const dy = Math.abs(aPos.y - bPos.y) - (aSize.height + bSize.height) / 2;
+  if (dx < 0 && dy < 0) return Math.max(dx, dy); // overlapping
+  if (dx < 0) return dy;
+  if (dy < 0) return dx;
+  return Math.hypot(dx, dy);
+}
+
 function pointToRectDistance(
   p: { x: number; y: number },
   center: { x: number; y: number },

@@ -804,3 +804,37 @@ Stage Summary:
 - Route quality transformed, completion intact: segments −30…−46% on every measured example (LED+R 26→14, Two-Stage 424→227, Digital Clock 1351→957, 555 Timer 1260→855); bends −35…−52%; vias reduced by the gloss on multi-via boards; 100% completion + DRC-clean everywhere; dense-board runtimes 1.5-4.8s (single pass).
 - Design decisions worth remembering: (1) admissible octile h + small cost terms — weighted A* breaks completion on dense boards; (2) the bias needs the density gate or it escalates passes; (3) gloss must be bounded; (4) dirState beats parent-decoding for bend checks.
 - Deferred (documented): stub removal (buildRoute produces simple polylines — no branch stubs exist in practice), acute-angle pad-entry splitting (45° snap already normalizes; rare fallback cases only), async routing with live progress (P1 #9), diff-pair + length-tune rewrites (P1 #6/#7 — untouched this round), PCB undo/redo (P1 #10), DRC parity set (P1 #11), align/distribute bbox (P1 #12).
+
+---
+Task ID: 9-b
+Agent: orchestrator (subagent dispatches failed on upstream 429 — implemented directly)
+Task: P1 feature batch — PCB undo/redo, DRC parity set, routeDiffPair rewrite, AI chat polish
+
+Work Log:
+- PCB UNDO/REDO (research P1 #10 — Ctrl+Z was a complete no-op in PCB mode):
+  • Module-level history engine in store.ts: PCBHistoryEntry snapshots (board, footprints, traces, vias, ratsnest, padNets, keepouts, netClasses, teardrops, copperPours, layerStack) via structuredClone; HISTORY_CAP 64; redoStack cleared on new mutations; canUndo/canRedo reactive flags kept truthful by pushHistory itself (first draft forgot — tests caught it: flags stayed stale after divergent mutations).
+  • Gesture coalescing: pushHistory(key) skips re-push when the same key recurs within 400 ms — a footprint drag fires moveFootprint per mousemove and must undo as ONE step (tested with a simulated 20-step drag).
+  • 27 mutating actions instrumented (import, board size, move/rotate/flip, deleteTrace, finishRouting commit, vias, layer stack, diff pair, clear, load, pours, auto/topo route, unroute, keepouts, teardrops, net classes, length tune, align/distribute). undo() clears drcErrors + selections (no zombie overlays). _resetPCBHistory() test hook.
+  • PCBCanvas keymap: Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y (input-guarded like the other keys).
+  • Tests: tests/pcb-undo-redo.test.ts — 8 tests (move undo/redo, drag coalescing = 1 step, unrouteAll undo restores traces+vias+satisfied ratsnest, deleteTrace undo, divergent-mutation clears redo, deep round-trip of pours/keepouts/netClasses/padNets, 64-cap, stale-DRC clearing).
+- DRC PARITY SET (research P1 #11, KiCad consumer bar):
+  • Pad-pad clearance now uses exact rect↔rect distance for rect pads (new rectToRectDistance helper) — kills Task 6-b's false positives on legally spaced SMD pads; circles keep the radius form.
+  • Outside-board checks extended from trace endpoints to pads, vias AND footprint bodies (6-b probe: 0 errors for pads past the edge).
+  • Hole-to-hole drill spacing (0.25 mm substrate-web limit, KiCad hole_to_hole parity) across vias + THT pads, new DRCError type.
+  • Tests: tests/pcb-drc-parity.test.ts — 9 tests (0.7mm-gap rect pads clean [was false-positive], 0.1mm gap still flagged, horizontal case correct, pad/via/footprint outside board flagged, inside clean, 0.1mm drill web flagged, 1mm drills clean).
+- ROUTEDIFFPAIR REWRITE (research P1 #6 — the 6-b MEDIUM "fabricated short" bug):
+  • Store: P endpoints must genuinely belong to netP (guard against the toolbar's old fabricated "GND_P"-style phantom nets); N endpoints resolved to the REAL nearest pads of netN (old code invented offset points connected to nothing); 45°-knee path construction with zero-length filtering; every segment clearance-verified via segmentHasClearanceConflict before commit; honest per-net failure (routedN:false commits nothing); ratsnest satisfaction updated; pairedTraceId linkage kept.
+  • Toolbar: handleRouteDiffPair now detects REAL pair nets by naming convention (_P/_N, +/−, _pos/_neg with matching base, ≥2 pads each) and routes those; informative toast when none exist (instead of silently fabricating).
+  • Tests: tests/pcb-diff-pair.test.ts — 4 tests (real-pad endpoints exact, fabricated-net guard refuses, N-fails-honestly with no floating copper, nearest-N-pad resolution).
+- AI CHAT POLISH (deferred 6-a MEDIUMs):
+  • text_reset now truncates to stableTextLen (narration delivered before tool_call boundaries survives model-call retries — "Building the voltage divider…" no longer vanishes); stableTextLen updated at every tool_call boundary.
+  • Forward-progress text_delta clears a stale provider-retry pill (pure-text answers no longer show "rate-limited — retrying in 12s" for their whole duration); activePhaseWasRetry flag on the runtime.
+  • circuitDiffers compares wire ENDPOINTS too (rewiring-only turns now show the Applied bar/Undo/appliedSummary).
+  • applyPendingDiff sets appliedDoc (BOM/wire-connections card survives the user applying a reviewed diff — renders from appliedDoc ?? pendingDiff).
+  • Tests: tests/ai-chat-polish.test.ts — 4 tests.
+- Verification: tsc 0 errors; eslint 0 errors across all touched files; full suite 2823/2823 (115 files); browser E2E: Ctrl+Z undid import (board emptied) → Ctrl+Y restored (948 copper px) → Auto-Route (1955 copper, 0 airwires) → Unroute All → Ctrl+Z restored ALL routes (1955 copper, 0 airwires); DRC passed + netlist 3/3 on the restored board; zero console/page errors after clean reload.
+
+Stage Summary:
+- PCB now has the three biggest missing modern-tool features: full undo/redo (gesture-coalesced, 64-deep), honest DRC parity checks (rect-exact, boundary, drill webs), and a diff-pair router that connects REAL pads with verified clearance.
+- AI chat UX polished: no stale rate-limit pills, narration survives retries, rewiring turns are undoable, the BOM card persists through review-apply.
+- Deferred (documented for later): length-tune serpentine rewrite (P1 #7 — untouched), async routing with live progress + Cancel (P1 #9), DRCSettingsDialog wiring to real config (6-b LOW), align/distribute bbox fix (P1 #12), remaining 9-d LOW items (limiter-429 code, retryLast newest-message, sse.ts tail flush, missing-key SetupCard regex).

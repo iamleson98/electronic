@@ -897,6 +897,17 @@ export function PCBCanvas() {
       }
       else if (e.key === 'r' || e.key === 'R') { if (selectedFootprintId) rotateFootprint(selectedFootprintId); }
       else if ((e.key === 'Delete' || e.key === 'Backspace') && !routing) { if (selectedTraceId) usePCB.getState().deleteTrace(selectedTraceId); }
+      // Undo/redo (document history in the PCB store — was a no-op before:
+      // every modern PCB tool has full undo)
+      else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        if (e.shiftKey) usePCB.getState().redo();
+        else usePCB.getState().undo();
+      }
+      else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault();
+        usePCB.getState().redo();
+      }
       else if (e.key === '1') setTool('select');
       else if (e.key === '2') setTool('route');
       else if (e.key === '3') setTool('via');

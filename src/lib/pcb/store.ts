@@ -128,6 +128,11 @@ interface PCBState {
   /** Place a via at the current routing position and continue on the other layer. */
   addRoutingVia: (pos?: { x: number; y: number }) => void;
   runNetlistVerify: () => NetlistVerifyResult | null;
+  // undo/redo — snapshot stacks of the document-bearing state
+  canUndo: boolean;
+  canRedo: boolean;
+  undo: () => void;
+  redo: () => void;
   // keepout
   addKeepout: (rect: { x: number; y: number; width: number; height: number }, layers: 'all' | string[], reason?: string) => void;
   removeKeepout: (id: string) => void;
@@ -145,12 +150,120 @@ interface PCBState {
 }
 
 let idCounter = 0;
+function dist2(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return dx * dx + dy * dy;
+}
+
 function genId(prefix: string) {
   idCounter++;
   return `${prefix}_${Date.now().toString(36)}_${idCounter}`;
 }
 
+
+// ── undo/redo history ────────────────────────────────────────────────────────
+/** Document-bearing state snapshot. Tool/selection/UI state is intentionally
+ *  NOT part of history — undo restores the board, not the mouse. */
+interface PCBHistoryEntry {
+  board: BoardOutline;
+  footprints: Footprint[];
+  traces: Trace[];
+  vias: Via[];
+  ratsnest: Ratsnest[];
+  padNets: Map<string, string>;
+  keepouts: PCBState['keepouts'];
+  netClasses: PCBState['netClasses'];
+  teardrops: PCBState['teardrops'];
+  copperPours: CopperPour[];
+  layerStack: LayerStack;
+}
+
+const undoStack: PCBHistoryEntry[] = [];
+const redoStack: PCBHistoryEntry[] = [];
+const HISTORY_CAP = 64;
+let lastHistoryPush = { key: '', time: 0 };
+
+function snapshotForHistory(s: PCBState): PCBHistoryEntry {
+  return structuredClone({
+    board: s.board,
+    footprints: s.footprints,
+    traces: s.traces,
+    vias: s.vias,
+    ratsnest: s.ratsnest,
+    padNets: s.padNets,
+    keepouts: s.keepouts,
+    netClasses: s.netClasses,
+    teardrops: s.teardrops,
+    copperPours: s.copperPours,
+    layerStack: s.layerStack,
+  });
+}
+
+/** Push the CURRENT state onto the undo stack before a mutation. Repeated
+ *  pushes with the same gesture key within 400 ms coalesce into one entry —
+ *  a footprint drag fires moveFootprint per mousemove and must undo as ONE
+ *  step. Any new mutation clears the redo stack. */
+function pushHistory(key: string): void {
+  const now = Date.now();
+  if (key !== '' && lastHistoryPush.key === key && now - lastHistoryPush.time < 400) {
+    lastHistoryPush.time = now;
+    return; // same gesture — the original "before" snapshot already covers it
+  }
+  lastHistoryPush = { key, time: now };
+  undoStack.push(snapshotForHistory(usePCB.getState()));
+  if (undoStack.length > HISTORY_CAP) undoStack.shift();
+  redoStack.length = 0;
+  // keep the reactive flags truthful (undo became available; redo is gone)
+  usePCB.setState({ canUndo: true, canRedo: false });
+}
+
+function applyHistoryEntry(entry: PCBHistoryEntry): Partial<PCBState> {
+  // structuredClone already isolated the entry — hand the store fresh clones
+  // so a LATER undo of the same entry is unaffected (applyHistoryEntry may be
+  // called twice: undo then redo then undo).
+  const clone = structuredClone(entry);
+  return {
+    board: clone.board,
+    footprints: clone.footprints,
+    traces: clone.traces,
+    vias: clone.vias,
+    ratsnest: clone.ratsnest,
+    padNets: clone.padNets,
+    keepouts: clone.keepouts,
+    netClasses: clone.netClasses,
+    teardrops: clone.teardrops,
+    copperPours: clone.copperPours,
+    layerStack: clone.layerStack,
+    drcErrors: [],
+    selectedFootprintId: null,
+    selectedTraceId: null,
+    canUndo: undoStack.length > 0,
+    canRedo: redoStack.length > 0,
+  };
+}
+
+/** Test hook: reset the history stacks (module-level state, shared per module instance). */
+export function _resetPCBHistory(): void {
+  undoStack.length = 0;
+  redoStack.length = 0;
+  lastHistoryPush = { key: '', time: 0 };
+}
+
 export const usePCB = create<PCBState>((set, get) => ({
+  canUndo: false,
+  canRedo: false,
+  undo: () => {
+    const entry = undoStack.pop();
+    if (!entry) return;
+    redoStack.push(snapshotForHistory(get()));
+    set(applyHistoryEntry(entry));
+  },
+  redo: () => {
+    const entry = redoStack.pop();
+    if (!entry) return;
+    undoStack.push(snapshotForHistory(get()));
+    set(applyHistoryEntry(entry));
+  },
   board: { width: 80, height: 60 },
   footprints: [],
   traces: [],
@@ -179,6 +292,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   copperPours: [],
 
   importFromSchematic: (components, wires) => {
+    pushHistory('import');
     const { footprints, ratsnest, padNets, board } = createPCBFromSchematic(components, wires);
     set({
       footprints,
@@ -197,9 +311,13 @@ export const usePCB = create<PCBState>((set, get) => ({
   setTool: (tool) => set({ tool, routingFrom: null, routingPath: [] }),
   setActiveLayer: (activeLayer) => set({ activeLayer }),
   setDefaultTraceWidth: (defaultTraceWidth) => set({ defaultTraceWidth }),
-  setBoardSize: (width, height) => set({ board: { width, height } }),
+  setBoardSize: (width, height) => {
+    pushHistory('setBoardSize');
+    set({ board: { width, height } });
+  },
 
   moveFootprint: (id, pos) => {
+    pushHistory(`move:${id}`);
     const s = get();
     const fp = s.footprints.find((f) => f.id === id);
     if (!fp) return;
@@ -236,6 +354,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   rotateFootprint: (id) => {
+    pushHistory(`rotate:${id}`);
     const s = get();
     const fp = s.footprints.find((f) => f.id === id);
     if (!fp) return;
@@ -276,6 +395,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   deleteTrace: (id) => {
+    pushHistory(`deleteTrace:${id}`);
     const s = get();
     const traces = s.traces.filter((t) => t.id !== id);
     // Deleting copper can un-satisfy ratsnest legs → airwires must return
@@ -349,6 +469,7 @@ export const usePCB = create<PCBState>((set, get) => ({
         width: s.defaultTraceWidth,
       });
     }
+    pushHistory('finishRoute');
     set((st) => ({
       traces: [...st.traces, trace],
       routingFrom: null,
@@ -410,6 +531,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   addVia: (pos, net) => {
+    pushHistory('addVia');
     const via: Via = {
       id: genId('via'),
       position: { ...pos },
@@ -424,6 +546,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   addTypedVia: (pos, net, type, fromLayer, toLayer) => {
+    pushHistory('addVia');
     // Diameter/drill defaults per via type (industry-typical values)
     let diameter = 1.0;
     let drill = 0.5;
@@ -450,8 +573,9 @@ export const usePCB = create<PCBState>((set, get) => ({
   })),
 
   routeDiffPair: (padAId, padBId, netP, netN) => {
+    pushHistory('diffPair');
     const s = get();
-    // Find the two pads
+    // Find the two P pads
     let padA: Pad | null = null;
     let padB: Pad | null = null;
     for (const fp of s.footprints) {
@@ -461,38 +585,76 @@ export const usePCB = create<PCBState>((set, get) => ({
       }
     }
     if (!padA || !padB) return { routedP: false, routedN: false };
-    // Route the P trace as a simple L-shape on the active layer
+    if ((padA.net ?? '') !== netP || (padB.net ?? '') !== netP) {
+      // Both P endpoints must actually belong to netP — routing a P trace
+      // between two arbitrary pads of OTHER nets used to fabricate a
+      // phantom connection (Task 6-b: "usually different nets = fabricated
+      // net short").
+      return { routedP: false, routedN: false };
+    }
+    // Resolve the REAL N pads: every pad on netN, paired by proximity to
+    // the P endpoints (diff-pair N pads sit next to their P partners —
+    // USB D+/D-, DATA_P/D_N). The old code invented offset points not on
+    // any pad: floating copper that connected nothing.
+    const nPads: Pad[] = [];
+    for (const fp of s.footprints) {
+      for (const p of fp.pads) {
+        if ((p.net ?? '') === netN) nPads.push(p);
+      }
+    }
+    const nStart = nPads.length > 0
+      ? nPads.reduce((best, p) => (dist2(p.position, padA!.position) < dist2(best.position, padA!.position) ? p : best))
+      : null;
+    const nEnd = nPads.filter((p) => p !== nStart).length > 0
+      ? nPads.filter((p) => p !== nStart).reduce((best, p) => (dist2(p.position, padB!.position) < dist2(best.position, padB!.position) ? p : best))
+      : null;
+
     const layer = s.activeLayer;
     const width = s.defaultTraceWidth;
-    // P trace: padA → (midX, padA.y) → (midX, padB.y) → padB  (manhattan with 45° knees)
-    const midX = (padA.position.x + padB.position.x) / 2;
-    const pSegs = [
-      { start: { ...padA.position }, end: { x: midX, y: padA.position.y }, width },
-      { start: { x: midX, y: padA.position.y }, end: { x: midX, y: padB.position.y }, width },
-      { start: { x: midX, y: padB.position.y }, end: { ...padB.position }, width },
-    ];
-    // N trace: offset by traceSpacing (2× trace width) parallel to P
-    const spacing = width * 4; // 4× width is a typical diff-pair spacing
-    // Determine offset direction (perpendicular to dominant axis)
-    const isHoriz = Math.abs(padB.position.x - padA.position.x) > Math.abs(padB.position.y - padA.position.y);
-    const offX = isHoriz ? 0 : spacing;
-    const offY = isHoriz ? spacing : 0;
-    // Find a second pair of pads for the N net — for simplicity, use padB shifted.
-    // In a real implementation, the user would specify the actual N pad.
-    // Here we just route N parallel to P.
-    const nStart = { x: padA.position.x + offX, y: padA.position.y + offY };
-    const nEnd = { x: padB.position.x + offX, y: padB.position.y + offY };
-    const nSegs = [
-      { start: nStart, end: { x: midX + offX, y: nStart.y }, width },
-      { start: { x: midX + offX, y: nStart.y }, end: { x: midX + offX, y: nEnd.y }, width },
-      { start: { x: midX + offX, y: nEnd.y }, end: nEnd, width },
-    ];
+
+    /** Manhattan path with 45° knees between two real pads, zero-length
+     *  segments filtered (the old construction emitted them when pads
+     *  shared an axis), every segment clearance-verified. */
+    const buildVerifiedPath = (from: { x: number; y: number }, to: { x: number; y: number }, net: string) => {
+      const segs: { start: { x: number; y: number }; end: { x: number; y: number }; width: number }[] = [];
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const m = Math.min(Math.abs(dx), Math.abs(dy));
+      const sx = Math.sign(dx), sy = Math.sign(dy);
+      // 45° diagonal to the knee, then straight to the target
+      const knee = { x: from.x + sx * m, y: from.y + sy * m };
+      const pts = [from, knee, to];
+      for (let i = 0; i < pts.length - 1; i++) {
+        const a = pts[i], b = pts[i + 1];
+        if (Math.hypot(b.x - a.x, b.y - a.y) < 1e-9) continue; // zero-length — drop
+        const { conflict } = segmentHasClearanceConflict(a, b, net, layer, width / 2, DEFAULT_DRC_CONFIG.minClearance, s.footprints, s.traces, s.vias);
+        if (conflict) return null; // honest failure — no copper committed
+        segs.push({ start: { x: a.x, y: a.y }, end: { x: b.x, y: b.y }, width });
+      }
+      return segs.length > 0 ? segs : null;
+    };
+
+    const pSegs = buildVerifiedPath(padA.position, padB.position, netP);
     const idP = genId('diffp');
     const idN = genId('diffn');
-    const traceP: Trace = { id: idP, net: netP, layer, segments: pSegs, width, pairedTraceId: idN };
-    const traceN: Trace = { id: idN, net: netN, layer, segments: nSegs, width, pairedTraceId: idP };
-    set((st) => ({ traces: [...st.traces, traceP, traceN] }));
-    return { routedP: true, routedN: true };
+    const traceP: Trace | null = pSegs ? { id: idP, net: netP, layer, segments: pSegs, width, pairedTraceId: idN } : null;
+
+    let traceN: Trace | null = null;
+    if (nStart && nEnd) {
+      const nSegs = buildVerifiedPath(nStart.position, nEnd.position, netN);
+      if (nSegs) traceN = { id: idN, net: netN, layer, segments: nSegs, width, pairedTraceId: idP };
+    }
+
+    if (!traceP && !traceN) return { routedP: false, routedN: false };
+    set((st) => {
+      const added = [...(traceP ? [traceP] : []), ...(traceN ? [traceN] : [])];
+      return {
+        traces: [...st.traces, ...added],
+        // newly-connected pads satisfy their ratsnest legs
+        ratsnest: flagSatisfiedRatsnestLegs(st.ratsnest, st.footprints, [...st.traces, ...added], st.vias),
+      };
+    });
+    return { routedP: !!traceP, routedN: !!traceN };
   },
 
   selectFootprint: (id) => set({ selectedFootprintId: id, selectedTraceId: null }),
@@ -500,12 +662,15 @@ export const usePCB = create<PCBState>((set, get) => ({
   toggleRatsnest: () => set((s) => ({ showRatsnest: !s.showRatsnest })),
   toggleGrid: () => set((s) => ({ showGrid: !s.showGrid })),
   togglePadNets: () => set((s) => ({ showPadNets: !s.showPadNets })),
-  clearPCB: () => set({
+  clearPCB: () => {
+    pushHistory('clearPCB');
+    set({
     footprints: [], traces: [], vias: [], ratsnest: [], padNets: new Map(),
     keepouts: [], netClasses: [], teardrops: [], copperPours: [], drcErrors: [],
     selectedFootprintId: null, selectedTraceId: null, selectedFootprintIds: new Set(),
     routingFrom: null, routingPath: [], tool: 'select' as PCBTool,
-  }),
+  });
+  },
 
   serialize: () => {
     const s = get();
@@ -529,6 +694,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   loadDocument: (doc) => {
+    pushHistory('loadDocument');
     const footprints = doc.footprints;
     const traces = doc.traces;
     const vias = doc.vias ?? [];
@@ -574,6 +740,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   clearDRC: () => set({ drcErrors: [] }),
 
   addCopperPour: (layer, net) => {
+    pushHistory('addPour');
     const s = get();
     const pour = generateCopperPour(layer, net, s.footprints, s.traces, s.vias, s.board);
     set((st) => ({
@@ -582,6 +749,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   removeCopperPour: (layer) => {
+    pushHistory('removePour');
     set((st) => ({ copperPours: st.copperPours.filter((p) => p.layer !== layer) }));
   },
 
@@ -602,6 +770,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   runAutoRoute: () => {
+    pushHistory('autoRoute');
     const s = get();
     const options: Partial<AutoRouteOptions> = {
       ...DEFAULT_AUTOROUTE_OPTIONS,
@@ -625,6 +794,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   unrouteAll: () => {
+    pushHistory('unrouteAll');
     const s = get();
     set({
       traces: [], vias: [], routingFrom: null, routingPath: [], selectedTraceId: null,
@@ -634,6 +804,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   runTopoRoute: () => {
+    pushHistory('topoRoute');
     const s = get();
     const result = routeTopologically(
       s.footprints, s.traces, s.vias, s.ratsnest, s.board,
@@ -672,6 +843,7 @@ export const usePCB = create<PCBState>((set, get) => ({
 
   // ===== Flip footprint =====
   flipFootprint: (id) => {
+    pushHistory(`flip:${id}`);
     set((s) => ({
       footprints: s.footprints.map((fp) => {
         if (fp.id !== id) return fp;
@@ -706,13 +878,20 @@ export const usePCB = create<PCBState>((set, get) => ({
   toggleKeepouts: () => set((s) => ({ showKeepouts: !s.showKeepouts })),
 
   // ===== Keepout areas =====
-  addKeepout: (rect, layers, reason) => set((s) => ({
+  addKeepout: (rect, layers, reason) => {
+    pushHistory('addKeepout');
+    set((s) => ({
     keepouts: [...s.keepouts, { id: genId('keepout'), rect, layers, reason }],
-  })),
-  removeKeepout: (id) => set((s) => ({ keepouts: s.keepouts.filter((k) => k.id !== id) })),
+  }));
+  },
+  removeKeepout: (id) => {
+    pushHistory('removeKeepout');
+    set((s) => ({ keepouts: s.keepouts.filter((k) => k.id !== id) }));
+  },
 
   // ===== Teardrops =====
   generateTeardrops: () => {
+    pushHistory('teardrops');
     const s = get();
     const teardrops: PCBState['teardrops'] = [];
     let tdId = 0;
@@ -750,16 +929,26 @@ export const usePCB = create<PCBState>((set, get) => ({
     }
     set({ teardrops });
   },
-  clearTeardrops: () => set({ teardrops: [] }),
+  clearTeardrops: () => {
+    pushHistory('clearTeardrops');
+    set({ teardrops: [] });
+  },
 
   // ===== Net classes =====
-  addNetClass: (nc) => set((s) => ({
+  addNetClass: (nc) => {
+    pushHistory('addNetClass');
+    set((s) => ({
     netClasses: [...s.netClasses.filter((c) => c.name !== nc.name), nc],
-  })),
-  removeNetClass: (name) => set((s) => ({ netClasses: s.netClasses.filter((c) => c.name !== name) })),
+  }));
+  },
+  removeNetClass: (name) => {
+    pushHistory('removeNetClass');
+    set((s) => ({ netClasses: s.netClasses.filter((c) => c.name !== name) }));
+  },
 
   // ===== Length tuning (serpentine meander) =====
   lengthTuneTrace: (traceId, targetLength) => {
+    pushHistory('lengthTune');
     const s = get();
     const trace = s.traces.find((t) => t.id === traceId);
     if (!trace) return;
@@ -804,6 +993,7 @@ export const usePCB = create<PCBState>((set, get) => ({
 
   // ===== Alignment =====
   alignSelected: (direction) => {
+    pushHistory('align');
     const s = get();
     if (s.selectedFootprintIds.size < 2) return;
     const selected = s.footprints.filter((f) => s.selectedFootprintIds.has(f.id));
@@ -836,6 +1026,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   distributeSelected: (axis) => {
+    pushHistory('distribute');
     const s = get();
     if (s.selectedFootprintIds.size < 3) return;
     const selected = s.footprints.filter((f) => s.selectedFootprintIds.has(f.id));
