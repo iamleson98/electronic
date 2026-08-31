@@ -3,6 +3,8 @@
 // vias, board outline, and copper layers.
 // Supports 2-layer, 4-layer, and 6-layer boards.
 
+import type { CopperPour } from './copper-pour';
+
 /** Copper layer identifier */
 export type CopperLayer = 'top' | 'inner1' | 'inner2' | 'inner3' | 'inner4' | 'bottom';
 
@@ -155,7 +157,7 @@ export interface Via {
   toLayer?: CopperLayer;
 }
 
-/** A ratsnest connection (airwire showing what needs to be routed) */
+/** A ratsnest connection (airwire showing what needs routing) */
 export interface Ratsnest {
   /** from pad id */
   fromPadId: string;
@@ -167,6 +169,10 @@ export interface Ratsnest {
   from: { x: number; y: number };
   /** to position in mm */
   to: { x: number; y: number };
+  /** True when both pads are already connected by same-net copper — the
+   *  airwire is satisfied and must NOT be drawn (kept as a flag rather than
+   *  deleting the leg so re-runs/unroute can restore it). */
+  routed?: boolean;
 }
 
 /** PCB board outline */
@@ -188,6 +194,43 @@ export interface PCBDocument {
   defaultTraceWidth: number;
   /** Layer stack configuration (2/4/6 layer) */
   layerStack?: LayerStack;
+  /** Copper pours (ground/power planes) — restored by loadDocument */
+  copperPours?: CopperPour[];
+  /** Serialized form of the padNets Map: [terminalKey, netName] entries */
+  padNets?: [string, string][];
+  /** Keepout rectangles (copper routing exclusion zones) */
+  keepouts?: PCBKeepout[];
+  /** Per-net routing rules (width / clearance / via sizes) */
+  netClasses?: PCBNetClass[];
+  /** Teardrop relief shapes at pad↔trace junctions */
+  teardrops?: PCBTeardrop[];
+}
+
+/** A routing keepout zone */
+export interface PCBKeepout {
+  id: string;
+  rect: { x: number; y: number; width: number; height: number };
+  layers: 'all' | string[];
+  reason?: string;
+}
+
+/** A per-net routing rule */
+export interface PCBNetClass {
+  name: string;
+  traceWidth: number;
+  clearance: number;
+  viaDiameter: number;
+  viaDrill: number;
+  nets: string[];
+}
+
+/** A teardrop relief shape */
+export interface PCBTeardrop {
+  id: string;
+  position: { x: number; y: number };
+  padId: string;
+  points: { x: number; y: number }[];
+  layer: string;
 }
 
 /** Footprint definition for a component type (template) */

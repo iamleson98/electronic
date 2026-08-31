@@ -387,6 +387,39 @@ function combineSignals(timeoutMs: number, signal?: AbortSignal): { signal: Abor
   };
 }
 
+/**
+ * Race a stream-read promise against an abort signal. The z-ai-web-dev-sdk's
+ * chat.completions.create() accepts no AbortSignal (its fetch is opaque), so
+ * a sandbox-mode model stream used to be unstoppable: the read loop consumed
+ * the whole response even after the user pressed Stop or the 290s turn cap
+ * fired. When the signal aborts we reject immediately (the caller's abort
+ * path stays truthful) and cancel the reader — that makes the pending read()
+ * resolve done, so the abandoned accumulate loop exits instead of leaking the
+ * connection. Promise.race attaches handlers to BOTH contenders, so the
+ * loser's later settlement can never surface as an unhandled rejection.
+ */
+async function raceStreamAbort<T>(
+  readPromise: Promise<T>,
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return readPromise;
+  if (signal.aborted) {
+    readPromise.catch(() => { /* settled by the cancel below */ });
+    reader.cancel().catch(() => { /* already closed */ });
+    throw new Error('zai request aborted (client disconnected)');
+  }
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('zai request aborted (client disconnected)')), { once: true });
+  });
+  try {
+    return await Promise.race([readPromise, abortPromise]);
+  } catch (e) {
+    reader.cancel().catch(() => { /* already closed */ });
+    throw e;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Z.ai — PUBLIC API mode (ZAI_API_KEY): works from any deployment/domain.
 // Direct OpenAI-compatible fetch, SSE streaming, no SDK involvement.
@@ -637,7 +670,11 @@ class ZaiSandboxProvider implements AIProvider {
       }
       const reader = streamOrResponse.getReader() as ReadableStreamDefaultReader<Uint8Array>;
       try {
-        const result = await accumulateOpenAiStream(reader, onTextDelta);
+        // Abort-aware read: the SDK create() call accepts no signal, so the
+        // read itself races the abort (see raceStreamAbort) — a user Stop or
+        // the turn time cap interrupts the stream instead of reading it to
+        // completion.
+        const result = await raceStreamAbort(accumulateOpenAiStream(reader, onTextDelta), reader, options?.signal);
         return {
           content: result.content,
           tool_calls: result.tool_calls,

@@ -2,6 +2,7 @@
 // Generates industry-standard manufacturing files from the PCB layout.
 
 import type { Footprint, Trace, Via, BoardOutline, Pad } from './types';
+import type { CopperPour } from './copper-pour';
 
 /**
  * Generate a Gerber file (RS-274X format) for a copper layer.
@@ -20,6 +21,7 @@ export function exportGerberCopper(
   traces: Trace[],
   vias: Via[],
   board: BoardOutline,
+  pours?: CopperPour[],
 ): string {
   const lines: string[] = [];
   const fmt = (n: number) => {
@@ -87,6 +89,15 @@ export function exportGerberCopper(
   for (const via of vias) {
     getCircleAp(via.diameter);
   }
+  // Copper pours on this layer — merged horizontal cell runs as exact rect
+  // apertures (the pour model is a grid of filled cells; runs keep the flash
+  // count low while reproducing the exact fill geometry).
+  const layerPours = (pours ?? []).filter((p) => p.layer === layer)
+    .map((p) => ({ net: p.net, runs: pourRuns(p) }));
+
+  for (const { runs } of layerPours) {
+    for (const run of runs) getRectAp(run.w, run.h);
+  }
 
   // Emit all aperture definitions (must precede their first use)
   lines.push(...apDefs);
@@ -127,6 +138,16 @@ export function exportGerberCopper(
     const ap = getCircleAp(via.diameter);
     lines.push(`G54D${ap}*`);
     lines.push(`X${fmt(via.position.x)}Y${fmt(via.position.y)}D03*`);
+  }
+
+  // Draw copper pours — filled polygon regions as rect aperture flashes
+  // (X1 Gerber has no net attributes → pours export as plain copper)
+  for (const { runs } of layerPours) {
+    for (const run of runs) {
+      const ap = getRectAp(run.w, run.h);
+      lines.push(`G54D${ap}*`);
+      lines.push(`X${fmt(run.cx)}Y${fmt(run.cy)}D03*`);
+    }
   }
 
   // End
@@ -194,7 +215,7 @@ export function exportGerberSolderMask(
 export function exportGerberSilkscreen(
   layer: 'top' | 'bottom',
   footprints: Footprint[],
-  board: BoardOutline,
+  _board: BoardOutline,
 ): string {
   const lines: string[] = [];
   const fmt = (n: number) => {
@@ -331,12 +352,13 @@ export function exportAllGerbers(
   traces: Trace[],
   vias: Via[],
   board: BoardOutline,
+  pours?: CopperPour[],
 ): { filename: string; content: string }[] {
   const files: { filename: string; content: string }[] = [];
 
-  // Copper layers
-  files.push({ filename: 'top_copper.gbr', content: exportGerberCopper('top', footprints, traces, vias, board) });
-  files.push({ filename: 'bottom_copper.gbr', content: exportGerberCopper('bottom', footprints, traces, vias, board) });
+  // Copper layers (pours render into their layer's copper)
+  files.push({ filename: 'top_copper.gbr', content: exportGerberCopper('top', footprints, traces, vias, board, pours) });
+  files.push({ filename: 'bottom_copper.gbr', content: exportGerberCopper('bottom', footprints, traces, vias, board, pours) });
 
   // Solder masks
   files.push({ filename: 'top_soldermask.gbr', content: exportGerberSolderMask('top', footprints, board) });
@@ -374,6 +396,7 @@ export function exportGerberX2Copper(
   traces: Trace[],
   vias: Via[],
   board: BoardOutline,
+  pours?: CopperPour[],
 ): string {
   const lines: string[] = [];
   const fmt = (n: number) => {
@@ -442,6 +465,12 @@ export function exportGerberX2Copper(
   for (const via of vias) {
     getCircleAp(via.diameter);
   }
+  // Copper pours on this layer (rect-run apertures, like the X1 writer)
+  const layerPours = (pours ?? []).filter((p) => p.layer === layer)
+    .map((p) => ({ net: p.net, runs: pourRuns(p) }));
+  for (const { runs } of layerPours) {
+    for (const run of runs) getRectAp(run.w, run.h);
+  }
   lines.push(...apDefs);
 
   // Board outline
@@ -494,6 +523,18 @@ export function exportGerberX2Copper(
   }
   lines.push('%TD*%');
 
+  // Copper pours — filled regions with their net attribute (X2 supports
+  // net association, so a GND pour exports as GND copper)
+  for (const { net, runs } of layerPours) {
+    lines.push(`%TO.N,${net}*%`);
+    for (const run of runs) {
+      const ap = getRectAp(run.w, run.h);
+      lines.push(`G54D${ap}*`);
+      lines.push(`X${fmt(run.cx)}Y${fmt(run.cy)}D03*`);
+    }
+  }
+  lines.push('%TD*%');
+
   lines.push('M02*');
 
   return lines.join('\n');
@@ -507,10 +548,11 @@ export function exportAllGerbersX2(
   traces: Trace[],
   vias: Via[],
   board: BoardOutline,
+  pours?: CopperPour[],
 ): { filename: string; content: string }[] {
   const files: { filename: string; content: string }[] = [];
-  files.push({ filename: 'top_copper.gbr', content: exportGerberX2Copper('top', footprints, traces, vias, board) });
-  files.push({ filename: 'bottom_copper.gbr', content: exportGerberX2Copper('bottom', footprints, traces, vias, board) });
+  files.push({ filename: 'top_copper.gbr', content: exportGerberX2Copper('top', footprints, traces, vias, board, pours) });
+  files.push({ filename: 'bottom_copper.gbr', content: exportGerberX2Copper('bottom', footprints, traces, vias, board, pours) });
   files.push({ filename: 'top_soldermask.gbr', content: exportGerberSolderMask('top', footprints, board) });
   files.push({ filename: 'bottom_soldermask.gbr', content: exportGerberSolderMask('bottom', footprints, board) });
   files.push({ filename: 'top_silkscreen.gbr', content: exportGerberSilkscreen('top', footprints, board) });
@@ -518,4 +560,47 @@ export function exportAllGerbersX2(
   files.push({ filename: 'drill.drl', content: exportExcellonDrill(footprints, vias) });
   files.push({ filename: 'pick_and_place.csv', content: exportPickAndPlace(footprints) });
   return files;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Copper pour geometry
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Merge a copper pour's grid cells into horizontal runs. Each run becomes
+ * one exact rect aperture flash (center + size) — far fewer objects than
+ * flashing every 0.5mm cell while reproducing the identical fill area.
+ */
+function pourRuns(pour: CopperPour): { cx: number; cy: number; w: number; h: number }[] {
+  const cs = pour.cellSize;
+  if (cs <= 0) return [];
+  const rows = new Map<number, number[]>();
+  for (const cell of pour.cells) {
+    const col = Math.round(cell.x / cs - 0.5);
+    const row = Math.round(cell.y / cs - 0.5);
+    const list = rows.get(row);
+    if (list) list.push(col); else rows.set(row, [col]);
+  }
+  const runs: { cx: number; cy: number; w: number; h: number }[] = [];
+  for (const [row, cols] of rows) {
+    cols.sort((a, b) => a - b);
+    let start = cols[0];
+    let prev = cols[0];
+    for (let i = 1; i <= cols.length; i++) {
+      const c = cols[i];
+      if (c !== undefined && c === prev + 1) {
+        prev = c;
+        continue;
+      }
+      // flush the run [start..prev]
+      runs.push({
+        cx: (start + prev + 1) / 2 * cs,
+        cy: (row + 0.5) * cs,
+        w: (prev - start + 1) * cs,
+        h: cs,
+      });
+      if (c !== undefined) { start = c; prev = c; }
+    }
+  }
+  return runs;
 }

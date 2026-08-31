@@ -3,6 +3,8 @@
 // - Trace-to-trace clearance / short circuits
 // - Trace-to-pad clearance
 // - Pad-to-pad clearance
+// - Via-to-trace / via-to-pad / via-to-via clearance (vias are circles that
+//   span the layers between fromLayer..toLayer; THT vias span everything)
 // - Unrouted nets (ratsnest without traces)
 // - Traces outside board boundary
 // - Annular ring (pad ring around drill hole)
@@ -14,7 +16,8 @@
 // - Isolated copper (unconnected pours/fills)
 // - Starved thermal (pad with insufficient thermal connections)
 
-import type { Footprint, Trace, Via, Ratsnest, Pad, BoardOutline, CopperLayer } from './types';
+import type { Footprint, Trace, Via, Ratsnest, BoardOutline, CopperLayer } from './types';
+import { ALL_COPPER_LAYERS } from './types';
 import type { NetClass } from '../circuit/types';
 import { computeNetCompletion } from './netlist-verify';
 
@@ -218,6 +221,89 @@ export function runDRC(
             : `Clearance: trace "${seg.net}" too close to pad "${pad.id}"`,
           position: pad.pos,
           layer: seg.layer,
+        });
+      }
+    }
+  }
+
+  // 5b. Via-to-trace clearance (different nets, layer overlap).
+  //     A via is a plated barrel spanning the layers fromLayer..toLayer
+  //     (THT / unspecified → all layers), so its annulus conflicts with any
+  //     foreign trace on every layer it spans. Previously vias were never
+  //     clearance-checked at all: a via dropped on another net's trace passed
+  //     DRC completely clean and shipped in the Gerbers as a short.
+  for (const via of vias) {
+    const viaR = via.diameter / 2;
+    for (const seg of copperSegs) {
+      if (seg.net === via.net) continue; // same net may touch
+      if (!viaSpansLayer(via, seg.layer)) continue;
+      const dist = segToPointDistance(seg.start, seg.end, via.position);
+      const minDist = dist - viaR - seg.width / 2;
+      const requiredClearance = Math.max(getClearance(via.net), getClearance(seg.net));
+      if (minDist < requiredClearance) {
+        errors.push({
+          type: minDist < 0 ? 'short' : 'clearance',
+          severity: minDist < 0 ? 'error' : 'warning',
+          message: minDist < 0
+            ? `Short: via "${via.net}" overlaps trace "${seg.net}"`
+            : `Clearance: via "${via.net}" too close to trace "${seg.net}"`,
+          position: { x: via.position.x, y: via.position.y },
+          layer: seg.layer,
+        });
+      }
+    }
+  }
+
+  // 5c. Via-to-pad clearance (different nets). THT pads (drill > 0) have
+  //     copper on every layer, so any via conflicts; SMD pads only conflict
+  //     when the via spans the pad's layer.
+  for (const via of vias) {
+    const viaR = via.diameter / 2;
+    for (const pad of copperPads) {
+      if (pad.net === via.net) continue; // same net may touch
+      if ((pad.drill ?? 0) <= 0 && !viaSpansLayer(via, pad.layer)) continue;
+      let dist: number;
+      if (pad.shape === 'circle') {
+        const padRadius = Math.max(pad.size.width, pad.size.height) / 2;
+        dist = Math.hypot(pad.pos.x - via.position.x, pad.pos.y - via.position.y) - padRadius;
+      } else {
+        dist = pointToRectDistance(via.position, pad.pos, pad.size);
+      }
+      const minDist = dist - viaR;
+      const requiredClearance = Math.max(getClearance(via.net), getClearance(pad.net));
+      if (minDist < requiredClearance) {
+        errors.push({
+          type: minDist < 0 ? 'short' : 'clearance',
+          severity: minDist < 0 ? 'error' : 'warning',
+          message: minDist < 0
+            ? `Short: via "${via.net}" overlaps pad "${pad.id}"`
+            : `Clearance: via "${via.net}" too close to pad "${pad.id}"`,
+          position: { x: via.position.x, y: via.position.y },
+          layer: pad.layer,
+        });
+      }
+    }
+  }
+
+  // 5d. Via-to-via clearance (different nets, overlapping layer spans)
+  for (let i = 0; i < vias.length; i++) {
+    for (let j = i + 1; j < vias.length; j++) {
+      const a = vias[i];
+      const b = vias[j];
+      if (a.net === b.net) continue; // same net may touch
+      if (!viaSpansOverlap(a, b)) continue;
+      const dist = Math.hypot(a.position.x - b.position.x, a.position.y - b.position.y);
+      const minDist = dist - a.diameter / 2 - b.diameter / 2;
+      const requiredClearance = Math.max(getClearance(a.net), getClearance(b.net));
+      if (minDist < requiredClearance) {
+        errors.push({
+          type: minDist < 0 ? 'short' : 'clearance',
+          severity: minDist < 0 ? 'error' : 'warning',
+          message: minDist < 0
+            ? `Short: vias "${a.net}" and "${b.net}" overlap`
+            : `Clearance: vias "${a.net}" and "${b.net}" too close`,
+          position: { x: (a.position.x + b.position.x) / 2, y: (a.position.y + b.position.y) / 2 },
+          layer: 'both',
         });
       }
     }
@@ -492,6 +578,47 @@ function traceLength(trace: Trace): number {
 }
 
 // ----- Geometry helpers -----
+
+/** Layer index for via span math (ALL_COPPER_LAYERS order). */
+function layerIndex(layer: CopperLayer): number {
+  return ALL_COPPER_LAYERS.indexOf(layer);
+}
+
+/** Inclusive [lo, hi] layer-index span of a via. Unspecified from/to layers
+ *  mean a plain through via → the whole stack. */
+function viaLayerSpan(via: Via): [number, number] {
+  const fi = via.fromLayer != null ? layerIndex(via.fromLayer) : -1;
+  const ti = via.toLayer != null ? layerIndex(via.toLayer) : -1;
+  if (fi < 0 && ti < 0) return [0, ALL_COPPER_LAYERS.length - 1];
+  const lo = Math.min(fi < 0 ? 0 : fi, ti < 0 ? ALL_COPPER_LAYERS.length - 1 : ti);
+  const hi = Math.max(fi < 0 ? 0 : fi, ti < 0 ? ALL_COPPER_LAYERS.length - 1 : ti);
+  return [lo, hi];
+}
+
+/** Does the via's plated barrel exist on `layer`? */
+function viaSpansLayer(via: Via, layer: CopperLayer): boolean {
+  const [lo, hi] = viaLayerSpan(via);
+  const li = layerIndex(layer);
+  return li >= 0 && li >= lo && li <= hi;
+}
+
+/** Do two vias share at least one layer? */
+function viaSpansOverlap(a: Via, b: Via): boolean {
+  const [alo, ahi] = viaLayerSpan(a);
+  const [blo, bhi] = viaLayerSpan(b);
+  return alo <= bhi && blo <= ahi;
+}
+
+/** Distance from a point to an axis-aligned rectangle (0 = inside/touching) */
+function pointToRectDistance(
+  p: { x: number; y: number },
+  center: { x: number; y: number },
+  size: { width: number; height: number },
+): number {
+  const dx = Math.max(Math.abs(p.x - center.x) - size.width / 2, 0);
+  const dy = Math.max(Math.abs(p.y - center.y) - size.height / 2, 0);
+  return Math.hypot(dx, dy);
+}
 
 /** Distance from point to line segment */
 function segToPointDistance(

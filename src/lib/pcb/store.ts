@@ -16,7 +16,7 @@ import type {
   CopperLayer,
   LayerStack,
 } from './types';
-import { DEFAULT_LAYER_STACK, FOUR_LAYER_STACK, SIX_LAYER_STACK, ALL_COPPER_LAYERS } from './types';
+import { DEFAULT_LAYER_STACK } from './types';
 import type { CircuitComponent, Wire } from '../circuit/types';
 import { useEditor } from '../circuit/store';
 import { getFootprintDef } from './footprints';
@@ -26,10 +26,10 @@ import type { DRCError } from './drc';
 import { generateCopperPour } from './copper-pour';
 import type { CopperPour } from './copper-pour';
 import { exportAllGerbers } from './gerber-export';
-import { autoRoute, DEFAULT_AUTOROUTE_OPTIONS } from './auto-router';
+import { autoRoute, DEFAULT_AUTOROUTE_OPTIONS, segmentHasClearanceConflict } from './auto-router';
 import type { AutoRouteResult, AutoRouteOptions } from './auto-router';
 import { routeTopologically, DEFAULT_ROUTER_OPTIONS } from './topological-router';
-import { verifyNetlist } from './netlist-verify';
+import { verifyNetlist, flagSatisfiedRatsnestLegs } from './netlist-verify';
 import type { NetlistVerifyResult } from './netlist-verify';
 
 export type PCBTool = 'select' | 'route' | 'route45' | 'via' | 'move' | 'pour' | 'keepout';
@@ -89,7 +89,10 @@ interface PCBState {
   deleteTrace: (id: string) => void;
   startRouting: (from: { x: number; y: number; net: string }) => void;
   addRoutingPoint: (point: { x: number; y: number }) => void;
-  finishRouting: (to: { x: number; y: number; net: string } | null) => void;
+  /** Finish the interactive route. Returns true when the trace was committed;
+   *  false when it was rejected (wrong net at the finish pad, or a committed
+   *  segment violates clearance — routing continues so the user can fix it). */
+  finishRouting: (to: { x: number; y: number; net: string } | null) => boolean;
   cancelRouting: () => void;
   addVia: (pos: { x: number; y: number }, net: string) => void;
   /** Add a via with explicit type (THT, blind, buried, micro) and layer range.
@@ -197,60 +200,90 @@ export const usePCB = create<PCBState>((set, get) => ({
   setBoardSize: (width, height) => set({ board: { width, height } }),
 
   moveFootprint: (id, pos) => {
-    set((s) => ({
-      footprints: s.footprints.map((fp) => {
-        if (fp.id !== id) return fp;
+    const s = get();
+    const fp = s.footprints.find((f) => f.id === id);
+    if (!fp) return;
+    const dx = pos.x - fp.position.x;
+    const dy = pos.y - fp.position.y;
+    // Old pad positions: trace endpoints sitting on them must be dragged
+    // along (they used to stay at the old pad position → dangling copper +
+    // false "unrouted" DRC/netlist failures).
+    const padMoves = fp.pads.map((p) => ({
+      from: { ...p.position },
+      dx,
+      dy,
+      radius: Math.max(p.size.width, p.size.height) / 2,
+    }));
+    set({
+      footprints: s.footprints.map((f) => {
+        if (f.id !== id) return f;
         // Move all pads by the same delta
-        const dx = pos.x - fp.position.x;
-        const dy = pos.y - fp.position.y;
         return {
-          ...fp,
+          ...f,
           position: { ...pos },
-          pads: fp.pads.map((p) => ({
+          pads: f.pads.map((p) => ({
             ...p,
             position: { x: p.position.x + dx, y: p.position.y + dy },
           })),
         };
       }),
-    }));
+      traces: dragTraceEndpointsWithPads(s.traces, padMoves),
+    });
     // Recompute ratsnest
     const state = get();
-    const { ratsnest } = computeRatsnestFromState(state);
+    const ratsnest = computeRatsnestFor(state.footprints, state.padNets, state.traces, state.vias);
     set({ ratsnest });
   },
 
   rotateFootprint: (id) => {
-    set((s) => ({
-      footprints: s.footprints.map((fp) => {
-        if (fp.id !== id) return fp;
-        const newRot = (fp.rotation + 90) % 360;
-        const rad = (newRot * Math.PI) / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
-        const fpDef = getFootprintDefSafe(fp.componentType);
-        return {
-          ...fp,
-          rotation: newRot,
-          pads: fp.pads.map((pad, i) => {
-            const padDef = fpDef.pads[i];
-            if (!padDef) return pad;
-            const px = padDef.position.x * cos - padDef.position.y * sin;
-            const py = padDef.position.x * sin + padDef.position.y * cos;
-            return {
-              ...pad,
-              position: { x: fp.position.x + px, y: fp.position.y + py },
-            };
-          }),
-        };
+    const s = get();
+    const fp = s.footprints.find((f) => f.id === id);
+    if (!fp) return;
+    const fpDef = getFootprintDefSafe(fp.componentType);
+    const newRot = (fp.rotation + 90) % 360;
+    const rad = (newRot * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    // Compute the new pads from the def (existing semantics) and record each
+    // pad's move so attached trace endpoints can follow the same delta.
+    const padMoves: { from: { x: number; y: number }; dx: number; dy: number; radius: number }[] = [];
+    const newPads = fp.pads.map((pad, i) => {
+      const padDef = fpDef.pads[i];
+      if (!padDef) return pad; // pad without a def-index match doesn't move
+      const px = padDef.position.x * cos - padDef.position.y * sin;
+      const py = padDef.position.x * sin + padDef.position.y * cos;
+      const newPos = { x: fp.position.x + px, y: fp.position.y + py };
+      padMoves.push({
+        from: { ...pad.position },
+        dx: newPos.x - pad.position.x,
+        dy: newPos.y - pad.position.y,
+        radius: Math.max(pad.size.width, pad.size.height) / 2,
+      });
+      return { ...pad, position: newPos };
+    });
+    set({
+      footprints: s.footprints.map((f) => f.id !== id ? f : {
+        ...f,
+        rotation: newRot,
+        pads: newPads,
       }),
-    }));
+      traces: dragTraceEndpointsWithPads(s.traces, padMoves),
+    });
     // Recompute ratsnest
     const state = get();
-    const { ratsnest } = computeRatsnestFromState(state);
+    const ratsnest = computeRatsnestFor(state.footprints, state.padNets, state.traces, state.vias);
     set({ ratsnest });
   },
 
-  deleteTrace: (id) => set((s) => ({ traces: s.traces.filter((t) => t.id !== id) })),
+  deleteTrace: (id) => {
+    const s = get();
+    const traces = s.traces.filter((t) => t.id !== id);
+    // Deleting copper can un-satisfy ratsnest legs → airwires must return
+    set({
+      traces,
+      ratsnest: flagSatisfiedRatsnestLegs(s.ratsnest, s.footprints, traces, s.vias),
+    });
+  },
 
   startRouting: (from) => set({ routingFrom: from, routingPath: [from] }),
 
@@ -269,13 +302,38 @@ export const usePCB = create<PCBState>((set, get) => ({
     const s = get();
     if (!s.routingFrom || s.routingPath.length < 2) {
       set({ routingFrom: null, routingPath: [] });
-      return;
+      return false;
     }
     // Net-safety: interactive routing may only finish on copper of the SAME
     // net (prevents accidental shorts — routing VCC onto a GND pad used to
     // silently create a short).
     if (to && to.net && to.net !== s.routingFrom.net) {
-      return; // caller shows a toast; routing continues
+      return false; // caller shows a toast; routing continues
+    }
+    // Clearance gate: every committed segment is checked against other-net
+    // copper (DRC-equivalent). The live canvas preview only checks the
+    // segment under the cursor; waypoints committed on plain grid clicks were
+    // never checked, so shorts used to reach the Gerbers with a "DRC clean"
+    // badge. Rejected finishes keep the routing state so the user can fix it.
+    const routingNet = s.routingFrom.net;
+    const netClass = s.netClasses.find((nc) => nc.nets.includes(routingNet));
+    const clearance = netClass?.clearance ?? DEFAULT_DRC_CONFIG.minClearance;
+    // Pads may carry their net via padNets only (older documents) — fill it in
+    // so the same-net exemption of the checker sees the real net.
+    const nettedFootprints = s.footprints.map((fp) => ({
+      ...fp,
+      pads: fp.pads.map((p) => ({
+        ...p,
+        net: p.net ?? s.padNets.get(`${p.componentId}:${p.terminalId}`),
+      })),
+    }));
+    for (let i = 0; i < s.routingPath.length - 1; i++) {
+      const res = segmentHasClearanceConflict(
+        s.routingPath[i], s.routingPath[i + 1],
+        s.routingFrom.net, s.activeLayer, s.defaultTraceWidth / 2,
+        clearance, nettedFootprints, s.traces, s.vias,
+      );
+      if (res.conflict) return false;
     }
     const trace: Trace = {
       id: genId('trace'),
@@ -295,8 +353,11 @@ export const usePCB = create<PCBState>((set, get) => ({
       traces: [...st.traces, trace],
       routingFrom: null,
       routingPath: [],
+      // Newly-connected pads satisfy their ratsnest legs → hide airwires
+      ratsnest: flagSatisfiedRatsnestLegs(st.ratsnest, st.footprints, [...st.traces, trace], st.vias),
     }));
     void to;
+    return true;
   },
 
   cancelRouting: () => set({ routingFrom: null, routingPath: [] }),
@@ -460,30 +521,46 @@ export const usePCB = create<PCBState>((set, get) => ({
       keepouts: s.keepouts,
       netClasses: s.netClasses,
       teardrops: s.teardrops,
+      // layerStack + copperPours used to be omitted — a JSON round-trip
+      // silently reverted 4/6-layer stacks and dropped every pour.
+      layerStack: s.layerStack,
+      copperPours: s.copperPours,
     };
   },
 
-  loadDocument: (doc) => set({
-    board: doc.board,
-    footprints: doc.footprints,
-    traces: doc.traces,
-    vias: doc.vias ?? [],
-    activeLayer: (doc.activeLayer as 'top' | 'bottom') ?? 'top',
-    defaultTraceWidth: doc.defaultTraceWidth,
-    padNets: new Map((doc as any).padNets ?? []),
-    keepouts: (doc as any).keepouts ?? [],
-    netClasses: (doc as any).netClasses ?? [],
-    teardrops: (doc as any).teardrops ?? [],
-    ratsnest: [],
-    drcErrors: [],
-    copperPours: [],
-    selectedFootprintId: null,
-    selectedTraceId: null,
-    selectedFootprintIds: new Set(),
-    routingFrom: null,
-    routingPath: [],
-    tool: 'select',
-  }),
+  loadDocument: (doc) => {
+    const footprints = doc.footprints;
+    const traces = doc.traces;
+    const vias = doc.vias ?? [];
+    const padNets = new Map<string, string>(doc.padNets ?? []);
+    set({
+      board: doc.board,
+      footprints,
+      traces,
+      vias,
+      activeLayer: (doc.activeLayer as 'top' | 'bottom') ?? 'top',
+      defaultTraceWidth: doc.defaultTraceWidth,
+      padNets,
+      keepouts: doc.keepouts ?? [],
+      netClasses: doc.netClasses ?? [],
+      teardrops: doc.teardrops ?? [],
+      // The ratsnest is not serialized — rebuild it from the restored pad
+      // nets and flag legs satisfied by the restored copper, so loading a
+      // routed board doesn't resurrect airwires that are already routed.
+      ratsnest: computeRatsnestFor(footprints, padNets, traces, vias),
+      drcErrors: [],
+      // Backward-compatible restore: old documents without these fields
+      // fall back to the defaults (2-layer stack, no pours).
+      layerStack: doc.layerStack ?? DEFAULT_LAYER_STACK,
+      copperPours: doc.copperPours ?? [],
+      selectedFootprintId: null,
+      selectedTraceId: null,
+      selectedFootprintIds: new Set(),
+      routingFrom: null,
+      routingPath: [],
+      tool: 'select',
+    });
+  },
 
   runDRC: () => {
     const s = get();
@@ -510,7 +587,9 @@ export const usePCB = create<PCBState>((set, get) => ({
 
   exportGerbers: () => {
     const s = get();
-    const files = exportAllGerbers(s.footprints, s.traces, s.vias, s.board);
+    // Pours are part of the fab data — a pour visible on the canvas but
+    // missing from the Gerbers used to manufacture an un-planned board.
+    const files = exportAllGerbers(s.footprints, s.traces, s.vias, s.board, s.copperPours);
     for (const file of files) {
       const blob = new Blob([file.content], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
@@ -535,11 +614,24 @@ export const usePCB = create<PCBState>((set, get) => ({
       keepouts: s.keepouts.map((k) => ({ rect: k.rect, layers: k.layers })),
     };
     const result = autoRoute(s.footprints, s.traces, s.vias, s.ratsnest, s.board, options);
-    set({ traces: result.traces, vias: result.vias });
+    set({
+      traces: result.traces,
+      vias: result.vias,
+      // Flag satisfied ratsnest legs — a fully-routed board must not keep
+      // showing airwires (they used to stay forever, even after 100% routing).
+      ratsnest: flagSatisfiedRatsnestLegs(s.ratsnest, s.footprints, result.traces, result.vias),
+    });
     return { ...result.stats, unroutedCount: result.unrouted.length };
   },
 
-  unrouteAll: () => set({ traces: [], vias: [], routingFrom: null, routingPath: [], selectedTraceId: null }),
+  unrouteAll: () => {
+    const s = get();
+    set({
+      traces: [], vias: [], routingFrom: null, routingPath: [], selectedTraceId: null,
+      // With no copper left, every leg is unsatisfied → airwires return
+      ratsnest: flagSatisfiedRatsnestLegs(s.ratsnest, s.footprints, [], []),
+    });
+  },
 
   runTopoRoute: () => {
     const s = get();
@@ -555,7 +647,11 @@ export const usePCB = create<PCBState>((set, get) => ({
         viaDiameter: c.viaDiameter, viaDrill: c.viaDrill, nets: c.nets,
       })),
     );
-    set({ traces: result.traces, vias: result.vias });
+    set({
+      traces: result.traces,
+      vias: result.vias,
+      ratsnest: flagSatisfiedRatsnestLegs(s.ratsnest, s.footprints, result.traces, result.vias),
+    });
     return {
       routed: result.stats.routed,
       failed: result.stats.failed,
@@ -596,7 +692,7 @@ export const usePCB = create<PCBState>((set, get) => ({
     }));
     // Recompute ratsnest — pad positions changed
     const state = get();
-    const { ratsnest } = computeRatsnestFromState(state);
+    const ratsnest = computeRatsnestFor(state.footprints, state.padNets, state.traces, state.vias);
     set({ ratsnest });
   },
 
@@ -735,8 +831,8 @@ export const usePCB = create<PCBState>((set, get) => ({
     });
     // Recompute ratsnest — pad positions changed
     const alignedState = get();
-    const { ratsnest: alignedRatsnest } = computeRatsnestFromState(alignedState);
-    set({ ratsnest: alignedRatsnest });
+    const ratsnest = computeRatsnestFor(alignedState.footprints, alignedState.padNets, alignedState.traces, alignedState.vias);
+    set({ ratsnest });
   },
 
   distributeSelected: (axis) => {
@@ -764,16 +860,22 @@ export const usePCB = create<PCBState>((set, get) => ({
     });
     // Recompute ratsnest — pad positions changed
     const distState = get();
-    const { ratsnest: distRatsnest } = computeRatsnestFromState(distState);
-    set({ ratsnest: distRatsnest });
+    const ratsnest = computeRatsnestFor(distState.footprints, distState.padNets, distState.traces, distState.vias);
+    set({ ratsnest });
   },
 }));
 
-// Helper: compute ratsnest from current state
-function computeRatsnestFromState(state: PCBState) {
-  const padNets = state.padNets;
+// Helper: compute the ratsnest (per-net MST legs) from footprints + pad nets,
+// with each leg's `routed` flag derived from the ACTUAL trace/via copper —
+// satisfied legs stay in the array but are flagged so airwires can be hidden.
+function computeRatsnestFor(
+  footprints: Footprint[],
+  padNets: Map<string, string>,
+  traces: Trace[],
+  vias: Via[],
+): Ratsnest[] {
   const netsToPads = new Map<string, { padId: string; pos: { x: number; y: number } }[]>();
-  for (const fp of state.footprints) {
+  for (const fp of footprints) {
     for (const pad of fp.pads) {
       const termKey = `${pad.componentId}:${pad.terminalId}`;
       const net = padNets.get(termKey);
@@ -810,7 +912,43 @@ function computeRatsnestFromState(state: PCBState) {
       } else break;
     }
   }
-  return { ratsnest };
+  return flagSatisfiedRatsnestLegs(ratsnest, footprints, traces, vias);
+}
+
+/**
+ * Drag trace ENDPOINTS that sit on a moved footprint's pads along with the
+ * pads. Only the first/last segment endpoints of each trace count as trace
+ * ends — interior vertices are routing waypoints, not pad attachments.
+ * An endpoint counts as attached when it lies within the pad's copper
+ * radius (both the auto-router and interactive routing snap trace ends
+ * exactly onto pad centers, so attached ends are at distance 0).
+ */
+function dragTraceEndpointsWithPads(
+  traces: Trace[],
+  moves: { from: { x: number; y: number }; dx: number; dy: number; radius: number }[],
+): Trace[] {
+  if (moves.length === 0 || traces.length === 0) return traces;
+  const hasMove = moves.some((m) => m.dx !== 0 || m.dy !== 0);
+  if (!hasMove) return traces;
+  return traces.map((t) => {
+    if (t.segments.length === 0) return t;
+    const segs = t.segments.map((seg) => ({ ...seg, start: { ...seg.start }, end: { ...seg.end } }));
+    let changed = false;
+    for (const move of moves) {
+      if (move.dx === 0 && move.dy === 0) continue;
+      const first = segs[0];
+      if (Math.hypot(first.start.x - move.from.x, first.start.y - move.from.y) <= move.radius) {
+        first.start = { x: first.start.x + move.dx, y: first.start.y + move.dy };
+        changed = true;
+      }
+      const last = segs[segs.length - 1];
+      if (Math.hypot(last.end.x - move.from.x, last.end.y - move.from.y) <= move.radius) {
+        last.end = { x: last.end.x + move.dx, y: last.end.y + move.dy };
+        changed = true;
+      }
+    }
+    return changed ? { ...t, segments: segs } : t;
+  });
 }
 
 // Helper: safe footprint def getter

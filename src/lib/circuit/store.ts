@@ -264,7 +264,23 @@ interface EditorState {
   redo: () => void;
   pushHistory: () => void;
   clear: () => void;
-  loadDocument: (doc: CircuitDocument, opts?: { keepHistory?: boolean }) => void;
+  /**
+   * Load a document into the editor.
+   *
+   * Options:
+   *   - keepHistory: keep the undo/redo stacks (used by the AI apply path,
+   *     which pushes ONE checkpoint before its first mutation so a single
+   *     Ctrl+Z reverts the whole AI turn).
+   *   - preserveUserState: PARTIAL-APPLY mode for callers whose doc carries
+   *     only components+wires (the AI chat's circuit_update events). Every
+   *     other document field — drawings, no-connects, groups, hierarchical
+   *     sheets, net classes, saved views, page setup, metadata — is USER data
+   *     the event never describes, so it is kept as-is instead of being reset
+   *     to defaults (which used to silently wipe the user's annotations). The
+   *     simulation also keeps running: the step loop re-solves against the new
+   *     components every frame, exactly like a user edit made mid-run.
+   */
+  loadDocument: (doc: CircuitDocument, opts?: { keepHistory?: boolean; preserveUserState?: boolean }) => void;
   serialize: () => CircuitDocument;
 
   setRunning: (running: boolean) => void;
@@ -1556,28 +1572,32 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
 
   loadDocument: (doc, opts) => {
+    // preserveUserState (see the interface comment): AI partial-apply path.
+    const preserve = !!opts?.preserveUserState;
     set((s) => ({
       components: doc.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined, fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined })),
       wires: doc.wires.map((w) => ({ ...w })),
-      drawings: doc.drawings ?? [],
-      noConnects: doc.noConnects ?? [],
-      groups: doc.groups ?? [],
-      sheets: doc.sheets ?? [],
-      netClasses: doc.netClasses ?? [],
-      savedViews: doc.savedViews ?? [],
-      childSheets: doc.childSheets ?? {},
-      activeSheet: doc.activeSheet ?? '',
-      pageSetup: doc.pageSetup ?? { ...DEFAULT_PAGE_SETUP },
-      metadata: doc.metadata ?? { title: 'Untitled', revision: 'Rev 1', date: new Date().toISOString().slice(0, 10) },
+      drawings: preserve ? s.drawings : doc.drawings ?? [],
+      noConnects: preserve ? s.noConnects : doc.noConnects ?? [],
+      groups: preserve ? s.groups : doc.groups ?? [],
+      sheets: preserve ? s.sheets : doc.sheets ?? [],
+      netClasses: preserve ? s.netClasses : doc.netClasses ?? [],
+      savedViews: preserve ? s.savedViews : doc.savedViews ?? [],
+      childSheets: preserve ? s.childSheets : doc.childSheets ?? {},
+      activeSheet: preserve ? s.activeSheet : doc.activeSheet ?? '',
+      pageSetup: preserve ? s.pageSetup : doc.pageSetup ?? { ...DEFAULT_PAGE_SETUP },
+      metadata: preserve ? s.metadata : doc.metadata ?? { title: 'Untitled', revision: 'Rev 1', date: new Date().toISOString().slice(0, 10) },
       selection: { type: null, id: null },
       multiSelection: { components: new Set(), wires: new Set() },
-      traces: [],
-      simContext: null,
-      // Reset session state — same rationale as clear(). Loading a new
-      // circuit should not inherit sim errors or wire drafts from the old one.
-      running: false,
-      paused: false,
-      simError: null,
+      traces: preserve ? s.traces : [],
+      simContext: preserve ? s.simContext : null,
+      // Session state: in partial-apply mode a running sim keeps running
+      // (user edits mid-run never stop it either); a full document load
+      // still starts clean — loading a DIFFERENT circuit should not inherit
+      // sim errors or wire drafts from the old one.
+      running: preserve ? s.running : false,
+      paused: preserve ? s.paused : false,
+      simError: preserve ? s.simError : null,
       ercErrors: [],
       lastAnalysisResult: null,
       physicsViolations: [],

@@ -2,8 +2,8 @@
 // Detects mismatches between what's connected in the schematic vs what's
 // routed on the PCB.
 
-import type { Footprint, Trace, Via, Pad } from './types';
-import type { CircuitComponent, Wire } from '../circuit/types';
+import type { Footprint, Trace, Via, Pad, Ratsnest } from './types';
+import type { CircuitComponent, Wire, ComponentPlugin } from '../circuit/types';
 import { getPlugin } from '../circuit/registry';
 import { buildNodeMap } from '../circuit/engine';
 
@@ -50,7 +50,7 @@ export function verifyNetlist(
   const errors: { message: string; severity: 'error' | 'warning' }[] = [];
 
   // 1. Build schematic netlist
-  const plugins = new Map<string, any>();
+  const plugins = new Map<string, ComponentPlugin>();
   for (const c of schematicComponents) {
     const p = getPlugin(c.type);
     if (p) plugins.set(c.type, p);
@@ -289,4 +289,111 @@ export function computeNetCompletion(
     routedNets: results.filter((r) => r.complete).length,
     totalNets: results.length,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ratsnest leg satisfaction (which airwires are already routed)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Flag which ratsnest legs are electrically satisfied — both endpoint pads
+ * connected through same-net copper (traces + vias) — so routed airwires can
+ * be hidden. Legs are NOT removed: `routed` flips back to false when the
+ * connecting copper is deleted (deleteTrace / unrouteAll recompute).
+ *
+ * Returns a new array of legs (same order, same identity) with the `routed`
+ * flag recomputed from the ACTUAL copper — safe to call from the store after
+ * every routing mutation and from the canvas before rendering airwires.
+ */
+export function flagSatisfiedRatsnestLegs(
+  ratsnest: Ratsnest[],
+  footprints: Footprint[],
+  traces: Trace[],
+  vias: Via[],
+): Ratsnest[] {
+  if (ratsnest.length === 0) return ratsnest;
+
+  // Legs of one net share the same copper pool → one union-find per net.
+  const legIdxByNet = new Map<string, number[]>();
+  for (let i = 0; i < ratsnest.length; i++) {
+    const list = legIdxByNet.get(ratsnest[i].net);
+    if (list) list.push(i); else legIdxByNet.set(ratsnest[i].net, [i]);
+  }
+
+  // padId → position (legs reference pads by id)
+  const padPos = new Map<string, { x: number; y: number }>();
+  for (const fp of footprints) {
+    for (const pad of fp.pads) padPos.set(pad.id, pad.position);
+  }
+
+  const EPS = 0.25; // co-location tolerance (same as computeNetCompletion)
+  const result = ratsnest.map((leg) => ({ ...leg }));
+
+  for (const legIdxs of legIdxByNet.values()) {
+    const net = ratsnest[legIdxs[0]].net;
+
+    // union-find over rounded positions (same scheme as computeNetCompletion)
+    const nodeKey = (x: number, y: number) => `${Math.round(x * 100)},${Math.round(y * 100)}`;
+    const nodes = new Map<string, number>();
+    const parent: number[] = [];
+    const find = (i: number): number => {
+      while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+      return i;
+    };
+    const union = (a: number, b: number) => { parent[find(a)] = find(b); };
+    const nodeAt = (x: number, y: number): number => {
+      const k = nodeKey(x, y);
+      let n = nodes.get(k);
+      if (n === undefined) { n = parent.length; parent.push(n); nodes.set(k, n); }
+      return n;
+    };
+
+    for (const t of traces) {
+      if (t.net !== net) continue;
+      for (const seg of t.segments) {
+        union(nodeAt(seg.start.x, seg.start.y), nodeAt(seg.end.x, seg.end.y));
+      }
+    }
+    for (const v of vias) {
+      if (v.net !== net) continue;
+      nodeAt(v.position.x, v.position.y);
+    }
+
+    // co-located nodes belong together (a trace endpoint landing on a pad)
+    const pts = Array.from(nodes.entries()).map(([k, n]) => {
+      const [xs, ys] = k.split(',');
+      return { x: Number(xs) / 100, y: Number(ys) / 100, node: n };
+    });
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        if (Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y) <= EPS) union(pts[i].node, pts[j].node);
+      }
+    }
+
+    // Phase 1 — create pad nodes and attach them to nearby copper (ALL
+    // unions before ANY root reads, so roots are stable).
+    const legPadNodes: { idx: number; a: number; b: number }[] = [];
+    const padNodeOf = (padId: string): number | null => {
+      const pos = padPos.get(padId);
+      if (!pos) return null;
+      const n = nodeAt(pos.x, pos.y);
+      for (const p of pts) {
+        if (Math.hypot(p.x - pos.x, p.y - pos.y) <= EPS) union(n, p.node);
+      }
+      return n;
+    };
+    for (const idx of legIdxs) {
+      const leg = ratsnest[idx];
+      const a = padNodeOf(leg.fromPadId);
+      const b = padNodeOf(leg.toPadId);
+      legPadNodes.push({ idx, a: a ?? -1, b: b ?? -1 });
+    }
+
+    // Phase 2 — read roots after all unions
+    for (const { idx, a, b } of legPadNodes) {
+      result[idx].routed = a >= 0 && b >= 0 && find(a) === find(b);
+    }
+  }
+
+  return result;
 }

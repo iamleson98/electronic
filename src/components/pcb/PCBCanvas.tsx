@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
 import type { Pad, CopperLayer } from '@/lib/pcb/types';
@@ -14,7 +14,7 @@ import {
 import type { DRCError } from '@/lib/pcb/drc';
 import { DEFAULT_DRC_CONFIG } from '@/lib/pcb/drc';
 import { segmentHasClearanceConflict } from '@/lib/pcb/auto-router';
-import { computeNetCompletion } from '@/lib/pcb/netlist-verify';
+import { computeNetCompletion, flagSatisfiedRatsnestLegs } from '@/lib/pcb/netlist-verify';
 import { useAutoDRC } from '@/lib/auto-rule-hooks';
 import { LAYER_COLORS } from '@/lib/pcb/types';
 import { toast } from 'sonner';
@@ -68,6 +68,16 @@ export function PCBCanvas() {
   const showKeepouts = usePCB((s) => s.showKeepouts);
   const addKeepout = usePCB((s) => s.addKeepout);
   const layerStack = usePCB((s) => s.layerStack);
+
+  // Unsatisfied airwires only — legs whose pads are already connected by
+  // same-net copper are flagged/recomputed from the actual traces, so a
+  // routed board shows no ratsnest (recomputed here rather than trusting
+  // stored flags, so ANY state mutation path — including out-of-band
+  // setState — hides routed legs).
+  const unsatisfiedRatsnest = useMemo(
+    () => flagSatisfiedRatsnestLegs(ratsnest, footprints, traces, vias).filter((rn) => !rn.routed),
+    [ratsnest, footprints, traces, vias],
+  );
 
   const moveFootprint = usePCB((s) => s.moveFootprint);
   const rotateFootprint = usePCB((s) => s.rotateFootprint);
@@ -299,14 +309,14 @@ export function PCBCanvas() {
       ctx.fill();
     }
 
-    // ── Ratsnest (airwires) — thin glowing lines ────────────────────────
+    // ── Ratsnest (airwires) — thin glowing lines, unsatisfied legs only ─
     if (showRatsnest) {
       ctx.strokeStyle = 'rgba(250, 204, 21, 0.35)';
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 3]);
       ctx.shadowColor = 'rgba(250, 204, 21, 0.3)';
       ctx.shadowBlur = 3;
-      for (const rn of ratsnest) {
+      for (const rn of unsatisfiedRatsnest) {
         const from = mmToScreen(rn.from.x, rn.from.y);
         const to = mmToScreen(rn.to.x, rn.to.y);
         ctx.beginPath();
@@ -728,7 +738,7 @@ export function PCBCanvas() {
     }
 
     ctx.restore();
-  }, [size, pan, zoom, board, footprints, traces, vias, ratsnest, padNets, activeLayer, tool,
+  }, [size, pan, zoom, board, footprints, traces, vias, unsatisfiedRatsnest, padNets, activeLayer, tool,
       defaultTraceWidth, selectedFootprintId, selectedTraceId, routingFrom, routingPath,
       showRatsnest, showGrid, showPadNets, cursor, mmToScreen, drcErrors, copperPours, keepouts, teardrops, showKeepouts, hoveredDRC, crossProbeComponentIds, layerStack]);
 
@@ -775,7 +785,12 @@ export function PCBCanvas() {
         } else if (net === routingFrom.net) {
           // same net → finish cleanly on the pad center
           addRoutingPoint(pad.position);
-          finishRouting({ x: pad.position.x, y: pad.position.y, net });
+          const committed = finishRouting({ x: pad.position.x, y: pad.position.y, net });
+          if (!committed) {
+            // store-level clearance gate rejected the route (a committed
+            // segment runs into other-net copper — see the red preview)
+            toast.error('Cannot finish: the route violates clearance to other-net copper — reroute the red segment or press Esc');
+          }
         } else {
           // WRONG NET — never silently create a short
           toast.error(`Wrong net: pad belongs to "${net || 'unconnected'}" — finish on net "${routingFrom.net}" or press Esc`);

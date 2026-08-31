@@ -327,14 +327,20 @@ let abortCtrl: AbortController | null = null;
 /** Load a circuit doc into the editor. The undo checkpoint is pushed ONCE per
  *  turn (before the first mutation), so a single Ctrl+Z reverts the whole AI
  *  change instead of stepping through every intermediate state. keepHistory
- *  stops loadDocument from wiping that checkpoint (its default). */
+ *  stops loadDocument from wiping that checkpoint (its default), and
+ *  preserveUserState keeps every other document field (drawings, sheets,
+ *  no-connects, net classes, page setup, metadata, a running sim) that the
+ *  AI's components+wires-only event never describes. */
 function applyCircuitUpdate(rt: TurnRuntime, doc: CircuitSnapshot, seq: number): void {
   const editor = useEditor.getState();
   if (!rt.historyPushed) {
     editor.pushHistory();
     rt.historyPushed = true;
   }
-  editor.loadDocument({ version: 1, components: doc.components, wires: doc.wires }, { keepHistory: true });
+  editor.loadDocument(
+    { version: 1, components: doc.components, wires: doc.wires },
+    { keepHistory: true, preserveUserState: true },
+  );
   rt.lastAppliedDocJson = JSON.stringify(doc);
   rt.appliedSeq = Math.max(rt.appliedSeq, seq);
 }
@@ -516,135 +522,181 @@ function cleanupRuntime(): void {
   useChatSession.setState({ active: null });
 }
 
+/**
+ * Last-resort teardown for when a finalizer itself blows up mid-work: force
+ * the assistant message into a visible error state. If even THIS patch fails,
+ * the finalizer's finally-block still clears `active`/`runtime` — the only
+ * hard invariant is that send() can never stay permanently blocked.
+ */
+function forceTeardown(rt: TurnRuntime, fallbackMessage: string): void {
+  try {
+    patchAssistantMessage(rt.assistantMsgId, {
+      content: fallbackMessage,
+      progressText: rt.text || undefined,
+      loading: false,
+      error: 'true',
+      retryable: false,
+      toolCalls: [...rt.toolCalls],
+    });
+  } catch (e) {
+    console.error('[chat-session] fallback teardown failed:', e);
+  }
+}
+
 function finalizeError(rt: TurnRuntime, message: string, retryable: boolean, errorKind?: 'config'): void {
   if (rt.finalized) return;
-  rt.finalized = true;
-  const isConfig = errorKind === 'config' || /not configured|ZAI_API_KEY|set the .*API_KEY/i.test(message);
-  const isRateLimit = /429|rate.?limit|too many requests/i.test(message);
-  const durationMs = Date.now() - (useChatSession.getState().active?.startedAt ?? Date.now());
-  let friendly = `Sorry, I encountered an error: ${message}`;
-  if (isRateLimit) {
-    friendly = 'The AI provider is currently rate-limiting requests (too many requests / 429). ' +
-      'The server retried automatically but kept hitting the limit. Please wait a minute, then press Retry — your message and circuit are preserved.';
+  try {
+    const isConfig = errorKind === 'config' || /not configured|ZAI_API_KEY|set the .*API_KEY/i.test(message);
+    const isRateLimit = /429|rate.?limit|too many requests/i.test(message);
+    const durationMs = Date.now() - (useChatSession.getState().active?.startedAt ?? Date.now());
+    let friendly = `Sorry, I encountered an error: ${message}`;
+    if (isRateLimit) {
+      friendly = 'The AI provider is currently rate-limiting requests (too many requests / 429). ' +
+        'The server retried automatically but kept hitting the limit. Please wait a minute, then press Retry — your message and circuit are preserved.';
+    }
+    patchAssistantMessage(rt.assistantMsgId, {
+      content: isConfig ? 'AI backend not configured on this server.' : friendly,
+      progressText: rt.text || undefined,
+      durationMs,
+      loading: false,
+      error: 'true',
+      errorKind: isConfig ? 'config' : undefined,
+      retryable: (retryable || isRateLimit) && !isConfig,
+      toolCalls: [...rt.toolCalls],
+    });
+    toast.error(isConfig ? 'AI backend not configured — see setup instructions' : isRateLimit ? 'AI provider rate-limited — wait a moment and press Retry' : 'AI request failed');
+  } catch (e) {
+    console.error('[chat-session] finalizeError failed:', e);
+    forceTeardown(rt, 'Sorry — an internal error occurred while finishing this AI response.');
+  } finally {
+    // Flip the flag only AFTER the work. The old order (flag first, work
+    // second) let a mid-finalize exception escape with finalized already
+    // set: runTurnEngine then returned silently, `active` stayed set,
+    // message.loading stayed true forever and send() was permanently blocked.
+    rt.finalized = true;
+    cleanupRuntime();
   }
-  patchAssistantMessage(rt.assistantMsgId, {
-    content: isConfig ? 'AI backend not configured on this server.' : friendly,
-    progressText: rt.text || undefined,
-    durationMs,
-    loading: false,
-    error: 'true',
-    errorKind: isConfig ? 'config' : undefined,
-    retryable: (retryable || isRateLimit) && !isConfig,
-    toolCalls: [...rt.toolCalls],
-  });
-  toast.error(isConfig ? 'AI backend not configured — see setup instructions' : isRateLimit ? 'AI provider rate-limited — wait a moment and press Retry' : 'AI request failed');
-  cleanupRuntime();
 }
 
 function finalizeStopped(rt: TurnRuntime): void {
   if (rt.finalized) return;
-  rt.finalized = true;
-  const durationMs = Date.now() - (useChatSession.getState().active?.startedAt ?? Date.now());
-  patchAssistantMessage(rt.assistantMsgId, {
-    content: rt.text,
-    // content === progressText here (partial answer IS the whole stream) —
-    // the UI hides the progress accordion when they match, so no duplication.
-    progressText: rt.text || undefined,
-    durationMs,
-    loading: false,
-    stopped: true,
-    toolCalls: [...rt.toolCalls],
-  });
-  cleanupRuntime();
+  try {
+    const durationMs = Date.now() - (useChatSession.getState().active?.startedAt ?? Date.now());
+    patchAssistantMessage(rt.assistantMsgId, {
+      content: rt.text,
+      // content === progressText here (partial answer IS the whole stream) —
+      // the UI hides the progress accordion when they match, so no duplication.
+      progressText: rt.text || undefined,
+      durationMs,
+      loading: false,
+      stopped: true,
+      toolCalls: [...rt.toolCalls],
+    });
+  } catch (e) {
+    console.error('[chat-session] finalizeStopped failed:', e);
+    forceTeardown(rt, 'Stopped — but the partial response could not be finalized.');
+  } finally {
+    rt.finalized = true;
+    cleanupRuntime();
+  }
 }
 
 function finalizeDone(rt: TurnRuntime, data: any): void {
   if (rt.finalized) return;
-  rt.finalized = true;
-  const state = useChatSession.getState();
-  const response: string = data.response ?? rt.text;
-  const finalDoc: CircuitSnapshot | null = data.circuit ?? rt.finalDoc ?? null;
-  const durationMs = Date.now() - (state.active?.startedAt ?? Date.now());
+  try {
+    const state = useChatSession.getState();
+    const response: string = data.response ?? rt.text;
+    const finalDoc: CircuitSnapshot | null = data.circuit ?? rt.finalDoc ?? null;
+    const durationMs = Date.now() - (state.active?.startedAt ?? Date.now());
 
-  // The streamed narration may end with the final answer (the model streams
-  // its reply as the last chunk of the same turn) — trim that suffix so the
-  // progress accordion shows only the working narration, never a duplicate.
-  let progressText = rt.text;
-  if (response && progressText.endsWith(response)) {
-    progressText = progressText.slice(0, progressText.length - response.length).trimEnd();
-  }
-
-  let applied = false;
-  let appliedSummary = '';
-  let appliedDoc: CircuitSnapshot | undefined;
-
-  if (state.autoApply && finalDoc) {
-    // Only claim "applied" when the circuit actually changed — a pure
-    // explanation turn or a timeout-before-any-work turn must NOT show a
-    // misleading "+0 components" bar.
-    const changed = circuitDiffers(finalDoc, rt.originalCircuit);
-    const docJson = JSON.stringify(finalDoc);
-    if (changed && docJson !== rt.lastAppliedDocJson) {
-      // Final doc differs from the last applied intermediate (or nothing was
-      // applied yet — e.g. reload resume): load it now.
-      applyCircuitUpdate(rt, finalDoc, Number.MAX_SAFE_INTEGER);
-      toast.success('Circuit updated by AI — press Ctrl+Z to undo');
+    // The streamed narration may end with the final answer (the model streams
+    // its reply as the last chunk of the same turn) — trim that suffix so the
+    // progress accordion shows only the working narration, never a duplicate.
+    let progressText = rt.text;
+    if (response && progressText.endsWith(response)) {
+      progressText = progressText.slice(0, progressText.length - response.length).trimEnd();
     }
-    if (changed) {
-      applied = true;
-      appliedSummary = summarizeDiff(finalDoc, rt.originalCircuit);
-      appliedDoc = finalDoc;
+
+    let applied = false;
+    let appliedSummary = '';
+    let appliedDoc: CircuitSnapshot | undefined;
+
+    if (state.autoApply && finalDoc) {
+      // Only claim "applied" when the circuit actually changed — a pure
+      // explanation turn or a timeout-before-any-work turn must NOT show a
+      // misleading "+0 components" bar.
+      const changed = circuitDiffers(finalDoc, rt.originalCircuit);
+      const docJson = JSON.stringify(finalDoc);
+      if (changed && docJson !== rt.lastAppliedDocJson) {
+        // Final doc differs from the last applied intermediate (or nothing was
+        // applied yet — e.g. reload resume): load it now.
+        applyCircuitUpdate(rt, finalDoc, Number.MAX_SAFE_INTEGER);
+        toast.success('Circuit updated by AI — press Ctrl+Z to undo');
+      }
+      if (changed) {
+        applied = true;
+        appliedSummary = summarizeDiff(finalDoc, rt.originalCircuit);
+        appliedDoc = finalDoc;
+      }
+    } else if (!state.autoApply && finalDoc && circuitDiffers(finalDoc, rt.originalCircuit)) {
+      // Review mode — leave as a pending diff for the user to accept.
+      patchAssistantMessage(rt.assistantMsgId, {
+        pendingDiff: {
+          components: finalDoc.components,
+          wires: finalDoc.wires,
+          summary: summarizeDiff(finalDoc, rt.originalCircuit),
+        },
+      });
     }
-  } else if (!state.autoApply && finalDoc && circuitDiffers(finalDoc, rt.originalCircuit)) {
-    // Review mode — leave as a pending diff for the user to accept.
+
+    // Server-side PCB snapshot in the done payload — normally already applied
+    // via a live pcb_update event, but a page-reload resume or review-mode flow
+    // may only see it here. Apply unconditionally (idempotent full-doc load).
+    let pcbUpdated = false;
+    if (data.pcb && Array.isArray(data.pcb.footprints)) {
+      applyPcbUpdate(data.pcb);
+      pcbUpdated = true;
+    }
+
+    // Missing components (done payload) — merge with any live-detected ones.
+    const missingList = Array.isArray(data.missingComponents)
+      ? Array.from(new Set([...(useChatSession.getState().messages.find(m => m.id === rt.assistantMsgId)?.missingComponents ?? []), ...data.missingComponents]))
+      : undefined;
+
+    const usage = data.usage;
+    if (usage) {
+      useChatSession.setState(s => ({
+        totalTokens: {
+          prompt: s.totalTokens.prompt + (usage.prompt_tokens || 0),
+          completion: s.totalTokens.completion + (usage.completion_tokens || 0),
+          total: s.totalTokens.total + (usage.total_tokens || 0),
+        },
+      }));
+    }
+
     patchAssistantMessage(rt.assistantMsgId, {
-      pendingDiff: {
-        components: finalDoc.components,
-        wires: finalDoc.wires,
-        summary: summarizeDiff(finalDoc, rt.originalCircuit),
-      },
+      content: response,
+      progressText: progressText || undefined,
+      durationMs,
+      loading: false,
+      toolCalls: [...rt.toolCalls],
+      applied,
+      appliedSummary,
+      ...(appliedDoc ? { appliedDoc } : {}),
+      ...(missingList && missingList.length > 0 ? { missingComponents: missingList } : {}),
+      ...(pcbUpdated ? { pcbUpdated: true } : {}),
+      usage,
     });
+  } catch (e) {
+    // The final circuit apply (loadDocument/pushHistory on a possibly
+    // inconsistent store) is the realistic thrower — never let it wedge the
+    // session: the user still gets a message they can act on.
+    console.error('[chat-session] finalizeDone failed (final apply threw):', e);
+    forceTeardown(rt, 'Sorry — I finished the work but an internal error occurred while applying the final result to your circuit.');
+  } finally {
+    rt.finalized = true;
+    cleanupRuntime();
   }
-
-  // Server-side PCB snapshot in the done payload — normally already applied
-  // via a live pcb_update event, but a page-reload resume or review-mode flow
-  // may only see it here. Apply unconditionally (idempotent full-doc load).
-  let pcbUpdated = false;
-  if (data.pcb && Array.isArray(data.pcb.footprints)) {
-    applyPcbUpdate(data.pcb);
-    pcbUpdated = true;
-  }
-
-  // Missing components (done payload) — merge with any live-detected ones.
-  const missingList = Array.isArray(data.missingComponents)
-    ? Array.from(new Set([...(useChatSession.getState().messages.find(m => m.id === rt.assistantMsgId)?.missingComponents ?? []), ...data.missingComponents]))
-    : undefined;
-
-  const usage = data.usage;
-  if (usage) {
-    useChatSession.setState(s => ({
-      totalTokens: {
-        prompt: s.totalTokens.prompt + (usage.prompt_tokens || 0),
-        completion: s.totalTokens.completion + (usage.completion_tokens || 0),
-        total: s.totalTokens.total + (usage.total_tokens || 0),
-      },
-    }));
-  }
-
-  patchAssistantMessage(rt.assistantMsgId, {
-    content: response,
-    progressText: progressText || undefined,
-    durationMs,
-    loading: false,
-    toolCalls: [...rt.toolCalls],
-    applied,
-    appliedSummary,
-    ...(appliedDoc ? { appliedDoc } : {}),
-    ...(missingList && missingList.length > 0 ? { missingComponents: missingList } : {}),
-    ...(pcbUpdated ? { pcbUpdated: true } : {}),
-    usage,
-  });
-  cleanupRuntime();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -772,130 +824,158 @@ async function streamOnce(opts: EngineOptions, resume: { turnId: string } | null
     const cur = runtime;
     if (!cur || cur.finalized) return; // engine reset elsewhere (Stop)
     if (!ev.json) continue;
-    const data = ev.json;
-    const type = ev.event || 'message';
-    const seq = typeof data.seq === 'number' ? data.seq : 0;
-    /** Events that still owe their side effects on THIS connection. */
-    const owesSideEffects = !isResume || seq > cur.appliedSeq;
+    try {
+      // ── event dispatch ──────────────────────────────────────────────────
+      // Everything in this block is local turn bookkeeping + side effects
+      // (circuit loads, client actions, message patches). An exception here
+      // is an INTERNAL failure, NOT a network drop — it must not be retried
+      // (a reconnect would replay the same event into the same crashing
+      // handler up to 10 times and end in a misleading "Connection lost").
+      // The catch below distinguishes the two cases.
+      const data = ev.json;
+      const type = ev.event || 'message';
+      const seq = typeof data.seq === 'number' ? data.seq : 0;
+      /** Events that still owe their side effects on THIS connection. */
+      const owesSideEffects = !isResume || seq > cur.appliedSeq;
 
-    // First event past the watermark = the replay is over and we're live
-    // again — flip the status pill back from "Reconnecting…".
-    if (isResume && !announcedLive && owesSideEffects) {
-      announcedLive = true;
-      setPhase('streaming', 'Reconnected — continuing…');
-    }
+      // First event past the watermark = the replay is over and we're live
+      // again — flip the status pill back from "Reconnecting…".
+      if (isResume && !announcedLive && owesSideEffects) {
+        announcedLive = true;
+        setPhase('streaming', 'Reconnected — continuing…');
+      }
 
-    if (type === 'turn') {
-      cur.turnId = data.turnId;
-      // Mirror into the store so the UI (and Stop) can see the turn id.
-      useChatSession.setState(s =>
-        s.active && s.active.assistantMsgId === cur.assistantMsgId
-          ? { active: { ...s.active, turnId: data.turnId } }
-          : {},
-      );
-      if (!isResume) setPhase('streaming', 'Thinking…');
-      persistActiveTurn();
-    } else if (type === 'status') {
-      if (owesSideEffects && data.phase === 'provider-retry') {
-        const reason = String(data.reason || '');
-        const isRateLimit = /429|rate.?limit|too many requests/i.test(reason);
-        setStatusText(
-          isRateLimit
-            ? `AI provider rate-limited — retrying in ${Math.round((data.delayMs || 0) / 1000)}s (attempt ${data.attempt})…`
-            : `AI provider hiccup — retrying in ${Math.round((data.delayMs || 0) / 1000)}s (attempt ${data.attempt})…`,
+      if (type === 'turn') {
+        cur.turnId = data.turnId;
+        // Mirror into the store so the UI (and Stop) can see the turn id.
+        useChatSession.setState(s =>
+          s.active && s.active.assistantMsgId === cur.assistantMsgId
+            ? { active: { ...s.active, turnId: data.turnId } }
+            : {},
         );
-      }
-    } else if (type === 'text_delta') {
-      cur.text += data.text || '';
-      updateAssistantFromRuntime(cur);
-    } else if (type === 'text_reset') {
-      // The model call restarted (provider/loop retry) — text streamed by the
-      // aborted attempt is stale (the retry re-narrates from scratch); drop
-      // it so the message never shows duplicated narration. Like text_delta,
-      // this is pure display state: apply on replay AND live.
-      cur.text = '';
-      updateAssistantFromRuntime(cur);
-    } else if (type === 'tool_call') {
-      cur.toolCalls.push({
-        name: data.name,
-        args: safeJsonParse(data.args),
-        result: data.result,
-        error: data.error,
-        ok: data.ok !== false,
-      });
-      updateAssistantFromRuntime(cur);
-      if (owesSideEffects) {
-        runClientSideAction(data.name, safeJsonParse(data.args), data.result);
-        cur.appliedSeq = Math.max(cur.appliedSeq, seq);
-        setStatusText(TOOL_STATUS_LABELS[data.name] || `Running ${data.name}…`);
-      }
-      persistActiveTurn();
-    } else if (type === 'verify') {
-      cur.toolCalls.push({
-        name: 'verify.autoCheck',
-        args: { attempt: data.attempt },
-        result: { health: data.health, issueCount: data.issueCount, dcConverged: data.dcConverged },
-        ok: data.health !== 'critical',
-      });
-      updateAssistantFromRuntime(cur);
-    } else if (type === 'circuit_update') {
-      const doc: CircuitSnapshot = { components: data.components || [], wires: data.wires || [] };
-      cur.finalDoc = doc;
-      if (useChatSession.getState().autoApply) {
-        if (owesSideEffects) {
-          applyCircuitUpdate(cur, doc, seq);
-          setStatusText('Updating schematic…');
+        if (!isResume) setPhase('streaming', 'Thinking…');
+        persistActiveTurn();
+      } else if (type === 'status') {
+        if (owesSideEffects && data.phase === 'provider-retry') {
+          const reason = String(data.reason || '');
+          const isRateLimit = /429|rate.?limit|too many requests/i.test(reason);
+          setStatusText(
+            isRateLimit
+              ? `AI provider rate-limited — retrying in ${Math.round((data.delayMs || 0) / 1000)}s (attempt ${data.attempt})…`
+              : `AI provider hiccup — retrying in ${Math.round((data.delayMs || 0) / 1000)}s (attempt ${data.attempt})…`,
+          );
         }
-        // Replayed (already applied before the disconnect) — skip.
-      } else {
-        // Review mode: pending diff is derived state — idempotent to re-set.
-        patchAssistantMessage(cur.assistantMsgId, {
-          pendingDiff: {
-            components: doc.components,
-            wires: doc.wires,
-            summary: summarizeDiff(doc, cur.originalCircuit),
-          },
+      } else if (type === 'text_delta') {
+        cur.text += data.text || '';
+        updateAssistantFromRuntime(cur);
+      } else if (type === 'text_reset') {
+        // The model call restarted (provider/loop retry) — text streamed by the
+        // aborted attempt is stale (the retry re-narrates from scratch); drop
+        // it so the message never shows duplicated narration. Like text_delta,
+        // this is pure display state: apply on replay AND live.
+        cur.text = '';
+        updateAssistantFromRuntime(cur);
+      } else if (type === 'tool_call') {
+        cur.toolCalls.push({
+          name: data.name,
+          args: safeJsonParse(data.args),
+          result: data.result,
+          error: data.error,
+          ok: data.ok !== false,
         });
+        updateAssistantFromRuntime(cur);
+        if (owesSideEffects) {
+          runClientSideAction(data.name, safeJsonParse(data.args), data.result);
+          cur.appliedSeq = Math.max(cur.appliedSeq, seq);
+          setStatusText(TOOL_STATUS_LABELS[data.name] || `Running ${data.name}…`);
+        }
+        persistActiveTurn();
+      } else if (type === 'verify') {
+        cur.toolCalls.push({
+          name: 'verify.autoCheck',
+          args: { attempt: data.attempt },
+          result: { health: data.health, issueCount: data.issueCount, dcConverged: data.dcConverged },
+          ok: data.health !== 'critical',
+        });
+        updateAssistantFromRuntime(cur);
+      } else if (type === 'circuit_update') {
+        const doc: CircuitSnapshot = { components: data.components || [], wires: data.wires || [] };
+        cur.finalDoc = doc;
+        if (useChatSession.getState().autoApply) {
+          if (owesSideEffects) {
+            applyCircuitUpdate(cur, doc, seq);
+            setStatusText('Updating schematic…');
+          }
+          // Replayed (already applied before the disconnect) — skip.
+        } else {
+          // Review mode: pending diff is derived state — idempotent to re-set.
+          patchAssistantMessage(cur.assistantMsgId, {
+            pendingDiff: {
+              components: doc.components,
+              wires: doc.wires,
+              summary: summarizeDiff(doc, cur.originalCircuit),
+            },
+          });
+        }
+        persistActiveTurn();
+      } else if (type === 'pcb_update') {
+        // Server-side PCB snapshot — load it into the PCB store so the user can
+        // watch the AI's layout work live on the PCB tab. Idempotent (full-doc
+        // load), so replayed events are safe to re-apply.
+        if (owesSideEffects && data && Array.isArray(data.footprints)) {
+          applyPcbUpdate(data);
+          patchAssistantMessage(cur.assistantMsgId, { pcbUpdated: true });
+          setStatusText('Updating PCB layout…');
+          cur.appliedSeq = Math.max(cur.appliedSeq, seq);
+        }
+        persistActiveTurn();
+      } else if (type === 'missing_component') {
+        // The AI asked for a component type that doesn't exist — surface it on
+        // the message immediately (deduped) so the user knows what to add.
+        const missingType = typeof data.type === 'string' ? data.type : null;
+        if (missingType) {
+          const existing = useChatSession.getState().messages.find(m => m.id === cur.assistantMsgId);
+          const list = new Set(existing?.missingComponents ?? []);
+          list.add(missingType);
+          patchAssistantMessage(cur.assistantMsgId, { missingComponents: Array.from(list) });
+        }
+      } else if (type === 'done') {
+        sawFinal = true;
+        finalizeDone(cur, data);
+        return;
+      } else if (type === 'error') {
+        sawFinal = true;
+        if (data.code === 'TURN_LOST') throw new TurnLostError();
+        finalizeError(
+          cur,
+          data.message || 'AI request failed',
+          true,
+          data.code === 'AI_NOT_CONFIGURED' ? 'config' : undefined,
+        );
+        return;
+      } else if (type === 'cancelled') {
+        sawFinal = true;
+        finalizeStopped(cur);
+        return;
       }
-      persistActiveTurn();
-    } else if (type === 'pcb_update') {
-      // Server-side PCB snapshot — load it into the PCB store so the user can
-      // watch the AI's layout work live on the PCB tab. Idempotent (full-doc
-      // load), so replayed events are safe to re-apply.
-      if (owesSideEffects && data && Array.isArray(data.footprints)) {
-        applyPcbUpdate(data);
-        patchAssistantMessage(cur.assistantMsgId, { pcbUpdated: true });
-        setStatusText('Updating PCB layout…');
-        cur.appliedSeq = Math.max(cur.appliedSeq, seq);
-      }
-      persistActiveTurn();
-    } else if (type === 'missing_component') {
-      // The AI asked for a component type that doesn't exist — surface it on
-      // the message immediately (deduped) so the user knows what to add.
-      const missingType = typeof data.type === 'string' ? data.type : null;
-      if (missingType) {
-        const existing = useChatSession.getState().messages.find(m => m.id === cur.assistantMsgId);
-        const list = new Set(existing?.missingComponents ?? []);
-        list.add(missingType);
-        patchAssistantMessage(cur.assistantMsgId, { missingComponents: Array.from(list) });
-      }
-    } else if (type === 'done') {
-      sawFinal = true;
-      finalizeDone(cur, data);
-      return;
-    } else if (type === 'error') {
-      sawFinal = true;
-      if (data.code === 'TURN_LOST') throw new TurnLostError();
+    } catch (e) {
+      if (e instanceof TurnLostError) throw e; // control-flow, not a failure
+      // A handler/side-effect exception (e.g. applyCircuitUpdate blowing up on
+      // inconsistent store state) — an INTERNAL failure, NOT a transport drop.
+      // The old code let this escape into the engine's generic catch, which
+      // misclassified it as a network failure and reconnect-hammered the
+      // endpoint (each replay re-crashing on the same event) until it gave up
+      // with a misleading retryable "Connection lost after 10 attempts". Instead:
+      // log the REAL exception (dev.log), surface a clear non-retryable error,
+      // and stop the turn without reconnecting.
+      console.error('[chat-session] AI turn event handler failed — aborting turn:', e);
       finalizeError(
         cur,
-        data.message || 'AI request failed',
-        true,
-        data.code === 'AI_NOT_CONFIGURED' ? 'config' : undefined,
+        `AI_ERROR: internal error while applying an AI update: ${(e as Error)?.message || String(e)}`,
+        false,
       );
-      return;
-    } else if (type === 'cancelled') {
-      sawFinal = true;
-      finalizeStopped(cur);
+      // Release the connection (we will not read any further events).
+      reader.cancel().catch(() => { /* already closed */ });
       return;
     }
   }
@@ -1056,16 +1136,25 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
     // Out-of-band cancel: the turn runs server-side now, so aborting the
     // fetch alone wouldn't stop the AI. keepalive so the request survives
     // even if the panel/tab goes away right after the click.
-    if (rt.turnId) {
-      try {
-        void fetch('/api/ai/chat/cancel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ turnId: rt.turnId }),
-          keepalive: true,
-        }).catch(() => {});
-      } catch { /* ignore */ }
-    }
+    //
+    // When the turn id hasn't arrived yet (the fetch is in flight but the
+    // first `turn` SSE event hasn't completed the round-trip — also true for
+    // the whole reconnect-sleep window after a TURN_LOST restart, which
+    // resets turnId to null), the server-side turn is ALREADY running. Key
+    // the cancel by clientId instead: the server cancels that client's
+    // running turns, so no zombie keeps burning provider quota until the
+    // 290s hard cap.
+    const cancelBody = rt.turnId
+      ? { turnId: rt.turnId }
+      : { clientId: (typeof rt.requestBody?.clientId === 'string' && rt.requestBody.clientId) || getClientId() };
+    try {
+      void fetch('/api/ai/chat/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cancelBody),
+        keepalive: true,
+      }).catch(() => {});
+    } catch { /* ignore */ }
     abortCtrl?.abort(new DOMException('Stopped by user', 'AbortError'));
     finalizeStopped(rt);
   },

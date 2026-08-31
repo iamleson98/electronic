@@ -271,9 +271,13 @@ export class TurnManager {
     return true;
   }
 
-  /** Cancel every other RUNNING turn belonging to this client (dedupe
-   *  zombies left behind by a client-side auto-restart). */
-  cancelClientTurns(clientId: string, exceptTurnId?: string): void {
+  /** Cancel every RUNNING turn belonging to this client (dedupe
+   *  zombies left behind by a client-side auto-restart). Returns true when at
+   *  least one turn was still running (and is now being cancelled). Also used
+   *  by the cancel route for clientId-only Stop requests — the turn id hasn't
+   *  reached the client yet, but the turn is already running server-side. */
+  cancelClientTurns(clientId: string, exceptTurnId?: string): boolean {
+    let cancelledAny = false;
     for (const turn of this.turns.values()) {
       if (
         turn.status === 'running' &&
@@ -281,8 +285,10 @@ export class TurnManager {
         turn.id !== exceptTurnId
       ) {
         turn.abort.abort(new Error('superseded by a newer request'));
+        cancelledAny = true;
       }
     }
+    return cancelledAny;
   }
 
   getTurnStatus(id: string): TurnStatus | undefined {
