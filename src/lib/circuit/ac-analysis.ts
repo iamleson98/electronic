@@ -396,6 +396,18 @@ function computeOutputVoltage(
     // Other types are not handled — they contribute nothing to the AC matrix
   }
 
+  // ── Floating-node guard (gmin) ────────────────────────────────────────────
+  // A node whose ONLY members are unwired annotation pins (netLabel's spare
+  // terminal, an unconnected IC pin, …) gets an all-zero row/column in Y →
+  // the complex solve is SINGULAR and every frequency returns garbage
+  // (-600 dB flat). Real circuits don't care: 1e-12 S is 1 TΩ to ground.
+  const GMIN = 1e-12;
+  for (let i = 0; i < N; i++) {
+    if (Yre[i * N + i] === 0 && Yim[i * N + i] === 0) {
+      Yre[i * N + i] += GMIN;
+    }
+  }
+
   // Solve the complex linear system Y * V = I using Cramer's rule via Gaussian
   // elimination with partial pivoting. The matrix is small (N typically < 100).
   const Vre = new Float64Array(N);

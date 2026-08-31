@@ -561,15 +561,21 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
       ctx.stroke();
     }
 
-    // draw animated current flow dots THROUGH the component body
-    if (isAnimating && plugin.getFlowPath) {
+    // draw animated current flow dots THROUGH the component body.
+    // getFlowPaths (plural) renders multiple independent sub-paths — used by
+    // components where current does not flow straight through (a capacitor:
+    // dots INTO the + plate / OUT of the − plate, never across the dielectric).
+    if (isAnimating && (plugin.getFlowPaths || plugin.getFlowPath)) {
       const current = componentCurrents.get(comp.id) ?? 0;
       const absCurrent = Math.abs(current);
       if (absCurrent > 1e-12) {
         const dir = current >= 0 ? 1 : -1;
         const speed = Math.min(1.2, Math.max(0.1, 0.15 + 0.25 * Math.log10(absCurrent / 1e-6 + 1)));
-        const flowGridPath = plugin.getFlowPath(comp.parameters, simContext ?? undefined, comp);
-        if (flowGridPath && flowGridPath.length >= 2) {
+        const flowGridPaths: Vec2[][] = plugin.getFlowPaths
+          ? plugin.getFlowPaths(comp.parameters, simContext ?? undefined, comp)
+          : [plugin.getFlowPath!(comp.parameters, simContext ?? undefined, comp)];
+        for (const flowGridPath of flowGridPaths) {
+          if (!flowGridPath || flowGridPath.length < 2) continue;
           const flowScreenPath: Vec2[] = flowGridPath.map((gp) => {
             const bb = plugin.boundingBox;
             const cx = bb.width / 2;

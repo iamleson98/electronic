@@ -118,5 +118,72 @@ const loadDocumentTool: Tool = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Undo / redo — turn-scoped circuit history
+// ─────────────────────────────────────────────────────────────────────────────
+// The turn runner snapshots ctx.doc before every mutating tool call (see
+// turn-manager.ts). These tools move through that history server-side; the
+// restored document flows back to the client through the same circuit_update
+// channel as every other mutation, so the canvas and the model's context can
+// never diverge (a client-side editor.undo() here would fight the next
+// circuit_update and silently resurrect whatever was undone).
 
-export { serializeDocumentTool, exportKiCadNetlistTool, loadDocumentTool };
+const undoTool: Tool = {
+  name: 'schematic.undo',
+  category: 'Circuit Building',
+  description:
+    'Undo the most recent circuit change from this turn — yours or the user\'s earlier request in the same conversation. Use it to cleanly back out a wrong mutation before redoing it differently.',
+  parameters: { type: 'object', properties: {} },
+  execute(_args, ctx: ToolContext) {
+    const h = ctx.history;
+    if (!h || h.undoStack.length === 0) {
+      return { ok: false, error: 'Nothing to undo yet — no circuit changes have been made in this turn.' };
+    }
+    const snapshot = h.undoStack.pop()!;
+    h.redoStack.push(JSON.stringify({ components: ctx.doc.components, wires: ctx.doc.wires }));
+    const restored = JSON.parse(snapshot);
+    ctx.doc.components = restored.components;
+    ctx.doc.wires = restored.wires;
+    ctx.simContext = null; // topology changed — stale node voltages would mislead
+    return {
+      ok: true,
+      result: {
+        action: 'undo',
+        components: ctx.doc.components.length,
+        wires: ctx.doc.wires.length,
+        message: `Reverted the last circuit change (${ctx.doc.components.length} components, ${ctx.doc.wires.length} wires).`,
+      },
+    };
+  },
+};
+
+const redoTool: Tool = {
+  name: 'schematic.redo',
+  category: 'Circuit Building',
+  description: 'Redo a change that was just undone with schematic.undo.',
+  parameters: { type: 'object', properties: {} },
+  execute(_args, ctx: ToolContext) {
+    const h = ctx.history;
+    if (!h || h.redoStack.length === 0) {
+      return { ok: false, error: 'Nothing to redo — undo a change first.' };
+    }
+    const snapshot = h.redoStack.pop()!;
+    h.undoStack.push(JSON.stringify({ components: ctx.doc.components, wires: ctx.doc.wires }));
+    const restored = JSON.parse(snapshot);
+    ctx.doc.components = restored.components;
+    ctx.doc.wires = restored.wires;
+    ctx.simContext = null;
+    return {
+      ok: true,
+      result: {
+        action: 'redo',
+        components: ctx.doc.components.length,
+        wires: ctx.doc.wires.length,
+        message: `Re-applied the undone change (${ctx.doc.components.length} components, ${ctx.doc.wires.length} wires).`,
+      },
+    };
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+export { serializeDocumentTool, exportKiCadNetlistTool, loadDocumentTool, undoTool, redoTool };

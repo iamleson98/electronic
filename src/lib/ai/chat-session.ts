@@ -35,6 +35,8 @@ export interface ToolCallEntry {
   result?: any;
   error?: string;
   ok: boolean;
+  /** True while this call is in flight (last call of the ACTIVE turn only). */
+  pending?: boolean;
 }
 
 export interface ChatMessage {
@@ -59,6 +61,13 @@ export interface ChatMessage {
   /** Changes from this turn were applied to the canvas (auto mode). */
   applied?: boolean;
   appliedSummary?: string;
+  /** The circuit doc as applied — drives the BOM / wire-connections card. */
+  appliedDoc?: { components: any[]; wires: any[] };
+  /** Live working-progress narration (the raw streamed text). Shown inside the
+   *  collapsible progress accordion — it no longer grows the message bubble. */
+  progressText?: string;
+  /** Wall-clock duration of the finished turn (for the "Worked for Xs" title). */
+  durationMs?: number;
   usage?: {
     prompt_tokens: number;
     completion_tokens: number;
@@ -150,12 +159,16 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
   'schematic.clear': 'Clearing the schematic…',
   'schematic.loadDocument': 'Loading circuit…',
   'schematic.reannotate': 'Renumbering references…',
+  'schematic.undo': 'Undoing your last change…',
+  'schematic.redo': 'Redoing…',
   'schematic.runERC': 'Running ERC…',
   'examples.load': 'Loading example…',
   'simulate.run': 'Running simulation…',
   'simulate.solveDC': 'Solving DC operating point…',
   'simulate.validatePhysics': 'Validating physics…',
   'simulate.start': 'Starting simulation…',
+  'simulate.acAnalysis': 'Sweeping frequency response…',
+  'simulate.fourier': 'Analyzing harmonics…',
   'simulate.sweep': 'Sweeping parameters…',
   'simulate.whatIf': 'Testing what-if…',
   'ai.diagnose': 'Diagnosing circuit…',
@@ -173,6 +186,64 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
   'export.spiceNetlist': 'Exporting netlist…',
   'export.bomCSV': 'Building BOM…',
 };
+
+/** Past-tense step labels for the Steps accordion — null = derive from the name. */
+const TOOL_STEP_LABELS: Record<string, string> = {
+  'design.calculate': 'Calculated component values',
+  'design.buildPattern': 'Built circuit',
+  'schematic.addComponent': 'Added components',
+  'schematic.addWire': 'Wired components',
+  'schematic.removeComponent': 'Removed components',
+  'schematic.removeWire': 'Removed wires',
+  'schematic.moveComponent': 'Moved components',
+  'schematic.rotateComponent': 'Rotated components',
+  'schematic.setParameter': 'Adjusted values',
+  'schematic.clear': 'Cleared the schematic',
+  'schematic.loadDocument': 'Loaded circuit',
+  'schematic.reannotate': 'Renumbered references',
+  'schematic.undo': 'Undid your last change',
+  'schematic.redo': 'Redid a change',
+  'schematic.runERC': 'Ran ERC',
+  'examples.load': 'Loaded example',
+  'simulate.run': 'Ran simulation',
+  'simulate.solveDC': 'Solved DC operating point',
+  'simulate.validatePhysics': 'Validated physics',
+  'simulate.start': 'Started live simulation',
+  'simulate.pause': 'Paused simulation',
+  'simulate.reset': 'Reset simulation',
+  'simulate.acAnalysis': 'Swept frequency response',
+  'simulate.fourier': 'Analyzed harmonics (THD)',
+  'simulate.sweep': 'Swept parameters',
+  'simulate.whatIf': 'Tested what-if scenario',
+  'ai.diagnose': 'Diagnosed circuit',
+  'verify.autoCheck': 'Verified circuit',
+  'circuit.walkthrough': 'Analyzed circuit topology',
+  'kb.search': 'Searched knowledge base',
+  'kb.lookup': 'Looked up theory',
+  'concept.explain': 'Prepared explanation',
+  'pcb.importFromSchematic': 'Imported to PCB',
+  'pcb.autoRoute': 'Auto-routed PCB',
+  'pcb.topoRoute': 'Routed PCB',
+  'pcb.runDRC': 'Ran DRC',
+  'pcb.verifyNetlist': 'Verified PCB netlist',
+  'pcb.addCopperPour': 'Poured copper',
+  'export.spiceNetlist': 'Exported SPICE netlist',
+  'export.bomCSV': 'Built BOM',
+};
+
+/** Friendly label for a tool call in the Steps list ("Ran simulation"). */
+export function stepLabelFor(toolName: string): string {
+  if (TOOL_STEP_LABELS[toolName]) return TOOL_STEP_LABELS[toolName];
+  if (TOOL_STATUS_LABELS[toolName]) return TOOL_STATUS_LABELS[toolName].replace(/…$/, '');
+  // Derive from the name: "schematic.addComponent" → "addComponent"
+  const tail = toolName.includes('.') ? toolName.split('.').slice(1).join('.') : toolName;
+  return tail.replace(/([a-z])([A-Z])/g, '$1 $2');
+}
+
+/** Live status for a tool while it runs ("Running simulation…"). */
+export function statusLabelFor(toolName: string): string {
+  return TOOL_STATUS_LABELS[toolName] ?? `Running ${toolName}…`;
+}
 
 function localStorageGet(key: string): string | null {
   if (typeof window === 'undefined') return null;
@@ -327,8 +398,13 @@ function patchAssistantMessage(msgId: string, patch: Partial<ChatMessage>): void
 }
 
 function updateAssistantFromRuntime(rt: TurnRuntime): void {
+  // While the turn is ACTIVE the streamed narration lives in `progressText`
+  // (rendered inside the collapsible progress accordion) — the message bubble
+  // itself no longer grows line by line. `content` is filled once by the
+  // finalizer with the final answer.
   patchAssistantMessage(rt.assistantMsgId, {
-    content: rt.text,
+    content: '',
+    progressText: rt.text,
     toolCalls: [...rt.toolCalls],
     loading: true,
   });
@@ -412,8 +488,11 @@ function finalizeError(rt: TurnRuntime, message: string, retryable: boolean, err
   if (rt.finalized) return;
   rt.finalized = true;
   const isConfig = errorKind === 'config' || /not configured|ZAI_API_KEY|set the .*API_KEY/i.test(message);
+  const durationMs = Date.now() - (useChatSession.getState().active?.startedAt ?? Date.now());
   patchAssistantMessage(rt.assistantMsgId, {
     content: isConfig ? 'AI backend not configured on this server.' : `Sorry, I encountered an error: ${message}`,
+    progressText: rt.text || undefined,
+    durationMs,
     loading: false,
     error: 'true',
     errorKind: isConfig ? 'config' : undefined,
@@ -427,8 +506,13 @@ function finalizeError(rt: TurnRuntime, message: string, retryable: boolean, err
 function finalizeStopped(rt: TurnRuntime): void {
   if (rt.finalized) return;
   rt.finalized = true;
+  const durationMs = Date.now() - (useChatSession.getState().active?.startedAt ?? Date.now());
   patchAssistantMessage(rt.assistantMsgId, {
     content: rt.text,
+    // content === progressText here (partial answer IS the whole stream) —
+    // the UI hides the progress accordion when they match, so no duplication.
+    progressText: rt.text || undefined,
+    durationMs,
     loading: false,
     stopped: true,
     toolCalls: [...rt.toolCalls],
@@ -442,9 +526,19 @@ function finalizeDone(rt: TurnRuntime, data: any): void {
   const state = useChatSession.getState();
   const response: string = data.response ?? rt.text;
   const finalDoc: CircuitSnapshot | null = data.circuit ?? rt.finalDoc ?? null;
+  const durationMs = Date.now() - (state.active?.startedAt ?? Date.now());
+
+  // The streamed narration may end with the final answer (the model streams
+  // its reply as the last chunk of the same turn) — trim that suffix so the
+  // progress accordion shows only the working narration, never a duplicate.
+  let progressText = rt.text;
+  if (response && progressText.endsWith(response)) {
+    progressText = progressText.slice(0, progressText.length - response.length).trimEnd();
+  }
 
   let applied = false;
   let appliedSummary = '';
+  let appliedDoc: CircuitSnapshot | undefined;
 
   if (state.autoApply && finalDoc) {
     // Only claim "applied" when the circuit actually changed — a pure
@@ -461,6 +555,7 @@ function finalizeDone(rt: TurnRuntime, data: any): void {
     if (changed) {
       applied = true;
       appliedSummary = summarizeDiff(finalDoc, rt.originalCircuit);
+      appliedDoc = finalDoc;
     }
   } else if (!state.autoApply && finalDoc && circuitDiffers(finalDoc, rt.originalCircuit)) {
     // Review mode — leave as a pending diff for the user to accept.
@@ -486,10 +581,13 @@ function finalizeDone(rt: TurnRuntime, data: any): void {
 
   patchAssistantMessage(rt.assistantMsgId, {
     content: response,
+    progressText: progressText || undefined,
+    durationMs,
     loading: false,
     toolCalls: [...rt.toolCalls],
     applied,
     appliedSummary,
+    ...(appliedDoc ? { appliedDoc } : {}),
     usage,
   });
   cleanupRuntime();

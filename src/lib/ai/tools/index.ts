@@ -30,11 +30,12 @@ import { importToPCBTool, runAutoRouteTool, runDRCTool, runTopoRouteTool } from 
 import { setBoardSizeTool, setDefaultTraceWidthTool, setActiveLayerTool, addCopperPourTool, generateTeardropsTool, verifyNetlistTool } from './pcb-board-setup-tools';
 import { runERCTool, reannotateTool } from './erc-annotation-tools';
 import { findComponentTool } from './search-tools';
-import { serializeDocumentTool, exportKiCadNetlistTool, loadDocumentTool } from './document-tools';
+import { serializeDocumentTool, exportKiCadNetlistTool, loadDocumentTool, undoTool, redoTool } from './document-tools';
 import { diagnoseCircuitTool } from './diagnostic-tools';
 import { kbLookupTool, kbSearchTool, kbListByCategoryTool, kbRelatedTool, kbListCategoriesTool } from './kb-tools';
 import { simulateWhatIfTool } from './whatif-tools';
 import { simulateSweepTool } from './sweep-tools';
+import { acAnalysisTool, fourierTool } from './analysis-tools';
 import { designCalculateTool } from './design-calculators';
 import { designBuildPatternTool } from './design-patterns';
 import { circuitWalkthroughTool } from './walkthrough-tools';
@@ -52,6 +53,8 @@ export const TOOLS: Tool[] = [
   clearCircuitTool,
   reannotateTool,
   loadDocumentTool,
+  undoTool,
+  redoTool,
 
   // Discovery
   listComponentsTool,
@@ -70,6 +73,8 @@ export const TOOLS: Tool[] = [
   solveDCTool,
   runERCTool,
   autoCheckTool,
+  acAnalysisTool,
+  fourierTool,
 
   // Simulation Control (client-side)
   startSimulationTool,

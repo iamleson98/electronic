@@ -24,10 +24,20 @@ import { getFootprintDef } from './footprints';
 /** courtyard clearance kept between placed components (mm) — leaves routing channels */
 const PLACE_GAP = 1.8;
 
+/** Per-pair gap scaled by routing DEMAND: two multi-pin ICs facing each other
+ *  need a channel wide enough for all the through-traffic their pins generate
+ *  (a fixed 1.8mm channel jammed the digital-clock boards — three DIP-12s in
+ *  a row left no way through). ~0.3mm per pin of the denser part, capped. */
+function pairGap(padsA: number, padsB: number): number {
+  const demand = Math.min(padsA, padsB);
+  return PLACE_GAP + Math.min(4.0, 0.3 * demand);
+}
+
 interface PlacementComp {
   comp: CircuitComponent;
   x: number; y: number;            // center position (mm)
   hw: number; hh: number;          // half extents incl. pads (mm)
+  pads: number;                    // pad count (routing-demand proxy)
   refdes: string;
 }
 
@@ -125,6 +135,7 @@ export function computeSmartPlacement(
       x: margin + (comp.position.x - minX) * scale + (innerW - schW * scale) / 2,
       y: margin + (comp.position.y - minY) * scale + (innerH - schH * scale) / 2,
       hw: ext.hw, hh: ext.hh,
+      pads: ext.padCount,
       refdes: generateRefdes(comp.type, comp.id),
     };
   });
@@ -168,9 +179,10 @@ export function computeSmartPlacement(
     for (let i = 0; i < comps.length; i++) {
       for (let j = i + 1; j < comps.length; j++) {
         const A = comps[i], B = comps[j];
+        const gap = pairGap(A.pads, B.pads);
         const dx = B.x - A.x, dy = B.y - A.y;
-        const ox = A.hw + B.hw + PLACE_GAP - Math.abs(dx);
-        const oy = A.hh + B.hh + PLACE_GAP - Math.abs(dy);
+        const ox = A.hw + B.hw + gap - Math.abs(dx);
+        const oy = A.hh + B.hh + gap - Math.abs(dy);
         if (ox > 0 && oy > 0) {
           // push along the axis with the smaller violation
           const push = 0.35;
@@ -245,6 +257,8 @@ export function computeSmartPlacement(
       positions.set(c.comp.id, { x: Math.round(c.x * 2) / 2, y: Math.round(c.y * 2) / 2 });
     }
     // hard overlap resolution (bounded passes) with ROTATED extents
+    const padCounts = new Map<string, number>();
+    for (const c of comps) padCounts.set(c.comp.id, c.pads);
     for (let pass = 0; pass < 80; pass++) {
       let moved = false;
       for (let i = 0; i < comps.length; i++) {
@@ -252,9 +266,10 @@ export function computeSmartPlacement(
           const A = comps[i], B = comps[j];
           const ea = eff.get(A.comp.id)!, eb = eff.get(B.comp.id)!;
           const pa = positions.get(A.comp.id)!, pb = positions.get(B.comp.id)!;
+          const gap = pairGap(padCounts.get(A.comp.id) ?? 0, padCounts.get(B.comp.id) ?? 0);
           const dx = pb.x - pa.x, dy = pb.y - pa.y;
-          const ox = ea.hw + eb.hw + PLACE_GAP - Math.abs(dx);
-          const oy = ea.hh + eb.hh + PLACE_GAP - Math.abs(dy);
+          const ox = ea.hw + eb.hw + gap - Math.abs(dx);
+          const oy = ea.hh + eb.hh + gap - Math.abs(dy);
           if (ox <= 0 || oy <= 0) continue;
           moved = true;
           if (ox < oy) {

@@ -74,6 +74,65 @@ function formatR(r: number): string {
 }
 
 // ----- Capacitor -----
+
+/** Visual charge state of a capacitor — pure, testable mapping from (V, I, t). */
+export interface CapacitorChargeVisuals {
+  /** 0..1 stored-charge level (soft saturation of |V|; half-glow at ~3 V). */
+  level: number;
+  /** True while energy flows INTO the cap (V·I > 0 → plates charging up). */
+  charging: boolean;
+  /** True while energy flows OUT (V·I < 0 → plates draining). */
+  discharging: boolean;
+  /** 0..1 glow intensity including pulse modulation — drives the plate halos. */
+  glow: number;
+  /** Pulse rate in Hz (∝ |I| — charging/discharging activity "breathes"). */
+  pulseHz: number;
+  /** Which physical plate is at the higher potential. */
+  positivePlate: 'a' | 'b';
+  /** How many +/− charge marks to draw per plate (0..3, ∝ charge level). */
+  marks: number;
+}
+
+/** Voltage at which the plate glow reaches half intensity. */
+const CAP_GLOW_HALF_V = 3;
+
+/**
+ * Map a capacitor's instantaneous (voltage, current, time) to its visual
+ * charge state. Conventions (Falstad/EveryCircuit-style):
+ *  • glow intensity tracks stored energy: |V| soft-saturating → [0,1)
+ *  • while current flows the glow PULSES at a rate ∝ |I| ("it's charging")
+ *  • when discharging, |V| decays → the glow naturally dims ("energy draining")
+ *  • current direction is rendered by the flow dots (into + plate / out of −)
+ */
+export function capacitorChargeVisuals(v: number, i: number, time: number): CapacitorChargeVisuals {
+  const av = typeof v === 'number' && isFinite(v) ? Math.abs(v) : 0;
+  const ai = typeof i === 'number' && isFinite(i) ? Math.abs(i) : 0;
+  const level = av / (av + CAP_GLOW_HALF_V);
+  const vv = typeof v === 'number' && isFinite(v) ? v : 0;
+  const ii = typeof i === 'number' && isFinite(i) ? i : 0;
+  const power = vv * ii;
+  // Charging/discharging STATE requires a visually meaningful current (≥1µA):
+  // the exponential settling tail of an RC circuit leaves ~tens of nA forever,
+  // and calling that "charging" would keep the badge alive eternally.
+  const active = ai >= 1e-6;
+  const charging = active && power > 0;
+  const discharging = active && power < 0;
+  // Pulse: 0.8–4.4 Hz, log-scaled with current magnitude (1µA → ~0.8 Hz, 1mA → ~2 Hz, ≥1A → 4.4 Hz).
+  const pulseHz = 0.8 + 1.2 * Math.min(3, Math.max(0, Math.log10(ai / 1e-6 + 1)));
+  const pulsing = active;
+  const pulse = pulsing ? 0.72 + 0.28 * Math.sin(2 * Math.PI * pulseHz * time) : 1;
+  const glow = Math.min(1, level * pulse);
+  return {
+    level,
+    charging,
+    discharging,
+    glow,
+    pulseHz,
+    positivePlate: v >= 0 ? 'a' : 'b',
+    marks: Math.min(3, Math.round(level * 3)),
+  };
+}
+
 const capacitor: ComponentPlugin = {
   type: 'capacitor',
   name: 'Capacitor',
@@ -89,7 +148,7 @@ const capacitor: ComponentPlugin = {
     { key: 'capacitance', label: 'Capacitance', type: 'number', default: 1e-6, unit: 'F', min: 1e-15, max: 1, step: 1e-9 },
     { key: 'initialV', label: 'Initial Voltage', type: 'number', default: 0, unit: 'V', min: -1000, max: 1000, step: 0.1 },
   ],
-  render(ctx, params, cellSize) {
+  render(ctx, params, cellSize, sim, instance) {
     ctx.beginPath();
     ctx.moveTo(0, cellSize);
     ctx.lineTo(2 * cellSize - 3, cellSize);
@@ -97,6 +156,59 @@ const capacitor: ComponentPlugin = {
     ctx.lineTo(4 * cellSize, cellSize);
     ctx.stroke();
     ctx.translate(2 * cellSize, cellSize);
+
+    // ── Charge visualization (only while a simulation context exists) ──────
+    // The positive plate glows amber while charging (pulsing with |I|), the
+    // negative plate glows cyan; both dim as the stored energy drains. +/−
+    // marks show the accumulated charge — exactly the physics story the
+    // animated current dots tell on the wires around it.
+    if (sim && instance) {
+      const st = (sim.state as any)?.__global ?? {};
+      const key = `cap_${instance.id}`;
+      const v = typeof st[key] === 'number' ? st[key] : ((params.initialV as number) ?? 0);
+      const i = typeof st[key + '_i'] === 'number' ? st[key + '_i'] : 0;
+      const cv = capacitorChargeVisuals(v, i, sim.time);
+      if (cv.level > 0.02) {
+        const plateGap = 6;
+        // plate A sits at local x=0, plate B at x=plateGap (drawCapacitor geometry)
+        const plates: Array<{ x: number; positive: boolean }> = [
+          { x: 0, positive: cv.positivePlate === 'a' },
+          { x: plateGap, positive: cv.positivePlate === 'b' },
+        ];
+        for (const plate of plates) {
+          if (cv.glow <= 0.01) continue;
+          const color = plate.positive ? '#fbbf24' : '#38bdf8';
+          const radius = cellSize * (0.55 + 0.75 * cv.glow);
+          const gradient = ctx.createRadialGradient(plate.x, 0, 1, plate.x, 0, radius);
+          const aInner = Math.round(cv.glow * 0.55 * 255).toString(16).padStart(2, '0');
+          const aMid = Math.round(cv.glow * 0.22 * 255).toString(16).padStart(2, '0');
+          gradient.addColorStop(0, color + aInner);
+          gradient.addColorStop(0.55, color + aMid);
+          gradient.addColorStop(1, color + '00');
+          ctx.fillStyle = gradient;
+          ctx.fillRect(plate.x - radius, -radius, radius * 2, radius * 2);
+        }
+        // charge marks: + on the positive plate, − on the negative plate
+        if (cv.marks > 0) {
+          ctx.save();
+          ctx.font = 'bold 8px ui-monospace, monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.globalAlpha = Math.min(1, 0.35 + cv.glow);
+          const plateH = 18;
+          for (const plate of plates) {
+            ctx.fillStyle = plate.positive ? '#fde68a' : '#7dd3fc';
+            const dx = plate.positive ? -5 : 5;
+            for (let m = 0; m < cv.marks; m++) {
+              const y = plateH / 2 - (m + 0.5) * (plateH / cv.marks);
+              ctx.fillText(plate.positive ? '+' : '−', plate.x + dx, y);
+            }
+          }
+          ctx.restore();
+        }
+      }
+    }
+
     drawCapacitor(ctx, 6, 18);
     drawLabel(ctx, `${formatC(params.capacitance as number)}`, 0, -16);
   },
@@ -151,11 +263,15 @@ const capacitor: ComponentPlugin = {
     sys.stampConductance(a, b, g);
     sys.stampCurrentSource(b, a, iEq);
   },
-  getFlowPath() {
-    // Straight through the capacitor plates
+  getFlowPaths() {
+    // Current does NOT cross the dielectric: dots flow INTO the positive
+    // plate on the a-side and OUT of the negative plate on the b-side while
+    // charging (i > 0), and the reverse while discharging. The gap between
+    // the sub-paths is the plate gap (drawCapacitor plates at grid x≈1.83
+    // and x≈2.33 of this 4-wide body).
     return [
-      { x: 0, y: 1 },
-      { x: 4, y: 1 },
+      [{ x: 0, y: 1 }, { x: 1.8, y: 1 }],   // terminal a → positive plate
+      [{ x: 2.25, y: 1 }, { x: 4, y: 1 }],  // negative plate → terminal b
     ];
   },
   step(params, terminals, sim, comp) {

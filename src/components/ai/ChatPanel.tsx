@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
-import { useChatSession, type ChatMessage, type ToolCallEntry } from '@/lib/ai/chat-session';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useChatSession, stepLabelFor, type ChatMessage, type ToolCallEntry } from '@/lib/ai/chat-session';
+import { summarizeCircuitDoc } from '@/lib/ai/circuit-summary';
 import { useEditor } from '@/lib/circuit/store';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -11,7 +12,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import {
   ChevronDown, ChevronRight, Send, Sparkles, Loader2, X, AlertCircle, CheckCircle2,
   Wrench, Undo2, Eye, GitBranch, Cpu, KeyRound, ExternalLink, Square, WifiOff,
-  SquareSlash, RotateCcw,
+  SquareSlash, RotateCcw, ClipboardList, CircuitBoard, Cable, Clock,
 } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,8 +32,21 @@ const MUTATING_TOOLS = new Set([
   'schematic.addComponent', 'schematic.removeComponent', 'schematic.moveComponent',
   'schematic.rotateComponent', 'schematic.setParameter', 'schematic.addWire',
   'schematic.removeWire', 'schematic.clear', 'schematic.reannotate',
-  'schematic.loadDocument', 'examples.load', 'design.buildPattern',
+  'schematic.undo', 'schematic.redo', 'schematic.loadDocument', 'examples.load',
+  'design.buildPattern',
 ]);
+
+/** Shared scroll-area styling (slim dark scrollbar). */
+const SCROLL_AREA = 'max-h-56 overflow-y-auto [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-track]:bg-transparent';
+
+/** mm:ss-style duration for turn headers. */
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${Math.round(s - m * 60)}s`;
+}
 
 export function ChatPanel({ onClose }: { onClose: () => void }) {
   const [input, setInput] = useState('');
@@ -305,7 +319,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Message bubbles
+// Live status pill
 // ─────────────────────────────────────────────────────────────────────────────
 
 function StatusLine({ message }: { message: ChatMessage }) {
@@ -339,6 +353,311 @@ function StatusLine({ message }: { message: ChatMessage }) {
   );
 }
 
+/** Live elapsed-seconds counter (only while the turn is running). */
+function ElapsedTimer({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const s = Math.max(0, Math.floor((now - startedAt) / 1000));
+  return <span className="font-mono text-[10px] text-slate-500">{s}s</span>;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Working-progress accordion
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The AI's streamed narration, collapsed by default so the chat never turns
+ * into an ever-growing wall of text. While the turn runs the header pulses;
+ * afterwards it becomes a quiet "Worked for Xs" summary (Claude-style).
+ */
+function ProgressAccordion({ message, isActive }: { message: ChatMessage; isActive: boolean }) {
+  const active = useChatSession(s => s.active);
+  const [open, setOpen] = useState(false);
+  const textRef = useRef<HTMLDivElement>(null);
+  const text = message.progressText ?? '';
+
+  // Keep the open panel pinned to the newest line while streaming.
+  useEffect(() => {
+    if (open && isActive && textRef.current) {
+      textRef.current.scrollTop = textRef.current.scrollHeight;
+    }
+  }, [text, open, isActive]);
+
+  // Nothing to show: never streamed narration, or it's identical to the final
+  // answer already displayed in the bubble (stopped turns). Checked AFTER the
+  // hooks — hooks must run unconditionally.
+  if (!text || text === message.content) return null;
+
+  const connecting = isActive && active?.phase === 'connecting';
+  const title = isActive
+    ? 'Working progress'
+    : `Worked for ${formatDuration(message.durationMs ?? 0)}`;
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger
+        className={`group flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors cursor-pointer ${
+          isActive
+            ? 'border-purple-800/60 bg-purple-950/30 hover:bg-purple-950/50'
+            : 'border-slate-800 bg-slate-900/50 hover:bg-slate-800/60'
+        }`}
+        aria-expanded={open}
+      >
+        {open
+          ? <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
+          : <ChevronRight className="h-3.5 w-3.5 text-slate-500" />}
+        {isActive ? (
+          <span className="relative flex h-2 w-2 flex-shrink-0" aria-hidden="true">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-purple-400 opacity-75" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-purple-400" />
+          </span>
+        ) : (
+          <Clock className="h-3.5 w-3.5 flex-shrink-0 text-slate-500" aria-hidden="true" />
+        )}
+        <span className={`flex-1 font-medium ${isActive ? 'animate-pulse text-purple-200' : 'text-slate-400'}`}>
+          {title}
+        </span>
+        {isActive && active && <ElapsedTimer startedAt={active.startedAt} />}
+        {isActive && connecting && (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-purple-400" aria-hidden="true" />
+        )}
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div
+          ref={textRef}
+          className={`mt-1 whitespace-pre-wrap break-words rounded-md border border-slate-800/60 bg-slate-950/60 p-2.5 text-xs leading-relaxed text-slate-400 ${SCROLL_AREA}`}
+        >
+          {text}
+          {isActive && (
+            <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-purple-400 align-middle" aria-hidden="true" />
+          )}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Steps accordion
+// ─────────────────────────────────────────────────────────────────────────────
+
+function StepRow({ step }: { step: ToolCallEntry & { live?: string } }) {
+  const [open, setOpen] = useState(false);
+  const failed = !!step.error;
+  const live = step.live; // synthetic in-flight step (label = live status)
+  const hasDetails = !live && (step.args !== undefined || step.result !== undefined || failed);
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <div className="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-slate-800/40">
+        {live ? (
+          <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-purple-400" aria-hidden="true" />
+        ) : failed ? (
+          <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 text-rose-500" aria-hidden="true" />
+        ) : (
+          <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 text-emerald-500" aria-hidden="true" />
+        )}
+        {live ? (
+          <span className="flex-1 truncate text-xs text-purple-300">{live}</span>
+        ) : hasDetails ? (
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              className="flex flex-1 cursor-pointer items-center gap-1.5 truncate text-left text-xs text-slate-300 hover:text-slate-100"
+              title={`${step.name} — click for details`}
+            >
+              <span className="truncate">{stepLabelFor(step.name)}</span>
+              {open
+                ? <ChevronDown className="h-3 w-3 flex-shrink-0 text-slate-600" />
+                : <ChevronRight className="h-3 w-3 flex-shrink-0 text-slate-600" />}
+            </button>
+          </CollapsibleTrigger>
+        ) : (
+          <span className="flex-1 truncate text-xs text-slate-300">{stepLabelFor(step.name)}</span>
+        )}
+        {!live && (
+          <span className="hidden font-mono text-[9px] text-slate-600 sm:inline">{step.name}</span>
+        )}
+      </div>
+      <CollapsibleContent>
+        <div className="mb-1 ml-6 space-y-1 rounded border border-slate-800/50 bg-slate-950/50 p-2 text-xs">
+          <div className="flex items-center gap-1.5 text-slate-500">
+            <Wrench className="h-3 w-3" aria-hidden="true" />
+            <span className="font-mono">{step.name}</span>
+          </div>
+          {step.args !== undefined && (
+            <div>
+              <span className="text-slate-500">Args:</span>
+              <pre className="mt-0.5 max-h-40 overflow-auto rounded bg-slate-900 p-1.5 text-slate-300 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700">
+                {JSON.stringify(step.args, null, 2)}
+              </pre>
+            </div>
+          )}
+          {step.result !== undefined && (
+            <div>
+              <span className="text-slate-500">Result:</span>
+              <pre className="mt-0.5 max-h-40 overflow-auto rounded bg-slate-900 p-1.5 text-slate-300 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700">
+                {JSON.stringify(step.result, null, 2)}
+              </pre>
+            </div>
+          )}
+          {failed && (
+            <div>
+              <span className="text-rose-400">Error:</span>
+              <pre className="mt-0.5 overflow-x-auto rounded bg-rose-950/30 p-1.5 text-rose-300">{step.error}</pre>
+            </div>
+          )}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+/**
+ * The tool-call history as a compact step list. While the turn runs, the
+ * header carries a spinner and the current activity appears as a live
+ * in-flight step at the bottom of the list.
+ */
+function StepsAccordion({ message, isActive }: { message: ChatMessage; isActive: boolean }) {
+  const active = useChatSession(s => s.active);
+  const [open, setOpen] = useState(false);
+  const steps = message.toolCalls ?? [];
+  if (steps.length === 0 && !isActive) return null;
+
+  const failed = steps.some(s => s.error);
+  const liveStatus = isActive ? active?.statusText : undefined;
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger
+        className={`group flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors cursor-pointer ${
+          isActive
+            ? 'border-cyan-900/50 bg-cyan-950/20 hover:bg-cyan-950/40'
+            : 'border-slate-800 bg-slate-900/50 hover:bg-slate-800/60'
+        }`}
+        aria-expanded={open}
+      >
+        {open
+          ? <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
+          : <ChevronRight className="h-3.5 w-3.5 text-slate-500" />}
+        <ClipboardList className={`h-3.5 w-3.5 flex-shrink-0 ${isActive ? 'text-cyan-400' : 'text-slate-500'}`} aria-hidden="true" />
+        <span className="flex-1 font-medium text-slate-400">Steps</span>
+        <span className="font-mono text-[10px] text-slate-500">{steps.length}</span>
+        {isActive ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-cyan-400" aria-hidden="true" />
+        ) : failed ? (
+          <AlertCircle className="h-3.5 w-3.5 text-rose-500" aria-hidden="true" />
+        ) : steps.length > 0 ? (
+          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
+        ) : null}
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className={`mt-1 space-y-0.5 rounded-md border border-slate-800/60 bg-slate-950/60 p-1.5 ${SCROLL_AREA}`}>
+          {steps.map((tc, i) => (
+            <StepRow key={i} step={tc} />
+          ))}
+          {liveStatus && (
+            <StepRow key="live" step={{ name: 'In progress', args: undefined, ok: true, live: liveStatus }} />
+          )}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Circuit summary — BOM + wire connections
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The two things that matter about a built circuit: what parts it uses
+ * (bill of materials) and how they are wired (net connections). Computed
+ * deterministically from the applied document — never from model text.
+ */
+function CircuitSummaryCard({ components, wires }: { components: any[]; wires: any[] }) {
+  const summary = useMemo(
+    () => summarizeCircuitDoc(components ?? [], wires ?? []),
+    [components, wires],
+  );
+  if (summary.componentCount === 0) return null;
+
+  return (
+    <div className="ml-6 overflow-hidden rounded-lg border border-slate-700/60 bg-slate-900/70">
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-900 px-3 py-2">
+        <CircuitBoard className="h-4 w-4 text-cyan-400" aria-hidden="true" />
+        <span className="text-xs font-semibold text-slate-200">Circuit summary</span>
+        <span className="ml-auto font-mono text-[10px] text-slate-500">
+          {summary.componentCount} components · {summary.wireCount} wires · {summary.netCount} nets
+        </span>
+      </div>
+
+      {/* Bill of Materials */}
+      <div className="border-b border-slate-800 px-3 py-2">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+          <span>Bill of Materials</span>
+        </div>
+        <div className={SCROLL_AREA}>
+          <table className="w-full text-left text-xs">
+            <thead className="sticky top-0 bg-slate-900 text-[10px] uppercase tracking-wide text-slate-500">
+              <tr>
+                <th className="py-1 pr-2 font-medium">Qty</th>
+                <th className="py-1 pr-2 font-medium">Part</th>
+                <th className="py-1 pr-2 font-medium">Value</th>
+                <th className="py-1 font-medium">Refs</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summary.bom.map((e, i) => (
+                <tr key={i} className="border-t border-slate-800/60 align-top">
+                  <td className="py-1 pr-2 font-mono text-cyan-300">{e.count}×</td>
+                  <td className="py-1 pr-2 text-slate-300">{e.name}</td>
+                  <td className="py-1 pr-2 font-mono text-amber-300">{e.value || '—'}</td>
+                  <td className="py-1 font-mono text-[10px] leading-relaxed text-slate-500">{e.refdes.join(', ')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Wire connections */}
+      <div className="px-3 py-2">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+          <Cable className="h-3 w-3" aria-hidden="true" />
+          <span>Wire connections</span>
+        </div>
+        <div className={SCROLL_AREA}>
+          <ul className="space-y-1">
+            {summary.nets.map((net, i) => (
+              <li key={i} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 border-t border-slate-800/60 py-1 first:border-t-0">
+                <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                  net.name === 'GND'
+                    ? 'bg-slate-800 text-slate-300'
+                    : net.name.startsWith('+')
+                      ? 'bg-rose-950/60 text-rose-300'
+                      : 'bg-cyan-950/60 text-cyan-300'
+                }`}>
+                  {net.name}
+                </span>
+                <span className="font-mono text-[10px] leading-relaxed text-slate-500">
+                  {net.members.join('  ·  ')}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Message bubbles
+// ─────────────────────────────────────────────────────────────────────────────
+
 function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: boolean }) {
   const applyPendingDiff = useChatSession(s => s.applyPendingDiff);
   const dismissPendingDiff = useChatSession(s => s.dismissPendingDiff);
@@ -356,6 +675,10 @@ function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: 
   }
 
   const hasMutating = message.toolCalls?.some(tc => MUTATING_TOOLS.has(tc.name));
+  const hasContent = !!message.content;
+  const summaryDoc = message.appliedDoc ?? (message.pendingDiff
+    ? { components: message.pendingDiff.components, wires: message.pendingDiff.wires }
+    : null);
 
   return (
     <div className="flex justify-start">
@@ -365,7 +688,7 @@ function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: 
             <Sparkles className="h-4 w-4 text-purple-400" />
           </div>
           <div
-            className={`flex-1 rounded-lg rounded-tl-sm px-3 py-2 text-sm ${
+            className={`flex-1 space-y-2 rounded-lg rounded-tl-sm px-3 py-2 text-sm ${
               message.error
                 ? 'border border-rose-800 bg-rose-950/30 text-rose-200'
                 : 'border border-slate-800 bg-slate-900 text-slate-200'
@@ -373,19 +696,19 @@ function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: 
           >
             {isActive && <StatusLine message={message} />}
 
-            {message.loading && !message.content ? (
-              <div className="flex items-center gap-2 text-slate-400">
-                <span className="ml-1 text-xs">{isActive ? '' : 'Thinking…'}</span>
-              </div>
+            {/* While streaming, the narration lives in the progress accordion
+                below — the bubble itself stays compact. */}
+            {message.loading && !hasContent ? (
+              !isActive ? (
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                  <span>Thinking…</span>
+                </div>
+              ) : null
             ) : null}
 
-            {(message.content || !message.loading) && (
-              <div className="whitespace-pre-wrap break-words">
-                {message.content}
-                {message.loading && message.content && (
-                  <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-purple-400 align-middle" aria-hidden="true" />
-                )}
-              </div>
+            {hasContent && (
+              <div className="whitespace-pre-wrap break-words">{message.content}</div>
             )}
 
             {message.stopped && (
@@ -447,9 +770,6 @@ function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: 
                 {message.pendingDiff.summary}
               </span>
             </div>
-            <div className="mb-2 text-xs text-slate-400">
-              {message.pendingDiff.components.length} components · {message.pendingDiff.wires.length} wires
-            </div>
             <div className="flex gap-2">
               <Button size="sm" onClick={() => applyPendingDiff(message.id)} className="h-7 bg-emerald-600 text-xs hover:bg-emerald-500">
                 <CheckCircle2 className="mr-1 h-3 w-3" />
@@ -462,14 +782,20 @@ function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: 
           </div>
         )}
 
-        {/* Tool calls */}
-        {message.toolCalls && message.toolCalls.length > 0 && (
-          <div className="ml-6 space-y-1">
-            {message.toolCalls.map((tc, i) => (
-              <ToolCallDisplay key={i} toolCall={tc} />
-            ))}
-          </div>
+        {/* BOM + wire connections — the things that matter about the circuit */}
+        {summaryDoc && (
+          <CircuitSummaryCard components={summaryDoc.components} wires={summaryDoc.wires} />
         )}
+
+        {/* Steps (tool calls) accordion */}
+        <div className="ml-6">
+          <StepsAccordion message={message} isActive={isActive} />
+        </div>
+
+        {/* Working-progress narration accordion */}
+        <div className="ml-6">
+          <ProgressAccordion message={message} isActive={isActive} />
+        </div>
       </div>
     </div>
   );
@@ -507,54 +833,5 @@ function SetupCard() {
       </ul>
       <p className="text-slate-500">Then reload this page — the provider dropdown will pick it up automatically.</p>
     </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tool call chips
-// ─────────────────────────────────────────────────────────────────────────────
-
-function ToolCallDisplay({ toolCall }: { toolCall: ToolCallEntry }) {
-  const [open, setOpen] = useState(false);
-  const success = toolCall.ok;
-  const hasResult = toolCall.result !== undefined;
-  const hasError = !!toolCall.error;
-
-  return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger className="flex w-full items-center gap-1.5 rounded border border-slate-800 bg-slate-900/50 px-2 py-1 text-left text-xs hover:bg-slate-800">
-        {open ? <ChevronDown className="h-3 w-3 text-slate-500" /> : <ChevronRight className="h-3 w-3 text-slate-500" />}
-        <Wrench className="h-3 w-3 text-slate-500" />
-        <span className="font-mono text-slate-400">{toolCall.name}</span>
-        {success && !hasError && <CheckCircle2 className="ml-auto h-3 w-3 text-emerald-500" />}
-        {hasError && <AlertCircle className="ml-auto h-3 w-3 text-rose-500" />}
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="mt-1 space-y-1 rounded border border-slate-800/50 bg-slate-950/50 p-2 text-xs">
-          <div>
-            <span className="text-slate-500">Args:</span>
-            <pre className="mt-0.5 max-h-40 overflow-auto rounded bg-slate-900 p-1.5 text-slate-300">
-              {JSON.stringify(toolCall.args, null, 2)}
-            </pre>
-          </div>
-          {hasResult && (
-            <div>
-              <span className="text-slate-500">Result:</span>
-              <pre className="mt-0.5 max-h-40 overflow-auto rounded bg-slate-900 p-1.5 text-slate-300">
-                {JSON.stringify(toolCall.result, null, 2)}
-              </pre>
-            </div>
-          )}
-          {hasError && (
-            <div>
-              <span className="text-rose-400">Error:</span>
-              <pre className="mt-0.5 overflow-x-auto rounded bg-rose-950/30 p-1.5 text-rose-300">
-                {toolCall.error}
-              </pre>
-            </div>
-          )}
-        </div>
-      </CollapsibleContent>
-    </Collapsible>
   );
 }

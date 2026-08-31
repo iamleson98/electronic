@@ -521,6 +521,25 @@ export interface ComponentPlugin {
   ) => Vec2[];
 
   /**
+   * Optional: return MULTIPLE independent flow paths for current animation
+   * dots — the multi-segment generalization of getFlowPath. Each sub-path is
+   * animated independently in the component's +x direction when current is
+   * positive (first terminal → second terminal).
+   *
+   * Use this when current does NOT flow straight through the body — the
+   * canonical case is a capacitor: dots flow INTO the positive plate on one
+   * side and OUT of the negative plate on the other side, with a gap across
+   * the dielectric (no dots "through" the component).
+   *
+   * When present this takes precedence over getFlowPath.
+   */
+  getFlowPaths?: (
+    params: Record<string, any>,
+    sim?: SimContext,
+    instance?: CircuitComponent,
+  ) => Vec2[][];
+
+  /**
    * Optional: declare how many EXTRA unknowns (beyond voltage sources /
    * normal branch currents) this component's stamp will allocate via
    * `system.addExtra()`. The engine sizes the MNA matrix from this; without

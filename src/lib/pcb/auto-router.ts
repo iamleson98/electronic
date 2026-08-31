@@ -815,7 +815,17 @@ class Router {
           if (!this.cellClear(curCol, curRow + dy, curLayer, net, halfW, slack)) continue;
         }
         if (!this.cellClear(nc, nr, curLayer, net, halfW, slack)) continue;
-        const tentative = this.gScore[cur] + g * stepMul;
+        let stepCost = g * stepMul;
+        // Directional layer preference (classic 2-layer strategy): top prefers
+        // horizontal runs, bottom prefers vertical runs. Crossing nets then
+        // orthogonalize across layers instead of fighting for the same
+        // corridors — vias are cheap, congestion is expensive. Diagonals carry
+        // both axes and stay unpenalized; single-layer boards are exempt.
+        if (this.layerCount > 1 && dx === 0 !== (dy === 0)) {
+          const movesX = dx !== 0;
+          if (curLayer === 0 ? !movesX : movesX) stepCost *= 1.35;
+        }
+        const tentative = this.gScore[cur] + stepCost;
         if (this.gGen[nIdx] !== gen || tentative < this.gScore[nIdx]) {
           this.gGen[nIdx] = gen;
           this.gScore[nIdx] = tentative;
@@ -1130,6 +1140,10 @@ class Router {
       passes = pass;
       const viaCost = pass === 1 ? 14.0 : pass === 2 ? 6.0 : pass === 3 ? 2.5 : 1.2;
       const allowRipUp = pass >= 2 && ripUpBudget > 0;
+      // Corridor sweep (rip ALL corridor blockers at once) — the heavy
+      // rescue for long crossing legs on congested boards. Only from pass 3:
+      // passes 1–2 get the cheap single-net rip-ups first.
+      const allowSweep = pass >= 3 && ripUpBudget > 0;
 
       for (const net of [...netOrder]) {
         let legs = pending.get(net);
@@ -1147,6 +1161,12 @@ class Router {
               if (res.success) { routed = true; routedCount++; break; }
             }
           }
+          if (!routed && allowSweep && ripUpBudget > 0) {
+            const res = this.corridorSweep(leg, net, viaCost, pending);
+            rippedUp += res.ripUps;
+            ripUpBudget -= res.budgetCost;
+            if (res.success) { routed = true; routedCount++; }
+          }
           if (!routed) remaining.push(leg);
         }
         if (remaining.length === 0) pending.delete(net);
@@ -1160,6 +1180,88 @@ class Router {
       rippedUp,
       passes,
     };
+  }
+
+  /**
+   * Corridor SWEEP rescue for jammed long legs: rip up EVERY net blocking the
+   * leg's corridor at once (bounded), route the leg through the cleared
+   * corridor, then re-route the ripped nets around it. Ripped legs that fail
+   * to re-route return to the pending queue — later passes retry them.
+   *
+   * This is what un-blocks dense boards (multi-digit clocks): a long crossing
+   * leg is individually trivial to route, but every corridor is jammed by a
+   * dozen SHORT nets that no single-net rip-up can displace.
+   */
+  private corridorSweep(
+    leg: RouteLeg, ownNet: number, viaCost: number, pending: Map<number, RouteLeg[]>,
+  ): { success: boolean; ripUps: number; budgetCost: number } {
+    const blockers = this.corridorBlockers(leg, ownNet);
+    if (blockers.size === 0) return { success: false, ripUps: 0, budgetCost: 0 };
+
+    // snapshot every blocker's committed routes for restore
+    const snapshots: Array<{ net: number; routes: Array<{ leg: RouteLeg; traces: Trace[]; vias: Via[]; lengthMm: number }> }> = [];
+    for (const net of blockers) {
+      const routes = this.committed.filter((c) => c.leg.net === net);
+      if (routes.length === 0) continue;
+      snapshots.push({
+        net,
+        routes: routes.map((c) => ({
+          leg: c.leg,
+          traces: c.traces.map((t) => ({ ...t, segments: t.segments.map((s) => ({ ...s })) })),
+          vias: c.vias.map((v) => ({ ...v })),
+          lengthMm: c.lengthMm,
+        })),
+      });
+      for (const c of routes) this.ripUpRoute(c);
+    }
+    if (snapshots.length === 0) return { success: false, ripUps: 0, budgetCost: 0 };
+
+    if (this.tryRouteLeg(leg, viaCost)) {
+      // re-route every ripped net; failures go back to pending
+      let reFailures = 0;
+      for (const s of snapshots) {
+        const legs = this.legsForNetCache.get(s.net) ?? [];
+        const failed: RouteLeg[] = [];
+        for (const cl of legs) {
+          if (!this.tryRouteLeg(cl, viaCost)) failed.push(cl);
+        }
+        if (failed.length > 0) {
+          reFailures += failed.length;
+          const prev = pending.get(s.net) ?? [];
+          pending.set(s.net, [...prev, ...failed]);
+        }
+      }
+      return { success: true, ripUps: snapshots.length, budgetCost: 1 + reFailures };
+    }
+
+    // the leg STILL failed even with an empty corridor (shouldn't happen) —
+    // restore everything exactly as it was.
+    for (const s of snapshots) for (const r of s.routes) this.restoreRoute(r);
+    return { success: false, ripUps: 0, budgetCost: 1 };
+  }
+
+  /** nets whose committed routes cross the leg's corridor (all of them). */
+  private corridorBlockers(leg: RouteLeg, ownNet: number): Set<number> {
+    const margin = 2;
+    const mx = Math.min(leg.fromPt.x, leg.toPt.x) - margin;
+    const Mx = Math.max(leg.fromPt.x, leg.toPt.x) + margin;
+    const my = Math.min(leg.fromPt.y, leg.toPt.y) - margin;
+    const My = Math.max(leg.fromPt.y, leg.toPt.y) + margin;
+    const blockers = new Set<number>();
+    for (const c of this.committed) {
+      if (c.leg.net === ownNet || blockers.has(c.leg.net)) continue;
+      for (const t of c.traces) {
+        for (const seg of t.segments) {
+          if (Math.max(seg.start.x, seg.end.x) >= mx && Math.min(seg.start.x, seg.end.x) <= Mx
+            && Math.max(seg.start.y, seg.end.y) >= my && Math.min(seg.start.y, seg.end.y) <= My) {
+            blockers.add(c.leg.net);
+            break;
+          }
+        }
+        if (blockers.has(c.leg.net)) break;
+      }
+    }
+    return blockers;
   }
 
   /** single leg attempt with escalating slack. Returns true when committed. */

@@ -46,6 +46,9 @@ import {
 import { buildContextPreamble } from './netlist-summary';
 import { ensurePlugins } from './tools/helpers';
 
+/** Mutating tools that manage the history stacks THEMSELVES (no auto-snapshot). */
+const HISTORY_SELF_MANAGED = new Set(['schematic.undo', 'schematic.redo']);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -381,6 +384,9 @@ export class TurnManager {
           time: body.simContext.time,
           dt: body.simContext.dt,
         } : null,
+        // Turn-scoped undo history for schematic.undo/redo: a doc snapshot is
+        // pushed before every mutating tool call (undo/redo excepted).
+        history: { undoStack: [], redoStack: [] },
       };
       ctxRef = ctx;
 
@@ -482,10 +488,18 @@ export class TurnManager {
             }
 
             try {
+              const mutating = MUTATING_TOOL_NAMES.has(tc.function.name);
+              if (mutating && !HISTORY_SELF_MANAGED.has(tc.function.name) && ctx.history) {
+                // Snapshot BEFORE the mutation so schematic.undo can restore it.
+                ctx.history.undoStack.push(
+                  JSON.stringify({ components: ctx.doc.components, wires: ctx.doc.wires }),
+                );
+                ctx.history.redoStack.length = 0; // new mutation invalidates redo
+              }
               const toolResult = await tool.execute(args, ctx);
               executedToolCalls.push({ name: tc.function.name, args, result: toolResult.result, error: toolResult.error, ok: toolResult.ok });
               this.emit(turn, 'tool_call', { name: tc.function.name, args, result: toolResult.result, error: toolResult.error, ok: toolResult.ok });
-              if (MUTATING_TOOL_NAMES.has(tc.function.name)) {
+              if (mutating) {
                 circuitModified = true;
                 ensurePlugins(ctx);
               }

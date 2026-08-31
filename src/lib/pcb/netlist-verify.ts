@@ -7,6 +7,20 @@ import type { CircuitComponent, Wire } from '../circuit/types';
 import { getPlugin } from '../circuit/registry';
 import { buildNodeMap } from '../circuit/engine';
 
+/**
+ * Annotation-only component types (net labels, power symbols, no-connects…).
+ * They shape the LOGICAL netlist but have no physical pads on the PCB —
+ * exactly like KiCad treats hidden power-symbol pins — so their terminals are
+ * excluded from the schematic-side pad counts.
+ */
+const LOGICAL_ONLY_TYPES = new Set([
+  'netLabel', 'globalLabel', 'hierLabel', 'busLabel', 'busVectorLabel',
+  'noConnect', 'textLabel', 'busEntry', 'bus', 'powerFlag', 'hierSheet',
+  'powerGND', 'powerAGND', 'powerVCC', 'power5V', 'power3V3', 'power1V8',
+  'power2V5', 'power12V', 'powerMinus12V', 'powerMinus5V', 'powerAVDD',
+  'powerVBAT', 'customPower',
+]);
+
 export interface NetlistVerifyResult {
   ok: boolean;
   errors: { message: string; severity: 'error' | 'warning' }[];
@@ -43,11 +57,18 @@ export function verifyNetlist(
   }
   const nodeMap = buildNodeMap(schematicComponents, schematicWires, plugins);
 
-  // Map: net name → set of terminal keys (schematic side)
+  // Map: net name → set of terminal keys (schematic side).
+  // Annotation-only components (labels, power symbols, no-connects) shape the
+  // logical netlist but have no PCB pads — skip their terminals.
+  const logicalOnlyComps = new Set(
+    schematicComponents.filter(c => LOGICAL_ONLY_TYPES.has(c.type)).map(c => c.id),
+  );
   const schematicNets = new Map<string, Set<string>>();
   const nodeToNetName = new Map<number, string>();
   let netCounter = 1;
   for (const [termKey, nodeId] of nodeMap.terminalNode) {
+    const compId = termKey.split(':')[0];
+    if (logicalOnlyComps.has(compId)) continue;
     const netName = nodeId === 0 ? 'GND' : (nodeToNetName.get(nodeId) ?? `N${netCounter++}`);
     if (nodeId !== 0) nodeToNetName.set(nodeId, netName);
     if (!schematicNets.has(netName)) schematicNets.set(netName, new Set());

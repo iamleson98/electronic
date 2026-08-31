@@ -868,21 +868,41 @@ export function computeComponentCurrents(
       const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
       current = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
     } else if (comp.type === 'capacitor') {
-      const C = Math.max(1e-15, comp.parameters.capacitance as number);
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      // Prefer the ACTUAL current recorded by the plugin's step() (stored under
+      // `_i` BEFORE the voltage history was shifted). Recomputing it here from
+      // vPrev always yields 0 during a transient run — step() has already
+      // updated st[cap_<id>] to the CURRENT voltage, so (vCurr − vPrev) = 0.
+      // That bug made every capacitor read I = 0 in probes, wire-dot currents,
+      // and the AI's simulate.run / getCurrent results.
       const st = sim.state.__global ?? {};
-      const vPrev = st[`cap_${comp.id}`] ?? 0;
-      current = (C / Math.max(sim.dt, 1e-12)) * ((sim.nodeVoltage[a] - sim.nodeVoltage[b]) - vPrev);
+      const iStored = st[`cap_${comp.id}_i`];
+      if (typeof iStored === 'number') {
+        current = iStored;
+      } else {
+        // No transient step has run yet (fresh DC solve): estimate the
+        // companion current from the voltage change vs the initial condition.
+        const C = Math.max(1e-15, comp.parameters.capacitance as number);
+        const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+        const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+        const vPrev = st[`cap_${comp.id}`] ?? ((comp.parameters.initialV as number) ?? 0);
+        current = (C / Math.max(sim.dt, 1e-12)) * ((sim.nodeVoltage[a] - sim.nodeVoltage[b]) - vPrev);
+      }
     } else if (comp.type === 'inductor') {
-      const L = Math.max(1e-12, comp.parameters.inductance as number);
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+      // Same story: `_i` holds the inductor's ACTUAL current after step().
+      // The old recompute (iPrev + v/L·dt) read the ALREADY-updated state var
+      // and thus predicted the NEXT step's current (off by one step).
       const st = sim.state.__global ?? {};
-      const iPrev = st[`ind_${comp.id}`] ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
-      const dt = Math.max(sim.dt, 1e-12);
-      current = iPrev + (v / L) * dt;
+      const iStored = st[`ind_${comp.id}_i`];
+      if (typeof iStored === 'number') {
+        current = iStored;
+      } else {
+        const L = Math.max(1e-12, comp.parameters.inductance as number);
+        const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+        const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+        const iPrev = st[`ind_${comp.id}`] ?? ((comp.parameters.initialI as number) ?? 0);
+        const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
+        current = iPrev + (v / L) * Math.max(sim.dt, 1e-12);
+      }
     } else if (comp.type === 'led' || comp.type === 'diode') {
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;

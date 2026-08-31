@@ -13,6 +13,15 @@ export interface ToolContext {
   };
   simContext?: SimContext | null;
   plugins: Map<string, any>;
+  /**
+   * Turn-scoped circuit mutation history backing schematic.undo / schematic.redo.
+   * Managed by the turn runner: a snapshot of the doc is pushed BEFORE every
+   * mutating tool executes (undo/redo themselves manage the stacks).
+   */
+  history?: {
+    undoStack: string[];
+    redoStack: string[];
+  };
 }
 
 export interface ToolResult {
