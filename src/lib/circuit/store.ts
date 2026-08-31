@@ -264,7 +264,7 @@ interface EditorState {
   redo: () => void;
   pushHistory: () => void;
   clear: () => void;
-  loadDocument: (doc: CircuitDocument) => void;
+  loadDocument: (doc: CircuitDocument, opts?: { keepHistory?: boolean }) => void;
   serialize: () => CircuitDocument;
 
   setRunning: (running: boolean) => void;
@@ -1555,8 +1555,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     });
   },
 
-  loadDocument: (doc) => {
-    set({
+  loadDocument: (doc, opts) => {
+    set((s) => ({
       components: doc.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined, fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined })),
       wires: doc.wires.map((w) => ({ ...w })),
       drawings: doc.drawings ?? [],
@@ -1583,9 +1583,15 @@ export const useEditor = create<EditorState>((set, get) => ({
       physicsViolations: [],
       wireDraft: null,
       placementDraft: null,
-      past: [],
-      future: [],
-    });
+      // Loading a DIFFERENT document normally resets undo (you shouldn't be
+      // able to Ctrl+Z back into the previous circuit). The AI assistant is
+      // the exception: it pushes a history checkpoint BEFORE applying its
+      // changes so ONE undo reverts the whole AI turn — keepHistory preserves
+      // that checkpoint across the load (it used to be wiped here, which
+      // silently broke "Ctrl+Z to undo AI changes").
+      past: opts?.keepHistory ? s.past : [],
+      future: opts?.keepHistory ? s.future : [],
+    }));
   },
 
   serialize: () => {

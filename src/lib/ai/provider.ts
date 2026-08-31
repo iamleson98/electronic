@@ -203,7 +203,14 @@ function isRetryableProviderError(e: unknown): boolean {
   const isServerError = msg.includes('500') || msg.includes('502') || msg.includes('503') || msg.includes('504')
     || msg.includes('Bad Gateway') || msg.includes('Service Unavailable') || msg.includes('Internal Server Error')
     || msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('socket hang up');
-  return isRateLimit || isServerError;
+  // Generic network failures (transient DNS/TCP/TLS problems) — "fetch
+  // failed" (undici/Bun), "Failed to fetch" (browser-ish), "Could not reach
+  // the … API" (our own wrapper), ENOTFOUND/EAI_AGAIN, premature connection
+  // termination. These used to hard-fail the whole AI turn on the first blip.
+  const isNetworkError = /fetch failed|failed to fetch|could not reach|network|ENOTFOUND|EAI_AGAIN|ECONNABORTED|EPIPE|UND_ERR|connection (?:reset|terminated|closed|refused)|terminated unexpectedly/i.test(msg);
+  // Auth/config problems must NOT be retried — they need human action.
+  const isAuthError = /HTTP 40[13]|API key|API_KEY|credentials|not configured/i.test(msg);
+  return !isAuthError && (isRateLimit || isServerError || isNetworkError);
 }
 
 /**
@@ -232,7 +239,12 @@ async function runWithRetries<T>(
   throw lastError || new Error(`${label} request failed after ${MAX_ATTEMPTS} retry attempts`);
 }
 
-/** Combine an optional caller signal with a timeout into one abort signal. */
+/** Combine an optional caller signal with a timeout into one abort signal.
+ *  NOTE: cleanup() clears only the TIMEOUT timer — the caller→combined abort
+ *  propagation stays wired for the lifetime of the signal, so aborting the
+ *  caller mid-stream (user Stop, turn time cap) still tears down the response
+ *  body read. Previously cleanup removed that listener and a Stop couldn't
+ *  interrupt an in-flight provider stream. */
 function combineSignals(timeoutMs: number, signal?: AbortSignal): { signal: AbortSignal; cleanup: () => void } {
   const timeoutCtrl = new AbortController();
   const timer = setTimeout(() => timeoutCtrl.abort(new Error(`Request timed out after ${timeoutMs / 1000}s`)), timeoutMs);
@@ -245,7 +257,6 @@ function combineSignals(timeoutMs: number, signal?: AbortSignal): { signal: Abor
     signal: timeoutCtrl.signal,
     cleanup: () => {
       clearTimeout(timer);
-      signal?.removeEventListener('abort', callerAborted);
     },
   };
 }

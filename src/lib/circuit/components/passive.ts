@@ -63,6 +63,9 @@ const resistor: ComponentPlugin = {
 };
 
 function formatR(r: number): string {
+  // Model-provided / hand-edited parameters can be null, undefined, or NaN —
+  // the canvas renderer must NEVER crash on a bad label value.
+  if (typeof r !== 'number' || !Number.isFinite(r)) return 'Ω?';
   if (r >= 1e6) return `${(r / 1e6).toFixed(2)}MΩ`;
   if (r >= 1e3) return `${(r / 1e3).toFixed(2)}kΩ`;
   if (r >= 1) return `${r.toFixed(0)}Ω`;
@@ -230,6 +233,7 @@ const capacitor: ComponentPlugin = {
 };
 
 function formatC(c: number): string {
+  if (typeof c !== 'number' || !Number.isFinite(c)) return 'F?';
   if (c >= 1) return `${c.toFixed(2)}F`;
   if (c >= 1e-3) return `${(c * 1e3).toFixed(2)}mF`;
   if (c >= 1e-6) return `${(c * 1e6).toFixed(2)}µF`;
@@ -399,6 +403,7 @@ const inductor: ComponentPlugin = {
 };
 
 function formatL(l: number): string {
+  if (typeof l !== 'number' || !Number.isFinite(l)) return 'H?';
   if (l >= 1) return `${l.toFixed(2)}H`;
   if (l >= 1e-3) return `${(l * 1e3).toFixed(2)}mH`;
   if (l >= 1e-6) return `${(l * 1e6).toFixed(2)}µH`;

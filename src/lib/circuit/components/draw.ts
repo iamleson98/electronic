@@ -23,6 +23,9 @@ export function rotateVec(v: Vec2, rotation: 0 | 1 | 2 | 3, bb: ComponentBoundin
 }
 
 export function formatValue(value: number, unit: string): string {
+  // Null/undefined/NaN (model-provided or hand-edited params) must never
+  // crash the canvas renderer.
+  if (typeof value !== 'number' || !Number.isFinite(value)) return `?${unit}`;
   if (value === 0) return `0${unit}`;
   const abs = Math.abs(value);
   if (abs >= 1e6) return `${(value / 1e6).toFixed(2)}M${unit}`;

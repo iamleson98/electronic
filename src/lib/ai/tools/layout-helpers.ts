@@ -140,7 +140,16 @@ export function createComponent(
       y: Math.min(GRID_MAX_Y, Math.max(GRID_MIN_Y, Math.round(y))),
     },
     rotation: 0,
-    parameters: { ...defaults, ...params },
+    // Drop explicit nulls/undefined (models send them for params they don't
+    // care about) so plugin defaults survive — a null resistance would crash
+    // label rendering and the solver downstream.
+    parameters: (() => {
+      const merged: Record<string, any> = { ...defaults };
+      for (const [k, v] of Object.entries(params)) {
+        if (v !== null && v !== undefined) merged[k] = v;
+      }
+      return merged;
+    })(),
   };
   ctx.doc.components.push(comp);
   return comp;

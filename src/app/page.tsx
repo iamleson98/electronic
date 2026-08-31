@@ -31,6 +31,7 @@ const PCB3DViewer = dynamic(() => import('@/components/pcb/PCB3DViewer').then(m 
 const ChatPanel = dynamic(() => import('@/components/ai/ChatPanel').then(m => ({ default: m.ChatPanel })), { ssr: false });
 import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
+import { useChatSession } from '@/lib/ai/chat-session';
 import { installScriptingAPI } from '@/lib/scripting-api';
 import { hasSharedCircuit, loadFromShareURL, createShareURL } from '@/lib/circuit/share-url';
 import { AutosaveManager, detectCrashRecovery, loadAutosave, clearAutosave } from '@/lib/circuit/autosave';
@@ -184,6 +185,10 @@ export default function Home() {
   const pcbTraces = usePCB((s) => s.traces);
   const pcbBoard = usePCB((s) => s.board);
 
+  // AI turn in flight (even with the panel closed — the session store keeps
+  // streaming and applying circuit changes in the background)
+  const aiActive = useChatSession((s) => s.active);
+
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-slate-950 text-slate-100">
       {/* Mode Toggle Bar */}
@@ -219,12 +224,21 @@ export default function Home() {
           <Button
             size="sm"
             variant={showAI ? 'default' : 'ghost'}
-            className={showAI ? 'bg-purple-600 text-white hover:bg-purple-500' : ''}
+            className={`relative ${showAI ? 'bg-purple-600 text-white hover:bg-purple-500' : ''}`}
             onClick={() => setShowAI(s => !s)}
             title="Toggle AI Assistant (Ctrl+J)"
           >
-            <Sparkles size={14} />
+            <Sparkles size={14} className={aiActive ? 'animate-pulse' : ''} />
             <span className="ml-1 hidden md:inline">AI Assistant</span>
+            {aiActive && (
+              <span
+                className="absolute -right-0.5 -top-0.5 flex h-2.5 w-2.5"
+                title="AI is working — click to view progress"
+              >
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-purple-400 opacity-75" />
+                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-purple-500" />
+              </span>
+            )}
           </Button>
           <Button size="sm" variant="ghost" onClick={handleShare}><Share2 size={14} /><span className="ml-1 hidden md:inline">Share</span></Button>
           <Button size="sm" variant="ghost" onClick={() => setShowLibrary(true)}><Library size={14} /><span className="ml-1 hidden md:inline">Library</span></Button>

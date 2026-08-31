@@ -39,12 +39,19 @@ const addComponentTool: Tool = {
     const id = genId(args.type);
     const defaults: any = {};
     for (const p of plugin.parameters) defaults[p.key] = p.default;
+    // Models routinely send explicit nulls for parameters they don't care
+    // about (e.g. {resistance: null}) — a null would override the plugin
+    // default here and later crash label rendering / the solver. Drop them.
+    const overrides: Record<string, any> = {};
+    for (const [k, v] of Object.entries(args.parameters || {})) {
+      if (v !== null && v !== undefined) overrides[k] = v;
+    }
     const comp: CircuitComponent = {
       id,
       type: args.type,
       position: { x: args.x, y: args.y },
       rotation: 0,
-      parameters: { ...defaults, ...(args.parameters || {}) },
+      parameters: { ...defaults, ...overrides },
     };
     ctx.doc.components.push(comp);
     // Topology changed — invalidate any cached simulation (node ids get
@@ -133,6 +140,11 @@ const setParameterTool: Tool = {
   execute(args, ctx) {
     const comp = findComponent(ctx.doc, args.id);
     if (!comp) return { ok: false, error: `Component "${args.id}" not found` };
+    // Guard against null/undefined values — models sometimes send them
+    // explicitly; they would poison the parameter and crash rendering.
+    if (args.value === null || args.value === undefined) {
+      return { ok: false, error: `Parameter "${args.key}" value cannot be null — pass a number/string/boolean.` };
+    }
     comp.parameters[args.key] = args.value;
     // A `net` parameter change on a label/power symbol rewires connectivity —
     // and any parameter change invalidates the cached solve's physics.

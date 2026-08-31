@@ -1,113 +1,32 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useChatSession, type ChatMessage, type ToolCallEntry } from '@/lib/ai/chat-session';
 import { useEditor } from '@/lib/circuit/store';
-import { usePCB } from '@/lib/pcb/store';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { ChevronDown, ChevronRight, Send, Sparkles, Loader2, X, AlertCircle, CheckCircle2, Wrench, Undo2, Eye, GitBranch, Cpu, KeyRound, ExternalLink } from 'lucide-react';
-import { toast } from 'sonner';
+import {
+  ChevronDown, ChevronRight, Send, Sparkles, Loader2, X, AlertCircle, CheckCircle2,
+  Wrench, Undo2, Eye, GitBranch, Cpu, KeyRound, ExternalLink, Square, WifiOff,
+  SquareSlash, RotateCcw,
+} from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Provider selection — fetched once on mount from /api/ai/providers.
-// Persisted to localStorage so the user's choice survives reloads.
+// Suggested prompts (welcome screen)
 // ─────────────────────────────────────────────────────────────────────────────
-
-interface ModelInfo {
-  id: string;
-  label: string;
-  description: string;
-  free: boolean;
-}
-
-interface ProviderInfo {
-  name: 'zai' | 'openai' | 'anthropic';
-  label: string;
-  available: boolean;
-  requiresKey: string | null;
-  model: string;
-  models: ModelInfo[];
-  /** How the Z.ai backend is wired: 'api-key' (public API — works on any domain), 'sandbox' (Z.ai sandbox gateway), 'unconfigured'. */
-  mode?: 'api-key' | 'sandbox' | 'unconfigured';
-}
-
-const PROVIDER_STORAGE_KEY = 'circuit-lab.ai-provider';
-const MODEL_STORAGE_KEY = 'circuit-lab.ai-model';
-
-function loadStoredProvider(): 'zai' | 'openai' | 'anthropic' | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const v = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
-    if (v === 'zai' || v === 'openai' || v === 'anthropic') return v;
-  } catch { /* localStorage disabled */ }
-  return null;
-}
-
-function storeProvider(name: 'zai' | 'openai' | 'anthropic') {
-  if (typeof window === 'undefined') return;
-  try { window.localStorage.setItem(PROVIDER_STORAGE_KEY, name); } catch { /* ignore */ }
-}
-
-function loadStoredModel(): string | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    return window.localStorage.getItem(MODEL_STORAGE_KEY);
-  } catch { return null; }
-}
-
-function storeModel(model: string) {
-  if (typeof window === 'undefined') return;
-  try { window.localStorage.setItem(MODEL_STORAGE_KEY, model); } catch { /* ignore */ }
-}
-
-interface ToolCallEntry {
-  name: string;
-  args: any;
-  result?: any;
-  error?: string;
-  ok: boolean;
-}
-
-interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  toolCalls?: ToolCallEntry[];
-  timestamp: number;
-  loading?: boolean;
-  error?: string;
-  /** 'config' = the AI backend isn't configured (deployment missing API keys) — renders a setup card. */
-  errorKind?: 'config';
-  pendingDiff?: {
-    components: any[];
-    wires: any[];
-    summary: string;
-  };
-  /** Token usage for this message (from the AI provider's response). */
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-}
-
-interface CircuitSnapshot {
-  components: any[];
-  wires: any[];
-}
 
 const SUGGESTED_PROMPTS = [
+  'Build a 555 LED blinker at 2 Hz with 60% duty cycle',
   'Build a 5V power supply with transformer, bridge rectifier and regulator',
-  'Design a 555 LED blinker at 2 Hz with 60% duty cycle',
+  'Design an inverting amplifier with a gain of 10 and verify it',
   'Why doesn\'t my circuit work? Diagnose it',
-  'Build an inverting amplifier with a gain of 10 and verify it',
   'What if I changed R1 to 10k? Compare the results',
 ];
 
-// Tools that mutate the circuit (require undo checkpoint)
+/** Tools that mutate the circuit — used to decide whether to offer Undo. */
 const MUTATING_TOOLS = new Set([
   'schematic.addComponent', 'schematic.removeComponent', 'schematic.moveComponent',
   'schematic.rotateComponent', 'schematic.setParameter', 'schematic.addWire',
@@ -115,22 +34,40 @@ const MUTATING_TOOLS = new Set([
   'schematic.loadDocument', 'examples.load', 'design.buildPattern',
 ]);
 
-// Tools that require client-side PCB action
-const PCB_TOOLS = new Set(['pcb.importFromSchematic', 'pcb.autoRoute', 'pcb.topoRoute', 'pcb.runDRC']);
-
-// Tools that require client-side simulation action
-const SIM_CONTROL_TOOLS = new Set(['simulate.start', 'simulate.pause', 'simulate.reset', 'simulate.setSpeed']);
-
 export function ChatPanel({ onClose }: { onClose: () => void }) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [autoApply, setAutoApply] = useState(false); // When false, show diff preview before applying
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Listen for external "ask AI" prompts (from ProbePanel, PropertyPanel, etc.)
-  // Fills the input and auto-sends after a short delay.
+  // Session store — survives panel close (the AI keeps building in background)
+  const messages = useChatSession(s => s.messages);
+  const active = useChatSession(s => s.active);
+  const autoApply = useChatSession(s => s.autoApply);
+  const setAutoApply = useChatSession(s => s.setAutoApply);
+  const providers = useChatSession(s => s.providers);
+  const providersLoading = useChatSession(s => s.providersLoading);
+  const selectedProvider = useChatSession(s => s.selectedProvider);
+  const selectedModel = useChatSession(s => s.selectedModel);
+  const setProvider = useChatSession(s => s.setProvider);
+  const setModel = useChatSession(s => s.setModel);
+  const totalTokens = useChatSession(s => s.totalTokens);
+  const resetTokens = useChatSession(s => s.resetTokens);
+  const send = useChatSession(s => s.send);
+  const stop = useChatSession(s => s.stop);
+
+  const isLoading = !!active;
+
+  // One-time initialization: provider list + resume a turn that was in flight
+  // when the page reloaded (network drop, refresh, crash).
+  const initRef = useRef(false);
+  useEffect(() => {
+    if (initRef.current) return;
+    initRef.current = true;
+    void useChatSession.getState().initProviders();
+    useChatSession.getState().resumeAfterReload();
+  }, []);
+
+  // Listen for external "ask AI" prompts (ProbePanel, PropertyPanel, etc.)
   const sendRef = useRef<((text: string) => void) | null>(null);
   useEffect(() => {
     const onPrompt = (e: Event) => {
@@ -145,494 +82,41 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener('circuitlab:ai-prompt', onPrompt as EventListener);
   }, []);
 
-  // AI provider + model selection state
-  const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [selectedProvider, setSelectedProvider] = useState<'zai' | 'openai' | 'anthropic'>('zai');
-  const [selectedModel, setSelectedModel] = useState<string>('glm-4.6');
-  const [providersLoading, setProvidersLoading] = useState(true);
-  // Cumulative token usage across all messages in this session
-  const [totalTokens, setTotalTokens] = useState({ prompt: 0, completion: 0, total: 0 });
-
-  // Fetch available providers on mount
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch('/api/ai/providers');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (cancelled) return;
-        setProviders(data.providers || []);
-        // Initialize selection: prefer localStorage, fall back to server default, then 'zai'.
-        const stored = loadStoredProvider();
-        const serverDefault = data.default as 'zai' | 'openai' | 'anthropic' | undefined;
-        const initial = stored || serverDefault || 'zai';
-        // If the stored/default provider isn't available (missing API key), fall back to 'zai'.
-        const info = (data.providers as ProviderInfo[]).find(p => p.name === initial);
-        const providerName = info && info.available ? initial : 'zai';
-        setSelectedProvider(providerName);
-        // Initialize model: prefer localStorage, fall back to provider's default model.
-        const storedModel = loadStoredModel();
-        const providerInfo = (data.providers as ProviderInfo[]).find(p => p.name === providerName);
-        if (providerInfo) {
-          const modelToUse = storedModel && providerInfo.models.some(m => m.id === storedModel)
-            ? storedModel
-            : providerInfo.model;
-          setSelectedModel(modelToUse);
-        }
-      } catch (e) {
-        // Network or server error — default to Z.ai (always available).
-        if (!cancelled) {
-          setProviders([
-            { name: 'zai', label: 'Z.ai (GLM)', available: true, requiresKey: null, model: 'glm-4.6', mode: 'sandbox', models: [
-              { id: 'glm-4.6', label: 'GLM-4.6 (Default, Free)', description: 'Z.ai built-in model.', free: true },
-            ] },
-          ]);
-          setSelectedProvider('zai');
-          setSelectedModel('glm-4.6');
-        }
-      } finally {
-        if (!cancelled) setProvidersLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  const handleProviderChange = useCallback((name: 'zai' | 'openai' | 'anthropic') => {
-    setSelectedProvider(name);
-    storeProvider(name);
-    const info = providers.find(p => p.name === name);
-    if (info) {
-      // Switch to the provider's default model
-      setSelectedModel(info.model);
-      storeModel(info.model);
-      toast.success(`AI provider: ${info.label}`);
-    }
-  }, [providers]);
-
-  const handleModelChange = useCallback((modelId: string) => {
-    setSelectedModel(modelId);
-    storeModel(modelId);
-    const provider = providers.find(p => p.name === selectedProvider);
-    const model = provider?.models.find(m => m.id === modelId);
-    if (model) {
-      toast.success(`Model: ${model.label}`);
-    }
-  }, [providers, selectedProvider]);
-
-  // Editor + PCB stores
-  const components = useEditor(s => s.components);
-  const wires = useEditor(s => s.wires);
-  const loadDocument = useEditor(s => s.loadDocument);
-  const pushHistory = useEditor(s => s.pushHistory);
-  const undo = useEditor(s => s.undo);
-  const setRunning = useEditor(s => s.setRunning);
-  const setSpeed = useEditor(s => s.setSpeed);
-  const reset = useEditor(s => s.reset);
-
-  // PCB store
-  const runAutoRoute = usePCB(s => s.runAutoRoute);
-  const runTopoRoute = usePCB(s => s.runTopoRoute);
-  const runDRC = usePCB(s => s.runDRC);
-  const runNetlistVerify = usePCB(s => s.runNetlistVerify);
-  const importFromSchematic = usePCB(s => s.importFromSchematic);
-  const setBoardSize = usePCB(s => s.setBoardSize);
-  const setDefaultTraceWidth = usePCB(s => s.setDefaultTraceWidth);
-  const setActiveLayer = usePCB(s => s.setActiveLayer);
-  const addCopperPour = usePCB(s => s.addCopperPour);
-  const generateTeardrops = usePCB(s => s.generateTeardrops);
-
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [messages]);
-
-  // Abort controller for the in-flight AI request — aborted on unmount so
-  // closing the panel mid-stream doesn't leave a zombie fetch looping (the
-  // server also stops via its request-signal abort).
-  const abortRef = useRef<AbortController | null>(null);
-  useEffect(() => () => abortRef.current?.abort(), []);
-  // Synchronous in-flight guard — `isLoading` state can be stale for events
-  // arriving between the setState and the re-render (e.g. a queued
-  // 'circuitlab:ai-prompt' firing through the old sendRef closure), which
-  // used to allow two concurrent streams writing to the same message list.
-  const inFlightRef = useRef(false);
-
-  const applyCircuitUpdate = useCallback((newComponents: any[], newWires: any[], isFinal: boolean) => {
-    // Push current state to undo stack BEFORE applying (so Ctrl+Z reverts the AI change)
-    pushHistory();
-    loadDocument({
-      version: 1,
-      components: newComponents,
-      wires: newWires,
-    });
-    if (isFinal) {
-      toast.success('Circuit updated by AI — press Ctrl+Z to undo');
-    }
-  }, [pushHistory, loadDocument]);
-
-  const handleClientSideAction = useCallback((tc: ToolCallEntry) => {
-    if (tc.name === 'simulate.start') {
-      setRunning(true);
-      toast.success('Simulation started');
-    } else if (tc.name === 'simulate.pause') {
-      setRunning(false);
-      toast.success('Simulation paused');
-    } else if (tc.name === 'simulate.reset') {
-      reset();
-      toast.success('Simulation reset');
-    } else if (tc.name === 'simulate.setSpeed') {
-      setSpeed(tc.args.speed);
-      toast.success(`Speed set to ${tc.args.speed}×`);
-    } else if (tc.name === 'pcb.importFromSchematic') {
-      importFromSchematic(useEditor.getState().components, useEditor.getState().wires);
-      toast.success('Schematic imported to PCB');
-    } else if (tc.name === 'pcb.autoRoute') {
-      runAutoRoute();
-      toast.success('Auto-route complete');
-    } else if (tc.name === 'pcb.topoRoute') {
-      const r = runTopoRoute();
-      toast.success(`Topo-route: ${r.routed} routed, ${r.failed} failed`);
-    } else if (tc.name === 'pcb.runDRC') {
-      runDRC();
-      toast.success('DRC complete');
-    } else if (tc.name === 'pcb.setBoardSize') {
-      setBoardSize(tc.args.width, tc.args.height);
-      toast.success(`Board size set to ${tc.args.width}×${tc.args.height}mm`);
-    } else if (tc.name === 'pcb.setDefaultTraceWidth') {
-      setDefaultTraceWidth(tc.args.width);
-      toast.success(`Trace width set to ${tc.args.width}mm`);
-    } else if (tc.name === 'pcb.setActiveLayer') {
-      setActiveLayer(tc.args.layer);
-      toast.success(`Active layer: ${tc.args.layer}`);
-    } else if (tc.name === 'pcb.addCopperPour') {
-      addCopperPour(tc.args.layer, tc.args.net);
-      toast.success(`Copper pour added on ${tc.args.layer} for ${tc.args.net}`);
-    } else if (tc.name === 'pcb.generateTeardrops') {
-      generateTeardrops();
-      toast.success('Teardrops generated');
-    } else if (tc.name === 'pcb.verifyNetlist') {
-      const r = runNetlistVerify();
-      if (!r) {
-        toast.error('Netlist verify: no PCB to verify — import the schematic first');
-      } else if (r.ok) {
-        toast.success(`Netlist verify: PCB matches schematic (${r.stats.matchedNets} nets)`);
-      } else {
-        toast.error(`Netlist verify: ${r.errors.length} issue(s) — see the PCB tab`);
-      }
-    }
-  }, [setRunning, reset, setSpeed, importFromSchematic, runAutoRoute, runTopoRoute, runDRC, setBoardSize, setDefaultTraceWidth, setActiveLayer, addCopperPour, generateTeardrops, runNetlistVerify]);
-
-  const sendMessage = useCallback(async (text: string) => {
-    if (!text.trim() || isLoading || inFlightRef.current) return;
-    inFlightRef.current = true;
-    setIsLoading(true);
-    setInput('');
-
-    const userMsg: ChatMessage = {
-      id: `u_${Date.now()}`,
-      role: 'user',
-      content: text,
-      timestamp: Date.now(),
-    };
-    const assistantMsgId = `a_${Date.now()}`;
-    const loadingMsg: ChatMessage = {
-      id: assistantMsgId,
-      role: 'assistant',
-      content: '',
-      timestamp: Date.now(),
-      loading: true,
-      toolCalls: [],
-    };
-    setMessages(prev => [...prev, userMsg, loadingMsg]);
-
-    // Capture circuit snapshot + live sim state for the AI
-    const editorState = useEditor.getState();
-    const circuitSnapshot: CircuitSnapshot = {
-      components: JSON.parse(JSON.stringify(components)),
-      wires: JSON.parse(JSON.stringify(wires)),
-    };
-    const simContext = editorState.simContext ? {
-      nodeVoltage: Array.from(editorState.simContext.nodeVoltage),
-      branchCurrent: Array.from(editorState.simContext.branchCurrent),
-      time: editorState.simContext.time,
-      dt: editorState.simContext.dt,
-    } : null;
-    const simError = editorState.simError || null;
-    const simRunning = editorState.running;
-    const selectedComponentId = editorState.selection?.type === 'component' ? editorState.selection.id : null;
-
-    // Build message history for the API. Capped at the last 40 messages so a
-    // long session doesn't grow the prompt (and the upload) without bound —
-    // the server re-caps at 60 defensively.
-    const apiMessages = [
-      ...messages.filter(m => !m.loading && !m.error).slice(-40).map(m => ({
-        role: m.role,
-        content: m.content,
-      })),
-      { role: 'user' as const, content: text },
-    ];
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    try {
-      const response = await fetch('/api/ai/chat/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          messages: apiMessages,
-          circuit: circuitSnapshot,
-          simContext,
-          simError,
-          simRunning,
-          selectedComponentId,
-          provider: selectedProvider,
-          model: selectedModel,
-        }),
-      });
-
-      if (!response.ok) {
-        // Non-SSE failure (e.g. 429 rate limit, 503 unconfigured) — try to
-        // surface the server's JSON error body.
-        let detail = `HTTP ${response.status}: ${response.statusText}`;
-        let code: string | undefined;
-        try {
-          const j = await response.json();
-          if (j?.error) detail = j.error;
-          if (j?.code) code = j.code;
-        } catch { /* body wasn't JSON — keep the HTTP status line */ }
-        const err = new Error(detail);
-        (err as any).code = code;
-        throw err;
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No response stream');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let textContent = '';
-      const toolCalls: ToolCallEntry[] = [];
-      let pendingCircuitUpdate: CircuitSnapshot | null = null;
-      // The payload that was last applied via an intermediate circuit_update
-      // event — used to skip the redundant final re-apply at `done` (it used to
-      // push a duplicate undo checkpoint, so one Ctrl+Z appeared to do nothing).
-      let lastAppliedUpdate: CircuitSnapshot | null = null;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        let eventType = '';
-        const dataLines: string[] = [];
-
-        for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            eventType = line.slice(7).trim();
-          } else if (line.startsWith('data: ')) {
-            dataLines.push(line.slice(6));
-          } else if (line === '') {
-            // Empty line = end of event
-            if (eventType && dataLines.length > 0) {
-              const data = JSON.parse(dataLines.join(''));
-
-              if (eventType === 'text_delta') {
-                textContent += data.text;
-                setMessages(prev => prev.map(m =>
-                  m.id === assistantMsgId
-                    ? { ...m, content: textContent, loading: false }
-                    : m
-                ));
-              } else if (eventType === 'tool_call') {
-                const tc: ToolCallEntry = {
-                  name: data.name,
-                  args: typeof data.args === 'string' ? JSON.parse(data.args) : data.args,
-                  result: data.result,
-                  error: data.error,
-                  ok: data.ok !== false,
-                };
-                toolCalls.push(tc);
-                setMessages(prev => prev.map(m =>
-                  m.id === assistantMsgId
-                    ? { ...m, toolCalls: [...(m.toolCalls || []), tc], loading: false }
-                    : m
-                ));
-
-                // Handle client-side actions immediately
-                if (SIM_CONTROL_TOOLS.has(tc.name) || PCB_TOOLS.has(tc.name) || tc.name.startsWith('pcb.')) {
-                  handleClientSideAction(tc);
-                }
-              } else if (eventType === 'verify') {
-                // System auto-verification ran after the AI's circuit changes —
-                // surfaced as a pseudo tool-call so the user sees the check.
-                const tc: ToolCallEntry = {
-                  name: 'verify.autoCheck',
-                  args: { attempt: data.attempt },
-                  result: { health: data.health, issueCount: data.issueCount, dcConverged: data.dcConverged },
-                  ok: data.health !== 'critical',
-                };
-                toolCalls.push(tc);
-                setMessages(prev => prev.map(m =>
-                  m.id === assistantMsgId
-                    ? { ...m, toolCalls: [...(m.toolCalls || []), tc], loading: false }
-                    : m
-                ));
-              } else if (eventType === 'circuit_update') {
-                pendingCircuitUpdate = { components: data.components, wires: data.wires };
-
-                // If auto-apply is on, apply immediately; otherwise store as pending diff
-                if (autoApply) {
-                  applyCircuitUpdate(data.components, data.wires, false);
-                  lastAppliedUpdate = pendingCircuitUpdate;
-                } else {
-                  // Compute diff summary
-                  const addedComps = data.components.length - circuitSnapshot.components.length;
-                  const addedWires = data.wires.length - circuitSnapshot.wires.length;
-                  const summary = `${addedComps >= 0 ? '+' : ''}${addedComps} components, ${addedWires >= 0 ? '+' : ''}${addedWires} wires`;
-                  setMessages(prev => prev.map(m =>
-                    m.id === assistantMsgId
-                      ? { ...m, pendingDiff: { components: data.components, wires: data.wires, summary } }
-                      : m
-                  ));
-                }
-              } else if (eventType === 'done') {
-                textContent = data.response || textContent;
-                // Capture token usage from the done event
-                if (data.usage) {
-                  const usage = data.usage;
-                  setTotalTokens(prev => ({
-                    prompt: prev.prompt + (usage.prompt_tokens || 0),
-                    completion: prev.completion + (usage.completion_tokens || 0),
-                    total: prev.total + (usage.total_tokens || 0),
-                  }));
-                  // Attach usage to the assistant message
-                  setMessages(prev => prev.map(m =>
-                    m.id === assistantMsgId ? { ...m, usage } : m
-                  ));
-                }
-                // Apply final circuit if not auto-applied and there's a pending diff
-                if (!autoApply && data.circuit && (
-                  data.circuit.components.length !== circuitSnapshot.components.length ||
-                  data.circuit.wires.length !== circuitSnapshot.wires.length ||
-                  JSON.stringify(data.circuit.components) !== JSON.stringify(circuitSnapshot.components)
-                )) {
-                  // Leave as pending diff for user to review
-                  const addedComps = data.circuit.components.length - circuitSnapshot.components.length;
-                  const addedWires = data.circuit.wires.length - circuitSnapshot.wires.length;
-                  const summary = `${addedComps >= 0 ? '+' : ''}${addedComps} components, ${addedWires >= 0 ? '+' : ''}${addedWires} wires`;
-                  setMessages(prev => prev.map(m =>
-                    m.id === assistantMsgId
-                      ? {
-                          ...m,
-                          content: textContent,
-                          toolCalls,
-                          loading: false,
-                          pendingDiff: { components: data.circuit.components, wires: data.circuit.wires, summary },
-                        }
-                      : m
-                  ));
-                } else if (autoApply && pendingCircuitUpdate) {
-                  // Final apply — but skip the redundant re-apply when the last
-                  // circuit_update payload was already applied above (it would
-                  // only push a duplicate undo checkpoint). Still toast so the
-                  // user learns Ctrl+Z reverts the whole AI turn.
-                  if (pendingCircuitUpdate !== lastAppliedUpdate) {
-                    applyCircuitUpdate(pendingCircuitUpdate.components, pendingCircuitUpdate.wires, true);
-                  } else {
-                    toast.success('Circuit updated by AI — press Ctrl+Z to undo');
-                  }
-                  setMessages(prev => prev.map(m =>
-                    m.id === assistantMsgId
-                      ? { ...m, content: textContent, toolCalls, loading: false }
-                      : m
-                  ));
-                } else {
-                  setMessages(prev => prev.map(m =>
-                    m.id === assistantMsgId
-                      ? { ...m, content: textContent, toolCalls, loading: false }
-                      : m
-                  ));
-                }
-              } else if (eventType === 'error') {
-                const err = new Error(data.message || 'AI request failed');
-                // Attach the machine-readable code (AI_NOT_CONFIGURED) so the
-                // catch block can render the setup card.
-                (err as any).code = data.code;
-                throw err;
-              }
-            }
-            eventType = '';
-            dataLines.length = 0;
-          }
-        }
-      }
-    } catch (e) {
-      // Aborted because the panel was closed — drop the message quietly
-      // (setState after unmount is a no-op anyway, but don't show an error).
-      if ((e as Error).name === 'AbortError') return;
-      const message = (e as Error).message || 'Unknown error';
-      // A deployment without any AI backend configured gets a friendly setup
-      // card instead of a scary stack-ish error string.
-      const isConfigError = (e as any).code === 'AI_NOT_CONFIGURED' || /not configured|ZAI_API_KEY|set the .*API_KEY/i.test(message);
-      setMessages(prev => prev.map(m =>
-        m.id === assistantMsgId
-          ? {
-              ...m,
-              content: isConfigError ? 'AI backend not configured on this server.' : `Sorry, I encountered an error: ${message}`,
-              loading: false,
-              error: 'true',
-              errorKind: isConfigError ? 'config' : undefined,
-            }
-          : m
-      ));
-      toast.error(isConfigError ? 'AI backend not configured — see setup instructions' : 'AI request failed');
-    } finally {
-      inFlightRef.current = false;
-      setIsLoading(false);
-    }
-  }, [isLoading, components, wires, messages, autoApply, selectedProvider, selectedModel, applyCircuitUpdate, handleClientSideAction]);
-
-  // Keep sendRef in sync so the circuitlab:ai-prompt event listener can call it
   useEffect(() => {
     sendRef.current = (text: string) => {
-      if (!text.trim() || isLoading) return;
-      sendMessage(text);
+      if (!text.trim() || useChatSession.getState().active) return;
+      send(text);
     };
-  }, [sendMessage, isLoading]);
+  }, [send]);
 
-  const applyPendingDiff = useCallback((msgId: string) => {
-    // Find the message FIRST (outside the setMessages updater — React updaters
-    // must be pure, no side effects like pushHistory/loadDocument).
-    const msg = messages.find(m => m.id === msgId);
-    if (!msg || !msg.pendingDiff) return;
-
-    // Apply the circuit update (side effect — pushHistory + loadDocument)
-    applyCircuitUpdate(msg.pendingDiff.components, msg.pendingDiff.wires, true);
-
-    // Then update the message state (pure updater — no side effects)
-    setMessages(prev => prev.map(m =>
-      m.id === msgId ? { ...m, pendingDiff: undefined } : m
-    ));
-  }, [messages, applyCircuitUpdate]);
-
-  const dismissPendingDiff = useCallback((msgId: string) => {
-    setMessages(prev => prev.map(m =>
-      m.id === msgId ? { ...m, pendingDiff: undefined } : m
-    ));
+  // Auto-scroll while streaming (but not if the user scrolled up to read)
+  const stickToBottomRef = useRef(true);
+  useEffect(() => {
+    if (stickToBottomRef.current && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, active?.statusText]);
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
   }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendMessage(input);
+      if (!isLoading && input.trim()) {
+        send(input);
+        setInput('');
+      }
     }
+  };
+
+  const handleSendClick = () => {
+    if (isLoading) { stop(); return; }
+    if (!input.trim()) return;
+    send(input);
+    setInput('');
   };
 
   return (
@@ -640,10 +124,12 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
       {/* Header */}
       <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
         <div className="flex items-center gap-2">
-          <Sparkles className="h-5 w-5 text-purple-400" />
+          <Sparkles className={`h-5 w-5 ${active ? 'animate-pulse text-purple-300' : 'text-purple-400'}`} />
           <div>
             <h2 className="text-sm font-semibold text-slate-100">AI Assistant</h2>
-            <p className="text-xs text-slate-500">Designs, analyzes & debugs circuits</p>
+            <p className="text-xs text-slate-500">
+              {active ? 'Working — building on your canvas' : 'Builds directly on your canvas'}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-1">
@@ -654,7 +140,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                 <div>
                   <Select
                     value={selectedProvider}
-                    onValueChange={(v) => handleProviderChange(v as 'zai' | 'openai' | 'anthropic')}
+                    onValueChange={(v) => setProvider(v as 'zai' | 'openai' | 'anthropic')}
                     disabled={providersLoading || providers.length === 0}
                   >
                     <SelectTrigger className="h-7 w-[130px] gap-1 border-slate-700 bg-slate-800 px-2 text-xs text-slate-200 cursor-pointer hover:border-slate-600">
@@ -694,7 +180,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
             return (
               <Select
                 value={selectedModel}
-                onValueChange={(v) => handleModelChange(v)}
+                onValueChange={(v) => setModel(v)}
                 disabled={providersLoading}
               >
                 <SelectTrigger className="h-7 w-[160px] gap-1 border-slate-700 bg-slate-800 px-2 text-xs text-slate-200 cursor-pointer hover:border-slate-600">
@@ -716,17 +202,20 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
               </Select>
             );
           })()}
+          {/* Auto / Review toggle */}
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setAutoApply(s => !s)}
+            onClick={() => setAutoApply(!autoApply)}
             className="h-7 px-2 text-xs cursor-pointer hover:bg-slate-800"
-            title={autoApply ? 'Auto-apply ON — changes apply immediately' : 'Auto-apply OFF — review before applying'}
+            title={autoApply
+              ? 'Auto-build ON — AI changes apply to your schematic immediately (Ctrl+Z to undo)'
+              : 'Review mode — AI changes wait for your approval before applying'}
           >
             <GitBranch className={`h-3.5 w-3.5 ${autoApply ? 'text-emerald-400' : 'text-amber-400'}`} />
             <span className="ml-1 hidden sm:inline">{autoApply ? 'Auto' : 'Review'}</span>
           </Button>
-          <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8 cursor-pointer hover:bg-slate-800">
+          <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8 cursor-pointer hover:bg-slate-800" title="Close (AI keeps working in the background)">
             <X className="h-4 w-4" />
           </Button>
         </div>
@@ -740,7 +229,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
           <span>↓ {totalTokens.completion.toLocaleString()}</span>
           <span className="font-mono text-cyan-400">Σ {totalTokens.total.toLocaleString()}</span>
           <button
-            onClick={() => setTotalTokens({ prompt: 0, completion: 0, total: 0 })}
+            onClick={resetTokens}
             className="ml-auto cursor-pointer text-slate-600 hover:text-slate-400"
             title="Reset token counter"
           >
@@ -750,18 +239,22 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
       )}
 
       {/* Messages */}
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
+      <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto">
         <div className="space-y-4 p-4">
-          {messages.length === 0 && (
+          {messages.length === 0 && !active && (
             <div className="space-y-3">
               <div className="rounded-lg border border-purple-900/30 bg-purple-950/20 p-4 text-sm text-slate-300">
                 <p className="mb-2 font-medium text-purple-300">Hi! I'm your AI circuit design assistant.</p>
-                <p className="text-slate-400">I can build circuits, run simulations, validate physics, and explain behavior. Try one of these:</p>
+                <p className="text-slate-400">
+                  I build circuits <strong className="text-slate-200">directly on your canvas</strong> — you'll
+                  watch every component and wire appear live as I work, then I verify the design by
+                  simulation. One <kbd className="rounded bg-slate-900 px-1 text-[10px] text-cyan-300">Ctrl+Z</kbd> undoes everything I did.
+                </p>
               </div>
               {SUGGESTED_PROMPTS.map(prompt => (
                 <button
                   key={prompt}
-                  onClick={() => sendMessage(prompt)}
+                  onClick={() => send(prompt)}
                   className="block w-full rounded-lg border border-slate-800 bg-slate-900 p-3 text-left text-sm text-slate-300 transition-colors hover:border-purple-700 hover:bg-slate-800"
                 >
                   {prompt}
@@ -771,13 +264,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
           )}
 
           {messages.map(msg => (
-            <MessageBubble
-              key={msg.id}
-              message={msg}
-              onApplyDiff={() => applyPendingDiff(msg.id)}
-              onDismissDiff={() => dismissPendingDiff(msg.id)}
-              onUndo={() => undo()}
-            />
+            <MessageBubble key={msg.id} message={msg} isActive={active?.assistantMsgId === msg.id} />
           ))}
         </div>
       </div>
@@ -790,28 +277,74 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask me to build, analyze, or debug a circuit..."
-            disabled={isLoading}
+            placeholder={isLoading ? 'AI is working — press Stop to interrupt…' : 'Ask me to build, analyze, or debug a circuit…'}
             className="min-h-[60px] max-h-[200px] resize-none bg-slate-900 pr-12 text-sm text-slate-100 placeholder:text-slate-500"
           />
           <Button
-            onClick={() => sendMessage(input)}
-            disabled={isLoading || !input.trim()}
+            onClick={handleSendClick}
+            disabled={!isLoading && !input.trim()}
             size="icon"
-            className="absolute bottom-2 right-2 h-8 w-8"
+            title={isLoading ? 'Stop the AI' : 'Send'}
+            className={`absolute bottom-2 right-2 h-8 w-8 ${isLoading ? 'bg-rose-600 hover:bg-rose-500' : ''}`}
           >
-            {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            {isLoading
+              ? <Square className="h-3.5 w-3.5 fill-current" />
+              : <Send className="h-4 w-4" />}
           </Button>
         </div>
         <p className="mt-1 px-1 text-[10px] text-slate-600">
-          Enter to send · Shift+Enter for newline · Ctrl+Z to undo AI changes
+          {isLoading
+            ? (active?.phase === 'reconnecting' || active?.phase === 'restarting')
+              ? 'Reconnecting — your request continues on the server'
+              : 'Enter to send · Shift+Enter for newline · Ctrl+Z to undo AI changes'
+            : 'Enter to send · Shift+Enter for newline · Ctrl+Z to undo AI changes'}
         </p>
       </div>
     </div>
   );
 }
 
-function MessageBubble({ message, onApplyDiff, onDismissDiff, onUndo }: { message: ChatMessage; onApplyDiff: () => void; onDismissDiff: () => void; onUndo: () => void }) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Message bubbles
+// ─────────────────────────────────────────────────────────────────────────────
+
+function StatusLine({ message }: { message: ChatMessage }) {
+  const active = useChatSession(s => s.active);
+  if (!active || active.assistantMsgId !== message.id) return null;
+
+  const Icon =
+    active.phase === 'reconnecting' || active.phase === 'restarting' ? WifiOff
+    : active.phase === 'stopping' ? SquareSlash
+    : Loader2;
+  const color =
+    active.phase === 'reconnecting' || active.phase === 'restarting' ? 'text-amber-400'
+    : active.phase === 'stopping' ? 'text-rose-400'
+    : 'text-purple-400';
+
+  return (
+    <div className={`mb-2 flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs ${
+      active.phase === 'reconnecting' || active.phase === 'restarting'
+        ? 'border-amber-800/50 bg-amber-950/20 text-amber-200'
+        : 'border-purple-900/40 bg-purple-950/20 text-slate-300'
+    }`}>
+      <Icon className={`h-3.5 w-3.5 ${color} ${active.phase === 'stopping' ? '' : 'animate-spin'}`} aria-hidden="true" />
+      <span className="flex-1">{active.statusText}</span>
+      {active.reconnectAttempt > 0 && (
+        <span className="rounded bg-amber-900/50 px-1.5 py-0.5 font-mono text-[10px] text-amber-200">
+          retry {active.reconnectAttempt}
+        </span>
+      )}
+      <span className="sr-only" role="status">{active.statusText}</span>
+    </div>
+  );
+}
+
+function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: boolean }) {
+  const applyPendingDiff = useChatSession(s => s.applyPendingDiff);
+  const dismissPendingDiff = useChatSession(s => s.dismissPendingDiff);
+  const retryLast = useChatSession(s => s.retryLast);
+  const undo = useEditor(s => s.undo);
+
   if (message.role === 'user') {
     return (
       <div className="flex justify-end">
@@ -821,6 +354,8 @@ function MessageBubble({ message, onApplyDiff, onDismissDiff, onUndo }: { messag
       </div>
     );
   }
+
+  const hasMutating = message.toolCalls?.some(tc => MUTATING_TOOLS.has(tc.name));
 
   return (
     <div className="flex justify-start">
@@ -836,57 +371,73 @@ function MessageBubble({ message, onApplyDiff, onDismissDiff, onUndo }: { messag
                 : 'border border-slate-800 bg-slate-900 text-slate-200'
             }`}
           >
+            {isActive && <StatusLine message={message} />}
+
             {message.loading && !message.content ? (
               <div className="flex items-center gap-2 text-slate-400">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                <span>Thinking...</span>
+                <span className="ml-1 text-xs">{isActive ? '' : 'Thinking…'}</span>
               </div>
-            ) : (
+            ) : null}
+
+            {(message.content || !message.loading) && (
               <div className="whitespace-pre-wrap break-words">
-                {message.content || (message.loading ? '...' : '')}
+                {message.content}
                 {message.loading && message.content && (
                   <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-purple-400 align-middle" aria-hidden="true" />
                 )}
               </div>
             )}
+
+            {message.stopped && (
+              <div className="mt-2 flex items-center gap-1.5 text-xs text-slate-500">
+                <Square className="h-3 w-3" />
+                <span>Stopped — partial results kept</span>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Provider-not-configured setup card (deployment without an API key) */}
+        {/* Provider-not-configured setup card */}
         {message.errorKind === 'config' && (
-          <div className="ml-6 rounded-lg border border-amber-700/50 bg-amber-950/20 p-3 text-xs text-slate-300">
-            <div className="mb-2 flex items-center gap-2">
-              <KeyRound className="h-4 w-4 text-amber-400" />
-              <span className="font-medium text-amber-300">Enable the AI assistant on this server</span>
-            </div>
-            <p className="mb-2 text-slate-400">
-              The AI backend works inside the Z.ai sandbox out of the box. On any other deployment (Vercel, Docker,
-              your own domain), set <strong>one</strong> of these environment variables and restart — all requests
-              run server-to-server, so it works from any domain with no CORS setup:
-            </p>
-            <ul className="mb-2 list-disc space-y-1 pl-4 text-slate-400">
-              <li>
-                <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">ZAI_API_KEY</code>
-                {' '}— Z.ai public API (recommended). Create a key at{' '}
-                <a href="https://z.ai/manage-apikey/apikey-list" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-0.5 text-purple-300 underline hover:text-purple-200">
-                  z.ai <ExternalLink className="h-3 w-3" />
-                </a>
-                {' '}(GLM-4.6 / GLM-4.5 / GLM-4 Flash). Optionally set <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">ZAI_BASE_URL</code> to use a different OpenAI-compatible endpoint.
-              </li>
-              <li>
-                <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">OPENAI_API_KEY</code>
-                {' '}— OpenAI (GPT-4o, GPT-4.1 …)
-              </li>
-              <li>
-                <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">ANTHROPIC_API_KEY</code>
-                {' '}— Anthropic (Claude)
-              </li>
-            </ul>
-            <p className="text-slate-500">Then reload this page — the provider dropdown will pick it up automatically.</p>
+          <SetupCard />
+        )}
+
+        {/* Error with retry */}
+        {message.error && message.retryable && (
+          <div className="ml-6 flex items-center gap-2">
+            <Button size="sm" onClick={retryLast} className="h-7 bg-purple-600 text-xs hover:bg-purple-500">
+              <RotateCcw className="mr-1 h-3 w-3" />
+              Retry request
+            </Button>
+            <span className="text-[10px] text-slate-500">Re-sends your last message</span>
           </div>
         )}
 
-        {/* Pending diff preview */}
+        {/* Applied bar — the auto-mode outcome (replaces the old accept gate) */}
+        {!message.loading && message.applied && !message.pendingDiff && (
+          <div className="ml-6 flex flex-wrap items-center gap-2 rounded-lg border border-emerald-800/50 bg-emerald-950/20 px-3 py-2">
+            <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+            <span className="text-xs font-medium text-emerald-300">Applied to schematic</span>
+            {message.appliedSummary && (
+              <span className="rounded bg-emerald-900/50 px-2 py-0.5 font-mono text-[10px] text-emerald-200">
+                {message.appliedSummary}
+              </span>
+            )}
+            {hasMutating && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={undo}
+                className="ml-auto h-6 px-2 text-xs text-slate-400 hover:text-slate-200"
+              >
+                <Undo2 className="mr-1 h-3 w-3" />
+                Undo
+              </Button>
+            )}
+          </div>
+        )}
+
+        {/* Pending diff preview (Review mode) */}
         {message.pendingDiff && (
           <div className="ml-6 rounded-lg border border-amber-700/50 bg-amber-950/20 p-3">
             <div className="mb-2 flex items-center gap-2">
@@ -900,11 +451,11 @@ function MessageBubble({ message, onApplyDiff, onDismissDiff, onUndo }: { messag
               {message.pendingDiff.components.length} components · {message.pendingDiff.wires.length} wires
             </div>
             <div className="flex gap-2">
-              <Button size="sm" onClick={onApplyDiff} className="h-7 bg-emerald-600 text-xs hover:bg-emerald-500">
+              <Button size="sm" onClick={() => applyPendingDiff(message.id)} className="h-7 bg-emerald-600 text-xs hover:bg-emerald-500">
                 <CheckCircle2 className="mr-1 h-3 w-3" />
                 Apply changes
               </Button>
-              <Button size="sm" variant="outline" onClick={onDismissDiff} className="h-7 border-slate-700 text-xs">
+              <Button size="sm" variant="outline" onClick={() => dismissPendingDiff(message.id)} className="h-7 border-slate-700 text-xs">
                 Dismiss
               </Button>
             </div>
@@ -919,20 +470,49 @@ function MessageBubble({ message, onApplyDiff, onDismissDiff, onUndo }: { messag
             ))}
           </div>
         )}
-
-        {/* Undo button (shown if changes were applied) */}
-        {!message.loading && !message.error && message.toolCalls && message.toolCalls.some(tc => MUTATING_TOOLS.has(tc.name)) && !message.pendingDiff && (
-          <div className="ml-6">
-            <Button size="sm" variant="ghost" onClick={onUndo} className="h-7 text-xs text-slate-400 hover:text-slate-200">
-              <Undo2 className="mr-1 h-3 w-3" />
-              Undo these changes
-            </Button>
-          </div>
-        )}
       </div>
     </div>
   );
 }
+
+function SetupCard() {
+  return (
+    <div className="ml-6 rounded-lg border border-amber-700/50 bg-amber-950/20 p-3 text-xs text-slate-300">
+      <div className="mb-2 flex items-center gap-2">
+        <KeyRound className="h-4 w-4 text-amber-400" />
+        <span className="font-medium text-amber-300">Enable the AI assistant on this server</span>
+      </div>
+      <p className="mb-2 text-slate-400">
+        The AI backend works inside the Z.ai sandbox out of the box. On any other deployment (Vercel, Docker,
+        your own domain), set <strong>one</strong> of these environment variables and restart — all requests
+        run server-to-server, so it works from any domain with no CORS setup:
+      </p>
+      <ul className="mb-2 list-disc space-y-1 pl-4 text-slate-400">
+        <li>
+          <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">ZAI_API_KEY</code>
+          {' '}— Z.ai public API (recommended). Create a key at{' '}
+          <a href="https://z.ai/manage-apikey/apikey-list" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-0.5 text-purple-300 underline hover:text-purple-200">
+            z.ai <ExternalLink className="h-3 w-3" />
+          </a>
+          {' '}(GLM-4.6 / GLM-4.5 / GLM-4 Flash). Optionally set <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">ZAI_BASE_URL</code> to use a different OpenAI-compatible endpoint.
+        </li>
+        <li>
+          <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">OPENAI_API_KEY</code>
+          {' '}— OpenAI (GPT-4o, GPT-4.1 …)
+        </li>
+        <li>
+          <code className="rounded bg-slate-900 px-1 font-mono text-cyan-300">ANTHROPIC_API_KEY</code>
+          {' '}— Anthropic (Claude)
+        </li>
+      </ul>
+      <p className="text-slate-500">Then reload this page — the provider dropdown will pick it up automatically.</p>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tool call chips
+// ─────────────────────────────────────────────────────────────────────────────
 
 function ToolCallDisplay({ toolCall }: { toolCall: ToolCallEntry }) {
   const [open, setOpen] = useState(false);
