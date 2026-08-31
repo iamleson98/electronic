@@ -63,7 +63,7 @@ const categoryIcons: Record<string, LucideIcon> = {
 
 const PIN_ELEC_COLORS: Record<PinElecType, string> = {
   input: '#22d3ee', // cyan-400
-  tri_state: '#22d3ee',
+  tri_state: '#a78bfa', // violet-400
   output: '#34d399', // emerald-400
   open_collector: '#34d399',
   open_emitter: '#34d399',
@@ -198,6 +198,11 @@ export function ComponentPalette() {
     [recent],
   );
 
+  /** Record a component use (click-to-place OR drag-to-insert) in recents. */
+  const handleUse = useCallback((type: string) => {
+    setRecent(recordRecent(type));
+  }, []);
+
   /** Click-to-place: enter keyboard placement mode and focus the canvas. */
   const handlePlace = useCallback(
     (type: string) => {
@@ -206,7 +211,7 @@ export function ComponentPalette() {
       // arrows move it, Enter places, Esc cancels. (Also mouse-friendly:
       // clicking the canvas places there.)
       startPlacement(type, { x: 8, y: 8 });
-      setRecent(recordRecent(type));
+      handleUse(type);
       // Focus the canvas so arrow keys/Enter land on it — keeps the flow
       // fully keyboard-operable.
       requestAnimationFrame(() => {
@@ -214,7 +219,7 @@ export function ComponentPalette() {
         canvas?.focus();
       });
     },
-    [running, startPlacement],
+    [running, startPlacement, handleUse],
   );
 
   const toggleCategory = useCallback((category: string) => {
@@ -396,6 +401,7 @@ export function ComponentPalette() {
                           plugin={plugin}
                           running={running}
                           onPlace={handlePlace}
+                          onUse={handleUse}
                         />
                       ))}
                     </div>
@@ -433,12 +439,17 @@ function PaletteCard({
   plugin,
   running,
   onPlace,
+  onUse,
 }: {
   plugin: ComponentPlugin;
   running: boolean;
   onPlace: (type: string) => void;
+  /** Fires for both placement paths — click-to-place AND drag-to-insert —
+   *  so the Recently Used row always reflects actual usage. */
+  onUse: (type: string) => void;
 }) {
   const pinCount = plugin.terminals.length;
+  const pinWord = pinCount === 1 ? 'pin' : 'pins';
   return (
     <HoverCard openDelay={300} closeDelay={120}>
       <HoverCardTrigger asChild>
@@ -449,24 +460,25 @@ function PaletteCard({
             if (running) return;
             e.dataTransfer.setData('application/x-circuit-type', plugin.type);
             e.dataTransfer.effectAllowed = 'copy';
+            onUse(plugin.type);
           }}
           onClick={() => onPlace(plugin.type)}
           disabled={running}
-          aria-label={`${plugin.name}: ${plugin.description}. ${pinCount} ${pinCount === 1 ? 'pin' : 'pins'}.`}
+          aria-label={`${plugin.name}: ${plugin.description}. ${pinCount} ${pinWord}.`}
           title={running ? 'Pause simulation to add components' : `${plugin.name} — ${plugin.description}`}
           className="group flex flex-col rounded-lg border border-slate-800/80 bg-slate-800/40 p-1.5 text-center transition-all duration-150 hover:-translate-y-0.5 hover:border-cyan-500/60 hover:bg-slate-800/80 hover:shadow-lg hover:shadow-cyan-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0 disabled:hover:border-slate-800/80 disabled:hover:bg-slate-800/40 disabled:hover:shadow-none"
         >
-          {/* Symbol preview on a subtle gradient */}
-          <div className="relative mb-1 flex h-11 items-center justify-center overflow-hidden rounded-md border border-slate-900 bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900 transition-colors duration-150 group-hover:border-cyan-500/30">
+          {/* Symbol preview on a subtle gradient (slate-950 → slate-900) */}
+          <div className="relative mb-1 flex h-11 items-center justify-center overflow-hidden rounded-md border border-slate-900 bg-gradient-to-b from-slate-950 to-slate-900 transition-colors duration-150 group-hover:border-cyan-500/30">
             <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_45%,rgba(34,211,238,0.14),transparent_65%)] opacity-0 transition-opacity duration-150 group-hover:opacity-100" />
             <ComponentIcon type={plugin.type} size={38} />
-            {/* Pin-count badge */}
+            {/* Pin-count badge — slides in on hover */}
             <span
-              className="absolute right-1 top-1 inline-flex items-center gap-0.5 rounded-sm border border-slate-700/60 bg-slate-950/80 px-1 font-mono text-[8px] font-medium leading-4 text-slate-400 transition-colors duration-150 group-hover:border-cyan-500/40 group-hover:text-cyan-300"
-              title={`${pinCount} ${pinCount === 1 ? 'pin' : 'pins'}`}
+              aria-hidden="true"
+              className="pointer-events-none absolute right-1 top-1 inline-flex translate-y-1 items-center gap-0.5 rounded-sm border border-cyan-500/40 bg-slate-950/90 px-1 font-mono text-[8px] font-medium leading-4 text-cyan-300 opacity-0 shadow-sm shadow-black/50 transition-all duration-150 group-hover:translate-y-0 group-hover:opacity-100"
             >
               <Pin size={7} className="-ml-px" />
-              {pinCount}
+              {pinCount} {pinWord}
             </span>
           </div>
           <span className="block truncate text-[10px] font-medium leading-tight text-slate-300 transition-colors duration-150 group-hover:text-cyan-100">
@@ -503,7 +515,7 @@ function PaletteCard({
         </div>
 
         <div className="border-t border-slate-800 bg-slate-950/60 px-3 py-1.5 text-center text-[10px] text-slate-500">
-          {pinCount} {pinCount === 1 ? 'pin' : 'pins'} · Click to place, drag to insert
+          {pinCount} {pinWord} · Click to place · Drag to insert
         </div>
       </HoverCardContent>
     </HoverCard>

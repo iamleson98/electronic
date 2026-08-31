@@ -232,6 +232,18 @@ export async function POST(req: NextRequest) {
           components: ctx.doc.components,
           wires: ctx.doc.wires,
         },
+        pcb: ctx.pcb ? {
+          version: 1,
+          board: ctx.pcb.board,
+          footprints: ctx.pcb.footprints,
+          traces: ctx.pcb.traces,
+          vias: ctx.pcb.vias,
+          ratsnest: ctx.pcb.ratsnest,
+          padNets: Array.from(ctx.pcb.padNets.entries()),
+        } : undefined,
+        missingComponents: ctx.missingComponents && ctx.missingComponents.size > 0
+          ? Array.from(ctx.missingComponents)
+          : undefined,
         usage: result.usage,
         provider: provider.name,
         model: provider.model,
@@ -246,6 +258,9 @@ export async function POST(req: NextRequest) {
         components: ctx.doc.components,
         wires: ctx.doc.wires,
       },
+      missingComponents: ctx.missingComponents && ctx.missingComponents.size > 0
+        ? Array.from(ctx.missingComponents)
+        : undefined,
       warning: 'Max iterations reached',
     });
   } catch (e) {

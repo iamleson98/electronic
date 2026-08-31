@@ -63,6 +63,14 @@ export interface ChatMessage {
   appliedSummary?: string;
   /** The circuit doc as applied — drives the BOM / wire-connections card. */
   appliedDoc?: { components: any[]; wires: any[] };
+  /**
+   * Component types the AI asked for but that are missing from the library.
+   * Rendered as a prominent amber "Missing components" card so the user knows
+   * exactly what to add (Symbol Editor / Sub-Circuit) to unblock the AI.
+   */
+  missingComponents?: string[];
+  /** True when this turn updated the PCB (server-side) — shows a PCB chip. */
+  pcbUpdated?: boolean;
   /** Live working-progress narration (the raw streamed text). Shown inside the
    *  collapsible progress accordion — it no longer grows the message bubble. */
   progressText?: string;
@@ -140,8 +148,8 @@ const AUTO_APPLY_STORAGE_KEY = 'circuit-lab.ai-auto-apply';
 const ACTIVE_TURN_STORAGE_KEY = 'circuit-lab.ai.active-turn';
 const CLIENT_ID_STORAGE_KEY = 'circuit-lab.ai.client-id';
 
-const MAX_RECONNECTS = 5;
-const RECONNECT_BACKOFFS_MS = [1_000, 2_000, 4_000, 8_000, 16_000];
+const MAX_RECONNECTS = 10;
+const RECONNECT_BACKOFFS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 20_000, 20_000, 20_000, 30_000, 30_000];
 const MAX_HISTORY_MESSAGES = 40;   // sent to the API per request
 const RELOAD_RESUME_MAX_AGE_MS = 9 * 60_000;
 
@@ -331,8 +339,44 @@ function applyCircuitUpdate(rt: TurnRuntime, doc: CircuitSnapshot, seq: number):
   rt.appliedSeq = Math.max(rt.appliedSeq, seq);
 }
 
-/** Tools that act on the client stores (sim controls, PCB actions). */
-function runClientSideAction(name: string, args: any): void {
+/**
+ * Load a server-side PCB snapshot (pcb_update / done.pcb payload) into the PCB
+ * store so the user sees the AI's layout work live. Full-doc load — idempotent
+ * and safe to re-apply on event replay after a reconnect.
+ */
+function applyPcbUpdate(doc: any): void {
+  try {
+    const pcb = usePCB.getState();
+    const activeLayer = pcb.activeLayer;
+    const defaultTraceWidth = pcb.defaultTraceWidth;
+    pcb.loadDocument({
+      version: 1,
+      board: doc.board ?? { width: 80, height: 60 },
+      footprints: doc.footprints ?? [],
+      traces: doc.traces ?? [],
+      vias: doc.vias ?? [],
+      activeLayer,
+      defaultTraceWidth,
+      padNets: Array.isArray(doc.padNets) ? doc.padNets : [],
+    } as any);
+    // loadDocument resets the ratsnest — restore the server's copy (drives
+    // the unrouted-connection rendering + further routing runs).
+    if (Array.isArray(doc.ratsnest) && doc.ratsnest.length > 0) {
+      usePCB.setState({ ratsnest: doc.ratsnest });
+    }
+  } catch (e) {
+    console.warn('[chat-session] pcb_update apply failed:', e);
+  }
+}
+
+/**
+ * Tools that act on the client stores. Called for tool_call events whose
+ * RESULT carries an `action` field (the client-queued convention) — the
+ * server-executed PCB tools (import/autoRoute/topoRoute/DRC/verifyNetlist)
+ * return real results without an action field and sync via pcb_update events
+ * instead, so they must NOT be double-executed here.
+ */
+function runClientSideAction(name: string, args: any, result?: any): void {
   try {
     const editor = useEditor.getState();
     const pcb = usePCB.getState();
@@ -344,15 +388,8 @@ function runClientSideAction(name: string, args: any): void {
       editor.reset();
     } else if (name === 'simulate.setSpeed') {
       editor.setSpeed(args?.speed);
-    } else if (name === 'pcb.importFromSchematic') {
-      pcb.importFromSchematic(editor.components, editor.wires);
-    } else if (name === 'pcb.autoRoute') {
-      pcb.runAutoRoute();
-    } else if (name === 'pcb.topoRoute') {
-      pcb.runTopoRoute();
-    } else if (name === 'pcb.runDRC') {
-      pcb.runDRC();
     } else if (name === 'pcb.setBoardSize') {
+      if (result?.applied === 'server') return; // already applied via pcb_update
       pcb.setBoardSize(args?.width, args?.height);
     } else if (name === 'pcb.setDefaultTraceWidth') {
       pcb.setDefaultTraceWidth(args?.width);
@@ -362,11 +399,6 @@ function runClientSideAction(name: string, args: any): void {
       pcb.addCopperPour(args?.layer, args?.net);
     } else if (name === 'pcb.generateTeardrops') {
       pcb.generateTeardrops();
-    } else if (name === 'pcb.verifyNetlist') {
-      const r = pcb.runNetlistVerify?.();
-      if (!r) toast.error('Netlist verify: no PCB to verify — import the schematic first');
-      else if (r.ok) toast.success(`Netlist verify: PCB matches schematic (${r.stats.matchedNets} nets)`);
-      else toast.error(`Netlist verify: ${r.errors.length} issue(s) — see the PCB tab`);
     }
   } catch (e) {
     console.warn(`[chat-session] client action ${name} failed:`, e);
@@ -488,18 +520,24 @@ function finalizeError(rt: TurnRuntime, message: string, retryable: boolean, err
   if (rt.finalized) return;
   rt.finalized = true;
   const isConfig = errorKind === 'config' || /not configured|ZAI_API_KEY|set the .*API_KEY/i.test(message);
+  const isRateLimit = /429|rate.?limit|too many requests/i.test(message);
   const durationMs = Date.now() - (useChatSession.getState().active?.startedAt ?? Date.now());
+  let friendly = `Sorry, I encountered an error: ${message}`;
+  if (isRateLimit) {
+    friendly = 'The AI provider is currently rate-limiting requests (too many requests / 429). ' +
+      'The server retried automatically but kept hitting the limit. Please wait a minute, then press Retry — your message and circuit are preserved.';
+  }
   patchAssistantMessage(rt.assistantMsgId, {
-    content: isConfig ? 'AI backend not configured on this server.' : `Sorry, I encountered an error: ${message}`,
+    content: isConfig ? 'AI backend not configured on this server.' : friendly,
     progressText: rt.text || undefined,
     durationMs,
     loading: false,
     error: 'true',
     errorKind: isConfig ? 'config' : undefined,
-    retryable: retryable && !isConfig,
+    retryable: (retryable || isRateLimit) && !isConfig,
     toolCalls: [...rt.toolCalls],
   });
-  toast.error(isConfig ? 'AI backend not configured — see setup instructions' : 'AI request failed');
+  toast.error(isConfig ? 'AI backend not configured — see setup instructions' : isRateLimit ? 'AI provider rate-limited — wait a moment and press Retry' : 'AI request failed');
   cleanupRuntime();
 }
 
@@ -568,6 +606,20 @@ function finalizeDone(rt: TurnRuntime, data: any): void {
     });
   }
 
+  // Server-side PCB snapshot in the done payload — normally already applied
+  // via a live pcb_update event, but a page-reload resume or review-mode flow
+  // may only see it here. Apply unconditionally (idempotent full-doc load).
+  let pcbUpdated = false;
+  if (data.pcb && Array.isArray(data.pcb.footprints)) {
+    applyPcbUpdate(data.pcb);
+    pcbUpdated = true;
+  }
+
+  // Missing components (done payload) — merge with any live-detected ones.
+  const missingList = Array.isArray(data.missingComponents)
+    ? Array.from(new Set([...(useChatSession.getState().messages.find(m => m.id === rt.assistantMsgId)?.missingComponents ?? []), ...data.missingComponents]))
+    : undefined;
+
   const usage = data.usage;
   if (usage) {
     useChatSession.setState(s => ({
@@ -588,6 +640,8 @@ function finalizeDone(rt: TurnRuntime, data: any): void {
     applied,
     appliedSummary,
     ...(appliedDoc ? { appliedDoc } : {}),
+    ...(missingList && missingList.length > 0 ? { missingComponents: missingList } : {}),
+    ...(pcbUpdated ? { pcbUpdated: true } : {}),
     usage,
   });
   cleanupRuntime();
@@ -743,7 +797,13 @@ async function streamOnce(opts: EngineOptions, resume: { turnId: string } | null
       persistActiveTurn();
     } else if (type === 'status') {
       if (owesSideEffects && data.phase === 'provider-retry') {
-        setStatusText(`AI provider hiccup — retrying in ${Math.round((data.delayMs || 0) / 1000)}s (attempt ${data.attempt})…`);
+        const reason = String(data.reason || '');
+        const isRateLimit = /429|rate.?limit|too many requests/i.test(reason);
+        setStatusText(
+          isRateLimit
+            ? `AI provider rate-limited — retrying in ${Math.round((data.delayMs || 0) / 1000)}s (attempt ${data.attempt})…`
+            : `AI provider hiccup — retrying in ${Math.round((data.delayMs || 0) / 1000)}s (attempt ${data.attempt})…`,
+        );
       }
     } else if (type === 'text_delta') {
       cur.text += data.text || '';
@@ -758,7 +818,7 @@ async function streamOnce(opts: EngineOptions, resume: { turnId: string } | null
       });
       updateAssistantFromRuntime(cur);
       if (owesSideEffects) {
-        runClientSideAction(data.name, safeJsonParse(data.args));
+        runClientSideAction(data.name, safeJsonParse(data.args), data.result);
         cur.appliedSeq = Math.max(cur.appliedSeq, seq);
         setStatusText(TOOL_STATUS_LABELS[data.name] || `Running ${data.name}…`);
       }
@@ -791,6 +851,27 @@ async function streamOnce(opts: EngineOptions, resume: { turnId: string } | null
         });
       }
       persistActiveTurn();
+    } else if (type === 'pcb_update') {
+      // Server-side PCB snapshot — load it into the PCB store so the user can
+      // watch the AI's layout work live on the PCB tab. Idempotent (full-doc
+      // load), so replayed events are safe to re-apply.
+      if (owesSideEffects && data && Array.isArray(data.footprints)) {
+        applyPcbUpdate(data);
+        patchAssistantMessage(cur.assistantMsgId, { pcbUpdated: true });
+        setStatusText('Updating PCB layout…');
+        cur.appliedSeq = Math.max(cur.appliedSeq, seq);
+      }
+      persistActiveTurn();
+    } else if (type === 'missing_component') {
+      // The AI asked for a component type that doesn't exist — surface it on
+      // the message immediately (deduped) so the user knows what to add.
+      const missingType = typeof data.type === 'string' ? data.type : null;
+      if (missingType) {
+        const existing = useChatSession.getState().messages.find(m => m.id === cur.assistantMsgId);
+        const list = new Set(existing?.missingComponents ?? []);
+        list.add(missingType);
+        patchAssistantMessage(cur.assistantMsgId, { missingComponents: Array.from(list) });
+      }
     } else if (type === 'done') {
       sawFinal = true;
       finalizeDone(cur, data);

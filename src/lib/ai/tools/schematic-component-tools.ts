@@ -34,7 +34,14 @@ const addComponentTool: Tool = {
   execute(args, ctx) {
     const plugin = getPlugin(args.type);
     if (!plugin) {
-      return { ok: false, error: `Unknown component type: "${args.type}". Use listComponentTypes to see available types.` };
+      // Record the requested type so the turn runner can surface it to the
+      // user as a "Missing components" card — the AI is blocked on library
+      // availability the user can fix (Symbol Editor / Sub-Circuit dialog).
+      if (typeof args.type === 'string' && args.type.trim()) {
+        if (!ctx.missingComponents) ctx.missingComponents = new Set();
+        ctx.missingComponents.add(args.type.trim());
+      }
+      return { ok: false, error: `Unknown component type: "${args.type}". Use listComponentTypes to see available types. If the user needs this component, tell them it is missing from the library so they can add it.` };
     }
     const id = genId(args.type);
     const defaults: any = {};

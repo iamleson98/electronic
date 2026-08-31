@@ -42,7 +42,7 @@ export interface AIProvider {
   chat(
     messages: ChatMessage[],
     tools?: ToolDefinition[],
-    options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal },
+    options?: ProviderCallOptions,
   ): Promise<ChatResult>;
   /**
    * Streaming variant of chat(). Calls `onTextDelta(text)` as tokens arrive
@@ -53,9 +53,22 @@ export interface AIProvider {
   chatStream(
     messages: ChatMessage[],
     tools?: ToolDefinition[],
-    options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal },
+    options?: ProviderCallOptions,
     onTextDelta?: (text: string) => void,
   ): Promise<ChatResult>;
+}
+
+/** Options shared by every provider call. */
+export interface ProviderCallOptions {
+  temperature?: number;
+  max_tokens?: number;
+  signal?: AbortSignal;
+  /**
+   * Invoked BEFORE each provider-level retry sleep so the caller can surface
+   * "rate-limited, retrying in Ns" to the end user — without this the retries
+   * are invisible for up to the whole retry budget (silent spinner).
+   */
+  onRetry?: (info: { attempt: number; waitMs: number; rateLimited: boolean; reason: string }) => void;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,10 +191,20 @@ export function _resetSandboxConfigCache() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared retry policy — rate limits (429) and transient 5xx never fail the
 // request outright; we back off and retry instead.
+//
+// BUDGET, not just attempt counts: the old policy (20 attempts × 30s) could
+// spin for ~10 minutes inside ONE model call while the turn hard-cap killed
+// the turn at ~5 min — the user saw an endless "retrying" loop and a dead
+// turn. Now the provider layer gives up after ~2.5 min TOTAL and hands the
+// error to the loop layer (turn-manager), which retries the whole model call
+// with visible status events and its own backoff — the user always sees
+// progress or a clear error, never a silent infinite loop.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BACKOFF_SCHEDULE = [2000, 4000, 8000, 15000, 30000];
-const MAX_ATTEMPTS = 20;
+const MAX_ATTEMPTS = 8;
+/** Total wall-clock budget for provider-level retries within one model call. */
+const MAX_RETRY_TOTAL_MS = 150_000;
 
 function sleepRespectingAbort(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -215,14 +238,19 @@ function isRetryableProviderError(e: unknown): boolean {
 
 /**
  * Run an async provider call with retry-on-429/5xx backoff. The abort signal
- * (client disconnect) breaks the loop immediately.
+ * (client disconnect) breaks the loop immediately. A total wall-clock budget
+ * bounds the loop: once it is exhausted the (retryable) error is re-thrown so
+ * the loop layer in turn-manager can retry the whole call with VISIBLE status
+ * events — the user never faces a silent multi-minute spinner.
  */
 async function runWithRetries<T>(
   fn: () => Promise<T>,
   label: string,
   signal?: AbortSignal,
+  onRetry?: (info: { attempt: number; waitMs: number; rateLimited: boolean; reason: string }) => void,
 ): Promise<T> {
   let lastError: Error | null = null;
+  const startedAt = Date.now();
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     if (signal?.aborted) throw new Error(`${label} request aborted (client disconnected)`);
     try {
@@ -232,7 +260,23 @@ async function runWithRetries<T>(
       if (!isRetryableProviderError(e)) throw e;
       const waitMs = attempt < BACKOFF_SCHEDULE.length ? BACKOFF_SCHEDULE[attempt] : 30000;
       const isRateLimit = /429|rate limit|Too many requests/i.test(String((e as Error).message));
-      console.warn(`[${label}] ${isRateLimit ? 'Rate limited' : 'Server error'}, retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
+      const elapsed = Date.now() - startedAt;
+      // Budget check — if this sleep would blow the total budget, stop here
+      // and let the loop layer take over (it emits user-visible status).
+      if (elapsed + waitMs > MAX_RETRY_TOTAL_MS || attempt === MAX_ATTEMPTS - 1) {
+        throw new Error(
+          `${label} provider still ${isRateLimit ? 'rate-limited (429)' : 'unavailable'} after ${attempt + 1} attempt(s) / ${Math.round(elapsed / 1000)}s: ${(e as Error).message}. ` +
+          'The AI will retry automatically — if it keeps failing, wait a minute and press Retry.',
+        );
+      }
+      console.warn(`[${label}] ${isRateLimit ? 'Rate limited' : 'Server error'}, retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_ATTEMPTS}, budget ${Math.round((MAX_RETRY_TOTAL_MS - elapsed) / 1000)}s left)`);
+      // Surface the retry to the caller BEFORE sleeping — this drives the
+      // user-visible "AI provider rate-limited — retrying in Ns" status.
+      if (onRetry) {
+        try {
+          onRetry({ attempt: attempt + 1, waitMs, rateLimited: isRateLimit, reason: String((e as Error).message).slice(0, 200) });
+        } catch { /* callback must never break the retry loop */ }
+      }
       await sleepRespectingAbort(waitMs, signal);
     }
   }
@@ -309,7 +353,7 @@ class ZaiPublicProvider implements AIProvider {
     }
   }
 
-  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions): Promise<ChatResult> {
     const body: any = {
       model: this.model,
       messages,
@@ -336,10 +380,10 @@ class ZaiPublicProvider implements AIProvider {
           total_tokens: data.usage.total_tokens,
         } : undefined,
       } as ChatResult;
-    }, 'zai', options?.signal);
+    }, 'zai', options?.signal, options?.onRetry);
   }
 
-  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }, onTextDelta?: (text: string) => void): Promise<ChatResult> {
+  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions, onTextDelta?: (text: string) => void): Promise<ChatResult> {
     const body: any = {
       model: this.model,
       messages,
@@ -371,7 +415,7 @@ class ZaiPublicProvider implements AIProvider {
           try { await reader.cancel(); } catch { /* already closed */ }
         }
       }
-    }, 'zai', options?.signal);
+    }, 'zai', options?.signal, options?.onRetry);
   }
 }
 
@@ -432,7 +476,7 @@ class ZaiSandboxProvider implements AIProvider {
     return e as Error;
   }
 
-  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions): Promise<ChatResult> {
     const body: any = {
       model: this.model,
       messages,
@@ -464,10 +508,10 @@ class ZaiSandboxProvider implements AIProvider {
         if (e instanceof AIProviderConfigError) throw e;
         throw this.wrapSandboxNetworkError(e);
       }
-    }, 'zai', options?.signal);
+    }, 'zai', options?.signal, options?.onRetry);
   }
 
-  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }, onTextDelta?: (text: string) => void): Promise<ChatResult> {
+  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions, onTextDelta?: (text: string) => void): Promise<ChatResult> {
     const body: any = {
       model: this.model,
       messages,
@@ -526,7 +570,7 @@ class ZaiSandboxProvider implements AIProvider {
           try { await reader.cancel(); } catch { /* already closed */ }
         }
       }
-    }, 'zai', options?.signal);
+    }, 'zai', options?.signal, options?.onRetry);
   }
 }
 
@@ -542,7 +586,7 @@ class OpenAIProvider implements AIProvider {
     this.model = model || process.env.OPENAI_MODEL || 'gpt-4o-mini';
   }
 
-  private buildBody(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }, stream = false): any {
+  private buildBody(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions, stream = false): any {
     const body: any = {
       model: this.model,
       messages,
@@ -574,7 +618,7 @@ class OpenAIProvider implements AIProvider {
     return response;
   }
 
-  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions): Promise<ChatResult> {
     const body = this.buildBody(messages, tools, options);
     return runWithRetries(async () => {
       const response = await this.doFetch(body, options?.signal);
@@ -591,10 +635,10 @@ class OpenAIProvider implements AIProvider {
           total_tokens: data.usage.total_tokens,
         } : undefined,
       } as ChatResult;
-    }, 'openai', options?.signal);
+    }, 'openai', options?.signal, options?.onRetry);
   }
 
-  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }, onTextDelta?: (text: string) => void): Promise<ChatResult> {
+  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions, onTextDelta?: (text: string) => void): Promise<ChatResult> {
     const body = this.buildBody(messages, tools, options, true);
     return runWithRetries(async () => {
       const response = await this.doFetch(body, options?.signal);
@@ -607,7 +651,7 @@ class OpenAIProvider implements AIProvider {
         finish_reason: result.finish_reason,
         usage: result.usage,
       } as ChatResult;
-    }, 'openai', options?.signal);
+    }, 'openai', options?.signal, options?.onRetry);
   }
 }
 
@@ -624,7 +668,7 @@ class AnthropicProvider implements AIProvider {
     this.model = model || process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-20241022';
   }
 
-  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }): Promise<ChatResult> {
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions): Promise<ChatResult> {
     // Separate system message from conversation
     const systemMsg = messages.find(m => m.role === 'system');
     const conversationMsgs = messages.filter(m => m.role !== 'system');
@@ -740,7 +784,7 @@ class AnthropicProvider implements AIProvider {
     };
   }
 
-  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: { temperature?: number; max_tokens?: number; signal?: AbortSignal }, onTextDelta?: (text: string) => void): Promise<ChatResult> {
+  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions, onTextDelta?: (text: string) => void): Promise<ChatResult> {
     // Anthropic streaming uses a different SSE schema (content_block_delta
     // events) — for now, complete non-streaming and emit one delta.
     const result = await this.chat(messages, tools, options);

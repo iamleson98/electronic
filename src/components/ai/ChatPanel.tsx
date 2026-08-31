@@ -13,6 +13,7 @@ import {
   ChevronDown, ChevronRight, Send, Sparkles, Loader2, X, AlertCircle, CheckCircle2,
   Wrench, Undo2, Eye, GitBranch, Cpu, KeyRound, ExternalLink, Square, WifiOff,
   SquareSlash, RotateCcw, ClipboardList, CircuitBoard, Cable, Clock,
+  PackageX,
 } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -655,6 +656,47 @@ function CircuitSummaryCard({ components, wires }: { components: any[]; wires: a
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Missing components — what the AI asked for but the library doesn't have
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The AI records every component type it tried to add that doesn't exist in
+ * the library. This card tells the user exactly what to create (Symbol
+ * Editor / Sub-Circuit) so the AI can finish the job on the next message.
+ */
+function MissingComponentsCard({ types }: { types: string[] }) {
+  if (types.length === 0) return null;
+  return (
+    <div className="ml-6 overflow-hidden rounded-lg border border-amber-700/60 bg-amber-950/20">
+      <div className="flex flex-wrap items-center gap-2 border-b border-amber-900/40 px-3 py-2">
+        <PackageX className="h-4 w-4 text-amber-400" aria-hidden="true" />
+        <span className="text-xs font-semibold text-amber-200">Missing components</span>
+        <span className="ml-auto font-mono text-[10px] text-amber-400/80">
+          {types.length} type{types.length === 1 ? '' : 's'} the AI needs
+        </span>
+      </div>
+      <div className="px-3 py-2">
+        <p className="mb-2 text-[11px] leading-relaxed text-amber-200/80">
+          The AI tried to place these components but they are not in the library yet. Create them
+          (Symbol Editor or Sub-Circuit dialog) and ask the AI to continue — it will pick them up.
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {types.map((t) => (
+            <span
+              key={t}
+              className="rounded border border-amber-800/60 bg-amber-900/30 px-2 py-0.5 font-mono text-[11px] text-amber-200"
+              title={`Component type "${t}" is not registered`}
+            >
+              {t}
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Message bubbles
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -785,6 +827,20 @@ function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: 
         {/* BOM + wire connections — the things that matter about the circuit */}
         {summaryDoc && (
           <CircuitSummaryCard components={summaryDoc.components} wires={summaryDoc.wires} />
+        )}
+
+        {/* Missing components — the AI is blocked on library availability */}
+        {message.missingComponents && message.missingComponents.length > 0 && (
+          <MissingComponentsCard types={message.missingComponents} />
+        )}
+
+        {/* PCB chip — this turn also produced/updated a PCB layout */}
+        {message.pcbUpdated && (
+          <div className="ml-6 inline-flex items-center gap-1.5 rounded-lg border border-emerald-800/50 bg-emerald-950/20 px-3 py-1.5">
+            <CircuitBoard className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+            <span className="text-xs font-medium text-emerald-300">PCB layout updated</span>
+            <span className="text-[10px] text-emerald-400/70">see the PCB tab</span>
+          </div>
         )}
 
         {/* Steps (tool calls) accordion */}

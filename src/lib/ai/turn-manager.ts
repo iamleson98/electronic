@@ -49,6 +49,30 @@ import { ensurePlugins } from './tools/helpers';
 /** Mutating tools that manage the history stacks THEMSELVES (no auto-snapshot). */
 const HISTORY_SELF_MANAGED = new Set(['schematic.undo', 'schematic.redo']);
 
+/** Tools that mutate the server-side PCB state (ctx.pcb) — after these, a
+ *  pcb_update event snapshots the full PCB so the client's PCB view follows. */
+const PCB_MUTATING_TOOLS = new Set([
+  'pcb.importFromSchematic',
+  'pcb.autoRoute',
+  'pcb.topoRoute',
+  'pcb.setBoardSize',
+]);
+
+/** Serialize the server-side PCB state for the pcb_update event (client loads
+ *  it into the PCB store). padNets (a Map) becomes an entries array — the same
+ *  wire format the client's own serialize() uses. */
+function snapshotPcb(pcb: NonNullable<ToolContext['pcb']>): any {
+  return JSON.parse(JSON.stringify({
+    version: 1 as const,
+    board: pcb.board,
+    footprints: pcb.footprints,
+    traces: pcb.traces,
+    vias: pcb.vias,
+    ratsnest: pcb.ratsnest,
+    padNets: Array.from(pcb.padNets.entries()),
+  }));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,7 +104,9 @@ export type TurnEventType =
   | 'tool_call'     // { name, args, result?, error?, ok }
   | 'verify'        // { attempt, health, issueCount, dcConverged }
   | 'circuit_update'// { components, wires }
-  | 'done'          // { response, toolCalls, circuit, usage?, warning? }
+  | 'pcb_update'    // { version, board, footprints, traces, vias, ratsnest, padNets } — server-side PCB snapshot
+  | 'missing_component' // { type } — AI requested a component type not in the library
+  | 'done'          // { response, toolCalls, circuit, pcb?, missingComponents?, usage?, warning? }
   | 'error'         // { message, code? }
   | 'cancelled';    // { reason }
 
@@ -387,6 +413,11 @@ export class TurnManager {
         // Turn-scoped undo history for schematic.undo/redo: a doc snapshot is
         // pushed before every mutating tool call (undo/redo excepted).
         history: { undoStack: [], redoStack: [] },
+        // Server-side PCB state — created by pcb.importFromSchematic, then
+        // mutated by the routing tools. Snapshotted into pcb_update events.
+        pcb: undefined,
+        // Component types the AI requested but that don't exist in the library.
+        missingComponents: new Set<string>(),
       };
       ctxRef = ctx;
 
@@ -419,15 +450,19 @@ export class TurnManager {
 
       const executedToolCalls: any[] = [];
       let circuitModified = false;
+      let pcbModified = false;
       let autoVerifyCount = 0;
+      /** Missing component types already announced via events (dedupe). */
+      const announcedMissing = new Set<string>();
 
       for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
         if (turn.abort.signal.aborted) throw abortError();
 
         // Model call with loop-level retry — the provider already retries
-        // 429/5xx/network errors internally (up to 20 attempts); this second
-        // layer catches everything else (provider restarts, exotic SDK
-        // failures) so a blip never kills the user's turn.
+        // 429/5xx/network errors internally (attempt-capped AND time-budgeted);
+        // this second layer catches everything else (provider restarts, exotic
+        // SDK failures) so a blip never kills the user's turn. Provider-level
+        // retries are surfaced live via the onRetry → status event hook.
         let result: Awaited<ReturnType<typeof provider.chatStream>> | null = null;
         let lastProviderError: unknown = null;
         for (let attempt = 0; attempt <= LOOP_RETRY_DELAYS_MS.length; attempt++) {
@@ -435,7 +470,22 @@ export class TurnManager {
             result = await provider.chatStream(
               messages,
               toolDefs,
-              { temperature: 0.4, max_tokens: 8192, signal: turn.abort.signal },
+              {
+                temperature: 0.4,
+                max_tokens: 8192,
+                signal: turn.abort.signal,
+                onRetry: (info) => {
+                  // Provider-level retry about to sleep — tell the client NOW
+                  // so the status pill shows "rate-limited — retrying in Ns"
+                  // instead of a silent spinner.
+                  this.emit(turn, 'status', {
+                    phase: 'provider-retry',
+                    attempt: info.attempt,
+                    delayMs: info.waitMs,
+                    reason: info.rateLimited ? 'rate limited (429)' : info.reason,
+                  });
+                },
+              },
               (delta) => this.emit(turn, 'text_delta', { text: delta }),
             );
             break;
@@ -503,6 +553,21 @@ export class TurnManager {
                 circuitModified = true;
                 ensurePlugins(ctx);
               }
+              // Server-side PCB mutated → snapshot for the client's PCB view.
+              if (PCB_MUTATING_TOOLS.has(tc.function.name) && ctx.pcb) {
+                pcbModified = true;
+                this.emit(turn, 'pcb_update', snapshotPcb(ctx.pcb));
+              }
+              // Newly-detected missing component types → announce immediately
+              // so the user knows what to add to the library.
+              if (ctx.missingComponents) {
+                for (const missing of ctx.missingComponents) {
+                  if (!announcedMissing.has(missing)) {
+                    announcedMissing.add(missing);
+                    this.emit(turn, 'missing_component', { type: missing });
+                  }
+                }
+              }
               messages.push({
                 role: 'tool',
                 tool_call_id: tc.id,
@@ -549,6 +614,8 @@ export class TurnManager {
           response: result.content,
           toolCalls: executedToolCalls,
           circuit: JSON.parse(JSON.stringify({ components: ctx.doc.components, wires: ctx.doc.wires })),
+          pcb: pcbModified && ctx.pcb ? snapshotPcb(ctx.pcb) : undefined,
+          missingComponents: announcedMissing.size > 0 ? Array.from(announcedMissing) : undefined,
           provider: provider.name,
           model: provider.model,
           usage: result.usage,
@@ -562,6 +629,8 @@ export class TurnManager {
         response: 'I reached the maximum number of tool-call iterations. Here is what I managed to do so far. Please continue with a follow-up message if you need more.',
         toolCalls: executedToolCalls,
         circuit: JSON.parse(JSON.stringify({ components: ctx.doc.components, wires: ctx.doc.wires })),
+        pcb: pcbModified && ctx.pcb ? snapshotPcb(ctx.pcb) : undefined,
+        missingComponents: announcedMissing.size > 0 ? Array.from(announcedMissing) : undefined,
         warning: 'Max iterations reached',
       });
     } catch (e) {
@@ -575,6 +644,7 @@ export class TurnManager {
             circuit: ctxRef
               ? JSON.parse(JSON.stringify({ components: ctxRef.doc.components, wires: ctxRef.doc.wires }))
               : { components: turn.params.circuit?.components ?? [], wires: turn.params.circuit?.wires ?? [] },
+            missingComponents: ctxRef?.missingComponents && ctxRef.missingComponents.size > 0 ? Array.from(ctxRef.missingComponents) : undefined,
             warning: 'Turn exceeded the maximum duration',
           });
         } else {

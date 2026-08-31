@@ -1,15 +1,24 @@
 // AI Tool types — shared across all tool category files.
 
 import type { CircuitDocument, SimContext } from '@/lib/circuit/types';
-import type { BoardOutline, Footprint, Trace, Via } from '@/lib/pcb/types';
+import type { BoardOutline, Footprint, Trace, Via, Ratsnest } from '@/lib/pcb/types';
 
 export interface ToolContext {
   doc: CircuitDocument;
+  /**
+   * Server-side PCB state — populated by pcb.importFromSchematic and then
+   * mutated by pcb.autoRoute / pcb.topoRoute / via tools. The turn runner
+   * snapshots it into `pcb_update` events so the client's PCB view follows
+   * along live.
+   */
   pcb?: {
     board: BoardOutline;
     footprints: Footprint[];
     traces: Trace[];
     vias: Via[];
+    ratsnest: Ratsnest[];
+    /** pad key `${componentId}:${terminalId}` → net name */
+    padNets: Map<string, string>;
   };
   simContext?: SimContext | null;
   plugins: Map<string, any>;
@@ -22,6 +31,13 @@ export interface ToolContext {
     undoStack: string[];
     redoStack: string[];
   };
+  /**
+   * Component types the AI asked for but that don't exist in the library.
+   * Recorded by schematic.addComponent; surfaced to the user at the end of
+   * the turn ("Missing components" card) so they know what to add to the
+   * library to unblock the AI.
+   */
+  missingComponents?: Set<string>;
 }
 
 export interface ToolResult {

@@ -1,26 +1,22 @@
 // PCB BOARD SETUP TOOLS
 // Auto-extracted from the original ai/tools/index.ts during refactor.
+//
+// Split execution model:
+//   - pcb.setBoardSize mutates the SERVER-side PCB state when it exists (so
+//     subsequent auto-route/DRC runs see the new board) and falls back to a
+//     client-queued action when no PCB is loaded yet.
+//   - Trace width / active layer / copper pour / teardrops are client-queued
+//     actions (interactive-editor concerns): the tool result carries an
+//     `action` field, which the chat client executes against the live PCB store.
 
 import type { Tool } from './types';
-import type { ToolContext } from './types';
-import { genId, findComponent } from './helpers';
-import type { CircuitDocument, CircuitComponent, Wire, SimContext } from '@/lib/circuit/types';
-import { simulateStep, buildNodeMap, getTerminalsForComponent, computeComponentCurrents, computeWireCurrents, solveDC } from '@/lib/circuit/engine';
-import { getPlugin, getAllPlugins, getPluginsByCategory } from '@/lib/circuit/registry';
-import { validatePhysics } from '@/lib/circuit/physics-validator';
-import { exampleCategories } from '@/lib/circuit/examples';
-import { exportSPICENetlist, exportBOMCSV, exportKiCadNetlist } from '@/lib/circuit/netlist-export';
-import { runDRC } from '@/lib/pcb/drc';
-import { verifyNetlist } from '@/lib/pcb/netlist-verify';
-import { autoRoute } from '@/lib/pcb/auto-router';
-import { routeTopologically, DEFAULT_ROUTER_OPTIONS } from '@/lib/pcb/topological-router';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 const setBoardSizeTool: Tool = {
   name: 'pcb.setBoardSize',
   category: 'PCB',
-  description: 'Set the PCB board outline dimensions in millimeters.',
+  description: 'Set the PCB board outline dimensions in millimeters. Server-side when a PCB is loaded (auto-route/DRC use the new size); queued to the client otherwise.',
   parameters: {
     type: 'object',
     properties: {
@@ -29,7 +25,18 @@ const setBoardSizeTool: Tool = {
     },
     required: ['width', 'height'],
   },
-  execute(args) { return { ok: true, result: { action: 'setBoardSize', width: args.width, height: args.height } }; },
+  execute(args, ctx) {
+    const w = Number(args.width);
+    const h = Number(args.height);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+      return { ok: false, error: 'Board dimensions must be positive numbers (mm).' };
+    }
+    if (ctx.pcb) {
+      ctx.pcb.board = { width: w, height: h };
+      return { ok: true, result: { width: w, height: h, applied: 'server', message: `Board resized to ${w}×${h}mm — re-run pcb.autoRoute to use the new space.` } };
+    }
+    return { ok: true, result: { action: 'setBoardSize', width: w, height: h } };
+  },
 };
 
 const setDefaultTraceWidthTool: Tool = {
@@ -83,14 +90,6 @@ const generateTeardropsTool: Tool = {
   execute() { return { ok: true, result: { action: 'generateTeardrops' } }; },
 };
 
-const verifyNetlistTool: Tool = {
-  name: 'pcb.verifyNetlist',
-  category: 'PCB',
-  description: 'Verify that the PCB netlist matches the schematic netlist. Catches missing connections, wrong nets, short circuits.',
-  parameters: { type: 'object', properties: {} },
-  execute() { return { ok: true, result: { action: 'verifyNetlist' } }; },
-};
-
 // ─────────────────────────────────────────────────────────────────────────────
 
-export { setBoardSizeTool, setDefaultTraceWidthTool, setActiveLayerTool, addCopperPourTool, generateTeardropsTool, verifyNetlistTool };
+export { setBoardSizeTool, setDefaultTraceWidthTool, setActiveLayerTool, addCopperPourTool, generateTeardropsTool };

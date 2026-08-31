@@ -738,14 +738,67 @@ describe('AI audit: schematic.loadDocument argument validation', () => {
   });
 });
 
-describe('AI audit: client-executed PCB tools report success, not a phantom error', () => {
-  it('pcb.* tools return ok:true queued acknowledgements (the client executes them)', async () => {
+describe('AI audit: server-executed PCB tools run the real pipeline', () => {
+  it('rejects import from an EMPTY schematic with a clear error (not ok:true)', async () => {
     const { TOOLS_BY_NAME } = await import('../src/lib/ai/tools');
-    for (const name of ['pcb.importFromSchematic', 'pcb.autoRoute', 'pcb.topoRoute', 'pcb.runDRC', 'pcb.verifyNetlist']) {
-      const tool = TOOLS_BY_NAME.get(name)!;
-      const res = await tool.execute({}, mkCtx([], [])) as any;
-      expect(res.ok, name).toBe(true);
-      expect(res.error, name).toBeUndefined();
+    const res = await TOOLS_BY_NAME.get('pcb.importFromSchematic')!.execute({}, mkCtx([], [])) as any;
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/schematic is empty/i);
+  });
+
+  it('requires a PCB before routing/DRC/verify (clear error, no crash)', async () => {
+    const { TOOLS_BY_NAME } = await import('../src/lib/ai/tools');
+    const ctx = mkCtx([], []);
+    for (const name of ['pcb.autoRoute', 'pcb.topoRoute', 'pcb.runDRC', 'pcb.verifyNetlist']) {
+      const res = await TOOLS_BY_NAME.get(name)!.execute({}, ctx) as any;
+      expect(res.ok, name).toBe(false);
+      expect(res.error, name).toMatch(/No PCB loaded/i);
     }
+  });
+
+  it('imports a real circuit, routes it, and returns actual statistics + DRC', async () => {
+    const { TOOLS_BY_NAME } = await import('../src/lib/ai/tools');
+    const components = [
+      mkComp('ground', 'gnd'),
+      mkComp('dcVoltage', 'v1', { voltage: 5 }),
+      mkComp('resistor', 'r1', { resistance: 1000 }),
+      mkComp('led', 'led1', {}),
+    ];
+    const wires = [
+      mkWire('w1', 'v1', 'p', 'r1', 'a'),
+      mkWire('w2', 'r1', 'b', 'led1', 'a'),
+      mkWire('w3', 'led1', 'k', 'gnd', 'g'),
+      mkWire('w4', 'v1', 'n', 'gnd', 'g'),
+    ];
+    const ctx = mkCtx(components, wires);
+
+    const imp = await TOOLS_BY_NAME.get('pcb.importFromSchematic')!.execute({}, ctx) as any;
+    expect(imp.ok).toBe(true);
+    expect(ctx.pcb).toBeDefined();
+    expect(ctx.pcb!.footprints.length).toBe(4); // ground has no footprint... footprints = non-annotation comps? At least the 3 real ones.
+    expect(imp.result.footprints).toBeGreaterThanOrEqual(3);
+    expect(imp.result.board.width).toBeGreaterThan(0);
+
+    const route = await TOOLS_BY_NAME.get('pcb.autoRoute')!.execute({}, ctx) as any;
+    expect(route.result).toBeDefined();
+    expect(route.result.totalConnections).toBeGreaterThan(0);
+    expect(route.result.drc).toBeDefined();
+
+    const drc = await TOOLS_BY_NAME.get('pcb.runDRC')!.execute({}, ctx) as any;
+    expect(drc.result.errorCount).toBeDefined();
+
+    const verify = await TOOLS_BY_NAME.get('pcb.verifyNetlist')!.execute({}, ctx) as any;
+    expect(verify.result.matchedNets).toBeGreaterThan(0);
+  });
+
+  it('records missing component types for the user-facing card', async () => {
+    const { TOOLS_BY_NAME } = await import('../src/lib/ai/tools');
+    const ctx = mkCtx([], []);
+    const res = await TOOLS_BY_NAME.get('schematic.addComponent')!.execute(
+      { type: 'fluxCapacitor42', x: 1, y: 1 }, ctx,
+    ) as any;
+    expect(res.ok).toBe(false);
+    expect(ctx.missingComponents).toBeDefined();
+    expect(ctx.missingComponents!.has('fluxCapacitor42')).toBe(true);
   });
 });

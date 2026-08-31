@@ -26,8 +26,8 @@ import { runSimulationTool, getVoltageTool, getCurrentTool, validatePhysicsTool,
 import { startSimulationTool, pauseSimulationTool, resetSimulationTool, setSimulationSpeedTool } from './simulation-control-tools';
 import { listExamplesTool, loadExampleTool } from './examples-tools';
 import { exportSPICENetlistTool, exportBOMTool } from './export-tools';
-import { importToPCBTool, runAutoRouteTool, runDRCTool, runTopoRouteTool } from './pcb-tools';
-import { setBoardSizeTool, setDefaultTraceWidthTool, setActiveLayerTool, addCopperPourTool, generateTeardropsTool, verifyNetlistTool } from './pcb-board-setup-tools';
+import { importToPCBTool, runAutoRouteTool, runDRCTool, runTopoRouteTool, verifyNetlistTool } from './pcb-tools';
+import { setBoardSizeTool, setDefaultTraceWidthTool, setActiveLayerTool, addCopperPourTool, generateTeardropsTool } from './pcb-board-setup-tools';
 import { runERCTool, reannotateTool } from './erc-annotation-tools';
 import { findComponentTool } from './search-tools';
 import { serializeDocumentTool, exportKiCadNetlistTool, loadDocumentTool, undoTool, redoTool } from './document-tools';

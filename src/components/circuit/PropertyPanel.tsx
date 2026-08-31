@@ -22,8 +22,8 @@ import { Badge } from '@/components/ui/badge';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Category badges / pin electrical-type colour coding (matches the palette:
-// inputs cyan · outputs emerald · power amber · bidirectional violet ·
-// passive/other slate)
+// inputs cyan · outputs emerald · power amber · bidirectional + tri-state
+// violet · passive/other slate)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const categoryLabels: Record<string, string> = {
@@ -44,7 +44,7 @@ function prettyCategory(category: string): string {
 
 const PIN_ELEC_COLORS: Record<PinElecType, string> = {
   input: '#22d3ee', // cyan-400
-  tri_state: '#22d3ee',
+  tri_state: '#a78bfa', // violet-400 (grouped with bidirectional)
   output: '#34d399', // emerald-400
   open_collector: '#34d399',
   open_emitter: '#34d399',
@@ -86,8 +86,9 @@ function pinLabel(type: PinElecType | undefined): string {
 function pinGroup(type: PinElecType | undefined): { label: string; color: string } {
   switch (type) {
     case 'input':
-    case 'tri_state':
       return { label: 'Input', color: '#22d3ee' };
+    case 'tri_state':
+      return { label: 'Tri-state', color: '#a78bfa' };
     case 'output':
     case 'open_collector':
     case 'open_emitter':
@@ -157,16 +158,16 @@ function formatVolts(v: number): string {
   return v === 0 ? '0 V' : `${(v * 1e6).toFixed(1)} µV`;
 }
 
-/** True when the current value differs from the parameter's default. */
+/** True when the current value differs from the parameter's default.
+ *  Loose String() comparison on both sides: harmless type drift (4.7 vs
+ *  "4.7", true vs "true") must not surface a spurious reset button, while a
+ *  genuine change — or a broken null value — must. */
 function valueDiffersFromDefault(
   def: ParameterDef,
   value: number | string | boolean | undefined,
 ): boolean {
-  if (value === undefined || def.default === undefined) return false;
-  if (def.type === 'number') {
-    return typeof value === 'number' && value !== Number(def.default);
-  }
-  return value !== def.default;
+  if (def.default === undefined) return false;
+  return String(value) !== String(def.default);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -230,16 +231,18 @@ export function PropertyPanel() {
     }
   }, [comp, plugin, simContext, components, wires]);
 
-  // Live voltages are only trustworthy while the simulation is running.
-  const liveVoltages = useMemo(() => {
-    if (!running || !simContext) return null;
+  // Node voltages read straight from the simulation context: live while the
+  // sim runs, frozen at the last step while paused, null once stopped or
+  // never run (pins then show "—" with a hint to run the simulation).
+  const nodeVoltageAt = useMemo(() => {
+    if (!simContext) return null;
     const nv = simContext.nodeVoltage;
     return (nodeId: number) => {
       if (nodeId < 0 || nodeId >= nv.length) return null;
       const v = nv[nodeId];
       return isFinite(v) ? v : null;
     };
-  }, [running, simContext]);
+  }, [simContext]);
 
   // Multi-edit mode: when 2+ components are selected, show common parameters
   const multiCompIds = new Set(multiSelection.components);
@@ -264,9 +267,9 @@ export function PropertyPanel() {
           <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Multi-Edit</h2>
           <p className="mt-1 text-xs text-slate-500">{multiComps.length} components selected</p>
         </div>
-        <div className="flex-1 overflow-y-auto p-3">
+        <div className="flex-1 overflow-y-auto">
           {/* Alignment tools */}
-          <div className="mb-4 space-y-2">
+          <div className="space-y-2 border-b border-slate-800 p-3">
             <Label className="text-xs text-slate-400">Alignment</Label>
             <div className="grid grid-cols-3 gap-1">
               <Button size="sm" variant="ghost" className="cursor-pointer text-xs" onClick={() => alignSelected('x', 'min')}>Left</Button>
@@ -277,7 +280,7 @@ export function PropertyPanel() {
               <Button size="sm" variant="ghost" className="cursor-pointer text-xs" onClick={() => alignSelected('y', 'max')}>Bottom</Button>
             </div>
           </div>
-          <div className="mb-4 space-y-2">
+          <div className="space-y-2 border-b border-slate-800 p-3">
             <Label className="text-xs text-slate-400">Distribute</Label>
             <div className="grid grid-cols-2 gap-1">
               <Button size="sm" variant="ghost" className="cursor-pointer text-xs" onClick={() => distributeSelected('x')} disabled={multiComps.length < 3}>Horizontal</Button>
@@ -286,7 +289,7 @@ export function PropertyPanel() {
           </div>
           {/* Common parameters */}
           {commonParams.length > 0 && (
-            <div className="space-y-3">
+            <div className="space-y-2.5 p-3">
               <Label className="text-xs text-slate-400">Common Parameters</Label>
               {commonParams.map((param) => (
                 <div key={param.key}>
@@ -377,6 +380,7 @@ export function PropertyPanel() {
             className="h-6 w-6 shrink-0 text-slate-400 hover:text-slate-200"
             onClick={() => setSelection({ type: null, id: null })}
             title="Deselect"
+            aria-label="Deselect component"
           >
             <X size={14} />
           </Button>
@@ -434,7 +438,7 @@ export function PropertyPanel() {
           plugin={plugin}
           nodeIdByTerminal={nodeIdByTerminal}
           wiredTerminals={wiredTerminals}
-          getVoltage={liveVoltages}
+          getVoltage={nodeVoltageAt}
         />
 
         {/* Parameters */}
@@ -581,7 +585,7 @@ function PinsSection({
       {/* Wire hint */}
       <div className="mt-2 flex items-start gap-1.5 rounded-md border border-slate-800/70 bg-slate-800/30 px-2 py-1.5 text-[9px] leading-snug text-slate-500">
         <Cable size={10} className="mt-px shrink-0" />
-        Click a pin on the canvas or use the Wire tool (W) to connect
+        Wire tool (W) connects pins — click a pin on the canvas
       </div>
     </div>
   );
@@ -605,10 +609,10 @@ function PinRow({
     <div className="px-2 py-1.5">
       <div className="flex items-center gap-1.5">
         <PinDot type={terminal.electricalType} />
-        <span className="shrink-0 text-[11px] font-semibold text-slate-200">
+        <span className="shrink-0 text-xs font-semibold text-slate-200">
           {terminal.label || terminal.id}
         </span>
-        <code className="min-w-0 truncate font-mono text-[10px] text-slate-500">{terminal.id}</code>
+        <code className="min-w-0 truncate font-mono text-xs text-slate-500">{terminal.id}</code>
         {terminal.number != null && terminal.number !== '' && (
           <span className="shrink-0 rounded bg-slate-800 px-1 font-mono text-[9px] leading-4 text-slate-400">
             #{terminal.number}
@@ -638,7 +642,7 @@ function PinRow({
         </span>
       </div>
       <div className="mt-0.5 flex items-center gap-1.5 pl-3.5 text-[9px]">
-        <span className="shrink-0 font-medium uppercase tracking-wide" style={{ color }}>
+        <span className="shrink-0 font-medium tracking-wide" style={{ color }}>
           {pinLabel(terminal.electricalType)}
         </span>
         {terminal.name && terminal.name !== terminal.label && (
@@ -681,11 +685,11 @@ function ParameterEditor({
   if (def.type === 'boolean') {
     return (
       <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <Label className="cursor-pointer text-xs text-slate-300">{def.label}</Label>
+        <Label className="min-w-0 cursor-pointer truncate text-xs text-slate-300">{def.label}</Label>
+        <span className="flex shrink-0 items-center gap-1.5">
           {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
-        </div>
-        <Switch checked={!!value} onCheckedChange={(v) => onChange(v)} />
+          <Switch checked={!!value} onCheckedChange={(v) => onChange(v)} />
+        </span>
       </div>
     );
   }
@@ -781,18 +785,21 @@ goto loop`,
       };
       return (
         <div className="space-y-1">
-          <div className="flex items-center justify-between">
-            <Label className="text-xs text-slate-300">{def.label}</Label>
-            <Select onValueChange={(v) => onChange(sampleSketches[v] || '')}>
-              <SelectTrigger className="h-6 w-32 border-slate-700 bg-slate-800 text-[10px] text-slate-300">
-                <SelectValue placeholder="Load sample..." />
-              </SelectTrigger>
-              <SelectContent className="bg-slate-800 border-slate-700">
-                {Object.keys(sampleSketches).map((k) => (
-                  <SelectItem key={k} value={k} className="text-xs text-slate-200">{k}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+          <div className="flex items-center justify-between gap-1.5">
+            <Label className="min-w-0 truncate text-xs text-slate-300">{def.label}</Label>
+            <span className="flex shrink-0 items-center gap-1.5">
+              {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
+              <Select onValueChange={(v) => onChange(sampleSketches[v] || '')}>
+                <SelectTrigger className="h-6 w-32 border-slate-700 bg-slate-800 text-[10px] text-slate-300">
+                  <SelectValue placeholder="Load sample..." />
+                </SelectTrigger>
+                <SelectContent className="bg-slate-800 border-slate-700">
+                  {Object.keys(sampleSketches).map((k) => (
+                    <SelectItem key={k} value={k} className="text-xs text-slate-200">{k}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </span>
           </div>
           <textarea
             value={String(value ?? '')}
@@ -832,12 +839,12 @@ goto loop`,
   return (
     <div className="space-y-1.5 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
       <div className="flex items-center justify-between gap-1.5">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <Label className="truncate text-xs text-slate-300">{def.label}</Label>
+        <Label className="min-w-0 truncate text-xs text-slate-300">{def.label}</Label>
+        <span className="flex shrink-0 items-center gap-1">
+          <span className="font-mono text-[10px] tabular-nums text-cyan-300/90">
+            {formatSI(numVal, def.unit)}
+          </span>
           {differs && <ResetToDefaultButton label={def.label} onReset={() => onChange(def.default)} />}
-        </div>
-        <span className="shrink-0 font-mono text-[10px] tabular-nums text-cyan-300/90">
-          {formatSI(numVal, def.unit)}
         </span>
       </div>
       {useSlider ? (
