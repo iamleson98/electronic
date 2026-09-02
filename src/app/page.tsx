@@ -21,7 +21,6 @@ import { HelpDialog } from '@/components/circuit/HelpDialog';
 import { LibraryManagerDialog } from '@/components/pcb/LibraryManagerDialog';
 import { SimStatusBar } from '@/components/circuit/SimStatusBar';
 import { TipOfTheDay } from '@/components/circuit/TipOfTheDay';
-import { FirstRunTutorial } from '@/components/circuit/FirstRunTutorial';
 import { ThemeManager } from '@/components/circuit/ThemeManager';
 
 // Lazy-load heavy components to reduce initial bundle size.
@@ -340,7 +339,6 @@ export default function Home() {
       <HelpDialog open={showHelp} onClose={() => setShowHelp(false)} />
       <LibraryManagerDialog open={showLibrary} onClose={() => setShowLibrary(false)} />
       <TipOfTheDay />
-      <FirstRunTutorial />
       <ThemeManager />
     </div>
   );

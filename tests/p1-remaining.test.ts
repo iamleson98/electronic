@@ -162,13 +162,21 @@ describe('P1 remaining: Paste feedback', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Empty-state card
 // ─────────────────────────────────────────────────────────────────────────────
-describe('P1 remaining: Empty-state card', () => {
-  it('CircuitCanvas has welcome card', async () => {
+describe('P1 remaining: Empty-state card removed', () => {
+  it('CircuitCanvas has no welcome card (removed by user request)', async () => {
     const fs = await import('fs/promises');
     const source = await fs.readFile('./src/components/circuit/CircuitCanvas.tsx', 'utf-8');
-    expect(source).toContain('Welcome to CircuitLab');
-    expect(source).toContain('Load Example');
-    expect(source).toContain('Add Resistor');
+    expect(source).not.toContain('Welcome to CircuitLab');
+    expect(source).not.toContain('Load Example');
+    expect(source).not.toContain('Add Resistor');
+  });
+  it('page.tsx no longer renders the first-run tutorial overlay', async () => {
+    const fs = await import('fs/promises');
+    const source = await fs.readFile('./src/app/page.tsx', 'utf-8');
+    expect(source).not.toContain('FirstRunTutorial');
+    // regression guard: nothing may render a full-screen click-locking overlay
+    // at document root level
+    expect(source).not.toContain('z-[9999]');
   });
 });
 
