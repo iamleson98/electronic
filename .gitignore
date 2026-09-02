@@ -64,6 +64,12 @@ server.log
 # Allow .env.example but ignore actual .env
 !.env.example
 
+# EXCEPTION (owner-approved): the root .env carries the Turso DB credentials
+# and IS committed on purpose — the repo is private and the owner explicitly
+# opted in ("don't worry about security here, I allow that"). Keep this
+# exception scoped to exactly `.env`; never extend it to other env files.
+!.env
+
 # ─── Secrets & credentials — NEVER commit ───────────────────────────────────
 # Explicit belt-and-suspenders guard for credentials. Even if a future .env*
 # pattern is accidentally loosened, these catch the common secret file names.
