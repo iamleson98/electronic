@@ -13,6 +13,7 @@
 // Model sizing adapts to the footprint's pad span so parts always land on
 // their pads (KiCad WRL-parity behavior).
 import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import type { Footprint } from './types';
 
 export interface ModelBuildContext {
@@ -25,37 +26,42 @@ export interface ModelBuildContext {
 export type ModelFactory = (ctx: ModelBuildContext) => THREE.Group | null;
 
 // ─── Shared materials (module-level cache — few instances, reused) ──────────
+// Body materials are MeshPhysicalMaterial with clearcoat: molded epoxy and
+// ABS plastics have a thin glossy surface layer over a diffuse bulk — the
+// clearcoat term is what separates "looks real" from "looks like clay".
 const MAT = {
   // Epoxy / molded plastic bodies
-  blackPlastic: new THREE.MeshStandardMaterial({ color: 0x1c1c20, roughness: 0.55, metalness: 0.05 }),
-  darkPlastic: new THREE.MeshStandardMaterial({ color: 0x2a2a30, roughness: 0.6, metalness: 0.05 }),
+  blackPlastic: new THREE.MeshPhysicalMaterial({ color: 0x1c1c20, roughness: 0.5, metalness: 0.05, clearcoat: 0.45, clearcoatRoughness: 0.35 }),
+  darkPlastic: new THREE.MeshPhysicalMaterial({ color: 0x2a2a30, roughness: 0.55, metalness: 0.05, clearcoat: 0.4, clearcoatRoughness: 0.4 }),
   // DIP body (matte black epoxy)
-  dipBody: new THREE.MeshStandardMaterial({ color: 0x141416, roughness: 0.65, metalness: 0.02 }),
+  dipBody: new THREE.MeshPhysicalMaterial({ color: 0x141416, roughness: 0.6, metalness: 0.02, clearcoat: 0.3, clearcoatRoughness: 0.45 }),
   // Bright tinned-steel leads / pins
-  lead: new THREE.MeshStandardMaterial({ color: 0xb8bcc2, roughness: 0.25, metalness: 1.0 }),
+  lead: new THREE.MeshPhysicalMaterial({ color: 0xb8bcc2, roughness: 0.28, metalness: 1.0, clearcoat: 0.25, clearcoatRoughness: 0.2 }),
   // Aluminum can tops (crystals, electrolytics)
   aluminum: new THREE.MeshStandardMaterial({ color: 0x9aa0a6, roughness: 0.35, metalness: 0.9 }),
   // Copper windings
-  copper: new THREE.MeshStandardMaterial({ color: 0xb87333, roughness: 0.3, metalness: 0.9 }),
-  // Resistor body (beige ceramic)
-  resistorBody: new THREE.MeshStandardMaterial({ color: 0xc8b088, roughness: 0.7, metalness: 0.0 }),
-  // Electrolytic can (dark navy)
-  elecCan: new THREE.MeshStandardMaterial({ color: 0x1a2440, roughness: 0.45, metalness: 0.15 }),
+  copper: new THREE.MeshPhysicalMaterial({ color: 0xb87333, roughness: 0.25, metalness: 0.95, clearcoat: 0.3, clearcoatRoughness: 0.25 }),
+  // Resistor body (beige ceramic with a lacquer sheen)
+  resistorBody: new THREE.MeshPhysicalMaterial({ color: 0xc8b088, roughness: 0.55, metalness: 0.0, clearcoat: 0.25, clearcoatRoughness: 0.4 }),
+  // Electrolytic can (dark navy plastic sleeve)
+  elecCan: new THREE.MeshPhysicalMaterial({ color: 0x1a2440, roughness: 0.4, metalness: 0.15, clearcoat: 0.5, clearcoatRoughness: 0.3 }),
   // Ceramic disc (orange-tan)
-  ceramic: new THREE.MeshStandardMaterial({ color: 0xd9a066, roughness: 0.8, metalness: 0.0 }),
+  ceramic: new THREE.MeshPhysicalMaterial({ color: 0xd9a066, roughness: 0.7, metalness: 0.0, clearcoat: 0.12, clearcoatRoughness: 0.5 }),
   // MLCC / SMD tan body
-  mlcc: new THREE.MeshStandardMaterial({ color: 0xc9a876, roughness: 0.75, metalness: 0.0 }),
+  mlcc: new THREE.MeshPhysicalMaterial({ color: 0xc9a876, roughness: 0.65, metalness: 0.0, clearcoat: 0.15, clearcoatRoughness: 0.45 }),
   // Glass diode (translucent red-brown)
   diodeGlass: new THREE.MeshPhysicalMaterial({
     color: 0x8b1a1a, roughness: 0.15, metalness: 0.0,
     transparent: true, opacity: 0.85, transmission: 0.35,
   }),
   // Black diode body (DO-41 power diodes)
-  diodeBody: new THREE.MeshStandardMaterial({ color: 0x16161a, roughness: 0.5, metalness: 0.05 }),
+  diodeBody: new THREE.MeshPhysicalMaterial({ color: 0x16161a, roughness: 0.45, metalness: 0.05, clearcoat: 0.4, clearcoatRoughness: 0.35 }),
   // TO-220 metal tab
-  tab: new THREE.MeshStandardMaterial({ color: 0x8f959c, roughness: 0.3, metalness: 0.95 }),
+  tab: new THREE.MeshPhysicalMaterial({ color: 0x8f959c, roughness: 0.28, metalness: 0.95, clearcoat: 0.2, clearcoatRoughness: 0.25 }),
   // Gold ENIG pad finish
-  enig: new THREE.MeshStandardMaterial({ color: 0xd4b96a, roughness: 0.25, metalness: 0.85 }),
+  enig: new THREE.MeshPhysicalMaterial({ color: 0xd4b96a, roughness: 0.22, metalness: 1.0, clearcoat: 0.35, clearcoatRoughness: 0.2 }),
+  // Lead-free solder (fillets, joints)
+  solder: new THREE.MeshPhysicalMaterial({ color: 0xd9dde2, roughness: 0.16, metalness: 0.95, clearcoat: 0.55, clearcoatRoughness: 0.12 }),
 };
 
 /** Clone-safe helper: mesh with geometry + material, positioned. */
@@ -279,30 +285,41 @@ function ledModel(ctx: ModelBuildContext): THREE.Group {
     emissive: color, emissiveIntensity: 0,
   });
   const domeR = 2.5;
-  // base cylinder + dome
-  g.add(mesh(new THREE.CylinderGeometry(domeR, domeR * 1.02, 2.2, 24), lensMat, 0, 1.1 + 1.4, 0));
-  const dome = mesh(new THREE.SphereGeometry(domeR, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2), lensMat, 0, 2.2 + 1.4, 0);
+  // base cylinder + dome + flange — flange BOTTOM sits at y = 0 (on the
+  // board); legs reach up inside the flange. (A stray +1.4 offset on every
+  // part used to float the whole lens 1.4 mm above its own legs.)
+  g.add(mesh(new THREE.CylinderGeometry(domeR, domeR * 1.02, 2.2, 24), lensMat, 0, 1.1, 0));
+  const dome = mesh(new THREE.SphereGeometry(domeR, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2), lensMat, 0, 2.2, 0);
   g.add(dome);
   // flange ring
-  g.add(mesh(new THREE.CylinderGeometry(domeR * 1.12, domeR * 1.12, 0.7, 24), lensMat, 0, 0.35 + 1.4, 0));
-  // legs at the actual pad positions; anode ('a') is the longer one
+  g.add(mesh(new THREE.CylinderGeometry(domeR * 1.12, domeR * 1.12, 0.7, 24), lensMat, 0, 0.35, 0));
+  // legs at the actual pad positions; anode ('a') is the longer one — tops
+  // reach y = 1.6, inside the lens body
   const padPts = padPoints(ctx.footprint, 2);
   for (let i = 0; i < padPts.length; i++) {
     const [x, z] = padPts[i];
     const padId = ctx.footprint.pads[i]?.terminalId;
     const isAnode = padId === 'a' || i === 0;
-    const len = isAnode ? 3.6 : 2.8;
-    g.add(mesh(new THREE.CylinderGeometry(0.28, 0.28, len, 8), MAT.lead, x, -len / 2 + 0.4, z));
+    const len = isAnode ? 4.4 : 3.4;
+    g.add(mesh(new THREE.CylinderGeometry(0.28, 0.28, len, 8), MAT.lead, x, -len / 2 + 1.6, z));
   }
   // real light inside the dome — illuminates the board + neighbors when lit
   const glowLight = new THREE.PointLight(color, 0, 30, 2);
-  glowLight.position.set(0, 4.2, 0);
+  glowLight.position.set(0, 3.4, 0);
   g.add(glowLight);
-  // emissive hook — the render loop calls this with live sim current
+  // emissive core (the LED die) visible through the transmissive dome
+  const core = mesh(new THREE.BoxGeometry(0.9, 0.9, 0.9), new THREE.MeshStandardMaterial({
+    color: 0xffffff, emissive: color, emissiveIntensity: 0, roughness: 0.4,
+  }), 0, 2.4, 0);
+  g.add(core);
+  // emissive hook — the render loop calls this with live sim current.
+  // Tuned so a 10 mA LED reads clearly lit WITHOUT blowing out ACES
+  // tonemapping + bloom (previous 4.0/15 cd washed the whole board white).
   (g as any).__updateEmissive = (amps: number) => {
     const lit = Math.min(1, Math.abs(amps) / 0.008); // full glow at ~8 mA
-    lensMat.emissiveIntensity = lit * 4.0;
-    glowLight.intensity = lit * 15;
+    lensMat.emissiveIntensity = lit * 2.2;
+    (core.material as THREE.MeshStandardMaterial).emissiveIntensity = lit * 3.5;
+    glowLight.intensity = lit * 8;
   };
   return g;
 }
@@ -472,25 +489,38 @@ function inductorModel(ctx: ModelBuildContext): THREE.Group {
   return g;
 }
 
-/** 9 V battery style source: boxy cell + snap terminals. Scaled to fit
- *  the footprint's pad span (a real PP3 dwarfs small prototyping boards —
- *  this keeps the visual proportion sensible). */
+/** 9 V battery (PP3): rounded metal jacket, wrap label, snap terminals.
+ *  Scaled to fit the footprint's pad span (a real PP3 dwarfs small
+ *  prototyping boards — this keeps the visual proportion sensible). */
 function batteryModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
   const span = Math.max(6, padSpanX(ctx.footprint));
-  const s = Math.min(1, span / 13); // scale down on tight footprints
-  const bodyW = 13 * s, bodyH = 16 * s, bodyD = 10 * s;
-  const body = mesh(new THREE.BoxGeometry(bodyW, bodyH, bodyD), new THREE.MeshStandardMaterial({
-    color: 0x22262c, roughness: 0.6,
-  }), 0, bodyH / 2, 0);
-  g.add(body);
-  // top cap + terminal
-  g.add(mesh(new THREE.CylinderGeometry(2.6 * s, 2.6 * s, 0.7, 20), MAT.aluminum, 0, bodyH + 0.35, 0));
-  g.add(mesh(new THREE.CylinderGeometry(1.1 * s, 1.1 * s, 1.2, 12), MAT.lead, 0, bodyH + 1.0, 0));
-  // label band
-  g.add(mesh(new THREE.BoxGeometry(bodyW * 1.01, bodyH * 0.32, bodyD * 1.01), new THREE.MeshStandardMaterial({
-    color: 0xd9a441, roughness: 0.55,
-  }), 0, bodyH * 0.78, 0));
+  const s = Math.min(1, span / 13);
+  const bodyW = 13 * s, bodyH = 16.5 * s, bodyD = 10.5 * s;
+  // rounded-corner jacket (rolled steel look)
+  const jacket = mesh(
+    new RoundedBoxGeometry(bodyW, bodyH, bodyD, 3, 1.1 * s),
+    new THREE.MeshPhysicalMaterial({ color: 0x2e3138, roughness: 0.42, metalness: 0.75, clearcoat: 0.35, clearcoatRoughness: 0.35 }),
+    0, bodyH / 2, 0,
+  );
+  g.add(jacket);
+  // paper label wrap (upper 60 %)
+  const label = mesh(
+    new RoundedBoxGeometry(bodyW * 1.012, bodyH * 0.58, bodyD * 1.012, 2, 1.0 * s),
+    new THREE.MeshPhysicalMaterial({ color: 0xc9a441, roughness: 0.62, metalness: 0.0, clearcoat: 0.1 }),
+    0, bodyH * 0.7, 0,
+  );
+  g.add(label);
+  // printed stripe on the label
+  g.add(mesh(new THREE.BoxGeometry(bodyW * 1.02, bodyH * 0.1, bodyD * 1.02),
+    new THREE.MeshPhysicalMaterial({ color: 0x8c1f1f, roughness: 0.55 }), 0, bodyH * 0.55, 0));
+  // PP3 snap terminals: large + stud and small − stud with rim
+  const plus = mesh(new THREE.CylinderGeometry(2.9 * s, 2.9 * s, 1.1, 20), MAT.aluminum, 0, bodyH + 0.55, -bodyD * 0.14);
+  g.add(plus);
+  g.add(mesh(new THREE.CylinderGeometry(1.5 * s, 1.5 * s, 1.0, 14), MAT.lead, 0, bodyH + 1.3, -bodyD * 0.14));
+  const minusRim = mesh(new THREE.CylinderGeometry(2.1 * s, 2.1 * s, 0.9, 18), MAT.aluminum, 0, bodyH + 0.45, bodyD * 0.22);
+  g.add(minusRim);
+  g.add(mesh(new THREE.CylinderGeometry(1.9 * s, 1.9 * s, 0.5, 16), MAT.darkPlastic, 0, bodyH + 0.62, bodyD * 0.22));
   return g;
 }
 

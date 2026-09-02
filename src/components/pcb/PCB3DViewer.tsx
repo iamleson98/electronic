@@ -1,50 +1,87 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
+import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
 import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
 import { buildNodeMap, getTerminalsForComponent, computeComponentCurrents } from '@/lib/circuit/engine';
 import { getPlugin } from '@/lib/circuit/registry';
 import { DEFAULT_MODELS } from '@/lib/pcb/3d-models';
 import { parseModel, modelToGeometry } from '@/lib/pcb/model-loader';
-import { buildComponentModel } from '@/lib/pcb/component-models-3d';
+import { buildComponentModel, hasProceduralModel } from '@/lib/pcb/component-models-3d';
 import type { Footprint } from '@/lib/pcb/types';
+import {
+  boardGeometry,
+  buildSilkscreenTexture,
+  flattenModel,
+  mergeAll,
+  netColor,
+  padGeometry,
+  solderFilletGeometry,
+  traceGeometries,
+  viaGeometries,
+  voltageColor,
+  fr4Material,
+  goldMaterial,
+  solderMaskMaterial,
+  drillMaterial,
+  solderMaterial,
+} from '@/lib/pcb/board-geometry-3d';
+import { FlowParticleField, computeNetFlow, padWorldPosition } from '@/lib/pcb/current-flow-3d';
 
 const FAILED_SENTINEL = Symbol('FAILED');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Why this file uses WebGLRenderer, not WebGPURenderer:
+// Rendering-pipeline notes (why this file looks the way it does):
 //
-// The previous version tried `three/webgpu`'s `WebGPURenderer` first and
-// fell back to `WebGLRenderer`. That sounds progressive but in practice:
-//   • `WebGPURenderer.renderAsync()` is asynchronous — when React state
-//     updates trigger a re-render between frames, the pending render can
-//     race with scene mutations, causing flicker.
-//   • The WebGPU renderer does not support `localClippingEnabled` the same
-//     way — the cross-section tool flipped geometry on and off.
-//   • Browsers without WebGPU support silently fell back, but the fallback
-//     path didn't initialize the renderer the same way (different
-//     `setPixelRatio` semantics, different `domElement`).
-//
-// Plain `WebGLRenderer` is rock-solid, synchronous, and the clipping plane
-// API works exactly as documented. For a PCB 3D viewer the visual quality
-// difference is negligible, and stability wins.
+// • MSAA: `antialias:true` on WebGLRenderer does NOTHING once EffectComposer
+//   renders into an offscreen target — every earlier build had jaggies on
+//   board/component edges. The fix is a multisampled HalfFloat render target
+//   (WebGL2 `samples: 4`) handed to the composer as its base buffer.
+// • AO: GTAOPass gives grounded contact shadows between components and the
+//   board — the single biggest "photo vs. dev-tool" separator. It costs one
+//   extra scene pass, so an adaptive monitor disables it on slow GPUs.
+// • Bloom: threshold raised to 0.85 & strength cut to 0.35 — the previous
+//   0.55/0.72 washed the whole board white whenever an LED lit.
+// • Plain WebGLRenderer (not WebGPURenderer) — synchronous render, stable
+//   clipping-plane API, see git history for the failed experiment.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Cache 3D geometries across renders. Once a model is loaded, we never re-fetch
-// it — even if the entire PCB group is rebuilt, this cache is preserved.
-// This is critical: without it, every state change would re-trigger fetches.
+const BOARD_THICKNESS = 1.6;
+const MASK_T = 0.06;              // solder-mask slab thickness
+const COPPER_TOP_Y = 0.075;       // flush-mounted: embedded 0.01, proud 0.04
+const COPPER_BOT_Y = -1.685;
+const SILK_Y = 0.068;             // just above the top mask slab
+const MODEL_TOP_Y = 0.05;
+const MODEL_BOT_Y = -1.72;
+
+/** World Y for a copper layer (inner layers sit inside the substrate —
+ *  visible with the cross-section tool, like a real multilayer cutaway). */
+function layerYOf(layer: string): number {
+  switch (layer) {
+    case 'top': return COPPER_TOP_Y;
+    case 'bottom': return COPPER_BOT_Y;
+    case 'inner1': return -0.5;
+    case 'inner2': return -0.85;
+    case 'inner3': return -1.15;
+    case 'inner4': return -1.45;
+    default: return COPPER_TOP_Y;
+  }
+}
+
+// Cache 3D geometries across renders (model geometry cache — survives HMR).
 function createModelGeometryCache(): Map<string, THREE.BufferGeometry | typeof FAILED_SENTINEL> {
   return new Map();
 }
 
-// Reusable material cache — avoids creating 1000s of identical materials
+// Reusable material cache for STL fallback models.
 function createMaterialCache() {
   const map = new Map<string, THREE.Material>();
   const get = (key: string, factory: () => THREE.Material): THREE.Material => {
@@ -56,6 +93,87 @@ function createMaterialCache() {
   return { get, dispose };
 }
 
+// ─── Studio backdrop ─────────────────────────────────────────────────────────
+
+/** Vertical gradient background — dark studio sweep, not a flat dev color. */
+function gradientBackground(): THREE.CanvasTexture {
+  const c = document.createElement('canvas');
+  c.width = 16; c.height = 512;
+  const g = c.getContext('2d')!;
+  const grad = g.createLinearGradient(0, 0, 0, 512);
+  grad.addColorStop(0, '#101a2c');
+  grad.addColorStop(0.55, '#0b1322');
+  grad.addColorStop(1, '#060b14');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 16, 512);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/** Soft radial-gradient floor: catches the board's shadow, fades to void. */
+function studioFloor(radius: number): THREE.Mesh {
+  const c = document.createElement('canvas');
+  c.width = c.height = 512;
+  const g = c.getContext('2d')!;
+  const grad = g.createRadialGradient(256, 256, 40, 256, 256, 256);
+  grad.addColorStop(0, 'rgba(38,54,84,0.95)');
+  grad.addColorStop(0.55, 'rgba(24,36,58,0.55)');
+  grad.addColorStop(1, 'rgba(10,16,28,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 512, 512);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mesh = new THREE.Mesh(
+    new THREE.CircleGeometry(radius, 48),
+    new THREE.MeshStandardMaterial({
+      map: tex, transparent: true, roughness: 0.96, metalness: 0.0,
+      depthWrite: false,
+    }),
+  );
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+// ─── Camera tween ────────────────────────────────────────────────────────────
+
+interface CamTween {
+  p0: THREE.Vector3; p1: THREE.Vector3;
+  t0v: THREE.Vector3; t1v: THREE.Vector3;
+  start: number; dur: number;
+}
+
+function easeInOutCubic(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+// ─── Component param summary for the info card ───────────────────────────────
+
+function paramSummary(fp: Footprint, comp: { parameters?: Record<string, unknown> } | undefined): string {
+  const p = comp?.parameters ?? {};
+  const entries: string[] = [];
+  const fmt = (v: unknown): string => {
+    if (typeof v === 'number') {
+      if (Math.abs(v) >= 1000) return `${(v / 1000).toPrecision(3)}k`;
+      if (Math.abs(v) < 1 && v !== 0) return v.toPrecision(2);
+      return String(Math.round(v * 100) / 100);
+    }
+    return String(v);
+  };
+  const order = ['resistance', 'capacitance', 'inductance', 'voltage', 'current', 'forwardV', 'frequency', 'color', 'closed', 'pressed'];
+  for (const k of order) {
+    if (p[k] !== undefined && p[k] !== null && entries.length < 4) {
+      const unit = k === 'resistance' ? 'Ω' : k === 'capacitance' ? 'F' : k === 'inductance' ? 'H' : k === 'voltage' ? 'V' : k === 'current' ? 'A' : '';
+      entries.push(`${k}: ${fmt(p[k])}${unit}`);
+    }
+  }
+  if (!entries.length && fp.componentType) entries.push(fp.componentType);
+  return entries.join(' · ');
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+
 export function PCB3DViewer() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -64,65 +182,89 @@ export function PCB3DViewer() {
   const controlsRef = useRef<OrbitControls | null>(null);
   const composerRef = useRef<EffectComposer | null>(null);
   const bloomPassRef = useRef<UnrealBloomPass | null>(null);
+  const gtaoPassRef = useRef<GTAOPass | null>(null);
+  const smaaPassRef = useRef<SMAAPass | null>(null);
   const pcbGroupRef = useRef<THREE.Group | null>(null);
-  const modelsGroupRef = useRef<THREE.Group | null>(null); // Separate group for 3D models so we can update them without rebuilding everything else
+  const modelsGroupRef = useRef<THREE.Group | null>(null);
+  const flowFieldRef = useRef<FlowParticleField | null>(null);
+  /** per-net copper materials — recolored live for heat/net-color modes */
+  const netMatsRef = useRef<Map<string, THREE.MeshPhysicalMaterial[]>>(new Map());
+  const clipPlaneRef = useRef<THREE.Plane | null>(null);
   const modelCacheRef = useRef(createModelGeometryCache());
   const inFlightRef = useRef<Set<string>>(new Set());
-  const pendingModelFootprintsRef = useRef<Set<string>>(new Set()); // footprint IDs waiting for their model
   const materialCacheRef = useRef(createMaterialCache());
-  /** true once any procedural model with live hooks (LED/7-seg) is attached */
   const liveModelsRef = useRef(false);
-  /** plugin map memoized on the components array identity (live-state loop) */
   const pluginMapCacheRef = useRef<{ components: unknown; plugins: Map<string, NonNullable<ReturnType<typeof getPlugin>>> } | null>(null);
-  const probeLabelsRef = useRef<Map<string, HTMLDivElement>>(new Map());
-  const probeLayerRef = useRef<HTMLDivElement | null>(null);
-  // Cache the (expensive) nodeMap used by voltage-probe labels, keyed on the
-  // components/wires array identities — it only changes on topology edits,
-  // but updateProbeLabels runs EVERY FRAME while probes are enabled.
   const nodeMapCacheRef = useRef<{
     components: unknown; wires: unknown; nodeMap: ReturnType<typeof buildNodeMap>;
   } | null>(null);
-  // Assembly-play animation interval (cleared on unmount)
+  const probeLabelsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const probeLayerRef = useRef<HTMLDivElement | null>(null);
   const assemblyIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // interaction
+  const raycasterRef = useRef(new THREE.Raycaster());
+  const pointerRef = useRef(new THREE.Vector2(10, 10)); // offscreen initially
+  const hoverFpIdRef = useRef<string | null>(null);
+  const hoverRingRef = useRef<THREE.Mesh | null>(null);
+  const selectRingRef = useRef<THREE.Mesh | null>(null);
+  const camTweenRef = useRef<CamTween | null>(null);
+  // frame counters for adaptive quality
+  const frameStatsRef = useRef({ last: 0, avg: 16, tier: 2, slowFrames: 0, degraded: false });
+  const aoEnabledRef = useRef(true);
+  const applyQualityRef = useRef<((tier: number, dpr: number) => void) | null>(null);
+  const screenshotRef = useRef<string | null>(null);
+  // live info-card value spans (updated imperatively from the render loop)
+  const infoVRef = useRef<HTMLSpanElement | null>(null);
+  const infoIRef = useRef<HTMLSpanElement | null>(null);
+  const infoPRef = useRef<HTMLSpanElement | null>(null);
+  const infoNetRef = useRef<HTMLSpanElement | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [qualityTier, setQualityTier] = useState(2); // 2 = full, 1 = fast, 0 = minimal
 
   // Visual options
   const [crossSection, setCrossSection] = useState(false);
   const [crossSectionY, setCrossSectionY] = useState(0);
-  const [highQuality, setHighQuality] = useState(false);
+  const [aoEnabled, setAoEnabled] = useState(true);
   const [showCurrentFlow, setShowCurrentFlow] = useState(false);
+  const [showVoltageHeat, setShowVoltageHeat] = useState(false);
+  const [showNetColors, setShowNetColors] = useState(false);
   const [showVoltageProbes, setShowVoltageProbes] = useState(false);
   const [explosionFactor, setExplosionFactor] = useState(0);
   const [assemblyProgress, setAssemblyProgress] = useState(1);
+  const [autoRotate, setAutoRotate] = useState(false);
+  const [selectedFpId, setSelectedFpId] = useState<string | null>(null);
+  const [perfMode, setPerfMode] = useState(false);
 
   // Use refs for animation-loop state (avoids re-render on every frame)
   const stateRef = useRef({
     crossSection: false,
     crossSectionY: 0,
     showCurrentFlow: false,
+    showVoltageHeat: false,
+    showNetColors: false,
     explosion: 0,
     assembly: 1,
     showVoltageProbes: false,
-    highQuality: false,
+    selectedFpId: null as string | null,
   });
   useEffect(() => { stateRef.current.crossSection = crossSection; }, [crossSection]);
   useEffect(() => { stateRef.current.crossSectionY = crossSectionY; }, [crossSectionY]);
   useEffect(() => { stateRef.current.showCurrentFlow = showCurrentFlow; }, [showCurrentFlow]);
+  useEffect(() => { stateRef.current.showVoltageHeat = showVoltageHeat; }, [showVoltageHeat]);
+  useEffect(() => { stateRef.current.showNetColors = showNetColors; }, [showNetColors]);
   useEffect(() => { stateRef.current.explosion = explosionFactor; }, [explosionFactor]);
   useEffect(() => { stateRef.current.assembly = assemblyProgress; }, [assemblyProgress]);
   useEffect(() => { stateRef.current.showVoltageProbes = showVoltageProbes; }, [showVoltageProbes]);
-  useEffect(() => { stateRef.current.highQuality = highQuality; }, [highQuality]);
+  useEffect(() => { stateRef.current.selectedFpId = selectedFpId; }, [selectedFpId]);
 
   // Clear the assembly-play interval if the viewer unmounts mid-animation
-  // (previously the interval kept firing setState on an unmounted component).
   useEffect(() => () => {
     if (assemblyIntervalRef.current) clearInterval(assemblyIntervalRef.current);
   }, []);
 
   // PCB data
-  const simContext = useEditor((s) => s.simContext);
   const running = useEditor((s) => s.running);
   const footprints = usePCB((s) => s.footprints);
   const traces = usePCB((s) => s.traces);
@@ -139,82 +281,139 @@ export function PCB3DViewer() {
 
     try {
       const scene = new THREE.Scene();
-      scene.background = new THREE.Color(0x0a1628);
+      scene.background = gradientBackground();
       sceneRef.current = scene;
 
       const width = Math.max(1, container.clientWidth);
       const height = Math.max(1, container.clientHeight);
-      const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 2000);
-      // Initial camera — will be auto-framed once footprints exist
+      const camera = new THREE.PerspectiveCamera(45, width / height, 0.5, 4000);
       camera.position.set(board.width / 2, 50, board.height + 30);
       camera.lookAt(board.width / 2, 0, board.height / 2);
       cameraRef.current = camera;
 
-      // Plain WebGLRenderer — synchronous, stable, no async render piles
       const renderer = new THREE.WebGLRenderer({
-        antialias: true,
-        alpha: true,
+        antialias: false, // MSAA comes from the composer's multisampled target
+        alpha: false,
         powerPreference: 'high-performance',
+        stencil: false,
       });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setSize(width, height);
       renderer.localClippingEnabled = true;
-      // Physically-based output: sRGB color space + filmic tone mapping —
-      // metals and colored plastics only look real with ACES.
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.0;
       renderer.shadowMap.enabled = true;
-      renderer.shadowMap.type = THREE.PCFShadowMap;
+      // r185 deprecated PCFSoftShadowMap (hard-edged fallback). VSM is the
+      // supported soft-shadow path — radius + blurSamples give the soft
+      // contact shadows that ground components on the mask surface.
+      renderer.shadowMap.type = THREE.VSMShadowMap;
       container.appendChild(renderer.domElement);
       rendererRef.current = renderer;
+      renderer.domElement.style.touchAction = 'none';
 
       const controls = new OrbitControls(camera, renderer.domElement);
       controls.enableDamping = true;
       controls.dampingFactor = 0.08;
-      controls.minDistance = 5;
-      controls.maxDistance = 500;
-      controls.maxPolarAngle = Math.PI * 0.85;
+      controls.minDistance = 3;
+      controls.maxDistance = 900;
+      controls.maxPolarAngle = Math.PI * 0.92;
+      controls.autoRotateSpeed = 1.1;
+      controls.zoomToCursor = true;
+      // keep controls.target in sync with the initial lookAt (OrbitControls
+      // defaults to (0,0,0) and update() orbits around THAT, panning the
+      // board off-center on mount)
+      controls.target.set(board.width / 2, 0, board.height / 2);
+      controls.update();
       controlsRef.current = controls;
 
-      // Post-processing chain: render → bloom → output. The bloom pass is
-      // what makes emissive parts (lit LEDs, glowing traces, 7-seg digits)
-      // read as ACTUALLY lit — the halo is the visual cue for "powered".
-      const composer = new EffectComposer(renderer);
+      /** Apply a quality tier: post-FX pass toggles + pixel ratio.
+       *  2 = full (GTAO+SMAA+MSAA, DPR≤2) · 1 = fast (bloom+MSAA, DPR 1.25)
+       *  · 0 = minimal (raw renderer, DPR 1) */
+      const applyQuality = (tier: number, dpr: number) => {
+        const fs = frameStatsRef.current;
+        fs.tier = tier;
+        if (gtaoPassRef.current) gtaoPassRef.current.enabled = tier >= 2 && aoEnabledRef.current;
+        if (smaaPassRef.current) smaaPassRef.current.enabled = tier >= 2;
+        if (bloomPassRef.current) bloomPassRef.current.enabled = tier >= 1;
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, dpr));
+        const size = renderer.getSize(new THREE.Vector2());
+        renderer.setSize(size.x, size.y);
+        composerRef.current?.setSize(size.x, size.y);
+        bloomPassRef.current?.setSize(size.x, size.y);
+      };
+      applyQualityRef.current = applyQuality;
+
+      // ── Post-processing: MSAA HalfFloat target → GTAO → bloom → output ──
+      const bufSize = renderer.getDrawingBufferSize(new THREE.Vector2());
+      const msaaTarget = new THREE.WebGLRenderTarget(bufSize.x, bufSize.y, {
+        type: THREE.HalfFloatType,
+        samples: 4,
+      });
+      const composer = new EffectComposer(renderer, msaaTarget);
+      // eslint-disable-next-line no-console
+      console.info('[3D] WebGL2:', renderer.capabilities.isWebGL2, '· MSAA samples:', msaaTarget.samples);
       composer.addPass(new RenderPass(scene, camera));
+      const gtao = new GTAOPass(scene, camera, width, height);
+      gtao.output = GTAOPass.OUTPUT.Default;
+      gtao.blendIntensity = 1.0;
+      composer.addPass(gtao);
+      gtaoPassRef.current = gtao;
       const bloomPass = new UnrealBloomPass(
         new THREE.Vector2(width, height),
-        0.55, // strength — subtle halo, not a fog
-        0.45, // radius
-        0.72, // threshold — above ~0.72 only emissive/bright metal blooms
+        0.35,  // strength — halo only on genuinely lit parts
+        0.5,   // radius
+        0.85,  // threshold — above ACES-white; emissive LEDs / hot copper only
       );
       composer.addPass(bloomPass);
+      bloomPassRef.current = bloomPass;
+      // SMAA: shape-based AA that catches thin 45° trace diagonals that
+      // 4× MSAA alone still shimmers on (official three ordering: before Output).
+      const smaa = new SMAAPass();
+      composer.addPass(smaa);
+      smaaPassRef.current = smaa;
       composer.addPass(new OutputPass());
       composerRef.current = composer;
-      bloomPassRef.current = bloomPass;
 
-      // Lights — studio three-point setup + environment reflections.
-      // The environment map is what makes MeshStandardMaterial metal look
-      // like real metal (screen-space reflections come free with PMREM).
-      scene.add(new THREE.AmbientLight(0xffffff, 0.35));
-      const hemi = new THREE.HemisphereLight(0xdfe8ff, 0x2a3140, 0.45);
+      // Software GL (llvmpipe / SwiftShader — CI, VMs, remote sandboxes):
+      // full post-processing runs at seconds-per-frame there. Start one
+      // tier down instead of freezing the tab.
+      try {
+        const gl = renderer.getContext();
+        const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+        const gpu = String(gl.getParameter(dbg ? dbg.UNMASKED_RENDERER_WEBGL : gl.RENDERER) || '');
+        if (/llvmpipe|swiftshader|software/i.test(gpu)) {
+          applyQuality(1, 1);
+          // eslint-disable-next-line no-console
+          console.info('[3D] software GL detected (', gpu, ') → quality tier 1');
+        }
+      } catch { /* detection optional */ }
+
+      // ── Studio lighting: contrasty three-point + IBL ─────────────────
+      // Product-render look = one STRONG key with real falloff + everything
+      // else subtle. The earlier even-lit setup read as a flat dev preview.
+      scene.add(new THREE.AmbientLight(0xffffff, 0.12));
+      const hemi = new THREE.HemisphereLight(0xdfe8ff, 0x1a2233, 0.25);
       scene.add(hemi);
-      const key = new THREE.DirectionalLight(0xffffff, 1.6);
-      key.position.set(25, 55, 30);
+      const key = new THREE.DirectionalLight(0xfff6e8, 1.9);
       key.castShadow = true;
-      key.shadow.mapSize.set(1024, 1024);
-      key.shadow.camera.left = -80; key.shadow.camera.right = 80;
-      key.shadow.camera.top = 80; key.shadow.camera.bottom = -80;
-      key.shadow.camera.far = 200;
-      key.shadow.bias = -0.0004;
+      key.shadow.mapSize.set(2048, 2048);
+      key.shadow.camera.near = 10;
+      key.shadow.camera.far = 500;
+      key.shadow.bias = -0.0002;
+      key.shadow.normalBias = 0.05;
+      key.shadow.radius = 8;
+      key.shadow.blurSamples = 16;
       scene.add(key);
-      const fill = new THREE.DirectionalLight(0x93c5fd, 0.5);
-      fill.position.set(-30, 35, -12); scene.add(fill);
-      const back = new THREE.DirectionalLight(0xfbbf24, 0.25);
-      back.position.set(0, -18, -35); scene.add(back);
-      // Image-based lighting from three's built-in RoomEnvironment — no
-      // network fetch, generated once via PMREM. Async import keeps the
-      // init effect synchronous (the cleanup contract below stays intact).
+      (scene as unknown as Record<string, unknown>).__keyLight = key;
+      const fill = new THREE.DirectionalLight(0xbfd4ff, 0.25);
+      scene.add(fill);
+      (scene as unknown as Record<string, unknown>).__fillLight = fill;
+      const rim = new THREE.DirectionalLight(0xffffff, 0.35);
+      scene.add(rim);
+      (scene as unknown as Record<string, unknown>).__rimLight = rim;
+
+      // Image-based lighting (PMREM of the built-in RoomEnvironment — no fetch)
       import('three/examples/jsm/environments/RoomEnvironment.js')
         .then(({ RoomEnvironment }) => {
           if (cancelled || !rendererRef.current) return;
@@ -222,23 +421,21 @@ export function PCB3DViewer() {
             const pmrem = new THREE.PMREMGenerator(rendererRef.current);
             const env = pmrem.fromScene(new RoomEnvironment(), 0.04);
             sceneRef.current!.environment = env.texture;
+            sceneRef.current!.environmentIntensity = 0.45;
             pmrem.dispose();
-          } catch {
-            // Environment optional — lights alone still shade correctly
-          }
+          } catch { /* environment optional */ }
         })
         .catch(() => { /* environment optional */ });
 
-      // Grid — sized to board with margin
-      const gridSize = Math.max(board.width, board.height) + 40;
-      const grid = new THREE.GridHelper(gridSize, gridSize / 2, 0x334155, 0x1e293b);
-      grid.position.y = -2;
-      scene.add(grid);
+      // ── Studio floor (shadow catcher with radial fade) ──────────────────
+      const floor = studioFloor(Math.max(300, Math.max(board.width, board.height) * 2.2));
+      floor.position.set(board.width / 2, -2.6, board.height / 2);
+      scene.add(floor);
 
-      // Persistent clipping plane — toggled on/off via stateRef, never recreated
+      // Persistent clipping plane — wired to every material at build time
       const clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
+      clipPlaneRef.current = clipPlane;
 
-      // PCB groups
       const pcbGroup = new THREE.Group();
       scene.add(pcbGroup);
       pcbGroupRef.current = pcbGroup;
@@ -253,121 +450,322 @@ export function PCB3DViewer() {
       container.appendChild(probeLayer);
       probeLayerRef.current = probeLayer;
 
-      // Animation loop — synchronous render, no frame piling
+      // ── Apply explosion / assembly to a whole group in-place ────────────
+      const applyExplode = (group: THREE.Group | null, exp: number, asm: number) => {
+        if (!group) return;
+        const idle = exp === 0 && asm === 1;
+        if (idle) {
+          // one-time restore pass is handled below when leaving idle; in the
+          // idle steady state everything is already at __baseY — skip work.
+          return;
+        }
+        group.traverse((child) => {
+          const c = child as unknown as { __baseY?: number; position?: THREE.Vector3; scale?: THREE.Vector3; visible?: boolean };
+          if (c.__baseY === undefined || !c.position || !c.scale) return;
+          const baseY = c.__baseY;
+          c.position.y = baseY + (baseY > 0 ? exp * 5 : -exp * 2);
+          if (baseY > 0 && asm < 1) {
+            c.position.y += (1 - asm) * 30;
+            c.scale.setScalar(asm);
+            c.visible = asm > 0.05;
+          }
+        });
+      };
+      const restoreExplode = (group: THREE.Group | null) => {
+        if (!group) return;
+        group.traverse((child) => {
+          const c = child as unknown as { __baseY?: number; position?: THREE.Vector3; scale?: THREE.Vector3; visible?: boolean };
+          if (c.__baseY === undefined || !c.position || !c.scale) return;
+          c.position.y = c.__baseY;
+          c.scale.setScalar(1);
+          c.visible = true;
+        });
+      };
+      let wasIdle = true;
+      let lastStatsT = 0;
+
+      // ── Animation loop ───────────────────────────────────────────────────
       const animate = () => {
         raf = requestAnimationFrame(animate);
+        const now = performance.now();
         if (controlsRef.current) controlsRef.current.update();
 
-        // Cross-section — set plane constant directly (cheap)
-        if (stateRef.current.crossSection) {
-          clipPlane.constant = stateRef.current.crossSectionY;
+        // camera tween (view presets / focus-component fly-to)
+        const tween = camTweenRef.current;
+        if (tween) {
+          const t = Math.min(1, (now - tween.start) / tween.dur);
+          const e = easeInOutCubic(t);
+          camera.position.lerpVectors(tween.p0, tween.p1, e);
+          controls.target.lerpVectors(tween.t0v, tween.t1v, e);
+          if (t >= 1) camTweenRef.current = null;
+        }
+
+        // cross-section — set plane constant (materials hold the plane ref)
+        if (stateRef.current.crossSection && clipPlaneRef.current) {
+          clipPlaneRef.current.constant = stateRef.current.crossSectionY;
           renderer.localClippingEnabled = true;
         } else {
           renderer.localClippingEnabled = false;
         }
 
-        // Explosion + assembly — modify in-place, no recreation
-        if (pcbGroupRef.current) {
+        // explosion / assembly
+        {
           const exp = stateRef.current.explosion;
           const asm = stateRef.current.assembly;
-          pcbGroupRef.current.traverse((child: any) => {
-            if (child.__baseY !== undefined) {
-              const baseY = child.__baseY;
-              child.position.y = baseY + (baseY > 0 ? exp * 5 : -exp * 2);
-              if (baseY > 0 && asm < 1) {
-                child.position.y += (1 - asm) * 30;
-                child.scale.setScalar(asm);
-                child.visible = asm > 0.05;
-              }
-            }
-          });
+          const idle = exp === 0 && asm === 1;
+          if (idle && !wasIdle) {
+            restoreExplode(pcbGroupRef.current);
+            restoreExplode(modelsGroupRef.current);
+          }
+          if (!idle) {
+            applyExplode(pcbGroupRef.current, exp, asm);
+            applyExplode(modelsGroupRef.current, exp, asm);
+          }
+          wasIdle = idle;
         }
 
-        // Current flow animation
-        if (stateRef.current.showCurrentFlow && running && pcbGroupRef.current) {
-          const t = performance.now() * 0.003;
-          pcbGroupRef.current.traverse((child: any) => {
-            if (child.__isTrace && child.material?.emissive) {
-              child.material.emissive.setRGB(0, 0.5 + 0.5 * Math.sin(t), 0.2);
-              child.material.emissiveIntensity = 0.8;
+        // ── Live electrical state (ONE compute per frame, shared by all) ──
+        const es = useEditor.getState();
+        const sim = es.simContext;
+        let compCurrents: Map<string, number> | null = null;
+        if (sim && es.components.length) {
+          if (pluginMapCacheRef.current?.components !== es.components) {
+            const plugins = new Map<string, NonNullable<ReturnType<typeof getPlugin>>>();
+            for (const c of es.components) {
+              const p = getPlugin(c.type);
+              if (p) plugins.set(c.type, p);
             }
-          });
-        } else if (pcbGroupRef.current) {
-          pcbGroupRef.current.traverse((child: any) => {
-            if (child.__isTrace && child.material?.emissiveIntensity > 0) {
-              child.material.emissive.setRGB(0, 0, 0);
-              child.material.emissiveIntensity = 0;
-            }
-          });
+            pluginMapCacheRef.current = { components: es.components, plugins };
+          }
+          const plugins = pluginMapCacheRef.current!.plugins;
+          try {
+            compCurrents = computeComponentCurrents(es.components, es.wires, plugins, sim);
+          } catch { compCurrents = null; }
         }
 
-        // ── Live component states: LED glow + 7-segment digits ────────────
-        // Procedural models expose hooks (__updateEmissive / __updateSegments);
-        // feed them the CURRENT simulation currents/state so the 3D view
-        // physically lights up with the circuit.
+        // live component states: LED glow + 7-segment digits
         if (liveModelsRef.current && modelsGroupRef.current) {
-          const es = useEditor.getState();
-          const sim = es.simContext;
-          if (sim && es.components.length) {
-            // plugin map memoized on the components array identity
-            if (pluginMapCacheRef.current?.components !== es.components) {
-              const plugins = new Map<string, NonNullable<ReturnType<typeof getPlugin>>>();
-              for (const c of es.components) {
-                const p = getPlugin(c.type);
-                if (p) plugins.set(c.type, p);
+          const st = (sim?.state as unknown as Record<string, unknown>)?.__global ?? {};
+          for (const child of modelsGroupRef.current.children as unknown as Record<string, unknown>[]) {
+            if (child.__updateEmissive) {
+              (child.__updateEmissive as (a: number) => void)(compCurrents?.get(child.__componentId as string) ?? 0);
+            } else if (child.__updateSegments) {
+              const segStates = (st[`7seg_${child.__componentId}`] ?? {}) as Record<string, boolean>;
+              let mask = 0;
+              const segBits: Record<string, number> = { a: 0, b: 1, c: 2, d: 3, e: 4, f: 5, g: 6 };
+              for (const [seg, bit] of Object.entries(segBits)) {
+                if (segStates[seg]) mask |= (1 << bit);
               }
-              pluginMapCacheRef.current = { components: es.components, plugins };
+              (child.__updateSegments as (m: number) => void)(mask);
             }
-            const plugins = pluginMapCacheRef.current!.plugins;
-            try {
-              const currents = computeComponentCurrents(es.components, es.wires, plugins, sim);
-              const st = (sim.state as any)?.__global ?? {};
-              for (const child of modelsGroupRef.current.children as any[]) {
-                if (child.__updateEmissive) {
-                  child.__updateEmissive(currents.get(child.__componentId) ?? 0);
-                } else if (child.__updateSegments) {
-                  // 7-seg display: segStates live in sim.state.__global keyed
-                  // by the component id (see physics engine's 7seg stamp)
-                  const segStates = (st[`7seg_${child.__componentId}`] ?? {}) as Record<string, boolean>;
-                  let mask = 0;
-                  const segBits: Record<string, number> = { a: 0, b: 1, c: 2, d: 3, e: 4, f: 5, g: 6 };
-                  for (const [seg, bit] of Object.entries(segBits)) {
-                    if (segStates[seg]) mask |= (1 << bit);
-                  }
-                  child.__updateSegments(mask);
-                }
-              }
-              if (typeof window !== 'undefined' && (window as any).__3D_PROBE__) {
-                (window as any).__3D_PROBE__({
-                  live: liveModelsRef.current,
-                  simTime: sim.time,
-                  children: (modelsGroupRef.current!.children as any[]).map((c) => ({
-                    componentId: c.__componentId,
-                    hasEmissiveHook: !!c.__updateEmissive,
-                    current: currents.get(c.__componentId) ?? null,
-                  })),
-                });
-              }
-            } catch { /* ignore */ }
+          }
+          if (typeof window !== 'undefined' && (window as unknown as Record<string, unknown>).__3D_PROBE__) {
+            (window as unknown as Record<string, (x: unknown) => void>).__3D_PROBE__({
+              live: liveModelsRef.current,
+              simTime: sim?.time,
+              children: (modelsGroupRef.current!.children as unknown as Record<string, unknown>[]).map((c) => ({
+                componentId: c.__componentId,
+                hasEmissiveHook: !!c.__updateEmissive,
+                current: compCurrents?.get(c.__componentId as string) ?? null,
+              })),
+            });
           }
         }
 
-        // Voltage probes — update DOM labels directly (no React re-render)
+        // current-flow particles + voltage heat (share one net-flow compute)
+        const flowOn = stateRef.current.showCurrentFlow;
+        const heatOn = stateRef.current.showVoltageHeat;
+        if ((flowOn || heatOn) && sim && es.components.length && pcbGroupRef.current) {
+          let netFlow: Map<string, { current: number; anchor: { x: number; y: number } | null; voltage: number | null }> | null = null;
+          try {
+            netFlow = computeNetFlow(footprintsRef.current, es.components, es.wires, pluginMapCacheRef.current?.plugins ?? new Map(), sim);
+          } catch { netFlow = null; }
+          if (flowOn && flowFieldRef.current) {
+            if (netFlow && es.running) {
+              flowFieldRef.current.setNetFlow(netFlow);
+              flowFieldRef.current.update(now / 1000);
+            } else {
+              flowFieldRef.current.points.visible = false;
+            }
+          }
+          if (heatOn && netFlow) recolorByVoltage(netFlow);
+        } else if (flowFieldRef.current && flowOn && !es.running) {
+          flowFieldRef.current.points.visible = false;
+        }
+
+        // voltage probes — update DOM labels directly (no React re-render)
         if (stateRef.current.showVoltageProbes && probeLayerRef.current && cameraRef.current) {
-          updateProbeLabels();
+          updateProbeLabels(compCurrents);
         } else if (probeLayerRef.current) {
-          // Hide all labels when disabled
           probeLabelsRef.current.forEach((el) => { el.style.display = 'none'; });
         }
 
-        // Post-processed render: bloom for lit LEDs / glowing traces.
-        if (composerRef.current) {
+        // selection / hover rings: pulse + follow
+        updateRings(now);
+
+        // live values in the info card
+        if (stateRef.current.selectedFpId) updateInfoCard(compCurrents);
+
+        // hover raycast (once per frame, using last pointer position)
+        updateHover();
+
+        // scene stats probe (debug/verification hook, refreshed ~1 Hz)
+        if (typeof window !== 'undefined' && now - lastStatsT > 1000) {
+          lastStatsT = now;
+          let pcbMeshes = 0;
+          let modelMeshes = 0;
+          pcbGroupRef.current?.traverse((c) => { if (c instanceof THREE.Mesh) pcbMeshes++; });
+          modelsGroupRef.current?.traverse((c) => { if (c instanceof THREE.Mesh) modelMeshes++; });
+          (window as unknown as Record<string, unknown>).__3D_STATS__ = {
+            pcbMeshes,
+            modelMeshes,
+            drawCalls: renderer.info.render.calls,
+            triangles: renderer.info.render.triangles,
+            fps: Math.round(1000 / Math.max(1, frameStatsRef.current.avg)),
+            tier: frameStatsRef.current.tier,
+          };
+        }
+
+        // adaptive quality: step down tiers when frames are consistently slow
+        // (software GL or weak iGPUs). Tier 2 = GTAO+SMAA+MSAA+DPR≤2,
+        // 1 = bloom+MSAA+DPR 1.25, 0 = raw renderer + DPR 1.
+        {
+          const fs = frameStatsRef.current;
+          const dt = now - (fs.last || now);
+          fs.last = now;
+          fs.avg = fs.avg * 0.95 + dt * 0.05;
+          if (fs.tier > 0 && dt > 40) {
+            fs.slowFrames++;
+            if (fs.slowFrames > 30 || (fs.slowFrames > 3 && dt > 400)) {
+              applyQualityRef.current?.(fs.tier - 1, fs.tier === 2 ? 1.25 : 1);
+              setQualityTier(fs.tier);
+              setPerfMode(true);
+              fs.slowFrames = 0;
+            }
+          } else if (dt < 20) {
+            fs.slowFrames = Math.max(0, fs.slowFrames - 1);
+          }
+        }
+
+        // render (tier 0 bypasses post-processing entirely)
+        if (composerRef.current && frameStatsRef.current.tier > 0) {
           composerRef.current.render();
         } else {
           renderer.render(scene, camera);
         }
+
+        // screenshot capture (canvas is valid right after render)
+        if (screenshotRef.current) {
+          try {
+            const url = renderer.domElement.toDataURL('image/png');
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = screenshotRef.current;
+            a.click();
+          } catch { /* capture failed */ }
+          screenshotRef.current = null;
+        }
       };
       raf = requestAnimationFrame(animate);
+
+      // ── Interaction: hover raycast helpers ──────────────────────────────
+      const updateHover = () => {
+        if (!modelsGroupRef.current || !cameraRef.current) return;
+        const canvas = renderer.domElement;
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        raycasterRef.current.setFromCamera(pointerRef.current, cameraRef.current);
+        const hits = raycasterRef.current.intersectObjects(modelsGroupRef.current.children, true);
+        let fpId: string | null = null;
+        if (hits.length) {
+          let obj: THREE.Object3D | null = hits[0].object;
+          while (obj && !(obj as unknown as { __footprintId?: string }).__footprintId) obj = obj.parent;
+          fpId = (obj as unknown as { __footprintId?: string } | null)?.__footprintId ?? null;
+        }
+        if (typeof window !== 'undefined') {
+          const models: { fpId: string | null; sx: number; sy: number }[] = [];
+          for (const child of modelsGroupRef.current.children) {
+            const box = new THREE.Box3().expandByObject(child);
+            const c = box.getBoundingSphere(new THREE.Sphere()).center;
+            c.project(cameraRef.current);
+            models.push({
+              fpId: (child as unknown as { __footprintId?: string }).__footprintId ?? null,
+              sx: Math.round(((c.x + 1) / 2) * rect.width + rect.left),
+              sy: Math.round(((1 - (c.y + 1) / 2)) * rect.height + rect.top),
+            });
+          }
+          (window as unknown as Record<string, unknown>).__3D_HOVER__ = {
+            pointer: { x: pointerRef.current.x, y: pointerRef.current.y },
+            canvasRect: { w: Math.round(rect.width), h: Math.round(rect.height) },
+            hits: hits.length,
+            fpId,
+            modelChildren: modelsGroupRef.current.children.length,
+            modelScreenPos: models,
+          };
+        }
+        if (fpId !== hoverFpIdRef.current) {
+          hoverFpIdRef.current = fpId;
+          canvas.style.cursor = fpId ? 'pointer' : 'grab';
+        }
+      };
+      const setPointerFromEvent = (e: PointerEvent) => {
+        const rect = renderer.domElement.getBoundingClientRect();
+        pointerRef.current.set(
+          ((e.clientX - rect.left) / rect.width) * 2 - 1,
+          -((e.clientY - rect.top) / rect.height) * 2 + 1,
+        );
+      };
+
+      const onPointerMove = (e: PointerEvent) => setPointerFromEvent(e);
+      const downScreenRef = { x: 0, y: 0 };
+      const onPointerDown = (e: PointerEvent) => {
+        setPointerFromEvent(e);
+        downScreenRef.x = e.clientX;
+        downScreenRef.y = e.clientY;
+      };
+      const onClick = (e: MouseEvent) => {
+        // ignore orbit drags: only select when the pointer barely moved
+        if (Math.hypot(e.clientX - downScreenRef.x, e.clientY - downScreenRef.y) > 5) return;
+        if (!cameraRef.current) return;
+        setPointerFromEvent(e as unknown as PointerEvent);
+        raycasterRef.current.setFromCamera(pointerRef.current, cameraRef.current);
+        if (!modelsGroupRef.current) return;
+        const hits = raycasterRef.current.intersectObjects(modelsGroupRef.current.children, true);
+        let fpId: string | null = null;
+        if (hits.length) {
+          let obj: THREE.Object3D | null = hits[0].object;
+          while (obj && !(obj as unknown as { __footprintId?: string }).__footprintId) obj = obj.parent;
+          fpId = (obj as unknown as { __footprintId?: string } | null)?.__footprintId ?? null;
+        }
+        setSelectedFpId(fpId);
+      };
+      const onDblClick = (e: MouseEvent) => {
+        if (!cameraRef.current) return;
+        setPointerFromEvent(e as unknown as PointerEvent);
+        raycasterRef.current.setFromCamera(pointerRef.current, cameraRef.current);
+        if (!modelsGroupRef.current) return;
+        const hits = raycasterRef.current.intersectObjects(modelsGroupRef.current.children, true);
+        if (!hits.length) return;
+        let obj: THREE.Object3D | null = hits[0].object;
+        while (obj && !(obj as unknown as { __footprintId?: string }).__footprintId) obj = obj.parent;
+        const fp = footprintsRef.current.find((f) => f.id === (obj as unknown as { __footprintId?: string })?.__footprintId);
+        if (fp) focusFootprint(fp);
+      };
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') setSelectedFpId(null);
+      };
+      renderer.domElement.addEventListener('pointermove', onPointerMove);
+      renderer.domElement.addEventListener('pointerdown', onPointerDown);
+      renderer.domElement.addEventListener('click', onClick);
+      renderer.domElement.addEventListener('dblclick', onDblClick);
+      window.addEventListener('keydown', onKey);
+      const removeInteraction = () => {
+        renderer.domElement.removeEventListener('pointermove', onPointerMove);
+        renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+        renderer.domElement.removeEventListener('click', onClick);
+        renderer.domElement.removeEventListener('dblclick', onDblClick);
+        window.removeEventListener('keydown', onKey);
+      };
 
       // ResizeObserver — handles panel splits
       const resizeObserver = new ResizeObserver(() => {
@@ -388,15 +786,14 @@ export function PCB3DViewer() {
       return () => {
         cancelled = true;
         cancelAnimationFrame(raf);
+        removeInteraction();
         resizeObserver.disconnect();
+        flowFieldRef.current?.dispose();
+        flowFieldRef.current = null;
         scene.traverse((child) => {
-          if (child instanceof THREE.Mesh) {
-            child.geometry?.dispose();
-          }
+          if (child instanceof THREE.Mesh) child.geometry?.dispose();
         });
         materialCacheRef.current.dispose();
-        // Don't dispose model cache here — preserve across hot reloads
-        // It'll be GC'd when the component unmounts fully.
         if (rendererRef.current) {
           rendererRef.current.dispose();
           if (rendererRef.current.domElement?.parentNode) {
@@ -406,6 +803,7 @@ export function PCB3DViewer() {
         if (composerRef.current) composerRef.current.dispose?.();
         composerRef.current = null;
         bloomPassRef.current = null;
+        gtaoPassRef.current = null;
         if (probeLayerRef.current && probeLayerRef.current.parentNode) {
           probeLayerRef.current.parentNode.removeChild(probeLayerRef.current);
         }
@@ -417,299 +815,529 @@ export function PCB3DViewer() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // ONE-TIME init only
 
+  // footprints mirror for the one-time animation loop (avoids stale closure)
+  const footprintsRef = useRef(footprints);
+  useEffect(() => { footprintsRef.current = footprints; }, [footprints]);
+
   // ── Auto-frame camera the first time footprints appear ───────────────────
-  // (NOT on every model load — that was the previous flicker bug)
+  // StrictMode double-mounts in dev: the cleanup cancels the RAF, so the
+  // "already framed" guard must live INSIDE the callback — a mount-time
+  // guard made the second mount skip re-scheduling and the auto-frame
+  // silently never ran (camera stayed wherever init left it).
   const hasAutoFramedRef = useRef(false);
   useEffect(() => {
-    if (hasAutoFramedRef.current) return;
     if (footprints.length === 0) return;
     if (!cameraRef.current || !controlsRef.current) return;
-    hasAutoFramedRef.current = true;
-
-    const centerX = board.width / 2;
-    const centerZ = board.height / 2;
-    const maxDim = Math.max(board.width, board.height, 30);
-    const dist = maxDim * 1.5;
-    cameraRef.current.position.set(centerX + dist * 0.5, dist * 0.8, centerZ + dist * 0.5);
-    controlsRef.current.target.set(centerX, 0, centerZ);
-    controlsRef.current.update();
+    const id = requestAnimationFrame(() => {
+      if (hasAutoFramedRef.current) return;
+      if (!cameraRef.current || !controlsRef.current) return;
+      hasAutoFramedRef.current = true;
+      frameBoard(true);
+    });
+    return () => cancelAnimationFrame(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [footprints.length, board.width, board.height]);
 
-  // ── Rebuild PCB group (board, traces, vias, pads) ───────────────────────
-  // This DOES rebuild on data change — but it's cheap (a few hundred meshes)
-  // and DOES NOT touch the 3D models group, so async model loads don't trigger it.
-  useEffect(() => {
-    if (!sceneRef.current) return;
-    if (footprints.length === 0 && traces.length === 0 && vias.length === 0) {
-      // Nothing to render — clear existing group
-      if (pcbGroupRef.current) {
-        disposeGroup(pcbGroupRef.current);
-        while (pcbGroupRef.current.children.length > 0) {
-          pcbGroupRef.current.remove(pcbGroupRef.current.children[0]);
-        }
-      }
-      return;
-    }
-
-    // Dispose old meshes in the pcb group, but keep the group itself
-    if (pcbGroupRef.current) {
-      disposeGroup(pcbGroupRef.current);
-      while (pcbGroupRef.current.children.length > 0) {
-        pcbGroupRef.current.remove(pcbGroupRef.current.children[0]);
-      }
-    } else {
-      const g = new THREE.Group();
-      sceneRef.current.add(g);
-      pcbGroupRef.current = g;
-    }
-
-    const group = pcbGroupRef.current;
-    const BOARD_THICKNESS = 1.6;
-
-    // Board substrate — rounded-rect extrusion (real PCB outline look)
-    // + FR4 core between copper layers: lighter fiberglass visible on the
-    // board's side / in cross-section.
-    // NOTE: the shape's Y is NEGATED before rotateX(−π/2) so board-Y maps
-    // to world +Z unmirrored, and the front cap (normal +Y) ends up as the
-    // TOP face at y=0 — with rotateX(+π/2) instead, the top cap's normal
-    // faced DOWN, got backface-culled, and the camera saw the raw FR4 core
-    // through the hole (the "cream board" bug).
-    const boardLayerGeometry = (bw: number, bh: number, depth: number, corner: number): THREE.ExtrudeGeometry => {
-      const shape = new THREE.Shape();
-      shape.moveTo(corner, 0);
-      shape.lineTo(bw - corner, 0);
-      shape.quadraticCurveTo(bw, 0, bw, -corner);
-      shape.lineTo(bw, -(bh - corner));
-      shape.quadraticCurveTo(bw, -bh, bw - corner, -bh);
-      shape.lineTo(corner, -bh);
-      shape.quadraticCurveTo(0, -bh, 0, -(bh - corner));
-      shape.lineTo(0, -corner);
-      shape.quadraticCurveTo(0, 0, corner, 0);
-      const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false, curveSegments: 6 });
-      geo.rotateX(-Math.PI / 2);
-      geo.translate(0, -depth, 0);
-      return geo;
+  // ── Camera helpers: tween, presets, focus ────────────────────────────────
+  function tweenTo(pos: THREE.Vector3, target: THREE.Vector3, dur = 650) {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+    camTweenRef.current = {
+      p0: camera.position.clone(), p1: pos.clone(),
+      t0v: controls.target.clone(), t1v: target.clone(),
+      start: performance.now(), dur,
     };
-    const corner = Math.min(2, board.width / 8, board.height / 8);
-    const w = board.width, h = board.height;
-    const boardGeo = boardLayerGeometry(w, h, BOARD_THICKNESS, corner);
-    const boardMat = materialCacheRef.current.get('board', () =>
-      new THREE.MeshStandardMaterial({ color: 0x0a5c30, roughness: 0.55, metalness: 0.15 }));
-    const boardMesh = new THREE.Mesh(boardGeo, boardMat);
-    boardMesh.position.set(0, 0, 0);
-    boardMesh.receiveShadow = true;
-    boardMesh.castShadow = true;
-    // __baseY must EQUAL position.y — the explosion/assembly loop re-pins
-    // every child to its __baseY each frame (a stale −0.8 here sank the
-    // board 0.8 mm under the FR4 core: the "cream board top" bug).
-    (boardMesh as any).__baseY = 0;
-    group.add(boardMesh);
+  }
 
-    // FR4 core edge (lighter fiberglass ring visible on the board's side)
-    const coreGeo = boardLayerGeometry(w, h, BOARD_THICKNESS * 0.5, corner);
-    const coreMesh = new THREE.Mesh(coreGeo, materialCacheRef.current.get('fr4core', () =>
-      new THREE.MeshStandardMaterial({ color: 0x9c8f5a, roughness: 0.8, metalness: 0.0 })));
-    coreMesh.scale.set(0.999, 1, 0.999);
-    coreMesh.position.set(0, -BOARD_THICKNESS * 0.25, 0);
-    (coreMesh as any).__baseY = -BOARD_THICKNESS * 0.25;
-    group.add(coreMesh);
+  function sceneBounds(): THREE.Box3 {
+    const box = new THREE.Box3();
+    if (pcbGroupRef.current) box.expandByObject(pcbGroupRef.current);
+    if (modelsGroupRef.current) box.expandByObject(modelsGroupRef.current);
+    return box;
+  }
 
-    // Silkscreen — a CanvasTexture plane above the board: refdes labels
-    // drawn at the footprint positions (what real boards have).
-    {
-      const silkCanvas = document.createElement('canvas');
-      const S = 8; // texels per mm
-      silkCanvas.width = Math.max(64, Math.round(w * S));
-      silkCanvas.height = Math.max(64, Math.round(h * S));
-      const sctx = silkCanvas.getContext('2d')!;
-      sctx.clearRect(0, 0, silkCanvas.width, silkCanvas.height);
-      sctx.fillStyle = '#e8eaec';
-      sctx.font = `bold ${Math.max(10, Math.round(S * 1.3))}px ui-monospace, monospace`;
-      sctx.textAlign = 'center';
-      sctx.textBaseline = 'middle';
-      for (const fp of footprints) {
-        const label = fp.refdes || fp.id;
-        sctx.fillText(label, fp.position.x * S, fp.position.y * S);
-        // small pin-1 dot
-        const p1 = fp.pads[0];
-        if (p1) {
-          sctx.beginPath();
-          sctx.arc((fp.position.x + p1.position.x) * S, (fp.position.y + p1.position.y) * S, S * 0.35, 0, Math.PI * 2);
-          sctx.fill();
+  function frameBoard(instant = false) {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+    const box = sceneBounds();
+    if (box.isEmpty()) return;
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    // Frame against the SMALLER of the camera's horizontal/vertical FOV so
+    // the board always fits regardless of aspect (framing against vertical
+    // FOV alone over-zooms-out on wide viewports — the board shrank to a
+    // ~190 px speck when the panel width was large).
+    const vFov = (camera.fov * Math.PI) / 180;
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+    const dist = Math.max(10, (sphere.radius / Math.sin(Math.min(vFov, hFov) / 2)) * 1.06);
+    const dir = new THREE.Vector3(0.55, 0.72, 0.55).normalize();
+    const pos = sphere.center.clone().add(dir.multiplyScalar(dist));
+    // eslint-disable-next-line no-console
+    console.info('[3D] frameBoard: radius', sphere.radius.toFixed(1), '→ dist', dist.toFixed(1), 'aspect', camera.aspect.toFixed(2));
+    if (instant) {
+      camera.position.copy(pos);
+      controls.target.copy(sphere.center);
+      controls.update();
+    } else {
+      tweenTo(pos, sphere.center);
+    }
+  }
+
+  const VIEW_DIRS: Record<string, THREE.Vector3> = {
+    top: new THREE.Vector3(0.001, 1, 0.0012),
+    iso: new THREE.Vector3(0.62, 0.62, 0.55),
+    front: new THREE.Vector3(0, 0.28, 1),
+  };
+  function viewPreset(kind: 'top' | 'iso' | 'front') {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+    const box = sceneBounds();
+    if (box.isEmpty()) return;
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const fov = (camera.fov * Math.PI) / 180;
+    const dist = Math.max(10, (sphere.radius / Math.sin(fov / 2)) * 1.1);
+    const pos = sphere.center.clone().add(VIEW_DIRS[kind].clone().normalize().multiplyScalar(dist));
+    tweenTo(pos, sphere.center, 550);
+  }
+
+  function focusFootprint(fp: Footprint) {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls || !modelsGroupRef.current) return;
+    const model = modelsGroupRef.current.children.find(
+      (c) => (c as unknown as { __footprintId?: string }).__footprintId === fp.id,
+    );
+    const box = new THREE.Box3();
+    if (model) box.expandByObject(model);
+    else box.set(new THREE.Vector3(fp.position.x - 4, 0, fp.position.y - 4), new THREE.Vector3(fp.position.x + 4, 6, fp.position.y + 4));
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const fov = (camera.fov * Math.PI) / 180;
+    const dist = Math.max(9, (Math.max(sphere.radius, 4) / Math.sin(fov / 2)) * 0.95);
+    const dir = new THREE.Vector3(0.5, 0.75, 0.65).normalize();
+    tweenTo(sphere.center.clone().add(dir.multiplyScalar(dist)), sphere.center, 700);
+  }
+
+  // ── Selection / hover rings ──────────────────────────────────────────────
+  function buildRingGeometry(fp: Footprint, thickness: number): THREE.BufferGeometry {
+    const m = 0.8; // margin around the courtyard
+    const w = Math.max(3, fp.bodySize.width) + m * 2;
+    const h = Math.max(3, fp.bodySize.height) + m * 2;
+    const r = Math.min(w, h) * 0.22;
+    const outer = new THREE.Shape();
+    // rounded rect (centered)
+    outer.moveTo(-w / 2 + r, -h / 2);
+    outer.lineTo(w / 2 - r, -h / 2);
+    outer.quadraticCurveTo(w / 2, -h / 2, w / 2, -h / 2 + r);
+    outer.lineTo(w / 2, h / 2 - r);
+    outer.quadraticCurveTo(w / 2, h / 2, w / 2 - r, h / 2);
+    outer.lineTo(-w / 2 + r, h / 2);
+    outer.quadraticCurveTo(-w / 2, h / 2, -w / 2, h / 2 - r);
+    outer.lineTo(-w / 2, -h / 2 + r);
+    outer.quadraticCurveTo(-w / 2, -h / 2, -w / 2 + r, -h / 2);
+    const iw = w - thickness * 2;
+    const ih = h - thickness * 2;
+    const ir = Math.max(0.01, r - thickness);
+    const inner = new THREE.Path();
+    inner.moveTo(-iw / 2 + ir, -ih / 2);
+    inner.lineTo(iw / 2 - ir, -ih / 2);
+    inner.quadraticCurveTo(iw / 2, -ih / 2, iw / 2, -ih / 2 + ir);
+    inner.lineTo(iw / 2, ih / 2 - ir);
+    inner.quadraticCurveTo(iw / 2, ih / 2, iw / 2 - ir, ih / 2);
+    inner.lineTo(-iw / 2 + ir, ih / 2);
+    inner.quadraticCurveTo(-iw / 2, ih / 2, -iw / 2, ih / 2 - ir);
+    inner.lineTo(-iw / 2, -ih / 2 + ir);
+    inner.quadraticCurveTo(-iw / 2, -ih / 2, -iw / 2 + ir, -ih / 2);
+    outer.holes.push(inner);
+    const geo = new THREE.ExtrudeGeometry(outer, { depth: 0.05, bevelEnabled: false, curveSegments: 5 });
+    geo.rotateX(-Math.PI / 2);
+    return geo;
+  }
+
+  function setRing(
+    ringRef: MutableRefObject<THREE.Mesh | null>,
+    fp: Footprint | null,
+    color: number,
+    thickness: number,
+  ) {
+    const old = ringRef.current;
+    if (old) {
+      old.geometry.dispose();
+      (old.material as THREE.Material).dispose();
+      old.parent?.remove(old);
+      ringRef.current = null;
+    }
+    if (!fp || !sceneRef.current) return;
+    const mesh = new THREE.Mesh(
+      buildRingGeometry(fp, thickness),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, depthWrite: false }),
+    );
+    mesh.position.set(fp.position.x, 0.14, fp.position.y);
+    mesh.rotation.y = (fp.rotation * Math.PI) / 180;
+    mesh.renderOrder = 20;
+    sceneRef.current.add(mesh);
+    ringRef.current = mesh;
+  }
+
+  const hoverRingFpRef = useRef<string | null>(null);
+  function updateRings(now: number) {
+    const sel = stateRef.current.selectedFpId;
+    const selFp = footprintsRef.current.find((f) => f.id === sel) ?? null;
+    if (selectRingRef.current ? selectRingRef.current.name !== `sel:${sel}` : sel) {
+      setRing(selectRingRef, selFp, 0x22d3ee, 0.28);
+      if (selectRingRef.current) selectRingRef.current.name = `sel:${sel}`;
+    }
+    const hover = hoverFpIdRef.current;
+    if (hover !== hoverRingFpRef.current) {
+      hoverRingFpRef.current = hover;
+      const hoverFp = footprintsRef.current.find((f) => f.id === hover) ?? null;
+      setRing(hoverRingRef, hoverFp, 0xfbbf24, 0.14);
+    }
+    // pulse the selection ring; gently breathe the hover ring
+    if (selectRingRef.current) {
+      const s = 1 + 0.02 * Math.sin(now * 0.005);
+      selectRingRef.current.scale.set(s, 1, s);
+    }
+  }
+
+  // rebuild rings when footprints change (geometry depends on bodySize)
+  useEffect(() => {
+    const sel = stateRef.current.selectedFpId;
+    const selFp = footprints.find((f) => f.id === sel) ?? null;
+    setRing(selectRingRef, selFp, 0x22d3ee, 0.28);
+    if (selectRingRef.current) selectRingRef.current.name = `sel:${sel}`;
+    hoverRingFpRef.current = null; // force hover rebuild
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [footprints]);
+
+  // ── Recolor copper by live net voltage (heat mode) ────────────────────────
+  const GOLD_BASE = 0xd9b96c;
+  function recolorByVoltage(netFlow: Map<string, { voltage: number | null }>) {
+    let vMin = 0;
+    let vMax = 0;
+    for (const d of netFlow.values()) {
+      if (d.voltage == null) continue;
+      vMin = Math.min(vMin, d.voltage);
+      vMax = Math.max(vMax, d.voltage);
+    }
+    if (vMax - vMin < 1e-6) vMax = vMin + 1e-6;
+    for (const [net, mats] of netMatsRef.current) {
+      const v = netFlow.get(net)?.voltage;
+      const c = v == null ? new THREE.Color(GOLD_BASE) : voltageColor(v, vMin, vMax);
+      for (const m of mats) m.color.copy(c);
+    }
+  }
+
+  // mode transitions for copper coloring (heat is driven per-frame above)
+  useEffect(() => {
+    const mats = netMatsRef.current;
+    if (showNetColors && !showVoltageHeat) {
+      for (const [net, list] of mats) {
+        const c = netColor(net);
+        for (const m of list) m.color.copy(c);
+      }
+    } else if (!showVoltageHeat) {
+      for (const [, list] of mats) {
+        for (const m of list) m.color.set(GOLD_BASE);
+      }
+    }
+  }, [showNetColors, showVoltageHeat, footprints, traces]);
+
+  // ── AO toggle ─────────────────────────────────────────────────────────────
+  useEffect(() => { aoEnabledRef.current = aoEnabled; }, [aoEnabled]);
+  useEffect(() => {
+    if (gtaoPassRef.current) gtaoPassRef.current.enabled = aoEnabled && frameStatsRef.current.tier >= 2;
+  }, [aoEnabled]);
+
+  // ── Autorotate ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (controlsRef.current) controlsRef.current.autoRotate = autoRotate;
+  }, [autoRotate]);
+
+  // ── Rebuild PCB group (board, silkscreen, copper, vias, fillets) ─────────
+  // Everything static is MERGED per net so a routed board costs a handful of
+  // draw calls instead of hundreds (the old per-segment boxes were both slow
+  // and visually "floating strips").
+  useEffect(() => {
+    if (!sceneRef.current || !pcbGroupRef.current) return;
+    const group = pcbGroupRef.current;
+
+    // dispose previous build (geometry + per-net materials + textures)
+    group.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        child.geometry?.dispose();
+        const mat = child.material as (THREE.Material & { map?: THREE.Texture }) | THREE.Material[];
+        if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
+        else {
+          mat.map?.dispose?.();
+          mat.dispose();
         }
       }
-      const silkTex = new THREE.CanvasTexture(silkCanvas);
-      silkTex.anisotropy = 4;
-      const silkPlane = new THREE.Mesh(
-        new THREE.PlaneGeometry(w, h),
-        new THREE.MeshBasicMaterial({ map: silkTex, transparent: true, depthWrite: false }),
-      );
-      silkPlane.rotation.x = -Math.PI / 2;
-      silkPlane.position.set(w / 2, 0.015, h / 2);
-      (silkPlane as any).__baseY = 0.015;
-      group.add(silkPlane);
+    });
+    while (group.children.length > 0) group.remove(group.children[0]);
+    netMatsRef.current.clear();
+
+    // dispose + detach the flow field (rebuilt below)
+    if (flowFieldRef.current) {
+      sceneRef.current.remove(flowFieldRef.current.points);
+      flowFieldRef.current.dispose();
+      flowFieldRef.current = null;
     }
 
-    const PAD_HEIGHT = 0.05;
-    const TRACE_HEIGHT = 0.05;
+    if (footprints.length === 0 && traces.length === 0 && vias.length === 0) return;
 
-    // Traces
-    const traceMat = materialCacheRef.current.get('trace', () =>
-      new THREE.MeshStandardMaterial({ color: 0xb87333, roughness: 0.3, metalness: 0.9 }));
+    const w = board.width;
+    const h = board.height;
+    const corner = Math.min(2.5, w / 8, h / 8);
+    const clip = clipPlaneRef.current;
+
+    // 1. Substrate — the real sandwich: green mask slab / tan FR4 core /
+    //    green mask slab. The FR4 edge is what makes a board read as a
+    //    physical object instead of a green sticker.
+    const fr4Mat = fr4Material();
+    if (clip) { fr4Mat.clippingPlanes = [clip]; fr4Mat.clipShadows = true; }
+    const fr4 = new THREE.Mesh(boardGeometry(w, h, BOARD_THICKNESS, corner), fr4Mat);
+    fr4.receiveShadow = true;
+    fr4.castShadow = true;
+    group.add(fr4);
+
+    const maskMat = solderMaskMaterial();
+    if (clip) { maskMat.clippingPlanes = [clip]; maskMat.clipShadows = true; }
+    // boardGeometry spans y ∈ [−depth, 0] — the mask slabs must be lifted so
+    // their TOP faces sit at +MASK_T / bottom at −(BOARD+MASK_T); leaving them
+    // untranslated buried the mask inside the FR4 and made copper float.
+    const topMask = new THREE.Mesh(boardGeometry(w, h, MASK_T, corner), maskMat);
+    topMask.position.y = MASK_T;
+    topMask.receiveShadow = true;
+    group.add(topMask);
+    const botMask = new THREE.Mesh(boardGeometry(w, h, MASK_T, corner), maskMat);
+    botMask.position.y = -BOARD_THICKNESS;
+    botMask.receiveShadow = true;
+    group.add(botMask);
+
+    // 2. Photographic silkscreen (courtyards, refdes, pin-1, title block)
+    try {
+      const { texture } = buildSilkscreenTexture(footprints, board);
+      const silkMat = new THREE.MeshStandardMaterial({
+        map: texture, transparent: true, roughness: 0.75, metalness: 0.0,
+        color: 0xbfc6cc, envMapIntensity: 0.3, depthWrite: false,
+      });
+      if (clip) silkMat.clippingPlanes = [clip];
+      const silk = new THREE.Mesh(new THREE.PlaneGeometry(w, h), silkMat);
+      silk.rotation.x = -Math.PI / 2;
+      silk.position.set(w / 2, SILK_Y, h / 2);
+      silk.receiveShadow = true;
+      (silk as unknown as { __baseY: number }).__baseY = SILK_Y;
+      group.add(silk);
+    } catch { /* silkscreen optional */ }
+
+    // 3. Copper per (net, layer): traces + pads + via barrels, merged
+    const buckets = new Map<string, { geos: THREE.BufferGeometry[]; baseY?: number }>();
+    const push = (key: string, geo: THREE.BufferGeometry | null, baseY?: number) => {
+      if (!geo) return;
+      const b = buckets.get(key) ?? { geos: [], baseY };
+      b.geos.push(geo);
+      if (b.baseY === undefined) b.baseY = baseY;
+      buckets.set(key, b);
+    };
+
     for (const trace of traces) {
-      for (const seg of trace.segments) {
-        const dx = seg.end.x - seg.start.x;
-        const dy = seg.end.y - seg.start.y;
-        const length = Math.hypot(dx, dy);
-        if (length < 0.01) continue;
-        const traceGeo = new THREE.BoxGeometry(length, TRACE_HEIGHT, trace.width);
-        const traceMesh = new THREE.Mesh(traceGeo, traceMat);
-        traceMesh.position.set(
-          (seg.start.x + seg.end.x) / 2,
-          trace.layer === 'top' ? PAD_HEIGHT : -BOARD_THICKNESS - PAD_HEIGHT,
-          (seg.start.y + seg.end.y) / 2,
-        );
-        if (Math.abs(dy) > 0.01) traceMesh.rotation.y = Math.atan2(dy, dx);
-        (traceMesh as any).__baseY = traceMesh.position.y;
-        (traceMesh as any).__isTrace = true;
-        group.add(traceMesh);
+      const y = layerYOf(trace.layer);
+      for (const geo of traceGeometries(trace, y)) {
+        push(`${trace.net}||${trace.layer}`, geo, y);
       }
     }
 
-    // Vias
-    const viaMat = materialCacheRef.current.get('via', () =>
-      new THREE.MeshStandardMaterial({ color: 0xcc8844, roughness: 0.3, metalness: 0.8 }));
-    const drillMat = materialCacheRef.current.get('drill', () =>
-      new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.9 }));
-    for (const via of vias) {
-      const viaR = Math.max(0.05, via.drill / 2 + 0.15);
-      const viaGeo = new THREE.CylinderGeometry(viaR, viaR, BOARD_THICKNESS + 0.1, 16);
-      const viaMesh = new THREE.Mesh(viaGeo, viaMat);
-      viaMesh.position.set(via.position.x, 0, via.position.y);
-      (viaMesh as any).__baseY = 0;
-      group.add(viaMesh);
-      // Drill hole
-      const drillR = Math.max(0.025, via.drill / 2);
-      const drillGeo = new THREE.CylinderGeometry(drillR, drillR, BOARD_THICKNESS + 0.2, 16);
-      const drillMesh = new THREE.Mesh(drillGeo, drillMat);
-      drillMesh.position.set(via.position.x, 0, via.position.y);
-      group.add(drillMesh);
-    }
+    const drillGeos: THREE.BufferGeometry[] = [];
+    const filletGeos: THREE.BufferGeometry[] = [];
 
-    // Footprints + pads (NO 3D model loading here — that's in a separate effect)
-    // Gold ENIG finish — what real boards' exposed copper looks like after
-    // surface finishing (the old silver was raw unfinished copper).
-    const padMat = materialCacheRef.current.get('pad', () =>
-      new THREE.MeshStandardMaterial({ color: 0xd4b96a, roughness: 0.3, metalness: 0.85 }));
     for (const fp of footprints) {
-      // Pads
+      const hasModel = hasProceduralModel(fp.componentType) || !!fp.modelUrl;
       for (const pad of fp.pads) {
-        // Copper size comes from pad.size (the drill hole is drawn separately
-        // below) — using pad.drill here shrank every THT pad to its hole size.
-        const padW = pad.size?.width || 0.6;
-        const padH = pad.size?.height || 0.6;
-        const padY = fp.side === 'bottom' ? -BOARD_THICKNESS - PAD_HEIGHT : PAD_HEIGHT;
-        let padMesh: THREE.Mesh;
-        if (pad.shape === 'circle') {
-          padMesh = new THREE.Mesh(
-            new THREE.CylinderGeometry(Math.max(padW, padH) / 2, Math.max(padW, padH) / 2, PAD_HEIGHT * 2, 20),
-            padMat,
-          );
-        } else {
-          padMesh = new THREE.Mesh(new THREE.BoxGeometry(padW, PAD_HEIGHT * 2, padH), padMat);
-        }
-        padMesh.position.set(
-          fp.position.x + pad.position.x,
-          padY,
-          fp.position.y + pad.position.y,
-        );
-        padMesh.receiveShadow = true;
-        (padMesh as any).__baseY = padY;
-        group.add(padMesh);
+        const wp = padWorldPosition(fp, pad);
+        const layer = (pad.layer ?? fp.side) || 'top';
+        const y = layerYOf(layer);
+        push(`${pad.net ?? fp.id}||${layer}`, padGeometry(pad, wp.x, wp.y, y, (fp.rotation * Math.PI) / 180), y);
         if (pad.drill && pad.drill > 0) {
-          const drillR = Math.max(0.05, (pad.drill || 0.3) / 2);
-          const drillGeo = new THREE.CylinderGeometry(drillR, drillR, BOARD_THICKNESS + 0.2, 12);
-          const drillMesh = new THREE.Mesh(drillGeo, drillMat);
-          drillMesh.position.set(
-            fp.position.x + pad.position.x,
-            0,
-            fp.position.y + pad.position.y,
-          );
-          (drillMesh as any).__baseY = 0;
-          group.add(drillMesh);
+          const drillR = Math.max(0.06, pad.drill / 2);
+          const drill = new THREE.CylinderGeometry(drillR, drillR, BOARD_THICKNESS + 0.1, 12);
+          drill.translate(wp.x, 0, wp.y);
+          drillGeos.push(drill);
+          if (hasModel) {
+            const fillet = solderFilletGeometry(pad, wp.x, wp.y, layer === 'bottom' ? COPPER_BOT_Y : COPPER_TOP_Y);
+            if (fillet) filletGeos.push(fillet);
+          }
         }
       }
     }
+
+    for (const via of vias) {
+      const [gold, drill] = viaGeometries(via, BOARD_THICKNESS);
+      push(`${via.net}||via`, gold, undefined); // vias stay with the board
+      drillGeos.push(drill);
+    }
+
+    const goldTemplate = goldMaterial();
+    for (const [key, { geos, baseY }] of buckets) {
+      if (!geos.length) continue;
+      let merged: THREE.BufferGeometry;
+      try {
+        merged = mergeAll(geos);
+        geos.forEach((g) => { if (g !== merged) g.dispose(); });
+      } catch {
+        merged = geos[0];
+      }
+      const net = key.split('||')[0];
+      const mat = goldTemplate.clone();
+      if (clip) { mat.clippingPlanes = [clip]; mat.clipShadows = true; }
+      const list = netMatsRef.current.get(net) ?? [];
+      list.push(mat);
+      netMatsRef.current.set(net, list);
+      const mesh = new THREE.Mesh(merged, mat);
+      mesh.receiveShadow = true;
+      if (baseY !== undefined) (mesh as unknown as { __baseY: number }).__baseY = baseY;
+      group.add(mesh);
+    }
+    goldTemplate.dispose();
+
+    if (drillGeos.length) {
+      try {
+        const drillMat = drillMaterial();
+        if (clip) drillMat.clippingPlanes = [clip];
+        const merged = mergeAll(drillGeos);
+        drillGeos.forEach((g) => { if (g !== merged) g.dispose(); });
+        group.add(new THREE.Mesh(merged, drillMat));
+      } catch { /* drills optional */ }
+    }
+
+    if (filletGeos.length) {
+      try {
+        const filletMat = solderMaterial();
+        if (clip) { filletMat.clippingPlanes = [clip]; filletMat.clipShadows = true; }
+        const merged = mergeAll(filletGeos);
+        filletGeos.forEach((g) => { if (g !== merged) g.dispose(); });
+        const mesh = new THREE.Mesh(merged, filletMat);
+        (mesh as unknown as { __baseY: number }).__baseY = COPPER_TOP_Y;
+        mesh.receiveShadow = true;
+        mesh.castShadow = true;
+        group.add(mesh);
+      } catch { /* fillets optional */ }
+    }
+
+    // 4. Current-flow particle field for these traces
+    try {
+      const ff = new FlowParticleField(traces, layerYOf);
+      sceneRef.current.add(ff.points);
+      flowFieldRef.current = ff;
+    } catch { /* flow optional */ }
+
+    // 5. Fit the key light + shadow frustum to the board
+    const sceneAny = sceneRef.current as unknown as Record<string, unknown>;
+    const key = sceneAny.__keyLight as THREE.DirectionalLight | undefined;
+    const fill = sceneAny.__fillLight as THREE.DirectionalLight | undefined;
+    const rim = sceneAny.__rimLight as THREE.DirectionalLight | undefined;
+    const cx = w / 2;
+    const cz = h / 2;
+    const D = Math.hypot(w, h);
+    if (key) {
+      key.position.set(cx + 0.3 * D, D * 0.95 + 20, cz + 0.45 * D);
+      key.target.position.set(cx, 0, cz);
+      key.target.updateMatrixWorld();
+      const half = Math.max(30, D * 0.8);
+      key.shadow.camera.left = -half;
+      key.shadow.camera.right = half;
+      key.shadow.camera.top = half;
+      key.shadow.camera.bottom = -half;
+      key.shadow.camera.updateProjectionMatrix();
+    }
+    fill?.position.set(cx - 0.55 * D, D * 0.6, cz - 0.3 * D);
+    rim?.position.set(cx - 0.15 * D, D * 0.5, cz - 0.85 * D);
+
+    // restore copper coloring mode after rebuild
+    if (showNetColors && !showVoltageHeat) {
+      for (const [net, list] of netMatsRef.current) {
+        const c = netColor(net);
+        for (const m of list) m.color.copy(c);
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [footprints, traces, vias, board, padNets]);
 
   // ── Async 3D model loading (separate from PCB group rebuild) ─────────────
-  // This is the critical fix: when models load, we add them to modelsGroup
-  // WITHOUT rebuilding the rest of the PCB. No flicker, no camera reset.
   useEffect(() => {
     if (!modelsGroupRef.current) return;
 
-    // Track which footprint IDs currently have a model mesh attached
     const attachedIds = new Set<string>();
-    modelsGroupRef.current.traverse((child: any) => {
-      if (child.__footprintId) attachedIds.add(child.__footprintId);
+    modelsGroupRef.current.traverse((child) => {
+      const id = (child as unknown as { __footprintId?: string }).__footprintId;
+      if (id) attachedIds.add(id);
     });
 
-    // Track which footprints should have a model
     const wantedIds = new Set<string>();
     for (const fp of footprints) wantedIds.add(fp.id);
 
-    // Remove meshes for footprints that no longer exist
     const toRemove: THREE.Object3D[] = [];
-    modelsGroupRef.current.traverse((child: any) => {
-      if (child.__footprintId && !wantedIds.has(child.__footprintId)) {
-        toRemove.push(child);
-      }
+    modelsGroupRef.current.traverse((child) => {
+      const id = (child as unknown as { __footprintId?: string }).__footprintId;
+      if (id && !wantedIds.has(id)) toRemove.push(child);
     });
     for (const obj of toRemove) {
       modelsGroupRef.current.remove(obj);
       if (obj instanceof THREE.Mesh) obj.geometry?.dispose();
     }
 
-    // For each footprint that doesn't have a model yet, attach one.
-    // Procedural factories FIRST (realistic multi-material models that read
-    // the component's parameters — resistor color bands, LED lens color,
-    // TO-92/DIP/TO-220 shapes); custom modelUrl / default-STL only as
-    // fallback for types without a factory.
     const cache = modelCacheRef.current;
     const inFlight = inFlightRef.current;
     const editorComps = useEditor.getState().components;
+    const clip = clipPlaneRef.current;
     for (const fp of footprints) {
-      // Skip if already attached or already loading
       if (attachedIds.has(fp.id)) continue;
 
       const modelKey = fp.modelUrl || `default:${fp.componentType}`;
 
       const attachObject = (obj: THREE.Object3D) => {
         if (!modelsGroupRef.current) return;
-        const BOARD_THICKNESS = 1.6;
-        const PAD_HEIGHT = 0.05;
-        obj.position.set(fp.position.x, PAD_HEIGHT, fp.position.y);
+        obj.position.set(fp.position.x, MODEL_TOP_Y, fp.position.y);
         if (fp.side === 'bottom') {
-          obj.position.y = -BOARD_THICKNESS - PAD_HEIGHT;
+          obj.position.y = MODEL_BOT_Y;
           obj.scale.y = -1;
         }
         obj.rotation.y = (fp.rotation * Math.PI) / 180;
-        (obj as any).__baseY = obj.position.y;
-        (obj as any).__footprintId = fp.id;
-        (obj as any).__componentId = fp.componentId;
+        (obj as unknown as { __baseY: number }).__baseY = obj.position.y;
+        (obj as unknown as { __footprintId: string }).__footprintId = fp.id;
+        (obj as unknown as { __componentId: string }).__componentId = fp.componentId;
+        if (clip) {
+          obj.traverse((c) => {
+            if (c instanceof THREE.Mesh) {
+              const mat = c.material as THREE.Material;
+              mat.clippingPlanes = [clip];
+            }
+          });
+        }
         modelsGroupRef.current.add(obj);
       };
 
-      // 1) Procedural realistic model (synchronous, parameter-aware)
+      // 1) Procedural realistic model — flattened to ~5 draw calls, hooks kept
       if (!fp.modelUrl) {
         const comp = editorComps.find((c) => c.id === fp.componentId);
         const procedural = buildComponentModel({
           footprint: fp,
-          params: (comp?.parameters as Record<string, any>) ?? {},
+          params: (comp?.parameters as Record<string, unknown>) ?? {},
         });
         if (procedural) {
-          attachObject(procedural);
-          liveModelsRef.current = true; // has __updateEmissive/__updateSegments hooks
+          const flat = flattenModel(procedural);
+          // carry live-state hooks (LED emissive / 7-seg digits)
+          const src = procedural as unknown as Record<string, unknown>;
+          const dst = flat as unknown as Record<string, unknown>;
+          for (const key of ['__updateEmissive', '__updateSegments']) {
+            if (typeof src[key] === 'function') dst[key] = src[key];
+          }
+          procedural.traverse((c) => {
+            if (c instanceof THREE.Mesh) c.geometry.dispose();
+          });
+          attachObject(flat);
+          liveModelsRef.current = true;
           continue;
         }
       }
@@ -718,42 +1346,40 @@ export function PCB3DViewer() {
         if (!modelsGroupRef.current) return;
         const mat = materialCacheRef.current.get(`model:${modelKey}`, () =>
           new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.4, metalness: 0.6 }));
+        if (clip) mat.clippingPlanes = [clip];
         const mesh = new THREE.Mesh(geo, mat);
-        // Center the model on the footprint
         geo.computeBoundingBox();
         const bb = geo.boundingBox;
-        const BOARD_THICKNESS = 1.6;
-        const PAD_HEIGHT = 0.05;
         if (bb) {
           const cx = (bb.max.x + bb.min.x) / 2;
           const cy = bb.min.y;
           const cz = (bb.max.z + bb.min.z) / 2;
-          mesh.position.set(fp.position.x - cx, PAD_HEIGHT - cy, fp.position.y - cz);
+          mesh.position.set(fp.position.x - cx, MODEL_TOP_Y - cy, fp.position.y - cz);
         } else {
-          mesh.position.set(fp.position.x, PAD_HEIGHT, fp.position.y);
+          mesh.position.set(fp.position.x, MODEL_TOP_Y, fp.position.y);
         }
         if (fp.side === 'bottom') {
-          mesh.position.y = -BOARD_THICKNESS - PAD_HEIGHT;
+          mesh.position.y = MODEL_BOT_Y;
           mesh.scale.y = -1;
         }
         mesh.rotation.y = (fp.rotation * Math.PI) / 180;
-        (mesh as any).__baseY = mesh.position.y;
-        (mesh as any).__footprintId = fp.id;
+        (mesh as unknown as { __baseY: number }).__baseY = mesh.position.y;
+        (mesh as unknown as { __footprintId: string }).__footprintId = fp.id;
+        (mesh as unknown as { __componentId: string }).__componentId = fp.componentId;
+        mesh.castShadow = true;
         modelsGroupRef.current.add(mesh);
       };
 
       const cached = cache.get(modelKey);
-      if (cached === FAILED_SENTINEL) continue; // skip known failures
-      if (cached) {
-        attachMesh(cached.clone());
+      // The cache survives HMR, where a FAILED sentinel Symbol from the OLD
+      // module version no longer === this module's sentinel — so gate on the
+      // object actually having clone() (geometry) instead of symbol identity.
+      if (cached && (cached as { clone?: unknown }).clone) {
+        attachMesh((cached as THREE.BufferGeometry).clone());
         continue;
       }
-      if (inFlight.has(modelKey)) {
-        pendingModelFootprintsRef.current.add(fp.id);
-        continue;
-      }
+      if (cached) continue; // FAILED sentinel (this module's or a stale one)
 
-      // Kick off async load
       inFlight.add(modelKey);
       (async () => {
         try {
@@ -764,23 +1390,16 @@ export function PCB3DViewer() {
             const filename = fp.modelUrl.split('/').pop() || 'model.stl';
             model = parseModel(filename, data);
           } else {
-            // Look up default STL by component type
             const entry = DEFAULT_MODELS.get(fp.componentType);
-            if (entry) {
-              model = parseModel('default.stl', entry.stlAscii);
-            } else {
-              model = null;
-            }
+            if (entry) model = parseModel('default.stl', entry.stlAscii);
+            else model = null;
           }
           if (model) {
             const geo = modelToGeometry(model);
             cache.set(modelKey, geo);
-            // Attach to all footprints waiting on this modelKey
             for (const fpInner of footprints) {
               const innerKey = fpInner.modelUrl || `default:${fpInner.componentType}`;
-              if (innerKey === modelKey) {
-                attachMesh(geo.clone());
-              }
+              if (innerKey === modelKey) attachMesh(geo.clone());
             }
           } else {
             cache.set(modelKey, FAILED_SENTINEL);
@@ -794,39 +1413,8 @@ export function PCB3DViewer() {
     }
   }, [footprints]);
 
-  // ── High-quality rendering toggle ────────────────────────────────────────
-  // ACES tone mapping + sRGB are now ALWAYS on (they make the PBR materials
-  // read as real); HQ adds a hard spotlight + rim light instead of toggling
-  // the (already correct) tone pipeline.
-  useEffect(() => {
-    const scene = sceneRef.current;
-    const renderer = rendererRef.current;
-    if (!scene || !renderer) return;
-    // Remove any existing HQ lights
-    const existingSpot = (scene as any).__hqSpot;
-    const existingRim = (scene as any).__hqRim;
-    if (existingSpot) { scene.remove(existingSpot); existingSpot.dispose?.(); delete (scene as any).__hqSpot; }
-    if (existingRim) { scene.remove(existingRim); existingRim.dispose(); delete (scene as any).__hqRim; }
-    if (highQuality) {
-      const spot = new THREE.SpotLight(0xffffff, 400, 400, Math.PI / 6, 0.45, 1.9);
-      spot.position.set(35, 90, 45);
-      spot.castShadow = true;
-      spot.shadow.mapSize.set(2048, 2048);
-      spot.shadow.bias = -0.0003;
-      scene.add(spot);
-      (scene as any).__hqSpot = spot;
-      const rim = new THREE.DirectionalLight(0x3b82f6, 0.4);
-      rim.position.set(-40, 25, -40);
-      scene.add(rim);
-      (scene as any).__hqRim = rim;
-      renderer.toneMappingExposure = 1.1;
-    } else {
-      renderer.toneMappingExposure = 1.0;
-    }
-  }, [highQuality]);
-
   // ── Update voltage probe labels (DOM, not React state) ───────────────────
-  function updateProbeLabels() {
+  function updateProbeLabels(compCurrents: Map<string, number> | null) {
     if (!probeLayerRef.current || !cameraRef.current) return;
     const layer = probeLayerRef.current;
     const camera = cameraRef.current;
@@ -834,8 +1422,6 @@ export function PCB3DViewer() {
     const h = layer.clientHeight;
     const seen = new Set<string>();
 
-    // buildNodeMap is O(components + wires) — compute it ONCE per frame (it
-    // used to run once PER FOOTPRINT, i.e. O(F·(V+E)) every animation frame).
     const editorState = useEditor.getState();
     if (!nodeMapCacheRef.current ||
         nodeMapCacheRef.current.components !== editorState.components ||
@@ -852,18 +1438,18 @@ export function PCB3DViewer() {
       };
     }
     const nodeMap = nodeMapCacheRef.current.nodeMap;
+    const sim = editorState.simContext;
 
-    for (const fp of footprints) {
+    for (const fp of footprintsRef.current) {
       const pos = new THREE.Vector3(fp.position.x, 2, fp.position.y);
       pos.project(camera);
       if (pos.z > 1) continue; // behind camera
 
-      const screenX = (pos.x + 1) / 2 * w;
-      const screenY = (1 - (pos.y + 1) / 2) * h;
+      const screenX = ((pos.x + 1) / 2) * w;
+      const screenY = ((1 - (pos.y + 1) / 2)) * h;
 
-      // Compute voltage/current/power label — full measurement readout
       let label = `${fp.refdes || fp.id}: —`;
-      if (simContext) {
+      if (sim) {
         const comp = editorState.components.find((c) => c.id === fp.componentId);
         if (comp) {
           const plugin = getPlugin(comp.type);
@@ -872,21 +1458,10 @@ export function PCB3DViewer() {
               const terms = getTerminalsForComponent(comp, plugin, nodeMap);
               const firstTerm = terms[0];
               if (firstTerm) {
-                const v = simContext.nodeVoltage[firstTerm.nodeId];
-                // Current through the component (mA) + power (mW) — the
-                // same source of truth as the schematic's probe panel.
-                let iText = '';
-                let pText = '';
-                try {
-                  const plugins = new Map<string, NonNullable<ReturnType<typeof getPlugin>>>();
-                  for (const c of editorState.components) {
-                    const p = getPlugin(c.type);
-                    if (p) plugins.set(c.type, p);
-                  }
-                  const i = computeComponentCurrents(editorState.components, editorState.wires, plugins, simContext).get(comp.id) ?? 0;
-                  iText = ` · ${(i * 1000).toFixed(2)}mA`;
-                  pText = ` · ${(v != null ? v * i * 1000 : 0).toFixed(2)}mW`;
-                } catch { /* current optional */ }
+                const v = sim.nodeVoltage[firstTerm.nodeId];
+                const i = compCurrents?.get(comp.id) ?? 0;
+                const iText = ` · ${(i * 1000).toFixed(2)}mA`;
+                const pText = ` · ${(v != null ? v * i * 1000 : 0).toFixed(2)}mW`;
                 label = `${fp.refdes || fp.id}: ${v != null ? v.toFixed(2) : '—'}V${iText}${pText}`;
               }
             } catch {
@@ -901,9 +1476,10 @@ export function PCB3DViewer() {
       if (!el) {
         el = document.createElement('div');
         el.style.cssText =
-          'position:absolute;transform:translate(-50%,-150%);padding:1px 4px;' +
-          'border-radius:2px;background:rgba(30,58,138,0.92);color:#bfdbfe;' +
-          'border:1px solid #1d4ed8;font:10px ui-monospace,monospace;white-space:nowrap;';
+          'position:absolute;transform:translate(-50%,-150%);padding:2px 6px;' +
+          'border-radius:4px;background:rgba(8,20,40,0.88);color:#a5f3fc;' +
+          'border:1px solid rgba(34,211,238,0.45);font:10px ui-monospace,monospace;' +
+          'white-space:nowrap;backdrop-filter:blur(2px);';
         layer.appendChild(el);
         probeLabelsRef.current.set(fp.id, el);
       }
@@ -913,14 +1489,63 @@ export function PCB3DViewer() {
       el.textContent = label;
     }
 
-    // Hide labels for footprints not in the current set
     probeLabelsRef.current.forEach((el, id) => {
       if (!seen.has(id)) el.style.display = 'none';
     });
   }
 
+  // ── Live info card values (imperative spans — no re-render per frame) ─────
+  function updateInfoCard(compCurrents: Map<string, number> | null) {
+    const es = useEditor.getState();
+    const sim = es.simContext;
+    const fp = footprintsRef.current.find((f) => f.id === stateRef.current.selectedFpId);
+    if (!fp) return;
+    const comp = es.components.find((c) => c.id === fp.componentId);
+    let v: number | null = null;
+    let i = 0;
+    if (sim && comp) {
+      const plugin = getPlugin(comp.type);
+      if (plugin) {
+        try {
+          if (!nodeMapCacheRef.current ||
+              nodeMapCacheRef.current.components !== es.components ||
+              nodeMapCacheRef.current.wires !== es.wires) {
+            const plugins = new Map<string, NonNullable<ReturnType<typeof getPlugin>>>();
+            for (const c of es.components) {
+              const p = getPlugin(c.type);
+              if (p) plugins.set(c.type, p);
+            }
+            nodeMapCacheRef.current = {
+              components: es.components, wires: es.wires,
+              nodeMap: buildNodeMap(es.components, es.wires, plugins),
+            };
+          }
+          const terms = getTerminalsForComponent(comp, plugin, nodeMapCacheRef.current.nodeMap);
+          const t0 = terms[0];
+          if (t0) v = sim.nodeVoltage[t0.nodeId] ?? null;
+          i = compCurrents?.get(comp.id) ?? 0;
+        } catch { /* values optional */ }
+      }
+    }
+    if (infoVRef.current) infoVRef.current.textContent = v != null ? `${v.toFixed(2)} V` : '—';
+    if (infoIRef.current) infoIRef.current.textContent = `${(i * 1000).toFixed(2)} mA`;
+    if (infoPRef.current) infoPRef.current.textContent = v != null ? `${(v * i * 1000).toFixed(1)} mW` : '—';
+    if (infoNetRef.current) {
+      const nets = [...new Set(fp.pads.map((p) => p.net).filter(Boolean))].join(', ');
+      infoNetRef.current.textContent = nets || '—';
+    }
+  }
+
+  const selectedFp = footprints.find((f) => f.id === selectedFpId) ?? null;
+  const selectedComp = selectedFp
+    ? useEditor.getState().components.find((c) => c.id === selectedFp.componentId)
+    : undefined;
+
+  const btn = (active: boolean) =>
+    `rounded px-2 py-1 text-left transition-colors ${active ? 'bg-cyan-600/90 text-white' : 'text-slate-300 hover:bg-slate-800'}`;
+
   return (
-    <div className="relative h-full w-full overflow-hidden bg-[#0a1628]"
+    <div className="relative h-full w-full overflow-hidden bg-[#0b1322]"
       onContextMenu={(e) => e.preventDefault()}>
       <div ref={containerRef} className="absolute inset-0" />
       {loading && (
@@ -943,33 +1568,45 @@ export function PCB3DViewer() {
       )}
       {!loading && !error && footprints.length > 0 && (
         <>
-          <div className="absolute right-2 top-2 flex flex-col gap-1 rounded-md bg-slate-900/90 p-2 text-xs">
-            <button onClick={() => setCrossSection(!crossSection)}
-              className={`rounded px-2 py-1 ${crossSection ? 'bg-cyan-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}>
-              ✂ Cross-section
+          {/* right-side control panel */}
+          <div className="absolute right-2 top-2 flex w-40 flex-col gap-0.5 rounded-md border border-slate-700/60 bg-slate-900/90 p-2 text-xs shadow-xl">
+            <div className="px-2 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Camera</div>
+            <div className="grid grid-cols-2 gap-1">
+              <button onClick={() => frameBoard()} className={btn(false)}>⤢ Fit</button>
+              <button onClick={() => setAutoRotate(!autoRotate)} className={btn(autoRotate)}>⟳ Spin</button>
+              <button onClick={() => viewPreset('top')} className={btn(false)}>Top</button>
+              <button onClick={() => viewPreset('iso')} className={btn(false)}>ISO</button>
+            </div>
+
+            <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Simulation</div>
+            <button onClick={() => setShowCurrentFlow(!showCurrentFlow)} className={btn(showCurrentFlow)}
+              title="Animated current along every trace — speed and brightness follow the live simulation">
+              ⚡ Current flow
             </button>
+            <button onClick={() => setShowVoltageHeat(!showVoltageHeat)} className={btn(showVoltageHeat)}
+              title="Recolor copper by live net voltage">
+              🌡 Voltage heat
+            </button>
+            <button onClick={() => setShowNetColors(!showNetColors)} className={btn(showNetColors)}
+              title="Distinct color per net">
+              🎨 Net colors
+            </button>
+            <button onClick={() => setShowVoltageProbes(!showVoltageProbes)} className={btn(showVoltageProbes)}>
+              🔵 Probes
+            </button>
+
+            <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Inspect</div>
+            <button onClick={() => setCrossSection(!crossSection)} className={btn(crossSection)}>✂ Cross-section</button>
             {crossSection && (
               <input type="range" min={-2} max={2} step={0.1} value={crossSectionY}
                 onChange={(e) => setCrossSectionY(parseFloat(e.target.value))}
-                className="w-28" />
+                className="w-36 px-1" aria-label="Cross-section height" />
             )}
-            <button onClick={() => setShowCurrentFlow(!showCurrentFlow)}
-              className={`rounded px-2 py-1 ${showCurrentFlow ? 'bg-emerald-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}>
-              ⚡ Current flow
-            </button>
-            <button onClick={() => setShowVoltageProbes(!showVoltageProbes)}
-              className={`rounded px-2 py-1 ${showVoltageProbes ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}>
-                🔵 Voltage probes
-            </button>
-            <button onClick={() => setHighQuality(!highQuality)}
-              className={`rounded px-2 py-1 ${highQuality ? 'bg-purple-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}>
-              ✨ High quality
-            </button>
-            <div className="flex items-center gap-1 px-2">
+            <div className="flex items-center gap-1 px-2 py-0.5">
               <span className="text-slate-500">Explode</span>
               <input type="range" min={0} max={1} step={0.05} value={explosionFactor}
                 onChange={(e) => setExplosionFactor(parseFloat(e.target.value))}
-                className="w-20" />
+                className="w-24" aria-label="Explode layers" />
             </div>
             <button onClick={() => {
                 setAssemblyProgress(0);
@@ -981,27 +1618,66 @@ export function PCB3DViewer() {
                   setAssemblyProgress(p);
                 }, 30);
               }}
-              className="flex items-center gap-1 rounded px-2 py-1 text-purple-300 hover:bg-slate-800">
+              className="rounded px-2 py-1 text-left text-purple-300 transition-colors hover:bg-slate-800">
               ▶ Play assembly
             </button>
+
+            <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Render</div>
+            <button onClick={() => setAoEnabled(!aoEnabled)} className={btn(aoEnabled)}
+              title="Ground-truth ambient occlusion — disables automatically on slow GPUs">
+              ◐ Ambient occl.
+            </button>
+            <button onClick={() => { screenshotRef.current = `pcb-3d-${Date.now()}.png`; }}
+              className="rounded px-2 py-1 text-left text-slate-300 transition-colors hover:bg-slate-800">
+              📷 Screenshot
+            </button>
+            {perfMode && (
+              <div className="px-2 pt-1 text-[10px] text-amber-400/80">
+                Performance mode (tier {qualityTier}/2)
+              </div>
+            )}
           </div>
 
-          <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-[#0a1628]/80 px-3 py-1.5 text-xs font-mono text-slate-400">
+          {/* selected component info card */}
+          {selectedFp && (
+            <div className="absolute bottom-10 left-2 w-64 rounded-lg border border-cyan-500/40 bg-slate-950/85 p-3 text-xs shadow-xl backdrop-blur">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="font-mono text-sm font-bold text-cyan-300">{selectedFp.refdes || selectedFp.id}</span>
+                <span className="truncate text-slate-500">{selectedFp.componentType}</span>
+              </div>
+              <div className="mt-1 truncate font-mono text-[11px] text-slate-400">
+                {paramSummary(selectedFp, selectedComp)}
+              </div>
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                <div className="rounded bg-slate-900/70 px-2 py-1">
+                  <div className="text-[9px] uppercase tracking-wide text-slate-500">Voltage</div>
+                  <span ref={infoVRef} className="font-mono text-cyan-200">—</span>
+                </div>
+                <div className="rounded bg-slate-900/70 px-2 py-1">
+                  <div className="text-[9px] uppercase tracking-wide text-slate-500">Current</div>
+                  <span ref={infoIRef} className="font-mono text-emerald-200">—</span>
+                </div>
+                <div className="rounded bg-slate-900/70 px-2 py-1">
+                  <div className="text-[9px] uppercase tracking-wide text-slate-500">Power</div>
+                  <span ref={infoPRef} className="font-mono text-amber-200">—</span>
+                </div>
+              </div>
+              <div className="mt-2 text-[10px] text-slate-500">
+                Nets: <span ref={infoNetRef} className="font-mono text-slate-400">—</span>
+              </div>
+              <div className="mt-1 text-[10px] text-slate-600">
+                Click: select · Double-click: focus · Esc: deselect
+              </div>
+            </div>
+          )}
+
+          <div className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded-md border border-slate-700/50 bg-[#0b1322]/80 px-3 py-1.5 text-xs font-mono text-slate-400">
             Left-drag: rotate · Right-drag: pan · Scroll: zoom
             {showCurrentFlow && running && <span className="ml-2 text-emerald-300">· ⚡ current flowing</span>}
+            {showVoltageHeat && <span className="ml-2 text-orange-300">· 🌡 heat map on</span>}
           </div>
         </>
       )}
     </div>
   );
-}
-
-// Helper: dispose all meshes inside a group (but keep the group)
-function disposeGroup(group: THREE.Group) {
-  group.traverse((child) => {
-    if (child instanceof THREE.Mesh) {
-      // Don't dispose cached materials — they're shared
-      if (child.geometry) child.geometry.dispose();
-    }
-  });
 }
