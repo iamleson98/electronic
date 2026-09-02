@@ -47,8 +47,10 @@ export interface ChatMessage {
   timestamp: number;
   loading?: boolean;
   error?: string;
-  /** 'config' = the AI backend isn't configured (deployment missing API keys) — renders a setup card. */
-  errorKind?: 'config';
+  /** 'config' = the AI backend isn't configured (deployment missing API keys) — renders a setup card.
+   *  'rate-limit' = the app's OWN per-client limiter rejected the request (distinct
+   *  from a provider-quota 429) — renders a "slow down, retry in Ns" hint. */
+  errorKind?: 'config' | 'rate-limit';
   /** True when a Retry button should be offered (transient failures). */
   retryable?: boolean;
   /** The user stopped this turn mid-flight. */
@@ -131,7 +133,10 @@ interface ChatSessionState {
 
   send(text: string): void;
   stop(): void;
-  retryLast(): void;
+  /** Re-send a user message. With `failedMsgId` (the assistant message whose
+   *  Retry button was clicked) it re-sends THAT turn's user message; without
+   *  it, the newest user message — legacy behavior. */
+  retryLast(failedMsgId?: string): void;
   applyPendingDiff(msgId: string): void;
   dismissPendingDiff(msgId: string): void;
   /** Re-attach to a turn that was in flight when the page reloaded. */
@@ -553,14 +558,26 @@ function forceTeardown(rt: TurnRuntime, fallbackMessage: string): void {
   }
 }
 
-function finalizeError(rt: TurnRuntime, message: string, retryable: boolean, errorKind?: 'config'): void {
+function finalizeError(rt: TurnRuntime, message: string, retryable: boolean, errorKind?: 'config' | 'rate-limit'): void {
   if (rt.finalized) return;
   try {
-    const isConfig = errorKind === 'config' || /not configured|ZAI_API_KEY|set the .*API_KEY/i.test(message);
-    const isRateLimit = /429|rate.?limit|too many requests/i.test(message);
+    // Defense in depth for the missing-key path: the server now throws
+    // AIProviderConfigError (→ AI_NOT_CONFIGURED code → errorKind 'config'),
+    // but a plain "OPENAI_API_KEY is not set" message must still classify as
+    // config so the SetupCard renders instead of a useless Retry button.
+    const isConfig = errorKind === 'config'
+      || /not configured|ZAI_API_KEY|API_KEY is not set|set the .*API_KEY/i.test(message);
+    /** The app's own per-client limiter (20/min) — NOT a provider quota outage. */
+    const isLocalRateLimit = errorKind === 'rate-limit';
+    const isRateLimit = isLocalRateLimit || /429|rate.?limit|too many requests/i.test(message);
     const durationMs = Date.now() - (useChatSession.getState().active?.startedAt ?? Date.now());
     let friendly = `Sorry, I encountered an error: ${message}`;
-    if (isRateLimit) {
+    if (isLocalRateLimit) {
+      // The caller already crafted the message with the wait time — show it
+      // as-is (the provider-quota text below would be wrong: the AI service
+      // is fine, the client is simply sending too fast).
+      friendly = message;
+    } else if (isRateLimit) {
       friendly = 'The AI service quota is temporarily exhausted (429 — every request is being rejected right now). ' +
         'This is a server-side limit that clears on its own — usually within a few minutes. Press Retry after a short wait — your message and circuit are preserved.';
     }
@@ -570,11 +587,16 @@ function finalizeError(rt: TurnRuntime, message: string, retryable: boolean, err
       durationMs,
       loading: false,
       error: 'true',
-      errorKind: isConfig ? 'config' : undefined,
+      errorKind: isConfig ? 'config' : isLocalRateLimit ? 'rate-limit' : undefined,
       retryable: (retryable || isRateLimit) && !isConfig,
       toolCalls: [...rt.toolCalls],
     });
-    toast.error(isConfig ? 'AI backend not configured — see setup instructions' : isRateLimit ? 'AI provider rate-limited — wait a moment and press Retry' : 'AI request failed');
+    toast.error(
+      isConfig ? 'AI backend not configured — see setup instructions'
+        : isLocalRateLimit ? 'Sending too fast — wait a moment, then press Retry'
+          : isRateLimit ? 'AI provider rate-limited — wait a moment and press Retry'
+            : 'AI request failed',
+    );
   } catch (e) {
     console.error('[chat-session] finalizeError failed:', e);
     forceTeardown(rt, 'Sorry — an internal error occurred while finishing this AI response.');
@@ -807,11 +829,31 @@ async function streamOnce(opts: EngineOptions, resume: { turnId: string } | null
   if (!res.ok) {
     let detail = `HTTP ${res.status}: ${res.statusText}`;
     let code: string | undefined;
+    let retryAfterSec = 0;
     try {
       const j = await res.json();
       if (j?.error) detail = j.error;
       if (j?.code) code = j.code;
+      if (typeof j?.retryAfterSec === 'number') retryAfterSec = j.retryAfterSec;
     } catch { /* body wasn't JSON */ }
+    if (!retryAfterSec) {
+      const headerVal = Number(res.headers?.get?.('retry-after'));
+      if (Number.isFinite(headerVal) && headerVal > 0) retryAfterSec = headerVal;
+    }
+    if (code === 'RATE_LIMITED') {
+      // The app's OWN per-client limiter (20 AI requests/minute) — finalize
+      // ONCE with a distinct, honest message. Reconnecting would be actively
+      // harmful: every fresh (non-resume) attempt re-records against the
+      // limiter window, extending the user's own block.
+      const wait = retryAfterSec > 0 ? ` Wait ~${retryAfterSec}s, then press Retry.` : ' Wait a moment, then press Retry.';
+      finalizeError(
+        rt,
+        `You're sending messages faster than this app allows (its own limit is 20 AI requests per minute).${wait}`,
+        true,
+        'rate-limit',
+      );
+      return;
+    }
     if ((res.status >= 500 || res.status === 429) && !code) {
       // Transient server trouble — throw so the engine retries.
       throw new Error(detail);
@@ -1187,18 +1229,35 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
     finalizeStopped(rt);
   },
 
-  retryLast: () => {
+  retryLast: (failedMsgId) => {
     const { messages, active } = get();
     if (active || runtime) return;
-    let lastUserIdx = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'user') { lastUserIdx = i; break; }
+    let targetUserIdx = -1;
+    if (typeof failedMsgId === 'string' && failedMsgId) {
+      // The Retry button lives on a SPECIFIC failed assistant message —
+      // re-send the user message of THAT turn, not the newest one (the old
+      // behavior dropped any message the user sent after the failure and
+      // re-sent the newest in its place).
+      const failedIdx = messages.findIndex(m => m.id === failedMsgId);
+      for (let i = failedIdx; i >= 0; i--) {
+        if (messages[i].role === 'user') { targetUserIdx = i; break; }
+      }
+      if (targetUserIdx === -1) {
+        // The failed message id is unknown (e.g. trimmed) — fall through to
+        // legacy newest-message behavior instead of a silent no-op.
+        console.warn('[chat-session] retryLast: unknown message id, retrying newest instead:', failedMsgId);
+      }
     }
-    if (lastUserIdx === -1) return;
-    const text = messages[lastUserIdx].content;
+    if (targetUserIdx === -1) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'user') { targetUserIdx = i; break; }
+      }
+    }
+    if (targetUserIdx === -1) return;
+    const text = messages[targetUserIdx].content;
     // Drop everything from the failed attempt (including the old user
     // message — send() re-adds it).
-    set({ messages: messages.slice(0, lastUserIdx) });
+    set({ messages: messages.slice(0, targetUserIdx) });
     get().send(text);
   },
 

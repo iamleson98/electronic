@@ -54,8 +54,17 @@ export async function POST(req: NextRequest) {
   // limit per client so it can't be hammered.
   const rl = checkRateLimit(clientIpFromRequest(req));
   if (!rl.ok) {
+    // `code: 'RATE_LIMITED'` (the app's OWN limiter, distinct from the
+    // provider-quota AI_RATE_LIMITED): without it the client classifies the
+    // 429 as a transient server failure and reconnect-hammers the endpoint
+    // (each fresh retry re-records against the window) instead of surfacing
+    // "slow down" once with the wait time.
     return NextResponse.json(
-      { error: 'Too many AI requests. Please wait a moment and try again.' },
+      {
+        error: 'Too many AI requests. Please wait a moment and try again.',
+        code: 'RATE_LIMITED',
+        retryAfterSec: rl.retryAfterSec,
+      },
       { status: 429, headers: { 'Retry-After': String(rl.retryAfterSec) } },
     );
   }

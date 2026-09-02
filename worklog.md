@@ -871,3 +871,28 @@ Stage Summary:
 - BSIM3/BSIM4 went from numerically insane (kA currents, negative thresholds, inverted Meyer C-V) to textbook (Vth 0.27/0.37 V, µA-scale I-V, monotonic, continuous capacitances) — forms match ngspice b3ld.c/b4ld.c exactly.
 - solveDC is now deterministic and converges (was: 50 iterations of random AC phase), and the transient's DC seed is consistent with the transient's own t=0 evaluation.
 - Deferred (documented, low-severity): coupled-inductor L2/k/M inert params, opampReal inert gbw/slew, solar-cell sqrt(lux) approximation, ADC/DAC "8-bit" naming (4 bits exposed), fuse 150 % margin vs description, physics-validator |v·i| on L/C during transients, FIND measurement tautology, integration.ts CompanionModel doc direction. Not fixed because they are documented approximations or display-level, not wrong physics in the solve path.
+
+---
+Task ID: 11-a
+Agent: orchestrator (Super Z)
+Task: AI chat feature completion — make it reliably helpful for circuit design, issue fixing, tool access, and rate limits; push
+
+Work Log:
+- Assessed the full AI chat stack (provider/turn-manager/routes/tools/system-prompt/ChatPanel/chat-session): 60+ tools, resumable server-side turns, 12-file AI test battery — 289/289 baseline green.
+- Implemented the four deferred items (documented in Task 9-b "Deferred"), all in the user's four requested capability areas:
+  1. MISSING-KEY → SETUP CARD (provider.ts + chat-session.ts): getProvider now throws AIProviderConfigError (was a plain Error) when the OpenAI/Anthropic provider is explicitly selected without a server key → turn-manager and both routes emit code AI_NOT_CONFIGURED → the client renders the actionable SetupCard instead of a generic retryable error card with a useless Retry button. Client isConfig regex hardened with "API_KEY is not set" as defense in depth.
+  2. APP-SIDE RATE-LIMITER 429 CODE (both chat routes + streamOnce): the limiter's 429 now carries { code: 'RATE_LIMITED', retryAfterSec } (distinct from provider-quota AI_RATE_LIMITED). The client finalizes ONCE with a dedicated local-limiter message ("You're sending messages faster than this app allows (20 AI requests/minute). Wait ~Ns…", errorKind 'rate-limit', amber Clock hint in ChatPanel) — previously streamOnce threw on the codeless 429 and the engine reconnect-hammered the endpoint up to 10×, each fresh retry re-recording against the limiter window.
+  3. RETRYLAST TARGETING (chat-session.ts + ChatPanel.tsx): retryLast(failedMsgId?) re-sends the user message of the SPECIFIC failed turn (Retry button passes its message id); no-arg keeps legacy newest-message behavior; unknown ids fall back with a console warning. ChatPanel helper text updated ("Re-sends this turn's message").
+  4. SSE TAIL FLUSH (sse.ts): end-of-stream buffer processed through the same per-line rules (extracted processLine) — an unterminated "event:+data:" pair is recovered (was dropped whole) and multi-line data tails join per the SSE spec (were mis-joined with a literal "data:" inside the payload).
+- Tests: tests/ai-chat-completion.test.ts — 14 regression tests (provider error class + zero network attempts on config failure, AI_NOT_CONFIGURED turn finalization, client config classification via plain message, both routes' coded 429 + retryAfterSec, client single-fetch finalize on RATE_LIMITED with the distinct message, retryLast targeting ×3, SSE tail flush ×4).
+- Verification: tsc 0 errors; eslint 0 new warnings (warning count identical pre/post); full suite 2868/2868 (118 files, +14).
+- Live E2E (dev server :3000):
+  • REAL AI turn via curl (sandbox gateway, GLM-4.6): "Build a voltage divider 9V→5V @1mA" — model self-corrected design.calculate argument errors from the tool's own error messages, built via design.buildPattern, verified with simulate.run + validatePhysics; done event reported BOM (R1 4.3kΩ, R2 5.6kΩ), netlist, measured 5.091V/909µA (+1.8% E-series error), physics ✓.
+  • Browser (agent-browser): chat panel streaming with live status pills, tool-call steps accordion (design.calculate → buildPattern → 5×addComponent → addWire), partial circuit auto-applied mid-turn, Stop/Close controls, zero console/page errors across the whole session.
+  • Rate limit LIVE: the sandbox account quota hit mid-turn → status pill "AI provider rate-limited — retrying in 12s (attempt 1)…" → honest terminal error card → Retry button re-sent the SAME turn's message (targeting fix verified live) → quota still down → same honest cycle. dev.log confirms the fail-fast policy (2 attempts / 12s, never the old 105s spinner).
+  • App-side limiter via curl: exactly 20 requests pass, the 21st returns 429 { code: 'RATE_LIMITED', retryAfterSec: 60 }.
+  • Provider config via curl: provider 'openai' without a key → SSE error event { code: 'AI_NOT_CONFIGURED' } (SetupCard path).
+
+Stage Summary:
+- The AI chat feature now has no known gaps in the four user-requested areas: circuit-design helpfulness (verified with a real agentic build), issue fixing (auto-verify + physics validation + diagnostics, 282 AI tests), tool access (60+ tools with self-correcting arg errors), and rate limits (provider-quota fail-fast UX + honest app-side limiter + correct retry targeting).
+- All four deferred LOW/MEDIUM items closed; 14 new regression tests; full suite 2868/2868.

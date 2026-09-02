@@ -767,14 +767,24 @@ function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: 
           <SetupCard />
         )}
 
-        {/* Error with retry */}
+        {/* Error with retry — pass the FAILED message id so retryLast re-sends
+            THIS turn's user message, not whatever the user sent most recently. */}
         {message.error && message.retryable && (
           <div className="ml-6 flex items-center gap-2">
-            <Button size="sm" onClick={retryLast} className="h-7 bg-purple-600 text-xs hover:bg-purple-500">
+            <Button size="sm" onClick={() => retryLast(message.id)} className="h-7 bg-purple-600 text-xs hover:bg-purple-500">
               <RotateCcw className="mr-1 h-3 w-3" />
               Retry request
             </Button>
-            <span className="text-[10px] text-slate-500">Re-sends your last message</span>
+            <span className="text-[10px] text-slate-500">Re-sends this turn's message</span>
+          </div>
+        )}
+
+        {/* App-side rate limit — distinct from a provider-quota 429: the AI
+            service is fine, the client is simply sending too fast. */}
+        {message.errorKind === 'rate-limit' && (
+          <div className="ml-6 flex items-center gap-1.5 text-xs text-amber-400">
+            <Clock className="h-3 w-3" aria-hidden="true" />
+            <span>App rate limit — wait a moment, then press Retry</span>
           </div>
         )}
 

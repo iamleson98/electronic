@@ -57,6 +57,27 @@ export async function* parseSseStream(
     eventName = undefined;
   };
 
+  /** Apply ONE parsed line (CR already stripped) to the event under
+   *  construction. Shared by the chunk loop AND the end-of-stream tail
+   *  flush so both follow identical line rules. */
+  const processLine = function* (line: string): Generator<SseEvent> {
+    if (line === '') {
+      // Blank line = end of event dispatch.
+      yield* flush();
+    } else if (line.startsWith(':')) {
+      // Comment / keep-alive — ignore.
+    } else if (line.startsWith('data:')) {
+      let payload = line.slice(5);
+      if (payload.startsWith(' ')) payload = payload.slice(1);
+      dataLines.push(payload);
+    } else if (line.startsWith('event:')) {
+      let payload = line.slice(6);
+      if (payload.startsWith(' ')) payload = payload.slice(1);
+      eventName = payload;
+    }
+    // Unknown fields (id:, retry:) are ignored.
+  };
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -69,28 +90,28 @@ export async function* parseSseStream(
       buffer = buffer.slice(newlineIdx + 1);
       // Strip a trailing CR from CRLF endings.
       if (line.endsWith('\r')) line = line.slice(0, -1);
-
-      if (line === '') {
-        // Blank line = end of event dispatch.
-        yield* flush();
-      } else if (line.startsWith(':')) {
-        // Comment / keep-alive — ignore.
-      } else if (line.startsWith('data:')) {
-        let payload = line.slice(5);
-        if (payload.startsWith(' ')) payload = payload.slice(1);
-        dataLines.push(payload);
-      } else if (line.startsWith('event:')) {
-        let payload = line.slice(6);
-        if (payload.startsWith(' ')) payload = payload.slice(1);
-        eventName = payload;
-      }
-      // Unknown fields (id:, retry:) are ignored.
+      yield* processLine(line);
     }
   }
   // Flush any trailing event that wasn't terminated by a blank line.
   buffer += decoder.decode();
-  if (buffer.trim().startsWith('data:')) {
-    dataLines.push(buffer.trim().slice(5).replace(/^ /, ''));
+  // A stream that dies mid-event can leave SEVERAL unterminated lines in the
+  // buffer (e.g. "event: message\ndata: {half…", or "data: a\ndata: b").
+  // The old tail handling salvaged only a single `data:` line — multi-line
+  // tails were either dropped whole (when they began with `event:`) or
+  // mis-joined into one payload. Process every remaining line through the
+  // SAME rules (the final fragment counts as a line), then flush.
+  let tailIdx: number;
+  while ((tailIdx = buffer.indexOf('\n')) !== -1) {
+    let line = buffer.slice(0, tailIdx);
+    buffer = buffer.slice(tailIdx + 1);
+    if (line.endsWith('\r')) line = line.slice(0, -1);
+    yield* processLine(line);
+  }
+  if (buffer.length > 0) {
+    let line = buffer;
+    if (line.endsWith('\r')) line = line.slice(0, -1);
+    yield* processLine(line);
   }
   yield* flush();
 }

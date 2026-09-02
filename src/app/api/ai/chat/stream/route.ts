@@ -71,8 +71,18 @@ export async function POST(req: NextRequest) {
     }
     const rl = checkRateLimit(clientIpFromRequest(req));
     if (!rl.ok) {
+      // `code: 'RATE_LIMITED'` — the app's OWN limiter (distinct from the
+      // provider-quota AI_RATE_LIMITED). Without a code the client's
+      // streamOnce treats the 429 as transient and reconnects with backoff,
+      // and every fresh (non-resume) retry re-records against the limiter
+      // window — a reconnect storm that makes the block worse. With the code
+      // the client finalizes ONCE with the wait time.
       return new Response(
-        JSON.stringify({ error: 'Too many AI requests. Please wait a moment and try again.' }),
+        JSON.stringify({
+          error: 'Too many AI requests. Please wait a moment and try again.',
+          code: 'RATE_LIMITED',
+          retryAfterSec: rl.retryAfterSec,
+        }),
         {
           status: 429,
           headers: { 'Content-Type': 'application/json', 'Retry-After': String(rl.retryAfterSec) },

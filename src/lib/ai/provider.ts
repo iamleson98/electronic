@@ -967,7 +967,12 @@ export function getProvider(requested?: ProviderName, model?: string): AIProvide
     case 'openai':
       if (!process.env.OPENAI_API_KEY) {
         if (requested) {
-          throw new Error(
+          // AIProviderConfigError (not a plain Error): the turn-manager and
+          // both chat routes route this class to the AI_NOT_CONFIGURED error
+          // code, which the client renders as the actionable SetupCard — a
+          // plain Error used to fall through to a generic retryable card with
+          // a useless Retry button (retrying cannot set an API key).
+          throw new AIProviderConfigError(
             'OpenAI provider selected but OPENAI_API_KEY is not set. ' +
             'Add it to your .env file or choose a different provider in the AI panel.',
           );
@@ -978,7 +983,7 @@ export function getProvider(requested?: ProviderName, model?: string): AIProvide
     case 'anthropic':
       if (!process.env.ANTHROPIC_API_KEY) {
         if (requested) {
-          throw new Error(
+          throw new AIProviderConfigError(
             'Anthropic provider selected but ANTHROPIC_API_KEY is not set. ' +
             'Add it to your .env file or choose a different provider in the AI panel.',
           );
