@@ -1,12 +1,15 @@
-// Wiring UX overhaul — regression tests.
+// Wiring UX — regression tests.
 //
-// Covers the two user complaints this changeset fixes:
-//   1. "Wires easily overlap and are hard to see and reason about"
-//      → router clearance costs, corner-sparse waypoints, crossing hop
-//        arcs (wire-crossings), honest draft preview.
-//   2. "The snapping feature is hard to work with"
-//      → nearest-match terminal snap, zoom-independent screen-space snap
-//        radius, snap exclusion/bypass, click-by-click bend placement.
+// Covers the behaviors pinned by user feedback:
+//   1. Straight wires ("the old way"): no A* detours — a wire without user
+//      bends commits with NO waypoints and renders as the direct line /
+//      horizontal-first L-elbow. User-placed bends are still honored.
+//   2. 1:1 overlap prevention: a new wire may CROSS or TOUCH an existing
+//      wire but never run on top of one — rejected at commit, red live
+//      preview while drafting.
+//   3. Current flow travels ALONG the rendered wire line (computeFlowDotPositions).
+//   4. Snapping (nearest-match, zoom-independent radius) + crossing hop arcs
+//      + malformed-endpoint robustness.
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { useEditor } from '../src/lib/circuit/store';
@@ -24,7 +27,8 @@ import {
 } from '../src/lib/circuit/smart-wire-router';
 import { computeWireCrossingMarks } from '../src/lib/circuit/wire-crossings';
 import { computeDraftPreview } from '../src/components/circuit/wire-draft-preview';
-import { orthogonalizePath } from '../src/lib/circuit/wire-geometry';
+import { orthogonalizePath, computeFlowDotPositions } from '../src/lib/circuit/wire-geometry';
+import { findWireOverlap, wireGridPath } from '../src/lib/circuit/wire-overlap';
 import {
   renderScene,
   createInitialView,
@@ -306,9 +310,11 @@ describe('computeDraftPreview', () => {
     expect(result.path[result.path.length - 1]).toEqual({ x: 10, y: 5 });
   });
 
-  it('routes the preview AROUND a blocking component (detours visible before commit)', () => {
-    // c1 pin at (0,1); big component body covering x=2..8, y=0..2 → the
-    // straight y=1 row is blocked.
+  it('previews the DIRECT L-route even across a component body (no A* detours)', () => {
+    // The A* detours produced jigsaw paths users hated ("wires not straight
+    // or horizontal, looks very ugly"). The preview must show exactly the
+    // two-segment L-route the commit renders — component bodies on the
+    // straight line do NOT reroute it.
     const comps = [
       { id: 'c1', type: 'resistor', position: { x: 0, y: 0 }, rotation: 0, parameters: {} },
       { id: 'big', type: 'resistor', position: { x: 2, y: 0 }, rotation: 0, parameters: {} },
@@ -319,10 +325,73 @@ describe('computeDraftPreview', () => {
       waypoints: [],
     };
     const result = computeDraftPreview(draft, comps, [], [], null)!;
-    expect(result.routed).toBe(true);
-    // No path cell may sit inside the body region (x=2..6, y=0..2).
-    const inBody = result.path.some((p) => p.x >= 2 && p.x <= 6 && p.y >= 0 && p.y <= 2);
-    expect(inBody).toBe(false);
+    // Aligned endpoints → direct horizontal line, no bends at all.
+    expect(result.path).toEqual([{ x: 0, y: 1 }, { x: 10, y: 1 }]);
+  });
+
+  it('falls back to a straight detour when the direct line would overlap (no stacking)', () => {
+    // Existing wire c1.a(0,1)→c2.a(10,1): horizontal run y=1, x 0..10.
+    const comps = [
+      { id: 'c1', type: 'resistor', position: { x: 0, y: 0 }, rotation: 0, parameters: {} },
+      { id: 'c2', type: 'resistor', position: { x: 10, y: 0 }, rotation: 0, parameters: {} },
+      { id: 'c3', type: 'resistor', position: { x: 0, y: 6 }, rotation: 0, parameters: {} },
+    ] as unknown as CircuitComponent[];
+    const wires: Wire[] = [{
+      id: 'w1', from: { componentId: 'c1', terminalId: 'a' }, to: { componentId: 'c2', terminalId: 'a' },
+    }];
+    // Draft from c1.b (4,1) to (8,1): the direct y=1 run lies on w1 —
+    // the planner detours 2 rows down instead of stacking wire on wire.
+    const detoured = computeDraftPreview(
+      { from: { componentId: 'c1', terminalId: 'b' }, cursor: { x: 8, y: 1 }, waypoints: [] },
+      comps, wires, [], null,
+    )!;
+    expect(detoured.overlap).toBe(false);
+    expect(detoured.path).toEqual([
+      { x: 4, y: 1 },
+      { x: 4, y: 3 },
+      { x: 8, y: 3 },
+      { x: 8, y: 1 },
+    ]);
+
+    // Draft from c3.a (0,7) to (10,7): parallel run on a different row — direct.
+    const parallel = computeDraftPreview(
+      { from: { componentId: 'c3', terminalId: 'a' }, cursor: { x: 10, y: 7 }, waypoints: [] },
+      comps, wires, [], null,
+    )!;
+    expect(parallel.overlap).toBe(false);
+    expect(parallel.path).toEqual([{ x: 0, y: 7 }, { x: 10, y: 7 }]);
+
+    // Draft from c3.a (0,7) to (3,1): vertical x=3 CROSSES w1 at (3,1) —
+    // crossings are allowed (hop arc), not 1:1 overlaps.
+    const crossing = computeDraftPreview(
+      { from: { componentId: 'c3', terminalId: 'a' }, cursor: { x: 3, y: 1 }, waypoints: [] },
+      comps, wires, [], null,
+    )!;
+    expect(crossing.overlap).toBe(false);
+  });
+
+  it('previews RED when every straight route is blocked (commit will reject)', () => {
+    // Five horizontal wires on rows y=1 (direct), y=3/−1 (±2), y=5/−3 (±4)
+    // all covering x 0..10 — every candidate for the horizontal draft
+    // (4,1)→(8,1) is blocked.
+    const comps = [
+      { id: 'c1', type: 'resistor', position: { x: 0, y: 0 }, rotation: 0, parameters: {} },
+      { id: 'c2', type: 'resistor', position: { x: 10, y: 0 }, rotation: 0, parameters: {} },
+    ] as unknown as CircuitComponent[];
+    const rows = [1, 3, -1, 5, -3];
+    const wires: Wire[] = rows.map((y, i) => ({
+      id: `b${i}`,
+      from: { componentId: 'c1', terminalId: 'a' },
+      to: { componentId: 'c2', terminalId: 'a' },
+      waypoints: y === 1 ? undefined : [{ x: 0, y }, { x: 10, y }],
+    }));
+    const result = computeDraftPreview(
+      { from: { componentId: 'c1', terminalId: 'b' }, cursor: { x: 8, y: 1 }, waypoints: [] },
+      comps, wires, [], null,
+    )!;
+    expect(result.overlap).toBe(true);
+    // The red preview shows the default L-route that fails.
+    expect(result.path).toEqual([{ x: 4, y: 1 }, { x: 8, y: 1 }]);
   });
 
   it('honors user-placed bends and only previews the final leg', () => {
@@ -401,7 +470,7 @@ describe('store: wire draft click-by-click', () => {
     assertCornerSparse(fullPath);
   });
 
-  it('completeWire auto-route stores corner-sparse waypoints (no handle every cell)', () => {
+  it('completeWire without user bends stores NO waypoints — straight/L route (the old way)', () => {
     reset();
     const v1 = state().addComponent('dcVoltage', { x: 4, y: 6 });      // p=(5,6)
     const r1 = state().addComponent('resistor', { x: 30, y: 10 });    // a=(30,11)
@@ -410,19 +479,12 @@ describe('store: wire draft click-by-click', () => {
 
     const wire = state().wires[0];
     expect(wire).toBeDefined();
-    const fullPath: Vec2[] = [
-      { x: 5, y: 6 },
-      ...(wire.waypoints ?? []),
-      { x: 30, y: 11 },
-    ];
-    // The old implementation stored EVERY A* cell (~25 waypoints here);
-    // sparse storage means ≤ 3 corners for an L-ish route.
-    expect((wire.waypoints ?? []).length).toBeLessThanOrEqual(4);
-    assertOrthogonal(fullPath);
-    assertCornerSparse(fullPath);
+    // No A* waypoints: the renderer draws the horizontal-first L-route
+    // (5,6)→(30,6)→(30,11) — the classic straight/horizontal look.
+    expect(wire.waypoints).toBeUndefined();
   });
 
-  it('routes correctly to components placed beyond the old 100×60 grid', () => {
+  it('wires connect far components exactly (no grid clamping — no router involved)', () => {
     reset();
     const v1 = state().addComponent('dcVoltage', { x: 150, y: 80 });   // p=(151,80)
     const r1 = state().addComponent('resistor', { x: 170, y: 90 });   // a=(170,91)
@@ -430,10 +492,9 @@ describe('store: wire draft click-by-click', () => {
     state().completeWire({ componentId: r1, terminalId: 'a' });
     const wire = state().wires[0];
     expect(wire).toBeDefined();
-    // Route must reach the pin area, not be clamped at the old x=100 bound.
-    const fullPath: Vec2[] = [{ x: 151, y: 80 }, ...(wire.waypoints ?? []), { x: 170, y: 91 }];
-    const maxX = Math.max(...fullPath.map((p) => p.x));
-    expect(maxX).toBeGreaterThanOrEqual(169);
+    expect(wire.waypoints).toBeUndefined();
+    expect(wire.from).toEqual({ componentId: v1, terminalId: 'p' });
+    expect(wire.to).toEqual({ componentId: r1, terminalId: 'a' });
   });
 
   it('undo/redo still bracket wire creation', () => {
@@ -447,6 +508,168 @@ describe('store: wire draft click-by-click', () => {
     expect(state().wires.length).toBe(0);
     state().redo();
     expect(state().wires.length).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5b. Store: 1:1 overlap prevention (wires may cross or touch, never stack)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('store: wire 1:1 overlap prevention', () => {
+  it('rejects an exact duplicate wire (same terminal pair) without touching history', () => {
+    reset();
+    const v1 = state().addComponent('dcVoltage', { x: 4, y: 6 });      // p=(5,6)
+    const r1 = state().addComponent('resistor', { x: 20, y: 6 });      // a=(20,7)
+    state().startWire({ componentId: v1, terminalId: 'p' }, { x: 5, y: 6 });
+    state().completeWire({ componentId: r1, terminalId: 'a' });
+    expect(state().wires.length).toBe(1);
+    const pastLen = state().past.length;
+
+    // Same wire again — lies exactly on top of the first.
+    state().startWire({ componentId: v1, terminalId: 'p' }, { x: 5, y: 6 });
+    state().completeWire({ componentId: r1, terminalId: 'a' });
+
+    expect(state().wires.length).toBe(1);                        // not added
+    expect(state().wireDraft).toBeNull();                        // draft closed
+    expect(state().announcement).toContain('rejected');           // a11y feedback
+    expect(state().past.length).toBe(pastLen);                   // history clean
+  });
+
+  it('auto-detours around an overlap: never stacks wire on wire (partial collinear)', () => {
+    reset();
+    // Wire 1: v1.p (5,6) → r2.b (14,6): horizontal run y=6, x 5..14.
+    const v1 = state().addComponent('dcVoltage', { x: 4, y: 6 });      // p=(5,6)
+    const r2 = state().addComponent('resistor', { x: 10, y: 5 });      // a=(10,6), b=(14,6)
+    const r3 = state().addComponent('resistor', { x: 26, y: 5 });      // a=(26,6)
+    state().startWire({ componentId: v1, terminalId: 'p' }, { x: 5, y: 6 });
+    state().completeWire({ componentId: r2, terminalId: 'b' });
+    expect(state().wires.length).toBe(1);
+
+    // New wire r2.a (10,6) → r3.a (26,6): the direct y=6 run would overlap
+    // wire 1's x 5..14 over 4 units — the planner detours 2 rows down.
+    state().startWire({ componentId: r2, terminalId: 'a' }, { x: 10, y: 6 });
+    state().completeWire({ componentId: r3, terminalId: 'a' });
+    expect(state().wires.length).toBe(2);                        // committed...
+    const w2 = state().wires[1];
+    expect(w2.waypoints).toEqual([{ x: 10, y: 8 }, { x: 26, y: 8 }]); // ...via the detour
+  });
+
+  it('auto-picks the alternate elbow when the default L would overlap (LED-chain case)', () => {
+    reset();
+    // Feed wire on y=3 between rLeft.b (6,3) and rRight.a (12,3).
+    const rLeft = state().addComponent('resistor', { x: 2, y: 2 });    // b=(6,3)
+    const rRight = state().addComponent('resistor', { x: 12, y: 2 });   // a=(12,3), b=(16,3)
+    state().startWire({ componentId: rLeft, terminalId: 'b' }, { x: 6, y: 3 });
+    state().completeWire({ componentId: rRight, terminalId: 'a' });
+
+    // Return wire from rRight.b (16,3) down to ground g (9,12): the default
+    // horizontal-first L would run BACK along y=3 (x 9..16) on top of the
+    // feed wire's run (x 6..12, 3 units of overlap); the vertical-first L
+    // clears it.
+    const gnd = state().addComponent('ground', { x: 8, y: 12 });        // g=(9,12)
+    state().startWire({ componentId: rRight, terminalId: 'b' }, { x: 16, y: 3 });
+    state().completeWire({ componentId: gnd, terminalId: 'g' });
+    expect(state().wires.length).toBe(2);
+    expect(state().wires[1].waypoints).toEqual([{ x: 16, y: 12 }]);   // vertical-first L
+  });
+
+  it('rejects when EVERY straight route overlaps (user must bend manually)', () => {
+    reset();
+    const r2 = state().addComponent('resistor', { x: 10, y: 5 });      // a=(10,6)
+    const r3 = state().addComponent('resistor', { x: 26, y: 5 });      // a=(26,6)
+    // Blockers on rows y=6 (direct), 8/4 (±2), 10/2 (±4), each covering
+    // x 5..26. Injected directly (no commit path) — geometry fixtures.
+    const block = (y: number, i: number): Wire => ({
+      id: `blk${i}`,
+      from: { componentId: r2, terminalId: 'b' },
+      to: { componentId: r3, terminalId: 'b' },
+      waypoints: y === 6 ? undefined : [{ x: 5, y }, { x: 26, y }],
+    });
+    useEditor.setState({
+      wires: [block(6, 0), block(8, 1), block(4, 2), block(10, 3), block(2, 4)],
+      past: [],
+      future: [],
+    });
+    state().startWire({ componentId: r2, terminalId: 'a' }, { x: 10, y: 6 });
+    state().completeWire({ componentId: r3, terminalId: 'a' });
+    expect(state().wires.length).toBe(5);                        // nothing added
+    expect(state().announcement).toContain('overlap');
+    expect(state().past.length).toBe(0);                          // history untouched
+  });
+
+  it('ALLOWS endpoint-touching series wires (junction, not overlap)', () => {
+    reset();
+    // Wire 1: v1.p (5,6) → r2.a (10,6). Wire 2: r2.b (14,6) → r3.a (26,6).
+    // Both run on y=6 but share only... nothing — 10..14 has the resistor
+    // body between the pins; the runs are disjoint. This is the normal
+    // series-chain pattern and must stay legal.
+    const v1 = state().addComponent('dcVoltage', { x: 4, y: 6 });      // p=(5,6)
+    const r2 = state().addComponent('resistor', { x: 10, y: 5 });      // a=(10,6), b=(14,6)
+    const r3 = state().addComponent('resistor', { x: 22, y: 5 });      // a=(22,6)
+    state().startWire({ componentId: v1, terminalId: 'p' }, { x: 5, y: 6 });
+    state().completeWire({ componentId: r2, terminalId: 'a' });
+    state().startWire({ componentId: r2, terminalId: 'b' }, { x: 14, y: 6 });
+    state().completeWire({ componentId: r3, terminalId: 'a' });
+    expect(state().wires.length).toBe(2);
+  });
+
+  it('ALLOWS perpendicular crossings (hop arc, not 1:1 overlap)', () => {
+    reset();
+    // Wire 1: horizontal y=6, x 5..14 (v1.p → r2.b).
+    const v1 = state().addComponent('dcVoltage', { x: 4, y: 6 });      // p=(5,6)
+    const r2 = state().addComponent('resistor', { x: 10, y: 5 });      // b=(14,6)
+    state().startWire({ componentId: v1, terminalId: 'p' }, { x: 5, y: 6 });
+    state().completeWire({ componentId: r2, terminalId: 'b' });
+
+    // Wire 2: vertical x=12 y 3..9 (top.b → bot.b) crossing wire 1 at (12,6).
+    const top = state().addComponent('resistor', { x: 10, y: 2 });     // b=(14,3)
+    const bot = state().addComponent('resistor', { x: 10, y: 8 });     // b=(14,9)
+    state().startWire({ componentId: top, terminalId: 'b' }, { x: 14, y: 3 });
+    state().addWireWaypoint({ x: 12, y: 3 });
+    state().addWireWaypoint({ x: 12, y: 9 });
+    state().completeWire({ componentId: bot, terminalId: 'b' });
+    expect(state().wires.length).toBe(2);
+  });
+
+  it('rejects a user-bent route that runs along an existing wire', () => {
+    reset();
+    const v1 = state().addComponent('dcVoltage', { x: 4, y: 6 });      // p=(5,6)
+    const r2 = state().addComponent('resistor', { x: 10, y: 5 });      // b=(14,6)
+    state().startWire({ componentId: v1, terminalId: 'p' }, { x: 5, y: 6 });
+    state().completeWire({ componentId: r2, terminalId: 'b' });
+
+    // Hand-routed wire with REAL corners whose first leg runs along y=6
+    // (overlapping wire 1's x 5..14 run). User routes get no fallback
+    // detours — the commit rejects so the user can move the bend.
+    const far = state().addComponent('resistor', { x: 40, y: 5 });      // a=(40,6)
+    state().startWire({ componentId: r2, terminalId: 'a' }, { x: 10, y: 6 });
+    state().addWireWaypoint({ x: 16, y: 6 });
+    state().addWireWaypoint({ x: 16, y: 9 });
+    state().completeWire({ componentId: far, terminalId: 'a' });
+    expect(state().wires.length).toBe(1);                        // rejected
+    expect(state().announcement).toContain('overlap');
+  });
+
+  it('straightenWires collapses stored bends into straight/L routes (undoable)', () => {
+    reset();
+    const v1 = state().addComponent('dcVoltage', { x: 4, y: 6 });      // p=(5,6)
+    const r1 = state().addComponent('resistor', { x: 20, y: 10 });     // a=(20,11)
+    // A legacy jigsaw wire (waypoints from the old A* router).
+    useEditor.setState({
+      wires: [{
+        id: 'legacy',
+        from: { componentId: v1, terminalId: 'p' },
+        to: { componentId: r1, terminalId: 'a' },
+        waypoints: [{ x: 10, y: 6 }, { x: 10, y: 11 }, { x: 16, y: 11 }],
+      }],
+      past: [],
+      future: [],
+    });
+    state().straightenWires();
+    expect(state().wires[0].waypoints).toBeUndefined();          // now the L-route
+    expect(state().past.length).toBe(1);                         // one history entry
+    state().undo();
+    expect(state().wires[0].waypoints).toHaveLength(3);          // restored
   });
 });
 
@@ -556,6 +779,42 @@ describe('renderer: wiring UX', () => {
     expect(draftHandleish).toBe(idleHandleish - 1);
   });
 
+  it('draws the tentative draft leg RED when every straight route would overlap', () => {
+    const comps = [
+      { id: 'c1', type: 'resistor', position: { x: 0, y: 0 }, rotation: 0, parameters: { resistance: 1000 } },
+      { id: 'c2', type: 'resistor', position: { x: 10, y: 0 }, rotation: 0, parameters: { resistance: 1000 } },
+    ] as unknown as CircuitComponent[];
+    // Five wires on rows y=1 (direct), y=3/−1 (±2), y=5/−3 (±4), each
+    // covering x 0..10 — every horizontal candidate for the draft
+    // c1.b (4,1) → (8,1) is blocked → the commit will reject → red leg.
+    const blockers: Wire[] = [1, 3, -1, 5, -3].map((y, i) => ({
+      id: `b${i}`,
+      from: { componentId: 'c1', terminalId: 'a' },
+      to: { componentId: 'c2', terminalId: 'a' },
+      waypoints: y === 1 ? undefined : [{ x: 0, y }, { x: 10, y }],
+    }));
+
+    // Wrap ctx.stroke to record the strokeStyle active at each call.
+    function renderWithStrokeSpy(cursor: { x: number; y: number }, wires: Wire[]): string[] {
+      const { ctx } = makeMockCtx();
+      const origStroke = ctx.stroke.bind(ctx);
+      const seen: string[] = [];
+      ctx.stroke = () => { seen.push(String(ctx.strokeStyle)); origStroke(); };
+      renderScene(ctx, baseScene({
+        components: comps, wires,
+        wireDraft: { from: { componentId: 'c1', terminalId: 'b' }, cursor, waypoints: [] },
+      }));
+      return seen;
+    }
+
+    // Fully blocked: red leg.
+    expect(renderWithStrokeSpy({ x: 8, y: 1 }, blockers)).toContain('#ef4444');
+    // Same draft pointed straight down (perpendicular): no red.
+    expect(renderWithStrokeSpy({ x: 4, y: 7 }, blockers)).not.toContain('#ef4444');
+    // With only one blocking wire the planner detours — no red either.
+    expect(renderWithStrokeSpy({ x: 8, y: 1 }, [blockers[0]])).not.toContain('#ef4444');
+  });
+
   it('formatStatusText shows the wiring hint while a draft is active', () => {
     const plain = formatStatusText({ x: 1, y: 2 }, 1, false);
     const drafting = formatStatusText({ x: 1, y: 2 }, 1, false, true);
@@ -584,5 +843,132 @@ describe('orthogonalizePath', () => {
     // (0,0)→(5,2) diagonal → elbow; (5,2)→(10,4) diagonal → elbow.
     assertOrthogonal([{ x: 0, y: 0 }, ...result, { x: 10, y: 4 }]);
     expect(result.length).toBeGreaterThan(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. wire-overlap pure geometry
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('findWireOverlap (pure geometry)', () => {
+  const comps = [
+    { id: 'c1', type: 'resistor', position: { x: 0, y: 0 }, rotation: 0, parameters: {} },
+    { id: 'c2', type: 'resistor', position: { x: 10, y: 0 }, rotation: 0, parameters: {} },
+    { id: 'c3', type: 'resistor', position: { x: 0, y: 6 }, rotation: 0, parameters: {} },
+    { id: 'c4', type: 'resistor', position: { x: 10, y: 6 }, rotation: 0, parameters: {} },
+  ] as unknown as CircuitComponent[];
+
+  it('wireGridPath mirrors getWirePath: direct when aligned, L-elbow otherwise, waypoints honored', () => {
+    // Aligned pins c1.a(0,1)→c2.a(10,1): direct 2-point line.
+    const aligned = wireGridPath({ from: { componentId: 'c1', terminalId: 'a' }, to: { componentId: 'c2', terminalId: 'a' } }, comps, []);
+    expect(aligned).toEqual([{ x: 0, y: 1 }, { x: 10, y: 1 }]);
+    // Diagonal pins c1.a(0,1)→c4.a(10,7): horizontal-first L.
+    const elbowPath = wireGridPath({ from: { componentId: 'c1', terminalId: 'a' }, to: { componentId: 'c4', terminalId: 'a' } }, comps, []);
+    expect(elbowPath).toEqual([{ x: 0, y: 1 }, { x: 10, y: 1 }, { x: 10, y: 7 }]);
+    // Waypoints are honored verbatim.
+    const bent = wireGridPath(
+      { from: { componentId: 'c1', terminalId: 'a' }, to: { componentId: 'c2', terminalId: 'a' }, waypoints: [{ x: 4, y: 4 }] },
+      comps, [],
+    );
+    expect(bent).toEqual([{ x: 0, y: 1 }, { x: 4, y: 4 }, { x: 10, y: 1 }]);
+  });
+
+  it('detects full, partial and reversed line-on-line overlaps', () => {
+    // w1: c1.a(0,1)→c2.a(10,1) horizontal y=1 x 0..10.
+    const w1: Wire = { id: 'w1', from: { componentId: 'c1', terminalId: 'a' }, to: { componentId: 'c2', terminalId: 'a' } };
+    // Same run, reversed endpoints.
+    const reversed: Wire = { id: 'wr', from: { componentId: 'c2', terminalId: 'a' }, to: { componentId: 'c1', terminalId: 'a' } };
+    expect(findWireOverlap([{ x: 0, y: 1 }, { x: 10, y: 1 }], [reversed], comps, [])).not.toBeNull();
+    // Partial overlap: candidate x 5..15 on the same row.
+    expect(findWireOverlap([{ x: 5, y: 1 }, { x: 15, y: 1 }], [w1], comps, [])).toMatchObject({ wireId: 'w1' });
+    // Parallel row (y=7): no overlap.
+    expect(findWireOverlap([{ x: 5, y: 7 }, { x: 15, y: 7 }], [w1], comps, [])).toBeNull();
+    // Perpendicular crossing: no overlap.
+    expect(findWireOverlap([{ x: 5, y: -2 }, { x: 5, y: 5 }], [w1], comps, [])).toBeNull();
+    // Endpoint touch only (share x=10 point): no overlap.
+    expect(findWireOverlap([{ x: 10, y: 1 }, { x: 20, y: 1 }], [w1], comps, [])).toBeNull();
+  });
+
+  it('reports the overlapping run and length', () => {
+    const w1: Wire = { id: 'w1', from: { componentId: 'c1', terminalId: 'a' }, to: { componentId: 'c2', terminalId: 'a' } };
+    const hit = findWireOverlap([{ x: 4, y: 1 }, { x: 14, y: 1 }], [w1], comps, [])!;
+    expect(hit.wireId).toBe('w1');
+    expect(hit.from).toEqual({ x: 4, y: 1 });
+    expect(hit.to).toEqual({ x: 10, y: 1 });
+    expect(hit.length).toBe(6);
+  });
+
+  it('tolerates wires with unresolvable endpoints (no crash, no hit)', () => {
+    const bad = { id: 'bad', from: 'oops', to: 'b' } as unknown as Wire;
+    expect(findWireOverlap([{ x: 0, y: 1 }, { x: 10, y: 1 }], [bad], comps, [])).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. Current flow MUST travel along the wire line (computeFlowDotPositions)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('computeFlowDotPositions — current flows along the wire line', () => {
+  /** Squared distance from point to polyline. */
+  function distToPolyline(p: Vec2, path: Vec2[]): number {
+    let best = Infinity;
+    for (let i = 0; i < path.length - 1; i++) {
+      const a = path[i];
+      const b = path[i + 1];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const lenSq = dx * dx + dy * dy;
+      if (lenSq === 0) continue;
+      let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+      t = Math.max(0, Math.min(1, t));
+      best = Math.min(best, Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy)));
+    }
+    return best;
+  }
+
+  it('every dot lies ON the L-shaped wire polyline, at every animation offset', () => {
+    // The classic L-route: horizontal leg then vertical leg.
+    const path: Vec2[] = [{ x: 0, y: 0 }, { x: 300, y: 0 }, { x: 300, y: 120 }];
+    for (let off = -400; off <= 400; off += 3.7) {
+      for (const d of computeFlowDotPositions(path, off)) {
+        expect(distToPolyline(d, path)).toBeLessThan(1e-6);
+      }
+    }
+  });
+
+  it('dots turn the corner — both legs of the L carry dots', () => {
+    const path: Vec2[] = [{ x: 0, y: 0 }, { x: 300, y: 0 }, { x: 300, y: 120 }];
+    const dots = computeFlowDotPositions(path, 0);
+    const onHorizontal = dots.some((d) => d.y === 0 && d.x > 0 && d.x < 300);
+    const onVertical = dots.some((d) => d.x === 300 && d.y > 0 && d.y < 120);
+    expect(onHorizontal).toBe(true);
+    expect(onVertical).toBe(true);
+    // No dot ever takes the diagonal shortcut.
+    expect(dots.some((d) => d.x > 0 && d.x < 300 && d.y > 0)).toBe(false);
+  });
+
+  it('offset wraps around the total length (animation loops seamlessly)', () => {
+    const path: Vec2[] = [{ x: 0, y: 0 }, { x: 240, y: 0 }];
+    const total = 240;
+    const a = computeFlowDotPositions(path, 0).map((p) => `${p.x},${p.y}`);
+    const b = computeFlowDotPositions(path, total).map((p) => `${p.x},${p.y}`);
+    const c = computeFlowDotPositions(path, -total).map((p) => `${p.x},${p.y}`);
+    expect(b).toEqual(a);
+    expect(c).toEqual(a);
+  });
+
+  it('negative offsets animate backwards (direction from current sign)', () => {
+    const path: Vec2[] = [{ x: 0, y: 0 }, { x: 240, y: 0 }];
+    const forward = computeFlowDotPositions(path, 10);
+    const backward = computeFlowDotPositions(path, -10);
+    // Different positions, same on-line guarantee.
+    expect(forward[0].x).not.toBeCloseTo(backward[0].x, 6);
+    for (const d of backward) expect(d.y).toBe(0);
+  });
+
+  it('degenerate paths produce no dots (no NaN, no crash)', () => {
+    expect(computeFlowDotPositions([], 10)).toEqual([]);
+    expect(computeFlowDotPositions([{ x: 1, y: 1 }], 10)).toEqual([]);
+    expect(computeFlowDotPositions([{ x: 1, y: 1 }, { x: 1, y: 1 }], 10)).toEqual([]);
   });
 });

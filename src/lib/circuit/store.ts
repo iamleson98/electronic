@@ -22,12 +22,14 @@ import type {
   Wire,
 } from './types';
 import { DEFAULT_PAGE_SETUP, DEFAULT_TITLE_BLOCK } from './types';
-import { getPlugin, getAllPlugins } from './registry';
+import { getPlugin } from './registry';
 import { simulateStep, getTerminalsForComponent } from './engine';
 import { cleanupComponentState } from './memory';
-import { findRoute, buildRoutingGridForDocument, pathToWaypoints, simplifyPath } from './smart-wire-router';
+import { pathToWaypoints, simplifyPath } from './smart-wire-router';
 import { resolveEndpointGridPos } from './endpoint-position';
 import { orthogonalizePath } from './wire-geometry';
+import { planWireRoute, type WireRoutePlan } from './wire-overlap';
+import { toast } from 'sonner';
 import { validatePhysics, type PhysicsViolation } from './physics-validator';
 import { runFullERC } from './erc';
 import { snapshotSheet, flattenHierarchy } from './hierarchy';
@@ -249,6 +251,8 @@ interface EditorState {
   popWireWaypoint: () => void;
   cancelWire: () => void;
   completeWire: (to: { componentId: string; terminalId: string }) => void;
+  /** Collapse every wire to its straight/L route (drop stored bends). One history entry. */
+  straightenWires: () => void;
   // keyboard placement (a11y)
   startPlacement: (type: string, position: { x: number; y: number }) => void;
   nudgePlacement: (dx: number, dy: number) => void;
@@ -1423,46 +1427,87 @@ export const useEditor = create<EditorState>((set, get) => ({
       set({ wireDraft: null });
       return;
     }
-    get().pushHistory();
-    const id = genId('wire');
     const s = get();
 
+    // Duplicate connection: the same terminal pair is already wired —
+    // reject outright (drawing it again would stack wire on wire).
+    const duplicate = s.wires.some((w) =>
+      (w.from.componentId === draft.from.componentId && w.from.terminalId === draft.from.terminalId &&
+        w.to.componentId === to.componentId && w.to.terminalId === to.terminalId) ||
+      (w.from.componentId === to.componentId && w.from.terminalId === to.terminalId &&
+        w.to.componentId === draft.from.componentId && w.to.terminalId === draft.from.terminalId));
+    if (duplicate) {
+      set({
+        wireDraft: null,
+        announcement: 'Wire rejected: these two pins are already connected by a wire.',
+      });
+      toast.error('Wire rejected', {
+        description: 'These two pins are already connected by a wire.',
+      });
+      return;
+    }
+
     // Rotation-aware endpoint positions — the single shared resolver
-    // (sheet-pin aware), same math as the renderer and the router.
+    // (sheet-pin aware), same math as the renderer.
     const startPos = resolveEndpointGridPos(draft.from, s.components, s.sheets);
     const endPos = resolveEndpointGridPos(to, s.components, s.sheets);
 
+    // Straight-wire routing ("the old way"). Without user bends the wire is
+    // the direct line (aligned pins) or the horizontal-first L-elbow; when
+    // that route would run 1:1 on top of an existing wire the planner falls
+    // back to the alternate elbow / a simple straight detour, and only
+    // rejects when no straight route exists. The A* obstacle-avoiding
+    // detours are gone — they produced jigsaw paths that were neither
+    // straight nor horizontal and users hated them.
+    let plan: WireRoutePlan | null = null;
     let waypoints: { x: number; y: number }[] | undefined;
     if (startPos && endPos) {
+      let userWaypoints: { x: number; y: number }[] = [];
       if (draft.waypoints.length > 0) {
         // The user drew the route bend-by-bend: honor their intent. Clean up
         // diagonals (fractional pins) and drop collinear midpoints so the
         // stored waypoints are corner-sparse — one drag handle per bend.
         const orthogonal = orthogonalizePath(startPos, endPos, draft.waypoints);
         const simplified = simplifyPath([startPos, ...orthogonal, endPos]);
-        waypoints = pathToWaypoints(simplified);
-      } else {
-        // No user bends: smart routing (A* obstacle avoidance, wire/body
-        // clearance, dynamic grid that covers the whole document). Falls
-        // back to the plain L-route (no waypoints) if routing fails.
-        try {
-          const plugins = new Map(getAllPlugins().map((p: any) => [p.type, p]));
-          const grid = buildRoutingGridForDocument(s.components, s.wires, plugins);
-          const route = findRoute(grid, startPos, endPos);
-          if (route.path.length > 2) {
-            // Corner-sparse waypoints: the dense cell list used to be stored
-            // verbatim, littering the path with a drag handle every cell.
-            waypoints = pathToWaypoints(simplifyPath(route.path));
-          }
-        } catch {
-          // Smart router failed — use simple L-shape (no waypoints)
-        }
+        userWaypoints = pathToWaypoints(simplified);
       }
+      plan = planWireRoute(startPos, endPos, s.wires, s.components, s.sheets, userWaypoints);
+      waypoints = plan.waypoints;
     }
+
+    // 1:1 overlap guard: rejected before history is touched, with both an
+    // a11y announcement and a visible toast (the draft preview went red).
+    if (plan && plan.overlap) {
+      set({
+        wireDraft: null,
+        announcement: 'Wire rejected: every straight route would run on top of an existing wire. Wires may cross or touch, but not overlap 1 to 1 — add a bend to route around it.',
+      });
+      toast.error('Wire rejected — 1:1 overlap', {
+        description: 'Every straight route would run on top of an existing wire. Add a bend (click) to route around it.',
+      });
+      return;
+    }
+
+    get().pushHistory();
+    const id = genId('wire');
 
     const wire: Wire = { id, from: draft.from, to };
     if (waypoints && waypoints.length > 0) wire.waypoints = waypoints;
     set((st) => ({ wires: [...st.wires, wire], wireDraft: null, announcement: 'Wire connected.' }));
+  },
+
+  straightenWires: () => {
+    const s = get();
+    const bendy = s.wires.filter((w) => w.waypoints && w.waypoints.length > 0);
+    if (bendy.length === 0) return;
+    get().pushHistory();
+    set((st) => ({
+      wires: st.wires.map((w) => ({ ...w, waypoints: undefined })),
+      announcement: `Straightened ${bendy.length} wire${bendy.length === 1 ? '' : 's'}.`,
+    }));
+    toast.success(`Straightened ${bendy.length} wire${bendy.length === 1 ? '' : 's'}`, {
+      description: 'Every wire now takes its direct / L-shaped route.',
+    });
   },
 
   setWireWaypoints: (id, waypoints) => {

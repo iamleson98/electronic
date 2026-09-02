@@ -7,7 +7,7 @@ import { toast } from 'sonner';
 import {
   Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Gauge, Zap,
   FileText, ChevronDown, Settings2, Database, FileCode, Boxes, ShieldCheck,
-  Search, FileDown, Network, Layers, BookOpen, Wand2, Ruler, Pencil,
+  Search, FileDown, Network, Layers, BookOpen, Wand2, Ruler, Pencil, Spline,
   Activity, Sliders, Sigma, Waves, ChevronRight, ChevronLeft, RotateCcw,
 } from 'lucide-react';
 import {
@@ -95,6 +95,8 @@ export function Toolbar() {
   const setTheme = useEditor((s) => s.setTheme);
   const activeTool = useEditor((s) => s.activeTool);
   const setActiveTool = useEditor((s) => s.setActiveTool);
+  const straightenWires = useEditor((s) => s.straightenWires);
+  const hasBendyWires = useEditor((s) => s.wires.some((w) => w.waypoints && w.waypoints.length > 0));
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const schImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -349,6 +351,23 @@ export function Toolbar() {
             </Button>
           </TooltipTrigger>
           <TooltipContent>{running ? 'Pause to redo' : 'Redo (Ctrl+Y)'}</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 w-7 p-0"
+              onClick={() => straightenWires()}
+              disabled={!hasBendyWires || running}
+              aria-label="Straighten wires"
+            >
+              <Spline size={14} />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            {running ? 'Pause to straighten' : 'Straighten wires — collapse every wire to its direct / L-shaped route'}
+          </TooltipContent>
         </Tooltip>
 
         {/* ─── SECONDARY CONTROLS (visible on md+ screens) ─── */}

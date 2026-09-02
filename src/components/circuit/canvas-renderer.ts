@@ -29,6 +29,7 @@ import {
 } from '@/lib/circuit/schematic-overlays';
 import { drawSheetBox } from '@/lib/circuit/sheet-render';
 import { computeWireCrossingMarks } from '@/lib/circuit/wire-crossings';
+import { computeFlowDotPositions } from '@/lib/circuit/wire-geometry';
 import { computeDraftPreview } from './wire-draft-preview';
 import { CELL_SIZE, type DragState, type WireDragState, type RotateDragState, type HoverState, TOGGLEABLE_TYPES } from './canvas-types';
 import { getWirePath, segmentMidpoint, angleFromCenter } from './canvas-wire-utils';
@@ -519,6 +520,7 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
     }
 
     // draw animated current flow dots — ONLY when running AND simContext is active.
+    // The dots travel ALONG the rendered wire polyline (around L-corners too).
     if (isAnimating) {
       const current = wireCurrents.get(wire.id) ?? 0;
       const absCurrent = Math.abs(current);
@@ -528,42 +530,17 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
         //   1µA → 0.15, 1mA → 0.4, 10mA → 0.6, 100mA → 0.8, 1A → 1.0
         const speed = Math.min(1.2, Math.max(0.1, 0.15 + 0.25 * Math.log10(absCurrent / 1e-6 + 1)));
         const dotSpacing = 24;
-        let totalLen = 0;
-        const segLens: number[] = [];
-        for (let i = 0; i < path.length - 1; i++) {
-          const a = path[i];
-          const b = path[i + 1];
-          const len = Math.hypot(b.x - a.x, b.y - a.y);
-          segLens.push(len);
-          totalLen += len;
-        }
-        if (totalLen > 0) {
-          const numDots = Math.max(2, Math.floor(totalLen / dotSpacing));
-          const evenSpacing = totalLen / numDots;
-          const PIXELS_PER_PHASE = 60;
-          const rawOffset = flowPhase * speed * dir * PIXELS_PER_PHASE;
-          const dotOffset = ((rawOffset % totalLen) + totalLen) % totalLen;
+        const PIXELS_PER_PHASE = 60;
+        const rawOffset = flowPhase * speed * dir * PIXELS_PER_PHASE;
+        const dots = computeFlowDotPositions(path, rawOffset, dotSpacing);
+        if (dots.length > 0) {
           ctx.fillStyle = '#fde047';
           ctx.shadowColor = '#fde047';
           ctx.shadowBlur = 6;
-          for (let n = 0; n < numDots; n++) {
-            let distAlong = (n * evenSpacing + dotOffset);
-            distAlong = ((distAlong % totalLen) + totalLen) % totalLen;
-            let acc = 0;
-            for (let i = 0; i < segLens.length; i++) {
-              if (acc + segLens[i] >= distAlong) {
-                const t = (distAlong - acc) / segLens[i];
-                const a = path[i];
-                const b = path[i + 1];
-                const x = a.x + (b.x - a.x) * t;
-                const y = a.y + (b.y - a.y) * t;
-                ctx.beginPath();
-                ctx.arc(x, y, 3, 0, Math.PI * 2);
-                ctx.fill();
-                break;
-              }
-              acc += segLens[i];
-            }
+          for (const d of dots) {
+            ctx.beginPath();
+            ctx.arc(d.x, d.y, 3, 0, Math.PI * 2);
+            ctx.fill();
           }
           ctx.shadowBlur = 0;
         }
@@ -571,10 +548,12 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
     }
   }
 
-  // draw wire draft — an honest preview of the wire that will be created:
-  // committed bends (solid), the tentative final leg (dashed) following the
-  // same orthogonal elbow / A* route the commit uses, bend markers, and a
-  // snap ring on the terminal the next click would connect to.
+  // draw wire draft — a WYSIWYG preview of the wire that will be created:
+  // committed bends (solid) + the tentative final leg (dashed) using the
+  // same direct / L-shaped route the commit renders, bend markers, and a
+  // snap ring on the terminal the next click would connect to. When the
+  // tentative wire would overlap an existing wire 1:1 (the commit will
+  // reject it) the whole tentative leg turns red.
   if (wireDraft) {
     const snapTerm = hover.terminal &&
       (hover.terminal.componentId !== wireDraft.from.componentId ||
@@ -583,6 +562,7 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
       : null;
     const preview = computeDraftPreview(wireDraft, components, wires, sheets, snapTerm);
     if (preview) {
+      const legColor = preview.overlap ? '#ef4444' : '#fbbf24';
       const screenPath = preview.path.map((p) => gridToScreen(p.x, p.y));
       // Committed part: start + user waypoints (+1 for the start point).
       const committedPts = Math.min(1 + preview.committedWaypoints, screenPath.length - 1);
@@ -596,7 +576,7 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
         ctx.stroke();
       }
       // Tentative leg: dashed to the cursor (or the snapped target).
-      ctx.strokeStyle = '#fbbf24';
+      ctx.strokeStyle = legColor;
       ctx.lineWidth = 2;
       ctx.setLineDash([5, 4]);
       ctx.beginPath();
@@ -619,17 +599,18 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
       }
 
       // Snap indicator: amber ring + dot at the terminal the click would
-      // finish on — the magnet is now VISIBLE instead of surprising.
+      // finish on — the magnet is now VISIBLE instead of surprising. Turns
+      // red when the resulting wire would be rejected for 1:1 overlap.
       if (snapTerm) {
         const sp = gridToScreen(snapTerm.pos.x, snapTerm.pos.y);
         ctx.beginPath();
         ctx.arc(sp.x, sp.y, 8, 0, Math.PI * 2);
-        ctx.strokeStyle = '#fbbf24';
+        ctx.strokeStyle = legColor;
         ctx.lineWidth = 2;
         ctx.stroke();
         ctx.beginPath();
         ctx.arc(sp.x, sp.y, 2.5, 0, Math.PI * 2);
-        ctx.fillStyle = '#fbbf24';
+        ctx.fillStyle = legColor;
         ctx.fill();
       }
     }
