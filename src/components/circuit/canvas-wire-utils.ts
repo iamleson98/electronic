@@ -1,5 +1,9 @@
 // Wire routing utilities — path computation, hit-testing, and segment dragging.
 import type { Vec2, Wire } from '@/lib/circuit/types';
+// Canonical implementation moved to lib (shared with the store); re-exported
+// here so existing component imports keep working.
+export { orthogonalizePath } from '@/lib/circuit/wire-geometry';
+import { orthogonalizePath as orthogonalize } from '@/lib/circuit/wire-geometry';
 
 /** Get the orthogonal path points for a wire. */
 export function getWirePath(
@@ -7,7 +11,7 @@ export function getWirePath(
   fromPos: Vec2,
   toPos: Vec2,
   gridToScreenFn: (gx: number, gy: number) => Vec2,
-  use45: boolean = false,
+  _use45: boolean = false, // reserved: 45° routing mode (currently orthogonal-only)
 ): Vec2[] {
   const points: Vec2[] = [fromPos];
   if (wire.waypoints && wire.waypoints.length > 0) {
@@ -114,23 +118,7 @@ export function rerouteWireForDrag(
     setPt(bIdx, newB);
   }
 
-  return orthogonalizePath(fromPos, toPos, wps);
-}
-
-/** Ensure a wire path is fully orthogonal (no diagonal segments). */
-export function orthogonalizePath(fromPos: Vec2, toPos: Vec2, wps: Vec2[]): Vec2[] {
-  const result: Vec2[] = [];
-  const full: Vec2[] = [fromPos, ...wps, toPos];
-  for (let i = 0; i < full.length - 1; i++) {
-    const a = full[i];
-    const b = full[i + 1];
-    result.push({ ...a });
-    if (Math.abs(a.x - b.x) > 0.01 && Math.abs(a.y - b.y) > 0.01) {
-      result.push({ x: b.x, y: a.y });
-    }
-  }
-  result.push({ ...toPos });
-  return result.slice(1, -1);
+  return orthogonalize(fromPos, toPos, wps);
 }
 
 /** Distance from point (px, py) to segment (ax,ay)-(bx,by). */

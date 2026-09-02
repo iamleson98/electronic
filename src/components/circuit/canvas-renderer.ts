@@ -28,6 +28,8 @@ import {
   drawWireLengthLabel,
 } from '@/lib/circuit/schematic-overlays';
 import { drawSheetBox } from '@/lib/circuit/sheet-render';
+import { computeWireCrossingMarks } from '@/lib/circuit/wire-crossings';
+import { computeDraftPreview } from './wire-draft-preview';
 import { CELL_SIZE, type DragState, type WireDragState, type RotateDragState, type HoverState, TOGGLEABLE_TYPES } from './canvas-types';
 import { getWirePath, segmentMidpoint, angleFromCenter } from './canvas-wire-utils';
 
@@ -43,6 +45,8 @@ export interface CanvasView {
   hoveredSheetId: string | null;
   hoveredERC: ERCError | null;
   use45Routing: boolean;
+  /** True while Alt is held — the terminal snap magnet is bypassed. */
+  snapBypass: boolean;
 }
 
 /** Everything renderScene needs for one frame. */
@@ -58,7 +62,7 @@ export interface RenderScene {
   simContext: SimContext | null;
   running: boolean;
   showGrid: boolean;
-  wireDraft: { from: { componentId: string; terminalId: string }; cursor: { x: number; y: number } } | null;
+  wireDraft: { from: { componentId: string; terminalId: string }; cursor: { x: number; y: number }; waypoints: Vec2[] } | null;
   noConnects: NoConnectMarker[];
   drawings: DrawingPrimitive[];
   units: 'mm' | 'mil' | 'in' | 'grid';
@@ -99,6 +103,7 @@ export function createInitialView(): CanvasView {
     hoveredSheetId: null,
     hoveredERC: null,
     use45Routing: false,
+    snapBypass: false,
   };
 }
 
@@ -121,6 +126,7 @@ export function computeCursorStyle(
   running: boolean,
   components: CircuitComponent[],
   rotateDragActive: boolean,
+  activeTool: string = 'select',
 ): string {
   if (rotateDragActive) return 'grabbing';
   if (running) {
@@ -130,6 +136,9 @@ export function computeCursorStyle(
     }
     return 'default';
   }
+  // Wire mode: crosshair everywhere — the tool says "you are drawing wires",
+  // so hovering a component shouldn't suggest a move.
+  if (activeTool === 'wire') return 'crosshair';
   if (hover.terminal) return 'crosshair';
   if (hover.rotateHandle) return 'grab';
   if (hover.wireHandle) return 'move';
@@ -143,8 +152,12 @@ export function formatStatusText(
   cursor: Vec2,
   zoom: number,
   running: boolean,
+  wireDraftActive = false,
 ): string {
-  return `(${cursor.x.toFixed(1)}, ${cursor.y.toFixed(1)})  zoom: ${zoom.toFixed(2)}x  ${running ? '▶ running' : '⏸ paused'}`;
+  const base = `(${cursor.x.toFixed(1)}, ${cursor.y.toFixed(1)})  zoom: ${zoom.toFixed(2)}x  ${running ? '▶ running' : '⏸ paused'}`;
+  return wireDraftActive
+    ? `${base}  · wire: click = bend · pin = finish · ⌫ undo · Esc cancel`
+    : base;
 }
 
 /** Pure transform helpers bound to the current view. */
@@ -171,6 +184,12 @@ function makeTransforms(view: CanvasView, components: CircuitComponent[], sheets
     };
   };
   const resolveEndpointPos = (endpoint: { componentId: string; terminalId: string }): Vec2 | null => {
+    // Defensive: malformed endpoints (scripting-API misuse, foreign JSON
+    // imports) must not crash the render loop — same guard as the shared
+    // resolveEndpointGridPos in lib/circuit/endpoint-position.ts.
+    if (!endpoint || typeof endpoint.componentId !== 'string' || typeof endpoint.terminalId !== 'string') {
+      return null;
+    }
     if (endpoint.componentId.startsWith('__sheet:')) {
       const sheetId = endpoint.componentId.slice('__sheet:'.length);
       const sheet = sheets.find((s) => s.id === sheetId);
@@ -203,6 +222,138 @@ function makeTransforms(view: CanvasView, components: CircuitComponent[], sheets
     };
   };
   return { gridToScreen, getTerminalPos, resolveEndpointPos, getRotateHandlePos };
+}
+
+/** Hop-arc radius in screen pixels (constant at any zoom). */
+const HOP_RADIUS_PX = 4.5;
+
+/**
+ * Project a point onto a polyline: returns { distAlong, dir } — the distance
+ * along the path and the unit direction of the segment it lands on.
+ */
+function projectOntoPath(path: Vec2[], p: Vec2): { distAlong: number; dir: Vec2 } {
+  let bestDist = Infinity;
+  let bestAlong = 0;
+  let bestDir: Vec2 = { x: 1, y: 0 };
+  let acc = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i];
+    const b = path[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) { acc += 0; continue; }
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    const cx = a.x + t * dx;
+    const cy = a.y + t * dy;
+    const dist = Math.hypot(p.x - cx, p.y - cy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestAlong = acc + t * Math.sqrt(lenSq);
+      const len = Math.sqrt(lenSq);
+      bestDir = { x: dx / len, y: dy / len };
+    }
+    acc += Math.sqrt(lenSq);
+  }
+  return { distAlong: bestAlong, dir: bestDir };
+}
+
+/** Point at a given distance along a polyline. */
+function pointAlongPath(path: Vec2[], dist: number): Vec2 {
+  let acc = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i];
+    const b = path[i + 1];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (acc + len >= dist) {
+      const t = len === 0 ? 0 : (dist - acc) / len;
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+    }
+    acc += len;
+  }
+  return { ...path[path.length - 1] };
+}
+
+/** Total polyline length. */
+function pathLength(path: Vec2[]): number {
+  let len = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    len += Math.hypot(path[i + 1].x - path[i].x, path[i + 1].y - path[i].y);
+  }
+  return len;
+}
+
+/**
+ * Stroke a wire polyline, drawing a small semicircular "hop" arc where it
+ * crosses another wire (classic schematic convention: hop = not connected,
+ * dot = connected). `hopMarks` are GRID-space cells; they are projected onto
+ * the screen path and bridged with arcs of HOP_RADIUS_PX.
+ */
+function strokeWirePathWithHops(
+  ctx: CanvasRenderingContext2D,
+  screenPath: Vec2[],
+  hopMarks: Vec2[] | undefined,
+  gridToScreen: (gx: number, gy: number) => Vec2,
+): void {
+  if (!hopMarks || hopMarks.length === 0 || screenPath.length < 2) {
+    ctx.beginPath();
+    ctx.moveTo(screenPath[0].x, screenPath[0].y);
+    for (let i = 1; i < screenPath.length; i++) ctx.lineTo(screenPath[i].x, screenPath[i].y);
+    ctx.stroke();
+    return;
+  }
+
+  const total = pathLength(screenPath);
+  const r = Math.min(HOP_RADIUS_PX, total / 4);
+  if (r <= 0) {
+    ctx.beginPath();
+    ctx.moveTo(screenPath[0].x, screenPath[0].y);
+    for (let i = 1; i < screenPath.length; i++) ctx.lineTo(screenPath[i].x, screenPath[i].y);
+    ctx.stroke();
+    return;
+  }
+
+  // Break intervals [start, end] along the path, one per hop.
+  const intervals: { start: number; end: number; center: Vec2; dir: Vec2 }[] = [];
+  for (const mark of hopMarks) {
+    const sp = gridToScreen(mark.x, mark.y);
+    const { distAlong, dir } = projectOntoPath(screenPath, sp);
+    const start = Math.max(0, distAlong - r);
+    const end = Math.min(total, distAlong + r);
+    if (end - start < 0.5) continue;
+    intervals.push({ start, end, center: sp, dir });
+  }
+  if (intervals.length === 0) {
+    ctx.beginPath();
+    ctx.moveTo(screenPath[0].x, screenPath[0].y);
+    for (let i = 1; i < screenPath.length; i++) ctx.lineTo(screenPath[i].x, screenPath[i].y);
+    ctx.stroke();
+    return;
+  }
+  intervals.sort((a, b) => a.start - b.start);
+
+  ctx.beginPath();
+  let cursor = 0;
+  for (const iv of intervals) {
+    if (iv.start > cursor) {
+      const from = cursor === 0 ? screenPath[0] : pointAlongPath(screenPath, cursor);
+      const to = pointAlongPath(screenPath, iv.start);
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+    }
+    // Semicircular bridge over the crossing, bulging to the left of travel.
+    const a0 = Math.atan2(-iv.dir.y, -iv.dir.x);
+    ctx.moveTo(iv.center.x - iv.dir.x * r, iv.center.y - iv.dir.y * r);
+    ctx.arc(iv.center.x, iv.center.y, r, a0, a0 + Math.PI, false);
+    cursor = Math.max(cursor, iv.end);
+  }
+  if (cursor < total) {
+    const from = cursor === 0 ? screenPath[0] : pointAlongPath(screenPath, cursor);
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(screenPath[screenPath.length - 1].x, screenPath[screenPath.length - 1].y);
+  }
+  ctx.stroke();
 }
 
 /**
@@ -312,6 +463,10 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
   const activeTerminals = activeNodeId != null ? (nodeToTerminals.get(activeNodeId) ?? new Set<string>()) : new Set<string>();
   const activeWires = activeNodeId != null ? (nodeToWires.get(activeNodeId) ?? new Set<string>()) : new Set<string>();
 
+  // Wire-wire crossing marks (hop arcs) — memoized on document identity so
+  // pan/zoom/hover frames don't recompute pairwise geometry.
+  const crossingMarks = computeWireCrossingMarks(wires, components, pluginsMap, sheets);
+
   // ---- Draw wires FIRST (below components) ----
   for (const wire of wires) {
     const fromGrid = resolveEndpointPos(wire.from);
@@ -329,10 +484,7 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
     ctx.lineWidth = isSelected ? 3.5 : (isHover ? 3 : (isOnActiveNode ? 2.5 : 2));
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ctx.moveTo(path[0].x, path[0].y);
-    for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
-    ctx.stroke();
+    strokeWirePathWithHops(ctx, path, crossingMarks.get(wire.id), gridToScreen);
 
     // Virtual-keyboard focus ring for wires (a11y)
     if (isSelected) {
@@ -348,8 +500,9 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
       ctx.restore();
     }
 
-    // draw wire segment midpoint handles (only when not running, for editing)
-    if (!running) {
+    // draw wire segment midpoint handles (only when not running and not
+    // mid-draft — during a draft they're clutter, not affordances)
+    if (!running && !wireDraft) {
       for (let i = 0; i < path.length - 1; i++) {
         const a = path[i];
         const b = path[i + 1];
@@ -418,25 +571,66 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
     }
   }
 
-  // draw wire draft
+  // draw wire draft — an honest preview of the wire that will be created:
+  // committed bends (solid), the tentative final leg (dashed) following the
+  // same orthogonal elbow / A* route the commit uses, bend markers, and a
+  // snap ring on the terminal the next click would connect to.
   if (wireDraft) {
-    const fromComp = components.find((c) => c.id === wireDraft.from.componentId);
-    if (fromComp) {
-      const plugin = getPlugin(fromComp.type);
-      if (plugin) {
-        const t = plugin.terminals.find((tt) => tt.id === wireDraft.from.terminalId);
-        if (t) {
-          const fromPos = gridToScreen(getTerminalPos(fromComp, t).x, getTerminalPos(fromComp, t).y);
-          const toPos = gridToScreen(wireDraft.cursor.x, wireDraft.cursor.y);
-          ctx.strokeStyle = '#fbbf24';
-          ctx.lineWidth = 2;
-          ctx.setLineDash([4, 4]);
-          ctx.beginPath();
-          ctx.moveTo(fromPos.x, fromPos.y);
-          ctx.lineTo(toPos.x, toPos.y);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
+    const snapTerm = hover.terminal &&
+      (hover.terminal.componentId !== wireDraft.from.componentId ||
+        hover.terminal.terminalId !== wireDraft.from.terminalId)
+      ? hover.terminal
+      : null;
+    const preview = computeDraftPreview(wireDraft, components, wires, sheets, snapTerm);
+    if (preview) {
+      const screenPath = preview.path.map((p) => gridToScreen(p.x, p.y));
+      // Committed part: start + user waypoints (+1 for the start point).
+      const committedPts = Math.min(1 + preview.committedWaypoints, screenPath.length - 1);
+      if (committedPts >= 2) {
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(screenPath[0].x, screenPath[0].y);
+        for (let i = 1; i <= committedPts; i++) ctx.lineTo(screenPath[i].x, screenPath[i].y);
+        ctx.stroke();
+      }
+      // Tentative leg: dashed to the cursor (or the snapped target).
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      const fromPt = screenPath[committedPts];
+      ctx.moveTo(fromPt.x, fromPt.y);
+      for (let i = committedPts + 1; i < screenPath.length; i++) ctx.lineTo(screenPath[i].x, screenPath[i].y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Bend markers: small squares at committed waypoints.
+      for (let i = 1; i <= preview.committedWaypoints && i < screenPath.length; i++) {
+        const p = screenPath[i];
+        ctx.beginPath();
+        ctx.rect(p.x - 3, p.y - 3, 6, 6);
+        ctx.fillStyle = '#fbbf24';
+        ctx.fill();
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Snap indicator: amber ring + dot at the terminal the click would
+      // finish on — the magnet is now VISIBLE instead of surprising.
+      if (snapTerm) {
+        const sp = gridToScreen(snapTerm.pos.x, snapTerm.pos.y);
+        ctx.beginPath();
+        ctx.arc(sp.x, sp.y, 8, 0, Math.PI * 2);
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(sp.x, sp.y, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#fbbf24';
+        ctx.fill();
       }
     }
   }
@@ -939,10 +1133,7 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
         ctx.shadowColor = '#fde047';
         ctx.shadowBlur = 4;
       }
-      ctx.beginPath();
-      ctx.moveTo(path[0].x, path[0].y);
-      for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
-      ctx.stroke();
+      strokeWirePathWithHops(ctx, path, crossingMarks.get(wire.id), gridToScreen);
       ctx.shadowBlur = 0;
     }
   }

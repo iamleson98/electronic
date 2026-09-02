@@ -30,6 +30,18 @@ export function useCanvasKeyboard(opts: {
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
 
+      // ── Wire tool (W) — the hotkey the help/shortcuts list has always
+      // advertised; it now actually engages wire mode (any pin click starts
+      // drawing, clicks place bends). Esc or W again returns to select.
+      // Plain W only — don't hijack Ctrl+W / Alt+W / meta+W.
+      if ((e.key === 'w' || e.key === 'W') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (running || useEditor.getState().placementDraft) return;
+        e.preventDefault();
+        const cur = useEditor.getState().activeTool;
+        useEditor.getState().setActiveTool(cur === 'wire' ? 'select' : 'wire');
+        return;
+      }
+
       // ── Keyboard placement mode (a11y) — takes priority over everything ────
       const st = useEditor.getState();
       if (st.placementDraft) {
@@ -76,6 +88,13 @@ export function useCanvasKeyboard(opts: {
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (running) return;
         const s = useEditor.getState();
+        // While drawing a wire, Backspace = undo the last placed bend
+        // (standard click-by-click routing behavior), not delete-selection.
+        if (e.key === 'Backspace' && s.wireDraft && s.wireDraft.waypoints.length > 0) {
+          e.preventDefault();
+          s.popWireWaypoint();
+          return;
+        }
         if (s.multiSelection.components.size > 0 || s.multiSelection.wires.size > 0) {
           s.deleteSelected();
         } else if (s.selection.type === 'component') {
@@ -141,6 +160,10 @@ export function useCanvasKeyboard(opts: {
           cancelWire();
           setSelection({ type: null, id: null });
           useEditor.getState().clearMultiSelection();
+          // Esc also drops out of the wire tool back to select
+          if (useEditor.getState().activeTool === 'wire') {
+            useEditor.getState().setActiveTool('select');
+          }
         }
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
         if (running) return;

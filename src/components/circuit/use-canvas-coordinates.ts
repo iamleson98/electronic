@@ -15,6 +15,7 @@ import type { HierarchicalSheet } from '@/lib/circuit/types';
 import { CELL_SIZE, type HoverState } from './canvas-types';
 import type { CanvasView } from './canvas-renderer';
 import { getWirePath, segmentMidpoint, pointToSegmentDist } from './canvas-wire-utils';
+import { findNearestTerminal, type TerminalSnapOptions } from './terminal-snap';
 
 export function useCanvasCoordinates(opts: {
   viewRef: RefObject<CanvasView>;
@@ -70,40 +71,26 @@ export function useCanvasCoordinates(opts: {
     return getTerminalPos(comp, t);
   }, [components, sheets, getTerminalPos]);
 
-  const findTerminalAt = useCallback((gx: number, gy: number) => {
-    for (const comp of components) {
-      const plugin = getPlugin(comp.type);
-      if (!plugin) continue;
-      for (const t of plugin.terminals) {
-        const pos = getTerminalPos(comp, t);
-        const dx = pos.x - gx;
-        const dy = pos.y - gy;
-        // Increased snap radius: 1.5 grid units — makes wire
-        // snapping much easier. At CELL_SIZE=18, this is ~27px radius.
-        if (dx * dx + dy * dy < 1.5 * 1.5) {
-          return { componentId: comp.id, terminalId: t.id, pos };
-        }
-      }
-    }
-    for (const sheet of sheets) {
-      for (const pin of sheet.pins) {
-        const pos = {
-          x: sheet.position.x + pin.position.x,
-          y: sheet.position.y + pin.position.y,
-        };
-        const dx = pos.x - gx;
-        const dy = pos.y - gy;
-        if (dx * dx + dy * dy < 1.5 * 1.5) {
-          return {
-            componentId: `__sheet:${sheet.id}`,
-            terminalId: `pin:${pin.id}`,
-            pos,
-          };
-        }
-      }
-    }
-    return null;
-  }, [components, getTerminalPos, sheets]);
+  /**
+   * Nearest-match terminal snap with a screen-space radius (constant on-screen
+   * magnet at any zoom). Options:
+   *  - `exclude`: ignore a terminal (e.g. the wire draft's source pin);
+   *  - `bypass`: temporarily disable the pin magnet (Alt while drawing).
+   * The old implementation returned the FIRST terminal inside a fixed
+   * 1.5-unit radius (component-array order) — with several pins nearby the
+   * cursor grabbed the wrong one, and the radius scaled with zoom (108px at
+   * 4× zoom), which made precise pin targeting impossible when zoomed in.
+   */
+  const findTerminalAt = useCallback(
+    (gx: number, gy: number, opts?: { exclude?: TerminalSnapOptions['exclude']; bypass?: boolean }) => {
+      if (opts?.bypass) return null;
+      return findNearestTerminal(gx, gy, components, sheets, {
+        zoom: viewRef.current.zoom,
+        exclude: opts?.exclude ?? null,
+      });
+    },
+    [components, sheets, viewRef],
+  );
 
   const findComponentAt = useCallback((gx: number, gy: number): CircuitComponent | null => {
     for (let i = components.length - 1; i >= 0; i--) {

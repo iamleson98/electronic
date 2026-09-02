@@ -25,8 +25,9 @@ import { DEFAULT_PAGE_SETUP, DEFAULT_TITLE_BLOCK } from './types';
 import { getPlugin, getAllPlugins } from './registry';
 import { simulateStep, getTerminalsForComponent } from './engine';
 import { cleanupComponentState } from './memory';
-import { findRoute, buildRoutingGrid, pathToWaypoints } from './smart-wire-router';
-import { rotateTerminal } from './components/draw';
+import { findRoute, buildRoutingGridForDocument, pathToWaypoints, simplifyPath } from './smart-wire-router';
+import { resolveEndpointGridPos } from './endpoint-position';
+import { orthogonalizePath } from './wire-geometry';
 import { validatePhysics, type PhysicsViolation } from './physics-validator';
 import { runFullERC } from './erc';
 import { snapshotSheet, flattenHierarchy } from './hierarchy';
@@ -102,7 +103,7 @@ interface EditorState {
   showGrid: boolean;
   snapToGrid: boolean;
   // wire draft
-  wireDraft: { from: { componentId: string; terminalId: string }; cursor: { x: number; y: number } } | null;
+  wireDraft: { from: { componentId: string; terminalId: string }; cursor: { x: number; y: number }; waypoints: { x: number; y: number }[] } | null;
   // keyboard placement draft (a11y): type + pending position + rotation
   placementDraft: { type: string; position: { x: number; y: number }; rotation: number } | null;
   /** Screen-reader announcement (rendered into the ARIA live region). */
@@ -242,6 +243,10 @@ interface EditorState {
   // wire ops
   startWire: (from: { componentId: string; terminalId: string }, cursor: { x: number; y: number }) => void;
   updateWireCursor: (cursor: { x: number; y: number }) => void;
+  /** Add a user-placed bend to the active wire draft (click-by-click routing). */
+  addWireWaypoint: (point: { x: number; y: number }) => void;
+  /** Remove the last user-placed bend (Backspace while drawing). */
+  popWireWaypoint: () => void;
   cancelWire: () => void;
   completeWire: (to: { componentId: string; terminalId: string }) => void;
   // keyboard placement (a11y)
@@ -1300,8 +1305,26 @@ export const useEditor = create<EditorState>((set, get) => ({
     }));
   },
 
-  startWire: (from, cursor) => set({ wireDraft: { from, cursor } }),
+  startWire: (from, cursor) => set({
+    wireDraft: { from, cursor: { x: cursor.x, y: cursor.y }, waypoints: [] },
+    announcement: 'Wire started. Click to add bends, click a pin to finish, Backspace undoes a bend, Escape cancels.',
+  }),
   updateWireCursor: (cursor) => set((s) => (s.wireDraft ? { wireDraft: { ...s.wireDraft, cursor } } : {})),
+
+  addWireWaypoint: (point) => set((s) => {
+    if (!s.wireDraft) return {};
+    const wp = { x: Math.round(point.x), y: Math.round(point.y) };
+    const last = s.wireDraft.waypoints[s.wireDraft.waypoints.length - 1];
+    // Skip duplicates (double-click, or a click on the same cell).
+    if (last && last.x === wp.x && last.y === wp.y) return {};
+    return { wireDraft: { ...s.wireDraft, waypoints: [...s.wireDraft.waypoints, wp] } };
+  }),
+
+  popWireWaypoint: () => set((s) => {
+    if (!s.wireDraft || s.wireDraft.waypoints.length === 0) return {};
+    return { wireDraft: { ...s.wireDraft, waypoints: s.wireDraft.waypoints.slice(0, -1) } };
+  }),
+
   cancelWire: () => set({ wireDraft: null }),
 
   // ── Keyboard placement (a11y) ─────────────────────────────────────────────
@@ -1402,41 +1425,44 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     get().pushHistory();
     const id = genId('wire');
+    const s = get();
 
-    // Try smart wire routing (A* with obstacle avoidance) — falls back to
-    // simple L-shaped routing if findRoute fails or isn't available.
+    // Rotation-aware endpoint positions — the single shared resolver
+    // (sheet-pin aware), same math as the renderer and the router.
+    const startPos = resolveEndpointGridPos(draft.from, s.components, s.sheets);
+    const endPos = resolveEndpointGridPos(to, s.components, s.sheets);
+
     let waypoints: { x: number; y: number }[] | undefined;
-    try {
-      const s = get();
-      const plugins = new Map(getAllPlugins().map((p: any) => [p.type, p]));
-      const grid = buildRoutingGrid(s.components, s.wires, plugins, { width: 100, height: 60 }, 5);
-      // Resolve terminal positions
-      const fromComp = s.components.find((c: any) => c.id === draft.from.componentId);
-      const toComp = s.components.find((c: any) => c.id === to.componentId);
-      if (fromComp && toComp) {
-        const fromTerm = (plugins.get(fromComp.type) as any)?.terminals.find((t: any) => t.id === draft.from.terminalId);
-        const toTerm = (plugins.get(toComp.type) as any)?.terminals.find((t: any) => t.id === to.terminalId);
-        if (fromTerm && toTerm) {
-          // Rotation-aware terminal positions (same transform as the canvas
-          // renderer) — the old unrotated math routed wires to the wrong
-          // endpoints for any component with rotation 1/2/3.
-          const fromRot = rotateTerminal(fromTerm, fromComp.rotation, (plugins.get(fromComp.type) as any).boundingBox);
-          const toRot = rotateTerminal(toTerm, toComp.rotation, (plugins.get(toComp.type) as any).boundingBox);
-          const startPos = { x: fromComp.position.x + fromRot.position.x, y: fromComp.position.y + fromRot.position.y };
-          const endPos = { x: toComp.position.x + toRot.position.x, y: toComp.position.y + toRot.position.y };
+    if (startPos && endPos) {
+      if (draft.waypoints.length > 0) {
+        // The user drew the route bend-by-bend: honor their intent. Clean up
+        // diagonals (fractional pins) and drop collinear midpoints so the
+        // stored waypoints are corner-sparse — one drag handle per bend.
+        const orthogonal = orthogonalizePath(startPos, endPos, draft.waypoints);
+        const simplified = simplifyPath([startPos, ...orthogonal, endPos]);
+        waypoints = pathToWaypoints(simplified);
+      } else {
+        // No user bends: smart routing (A* obstacle avoidance, wire/body
+        // clearance, dynamic grid that covers the whole document). Falls
+        // back to the plain L-route (no waypoints) if routing fails.
+        try {
+          const plugins = new Map(getAllPlugins().map((p: any) => [p.type, p]));
+          const grid = buildRoutingGridForDocument(s.components, s.wires, plugins);
           const route = findRoute(grid, startPos, endPos);
           if (route.path.length > 2) {
-            waypoints = pathToWaypoints(route.path);
+            // Corner-sparse waypoints: the dense cell list used to be stored
+            // verbatim, littering the path with a drag handle every cell.
+            waypoints = pathToWaypoints(simplifyPath(route.path));
           }
+        } catch {
+          // Smart router failed — use simple L-shape (no waypoints)
         }
       }
-    } catch {
-      // Smart router failed — use simple L-shape (no waypoints)
     }
 
     const wire: Wire = { id, from: draft.from, to };
     if (waypoints && waypoints.length > 0) wire.waypoints = waypoints;
-    set((s) => ({ wires: [...s.wires, wire], wireDraft: null }));
+    set((st) => ({ wires: [...st.wires, wire], wireDraft: null, announcement: 'Wire connected.' }));
   },
 
   setWireWaypoints: (id, waypoints) => {

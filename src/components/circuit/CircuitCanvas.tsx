@@ -90,6 +90,7 @@ export function CircuitCanvas() {
   const setSelection = useEditor((s) => s.setSelection);
   const startWire = useEditor((s) => s.startWire);
   const updateWireCursor = useEditor((s) => s.updateWireCursor);
+  const addWireWaypoint = useEditor((s) => s.addWireWaypoint);
   const completeWire = useEditor((s) => s.completeWire);
   const cancelWire = useEditor((s) => s.cancelWire);
   const setWireWaypoints = useEditor((s) => s.setWireWaypoints);
@@ -197,9 +198,14 @@ export function CircuitCanvas() {
         }
         return;
       }
-      // Check sheet box body — start a sheet drag
+      // Check sheet box body — start a sheet drag (but while a wire draft is
+      // active, a click on the box places a bend like anywhere else)
       const sheetHit = findSheetAt(sheets, sx, sy, gridToScreen);
       if (sheetHit) {
+        if (useEditor.getState().wireDraft) {
+          addWireWaypoint(g);
+          return;
+        }
         setSelection({ type: 'sheet', id: sheetHit.id });
         const offset = {
           x: g.x - sheetHit.position.x,
@@ -230,7 +236,24 @@ export function CircuitCanvas() {
       return;
     }
 
+    // ── Wire draft in progress: click a pin to finish, click anywhere else
+    // to place a bend (KiCad-style click-by-click routing). Terminal snapping
+    // is excluded from the wire's own source pin so an accidental click near
+    // the start doesn't self-complete; Alt bypasses the pin magnet entirely.
+    const wd = useEditor.getState().wireDraft;
+    if (wd) {
+      const term = findTerminalAt(g.x, g.y, { exclude: wd.from, bypass: e.altKey });
+      if (term) {
+        completeWire({ componentId: term.componentId, terminalId: term.terminalId });
+      } else {
+        addWireWaypoint(g);
+      }
+      return;
+    }
+
     // check rotation handle on selected component — start a rotate drag
+    // (14px hit zone — the SAME radius the hover pass uses, so what you
+    // hover is what you grab)
     const currentSelection = useEditor.getState().selection;
     if (!isRunningNow && currentSelection.type === 'component') {
       const comp = components.find((c) => c.id === currentSelection.id);
@@ -242,7 +265,7 @@ export function CircuitCanvas() {
             const dx = sx - handlePos.x;
             const dy = sy - handlePos.y;
             const distSq = dx * dx + dy * dy;
-            if (distSq < 400) { // 20px radius hit zone
+            if (distSq < 196) { // 14px radius — matches hover
               const bb = plugin.boundingBox;
               const centerGrid = { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 };
               const centerScreen = gridToScreen(centerGrid.x, centerGrid.y);
@@ -298,14 +321,10 @@ export function CircuitCanvas() {
       }
     }
 
-    // check terminal first
-    const term = findTerminalAt(g.x, g.y);
+    // check terminal — start a wire (Alt bypasses the pin magnet)
+    const term = findTerminalAt(g.x, g.y, { bypass: e.altKey });
     if (term) {
-      if (useEditor.getState().wireDraft) {
-        completeWire({ componentId: term.componentId, terminalId: term.terminalId });
-      } else {
-        startWire({ componentId: term.componentId, terminalId: term.terminalId }, g);
-      }
+      startWire({ componentId: term.componentId, terminalId: term.terminalId }, g);
       return;
     }
 
@@ -346,9 +365,9 @@ export function CircuitCanvas() {
       return;
     }
 
-    // empty space: clear selection, cancel wire
+    // empty space: clear selection (a wire draft, if any, stays alive —
+    // empty clicks place bends; Escape cancels)
     setSelection({ type: null, id: null });
-    if (useEditor.getState().wireDraft) cancelWire();
   };
 
   const onMouseMove = (e: React.MouseEvent) => {
@@ -357,6 +376,9 @@ export function CircuitCanvas() {
     const sy = e.clientY - rect.top;
     const g = screenToGrid(sx, sy);
     const view = viewRef.current;
+
+    // Alt temporarily bypasses the terminal snap magnet (precision routing).
+    view.snapBypass = e.altKey;
 
     // Cursor crosshair + status readout — ref only, no React re-render.
     view.cursor = g;
@@ -478,10 +500,16 @@ export function CircuitCanvas() {
       updateWireCursor(g);
     }
 
-    // hover detection: priority: terminal > rotate handle > wire handle > wire > component
-    const term = findTerminalAt(g.x, g.y);
-    if (term) {
-      setHover({ componentId: term.componentId, terminal: term, wireId: null, wireHandle: null, rotateHandle: null });
+    // hover detection — the ladder matches the mousedown ladder exactly
+    // (rotate 14px > wire handle 6px > terminal > wire > component) so what
+    // you hover is always what a click will grab. While a wire draft is
+    // active, only the snap target terminal is highlighted.
+    const wd = useEditor.getState().wireDraft;
+    if (wd) {
+      const term = findTerminalAt(g.x, g.y, { exclude: wd.from, bypass: e.altKey });
+      setHover(term
+        ? { componentId: term.componentId, terminal: term, wireId: null, wireHandle: null, rotateHandle: null }
+        : EMPTY_HOVER);
       return;
     }
     // rotate handle
@@ -492,7 +520,7 @@ export function CircuitCanvas() {
         if (handlePos) {
           const dx = sx - handlePos.x;
           const dy = sy - handlePos.y;
-          if (dx * dx + dy * dy < 144) { // 12px radius hit zone
+          if (dx * dx + dy * dy < 196) { // 14px radius — matches mousedown
             setHover({ componentId: comp.id, terminal: null, wireId: null, wireHandle: null, rotateHandle: comp.id });
             return;
           }
@@ -506,6 +534,12 @@ export function CircuitCanvas() {
         setHover({ componentId: null, terminal: null, wireId: wh.wireId, wireHandle: wh, rotateHandle: null });
         return;
       }
+    }
+    // terminal (pin magnet; Alt bypasses)
+    const term = findTerminalAt(g.x, g.y, { bypass: e.altKey });
+    if (term) {
+      setHover({ componentId: term.componentId, terminal: term, wireId: null, wireHandle: null, rotateHandle: null });
+      return;
     }
     // wire
     const wireId = findWireAt(sx, sy);
@@ -670,6 +704,7 @@ export function CircuitCanvas() {
           sheetDragRef.current = null;
           const view = viewRef.current;
           view.hoveredSheetId = null;
+          view.snapBypass = false;
           resetHover();
           setHoveredERC(null);
         }}

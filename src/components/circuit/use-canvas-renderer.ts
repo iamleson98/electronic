@@ -135,7 +135,7 @@ export function useCanvasRenderer(opts: {
 
             // Imperative cursor style — replaces React re-render per hover change.
             const cursorStyle = computeCursorStyle(
-              view.hover, st.running, st.components, rotateDragRef.current != null,
+              view.hover, st.running, st.components, rotateDragRef.current != null, st.activeTool,
             );
             if (canvas.style.cursor !== cursorStyle) {
               canvas.style.cursor = cursorStyle;
@@ -144,7 +144,7 @@ export function useCanvasRenderer(opts: {
             // Imperative status overlay — replaces React re-render per mousemove.
             const statusEl = statusRef.current;
             if (statusEl) {
-              const text = formatStatusText(view.cursor, view.zoom, st.running);
+              const text = formatStatusText(view.cursor, view.zoom, st.running, st.wireDraft != null);
               if (statusEl.textContent !== text) {
                 statusEl.textContent = text;
               }

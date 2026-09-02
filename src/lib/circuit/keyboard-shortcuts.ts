@@ -45,8 +45,10 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
   { key: 'Ctrl+R', description: 'Reset simulation', category: 'simulation', implemented: true },
 
   // Tools
-  { key: 'W', description: 'Wire mode (start drawing wires)', category: 'tools', implemented: true },
+  { key: 'W', description: 'Wire tool — click a pin to start, click to bend, click a pin to finish', category: 'tools', implemented: true },
   { key: 'Shift', description: 'Hold for multi-select', category: 'tools', implemented: true },
+  { key: 'Backspace (wiring)', description: 'Undo the last wire bend while drawing', category: 'tools', implemented: true },
+  { key: 'Alt (wiring)', description: 'Hold while drawing to bypass pin snapping', category: 'tools', implemented: true },
 
   // View
   { key: 'Ctrl+K', description: 'Open Command Palette', category: 'view', implemented: true },
