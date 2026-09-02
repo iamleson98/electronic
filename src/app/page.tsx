@@ -34,6 +34,8 @@ import { useChatSession } from '@/lib/ai/chat-session';
 import { installScriptingAPI } from '@/lib/scripting-api';
 import { hasSharedCircuit, loadFromShareURL, createShareURL } from '@/lib/circuit/share-url';
 import { AutosaveManager, detectCrashRecovery, loadAutosave, clearAutosave } from '@/lib/circuit/autosave';
+import { confirmDialog } from '@/lib/confirm';
+import { ConfirmDialogHost } from '@/components/ui/ConfirmDialogHost';
 import '@/lib/circuit/components';
 import { toast } from 'sonner';
 
@@ -77,21 +79,28 @@ export default function Home() {
         // Crash recovery — if the previous session crashed (tab closed
         // unexpectedly, browser crashed, etc.), offer to restore the last
         // autosaved circuit. Previously: unsaved work was silently lost.
+        //
+        // Uses the in-app confirm dialog (never a native window.confirm —
+        // native dialogs block the whole page and are suppressed/invisible
+        // in embedded preview iframes, which freezes the app on load).
         const info = detectCrashRecovery();
         if (info && info.crashed && info.componentCount > 0) {
           const when = new Date(info.timestamp).toLocaleString();
-          const restore = window.confirm(
-            `Recover unsaved work?\n\n` +
-            `A previous session ended unexpectedly (${when}).\n` +
-            `${info.componentCount} components, ${info.wireCount} wires were recovered.\n\n` +
-            `Click OK to restore, or Cancel to start fresh.`,
-          );
-          if (restore) {
-            const doc = loadAutosave();
-            if (doc) useEditor.getState().loadDocument(doc);
-          } else {
-            clearAutosave();
-          }
+          confirmDialog({
+            title: 'Recover unsaved work?',
+            description:
+              `A previous session ended unexpectedly (${when}).\n` +
+              `${info.componentCount} components and ${info.wireCount} wires were recovered.`,
+            confirmLabel: 'Restore',
+            cancelLabel: 'Start fresh',
+          }).then((restore) => {
+            if (restore) {
+              const doc = loadAutosave();
+              if (doc) useEditor.getState().loadDocument(doc);
+            } else {
+              clearAutosave();
+            }
+          });
         }
       }
     } catch (e) { console.warn('Init failed:', e); }
@@ -176,7 +185,37 @@ export default function Home() {
   const handleShare = () => {
     const doc = useEditor.getState().serialize();
     const url = createShareURL(doc);
-    navigator.clipboard.writeText(url).then(() => toast.success('Share URL copied!')).catch(() => window.prompt('Copy URL:', url));
+    // Clipboard write can fail in embedded iframes (permission denied) — fall
+    // back to a legacy copy, then to a toast. Never window.prompt: it blocks
+    // the page and is suppressed in sandboxed frames.
+    const legacyCopy = (text: string): boolean => {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch {
+        return false;
+      }
+    };
+    navigator.clipboard
+      .writeText(url)
+      .then(() => toast.success('Share URL copied!'))
+      .catch(() => {
+        if (legacyCopy(url)) {
+          toast.success('Share URL copied!');
+        } else {
+          toast.info('Share URL', {
+            description: url,
+            duration: 20000,
+          });
+        }
+      });
   };
 
   // Reactive PCB state for 3D header
@@ -340,6 +379,7 @@ export default function Home() {
       <LibraryManagerDialog open={showLibrary} onClose={() => setShowLibrary(false)} />
       <TipOfTheDay />
       <ThemeManager />
+      <ConfirmDialogHost />
     </div>
   );
 }

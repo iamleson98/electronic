@@ -29,6 +29,7 @@ import {
   Grid3x3, ZoomIn, ZoomOut, FilePlus, X,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { confirmDialog } from '@/lib/confirm';
 import type { ComponentPlugin, PinElecType, PinShape, Vec2 } from '@/lib/circuit/types';
 import { registerPlugin } from '@/lib/circuit/registry';
 import {
@@ -670,8 +671,14 @@ export function SymbolEditorDialog({ open, onClose, onSaved, initialDesign }: Pr
     }
   }, [onClose, onSaved]);
 
-  const handleNew = useCallback(() => {
-    if (!confirm('Discard current symbol and start fresh?')) return;
+  const handleNew = useCallback(async () => {
+    const ok = await confirmDialog({
+      title: 'Discard current symbol?',
+      description: 'Start fresh with a blank symbol design.',
+      confirmLabel: 'Discard & start fresh',
+      danger: true,
+    });
+    if (!ok) return;
     setDesign(blankDesign());
     setSelectedId(null);
     setCamera({ x: 80, y: 80, zoom: 1 });

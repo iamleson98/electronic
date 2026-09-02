@@ -39,6 +39,7 @@ import {
   Plus, Grid3x3, ZoomIn, ZoomOut, FilePlus, X, ChevronDown,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { confirmDialog } from '@/lib/confirm';
 import type { CopperLayer, FootprintDef, FootprintPadDef } from '@/lib/pcb/types';
 import { footprintDefs } from '@/lib/pcb/footprints';
 import { LAYER_COLORS } from '@/lib/pcb/types';
@@ -799,8 +800,14 @@ export function FootprintEditorDialog({ open, onClose, onSave, initialDesign }: 
     onClose();
   }, [onClose, onSave]);
 
-  const handleNew = useCallback(() => {
-    if (!confirm('Discard current footprint and start fresh?')) return;
+  const handleNew = useCallback(async () => {
+    const ok = await confirmDialog({
+      title: 'Discard current footprint?',
+      description: 'Start fresh with a blank footprint design.',
+      confirmLabel: 'Discard & start fresh',
+      danger: true,
+    });
+    if (!ok) return;
     setDesign(blankDesign());
     setSelectedId(null);
     setCamera({ x: 400, y: 300, zoom: 4 });

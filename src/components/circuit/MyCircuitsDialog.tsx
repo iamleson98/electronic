@@ -19,6 +19,7 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Save, Trash2, FolderOpen, Database, Plus, Search } from 'lucide-react';
 import { toast } from 'sonner';
+import { confirmDialog } from '@/lib/confirm';
 
 interface SavedCircuit {
   id: string;
@@ -123,7 +124,13 @@ export function MyCircuitsDialog({ open, onClose }: { open: boolean; onClose: ()
   };
 
   const handleDelete = async (id: string, name: string) => {
-    if (!confirm(`Delete circuit "${name}"?`)) return;
+    const ok = await confirmDialog({
+      title: `Delete circuit "${name}"?`,
+      description: 'This permanently removes the saved circuit.',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const res = await fetch(`/api/circuits/${id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Delete failed');

@@ -41,6 +41,7 @@ import {
   exportBOMCSV, exportBOMHTML, exportBOMXML,
 } from '@/lib/circuit/netlist-export';
 import { parseSchematicFile } from '@/lib/circuit/kicad-sch-import';
+import { confirmDialog } from '@/lib/confirm';
 
 export function Toolbar() {
   const running = useEditor((s) => s.running);
@@ -706,7 +707,16 @@ export function Toolbar() {
                 variant="ghost"
                 className="h-7 w-7 p-0 text-rose-400 hover:text-rose-300"
                 onClick={() => {
-                  if (confirm('Clear the entire circuit?')) clear();
+                  // In-app dialog (never native confirm — those block the page
+                  // and silently no-op in sandboxed preview iframes).
+                  confirmDialog({
+                    title: 'Clear the entire circuit?',
+                    description: 'Removes all components and wires from the canvas. You can undo with Ctrl+Z.',
+                    confirmLabel: 'Clear',
+                    danger: true,
+                  }).then((ok) => {
+                    if (ok) clear();
+                  });
                 }}
                 disabled={running}
               >
