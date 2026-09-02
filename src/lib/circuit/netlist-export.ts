@@ -7,7 +7,6 @@
 
 import type { CircuitComponent, CircuitDocument, Wire, ComponentPlugin } from './types';
 import { getPlugin } from './registry';
-import { rotateTerminal } from './components/draw';
 import { buildNodeMap } from './engine';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -155,7 +154,6 @@ export function exportSPICENetlist(doc: CircuitDocument, title: string = 'Circui
     // collect terminal node names (only first 2-3 for basic components)
     const terms = plugin.terminals.filter((t) => !t.hidden);
     const nodeNames = terms.map((t) => {
-      const r = rotateTerminal(t, comp.rotation, plugin.boundingBox);
       const key = `${comp.id}:${t.id}`;
       const node = nodeMap.terminalNode.get(key);
       return nodeName(node ?? 0);

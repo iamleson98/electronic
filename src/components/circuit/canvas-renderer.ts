@@ -21,7 +21,7 @@ import type {
   NetClass,
 } from '@/lib/circuit/types';
 import type { ERCError } from '@/lib/circuit/erc';
-import { rotateTerminal } from '@/lib/circuit/components/draw';
+import { terminalPos, transformBodyPoint } from '@/lib/circuit/endpoint-position';
 import {
   drawERCMarkers,
   drawAutoJunctions,
@@ -176,13 +176,13 @@ function makeTransforms(view: CanvasView, components: CircuitComponent[], sheets
     y: gy * CELL_SIZE * zoom + pan.y,
   });
   const getTerminalPos = (comp: CircuitComponent, terminal: { id: string; position: Vec2 }): Vec2 => {
+    // Shared canonical resolver — honors rotation AND mirror/free-rotation
+    // (parity with the body render below; the old local copy ignored
+    // mirrorX/mirrorY/rotationDeg so mirrored symbols drew their pins
+    // away from where wires attached).
     const plugin = getPlugin(comp.type);
     if (!plugin) return { x: 0, y: 0 };
-    const rotated = rotateTerminal(terminal as never, comp.rotation, plugin.boundingBox);
-    return {
-      x: comp.position.x + rotated.position.x,
-      y: comp.position.y + rotated.position.y,
-    };
+    return terminalPos(comp, terminal, plugin);
   };
   const resolveEndpointPos = (endpoint: { componentId: string; terminalId: string }): Vec2 | null => {
     // Defensive: malformed endpoints (scripting-API misuse, foreign JSON
@@ -276,6 +276,29 @@ function pointAlongPath(path: Vec2[], dist: number): Vec2 {
   return { ...path[path.length - 1] };
 }
 
+/**
+ * Polyline slice between two arc-length positions — includes every original
+ * vertex strictly between them (so corners are TRACED, never cut).
+ */
+function subPathRange(path: Vec2[], fromDist: number, toDist: number): Vec2[] {
+  if (path.length < 2 || toDist <= fromDist) return [pointAlongPath(path, fromDist)];
+  const out: Vec2[] = [pointAlongPath(path, fromDist)];
+  let acc = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i];
+    const b = path[i + 1];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len > 0) {
+      const dEnd = acc + len;
+      // Interior vertex b lies strictly inside (fromDist, toDist)?
+      if (dEnd > fromDist + 1e-9 && dEnd < toDist - 1e-9) out.push(b);
+      acc = dEnd;
+    }
+  }
+  out.push(pointAlongPath(path, toDist));
+  return out;
+}
+
 /** Total polyline length. */
 function pathLength(path: Vec2[]): number {
   let len = 0;
@@ -338,10 +361,14 @@ function strokeWirePathWithHops(
   let cursor = 0;
   for (const iv of intervals) {
     if (iv.start > cursor) {
-      const from = cursor === 0 ? screenPath[0] : pointAlongPath(screenPath, cursor);
-      const to = pointAlongPath(screenPath, iv.start);
-      ctx.moveTo(from.x, from.y);
-      ctx.lineTo(to.x, to.y);
+      // Trace the FULL polyline slice [cursor, iv.start] — every interior
+      // vertex included. The old two-point moveTo/lineTo CUT THE CORNER of
+      // L/Z-shaped paths, rendering a diagonal (the "wires are not
+      // orthogonal" bug: any wire with a hop mark mid-segment drew a
+      // corner-cutting straight line from its start).
+      const seg = subPathRange(screenPath, cursor, iv.start);
+      ctx.moveTo(seg[0].x, seg[0].y);
+      for (let k = 1; k < seg.length; k++) ctx.lineTo(seg[k].x, seg[k].y);
     }
     // Semicircular bridge over the crossing, bulging to the left of travel.
     const a0 = Math.atan2(-iv.dir.y, -iv.dir.x);
@@ -350,9 +377,10 @@ function strokeWirePathWithHops(
     cursor = Math.max(cursor, iv.end);
   }
   if (cursor < total) {
-    const from = cursor === 0 ? screenPath[0] : pointAlongPath(screenPath, cursor);
-    ctx.moveTo(from.x, from.y);
-    ctx.lineTo(screenPath[screenPath.length - 1].x, screenPath[screenPath.length - 1].y);
+    // Same corner-tracing for the tail slice [cursor, total].
+    const seg = subPathRange(screenPath, cursor, total);
+    ctx.moveTo(seg[0].x, seg[0].y);
+    for (let k = 1; k < seg.length; k++) ctx.lineTo(seg[k].x, seg[k].y);
   }
   ctx.stroke();
 }
@@ -752,21 +780,12 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
         for (const flowGridPath of flowGridPaths) {
           if (!flowGridPath || flowGridPath.length < 2) continue;
           const flowScreenPath: Vec2[] = flowGridPath.map((gp) => {
-            const bb = plugin.boundingBox;
-            const cx = bb.width / 2;
-            const cy = bb.height / 2;
-            const dx = gp.x - cx;
-            const dy = gp.y - cy;
-            let rx: number, ry: number;
-            switch (comp.rotation) {
-              case 0: rx = dx; ry = dy; break;
-              case 1: rx = -dy; ry = dx; break;
-              case 2: rx = -dx; ry = -dy; break;
-              case 3: rx = dy; ry = -dx; break;
-            }
-            const gridX = comp.position.x + cx + rx;
-            const gridY = comp.position.y + cy + ry;
-            return gridToScreen(gridX, gridY);
+            // Same canonical body transform as the symbol render (rotation,
+            // free rotation, mirror) — previously only the 90° switch was
+            // applied, so mirrored / free-rotated components showed their
+            // flow dots OUTSIDE the body, floating in free space.
+            const t = transformBodyPoint(comp, gp, plugin.boundingBox);
+            return gridToScreen(comp.position.x + t.x, comp.position.y + t.y);
           });
           let totalLen = 0;
           const segLens: number[] = [];

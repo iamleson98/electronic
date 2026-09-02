@@ -13,7 +13,7 @@
 // React, no store — so it is directly unit-testable.
 
 import { getPlugin } from '@/lib/circuit/registry';
-import { rotateTerminal } from '@/lib/circuit/components/draw';
+import { terminalPos } from '@/lib/circuit/endpoint-position';
 import type { CircuitComponent, TerminalDef, Vec2, HierarchicalSheet } from '@/lib/circuit/types';
 import { CELL_SIZE } from './canvas-types';
 
@@ -40,8 +40,9 @@ export interface TerminalSnapOptions {
 export function terminalGridPosition(comp: CircuitComponent, terminal: TerminalDef): Vec2 {
   const plugin = getPlugin(comp.type);
   if (!plugin) return { x: comp.position.x + terminal.position.x, y: comp.position.y + terminal.position.y };
-  const rotated = rotateTerminal(terminal, comp.rotation, plugin.boundingBox);
-  return { x: comp.position.x + rotated.position.x, y: comp.position.y + rotated.position.y };
+  // Canonical shared resolver — rotation + mirror + free-rotation parity
+  // with the body render (canvas-renderer uses the same helper).
+  return terminalPos(comp, terminal, plugin);
 }
 
 /**

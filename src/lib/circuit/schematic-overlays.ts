@@ -16,7 +16,7 @@
 import type { ERCError } from './erc';
 import type { CircuitComponent, TerminalDef, Vec2, Wire } from './types';
 import { getPlugin } from './registry';
-import { rotateTerminal } from './components/draw';
+import { terminalPos } from './endpoint-position';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. ERC markers
@@ -173,11 +173,10 @@ export function drawAutoJunctions(
 function getTerminalPos(comp: CircuitComponent, terminal: TerminalDef): Vec2 {
   const plugin = getPlugin(comp.type);
   if (!plugin) return { x: comp.position.x + terminal.position.x, y: comp.position.y + terminal.position.y };
-  const rotated = rotateTerminal(terminal, comp.rotation, plugin.boundingBox);
-  return {
-    x: comp.position.x + rotated.position.x,
-    y: comp.position.y + rotated.position.y,
-  };
+  // Canonical shared resolver — rotation + mirror + free-rotation parity
+  // with the canvas render (ERC markers / auto-junctions must land exactly
+  // where the renderer draws the terminals).
+  return terminalPos(comp, terminal, plugin);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

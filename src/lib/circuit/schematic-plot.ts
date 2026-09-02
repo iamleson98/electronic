@@ -4,7 +4,7 @@
 
 import type { CircuitComponent, CircuitDocument, Wire, ComponentPlugin, DrawingPrimitive } from './types';
 import { getPlugin } from './registry';
-import { rotateTerminal } from './components/draw';
+import { terminalPos } from './endpoint-position';
 
 const GRID_TO_MM = 2.54; // 1 grid unit = 2.54mm (0.1 inch) — KiCad default
 
@@ -66,12 +66,12 @@ export function exportSchematicSVG(doc: CircuitDocument): string {
     const fromTerm = fromPlugin.terminals.find((t) => t.id === wire.from.terminalId);
     const toTerm = toPlugin.terminals.find((t) => t.id === wire.to.terminalId);
     if (!fromTerm || !toTerm) continue;
-    const fromR = rotateTerminal(fromTerm, fromComp.rotation, fromPlugin.boundingBox);
-    const toR = rotateTerminal(toTerm, toComp.rotation, toPlugin.boundingBox);
-    const x1 = offX + (fromComp.position.x + fromR.position.x) * GRID_TO_MM;
-    const y1 = offY + (fromComp.position.y + fromR.position.y) * GRID_TO_MM;
-    const x2 = offX + (toComp.position.x + toR.position.x) * GRID_TO_MM;
-    const y2 = offY + (toComp.position.y + toR.position.y) * GRID_TO_MM;
+    const fromR = terminalPos(fromComp, fromTerm, fromPlugin);
+    const toR = terminalPos(toComp, toTerm, toPlugin);
+    const x1 = offX + fromR.x * GRID_TO_MM;
+    const y1 = offY + fromR.y * GRID_TO_MM;
+    const x2 = offX + toR.x * GRID_TO_MM;
+    const y2 = offY + toR.y * GRID_TO_MM;
     lines.push(`<line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="#475569" stroke-width="0.5"/>`);
   }
 
@@ -92,9 +92,9 @@ export function exportSchematicSVG(doc: CircuitDocument): string {
     lines.push(`<text x="${(x + w / 2).toFixed(2)}" y="${(y + h / 2 + 1).toFixed(2)}" font-family="ui-monospace,monospace" font-size="2.5" text-anchor="middle" fill="#475569">${escapeXML(plugin.name)}</text>`);
     // terminals
     for (const t of plugin.terminals) {
-      const r = rotateTerminal(t, comp.rotation, bb);
-      const tx = offX + (comp.position.x + r.position.x) * GRID_TO_MM;
-      const ty = offY + (comp.position.y + r.position.y) * GRID_TO_MM;
+      const r = terminalPos(comp, t, plugin);
+      const tx = offX + r.x * GRID_TO_MM;
+      const ty = offY + r.y * GRID_TO_MM;
       lines.push(`<circle cx="${tx.toFixed(2)}" cy="${ty.toFixed(2)}" r="0.7" fill="#64748b"/>`);
     }
   }

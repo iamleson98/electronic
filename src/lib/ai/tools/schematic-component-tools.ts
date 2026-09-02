@@ -7,6 +7,9 @@ import { genId, findComponent } from './helpers';
 import type { CircuitDocument, CircuitComponent, Wire, SimContext } from '@/lib/circuit/types';
 import { simulateStep, buildNodeMap, getTerminalsForComponent, computeComponentCurrents, computeWireCurrents, solveDC } from '@/lib/circuit/engine';
 import { getPlugin, getAllPlugins, getPluginsByCategory } from '@/lib/circuit/registry';
+import { orthogonalizePath } from '@/lib/circuit/wire-geometry';
+import { simplifyPath, pathToWaypoints } from '@/lib/circuit/smart-wire-router';
+import { resolveEndpointGridPos } from '@/lib/circuit/endpoint-position';
 import { validatePhysics } from '@/lib/circuit/physics-validator';
 import { exampleCategories } from '@/lib/circuit/examples';
 import { exportSPICENetlist, exportBOMCSV, exportKiCadNetlist } from '@/lib/circuit/netlist-export';
@@ -199,7 +202,18 @@ const addWireTool: Tool = {
       to: { componentId: args.toComponentId, terminalId: args.toTerminalId },
     };
     if (args.waypoints && args.waypoints.length > 0) {
-      (wire as any).waypoints = args.waypoints.map(([x, y]: [number, number]) => ({ x, y }));
+      // The editor's wire style is strictly orthogonal (Ox/OY) — the
+      // renderer draws waypoints verbatim, so a diagonal LLM waypoint would
+      // render a slanted wire. Orthogonalize with the same elbow semantics
+      // the interactive editor uses at commit time (store.completeWire).
+      const from = resolveEndpointGridPos(wire.from, ctx.doc.components, ctx.doc.sheets ?? []);
+      const to = resolveEndpointGridPos(wire.to, ctx.doc.components, ctx.doc.sheets ?? []);
+      const rawWps = args.waypoints.map(([x, y]: [number, number]) => ({ x, y }));
+      let wps: { x: number; y: number }[] = rawWps;
+      if (from && to) {
+        wps = pathToWaypoints(simplifyPath([from, ...orthogonalizePath(from, to, rawWps), to]));
+      }
+      if (wps.length > 0) (wire as any).waypoints = wps;
     }
     ctx.doc.wires.push(wire);
     ctx.simContext = null; // topology changed — node ids renumbered

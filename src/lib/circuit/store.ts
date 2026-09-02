@@ -29,6 +29,7 @@ import { pathToWaypoints, simplifyPath } from './smart-wire-router';
 import { resolveEndpointGridPos } from './endpoint-position';
 import { orthogonalizePath } from './wire-geometry';
 import { planWireRoute, type WireRoutePlan } from './wire-overlap';
+import { rerouteAttachedWires, orthogonalizeDocumentWires } from './wire-reroute';
 import { toast } from 'sonner';
 import { validatePhysics, type PhysicsViolation } from './physics-validator';
 import { runFullERC } from './erc';
@@ -514,33 +515,48 @@ export const useEditor = create<EditorState>((set, get) => ({
     // Note: pushHistory() is called once at drag START (via beginDrag),
     // not on every mousemove. Calling it here would flood the history stack
     // with hundreds of micro-moves.
-    set((s) => ({
-      components: s.components.map((c) =>
+    set((s) => {
+      const components = s.components.map((c) =>
         c.id === id ? { ...c, position: { ...position } } : c,
-      ),
-    }));
+      );
+      // Wires attached to the moved component MUST re-route in the SAME
+      // set() — stale waypoints render diagonal segments (the renderer
+      // draws waypoints verbatim) and the current-flow dots then ride the
+      // diagonal. Re-orthogonalizing keeps every wire Ox/OY-aligned through
+      // the whole drag; endpoints (netlist) are untouched.
+      const wires = rerouteAttachedWires(components, s.wires, s.sheets, new Set([id]));
+      return { components, ...(wires !== s.wires ? { wires } : {}) };
+    });
   },
 
   rotateComponent: (id) => {
     get().pushHistory();
-    set((s) => ({
-      components: s.components.map((c) =>
+    set((s) => {
+      const components = s.components.map((c) =>
         c.id === id
           ? { ...c, rotation: (((c.rotation + 1) % 4) as 0 | 1 | 2 | 3) }
           : c,
-      ),
-    }));
+      );
+      // Terminals rotated → attached wires re-orthogonalize (same invariant
+      // as moveComponent).
+      const wires = rerouteAttachedWires(components, s.wires, s.sheets, new Set([id]));
+      return { components, ...(wires !== s.wires ? { wires } : {}) };
+    });
   },
 
   mirrorComponent: (id, axis) => {
     get().pushHistory();
-    set((s) => ({
-      components: s.components.map((c) =>
+    set((s) => {
+      const components = s.components.map((c) =>
         c.id === id
           ? { ...c, [axis === 'x' ? 'mirrorX' : 'mirrorY']: !c[axis === 'x' ? 'mirrorX' : 'mirrorY'] }
           : c,
-      ),
-    }));
+      );
+      // Mirroring flips terminal positions around the body center — attached
+      // wires re-orthogonalize to the new pin positions.
+      const wires = rerouteAttachedWires(components, s.wires, s.sheets, new Set([id]));
+      return { components, ...(wires !== s.wires ? { wires } : {}) };
+    });
   },
 
   rotateComponentFree: (id, degrees) => {
@@ -548,11 +564,16 @@ export const useEditor = create<EditorState>((set, get) => ({
     // The canvas's render loop should use rotationDeg if present, otherwise fall back to rotation*90.
     get().pushHistory();
     const snapped = Math.round(degrees / 15) * 15;
-    set((s) => ({
-      components: s.components.map((c) =>
+    set((s) => {
+      const components = s.components.map((c) =>
         c.id === id ? { ...c, rotationDeg: snapped } : c,
-      ),
-    }));
+      );
+      // Free rotation moves terminals off the integer grid (honest KiCad
+      // behavior: wires attach exactly at the drawn pins) — attached wires
+      // still re-orthogonalize so no stale-waypoint diagonals linger.
+      const wires = rerouteAttachedWires(components, s.wires, s.sheets, new Set([id]));
+      return { components, ...(wires !== s.wires ? { wires } : {}) };
+    });
   },
 
   toggleDeMorgan: (id) => {
@@ -678,11 +699,13 @@ export const useEditor = create<EditorState>((set, get) => ({
       const ids = new Set(s.multiSelection.components);
       if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
       if (ids.size === 0) return {};
-      return {
-        components: s.components.map((c) =>
-          ids.has(c.id) ? { ...c, position: { x: c.position.x + delta.x, y: c.position.y + delta.y } } : c,
-        ),
-      };
+      const components = s.components.map((c) =>
+        ids.has(c.id) ? { ...c, position: { x: c.position.x + delta.x, y: c.position.y + delta.y } } : c,
+      );
+      // Group drag — every attached wire re-orthogonalizes in the same set()
+      // (stale waypoints would render diagonals, see moveComponent).
+      const wires = rerouteAttachedWires(components, s.wires, s.sheets, ids);
+      return { components, ...(wires !== s.wires ? { wires } : {}) };
     });
   },
 
@@ -704,13 +727,16 @@ export const useEditor = create<EditorState>((set, get) => ({
         ? selected.reduce((sum, c) => sum + c.position.x, 0) / selected.length
         : selected.reduce((sum, c) => sum + c.position.y, 0) / selected.length;
     }
-    set((s) => ({
-      components: s.components.map(c => {
+    set((s) => {
+      const components = s.components.map(c => {
         if (!ids.has(c.id)) return c;
         if (axis === 'x') return { ...c, position: { ...c.position, x: target } };
         return { ...c, position: { ...c.position, y: target } };
-      }),
-    }));
+      });
+      // Aligned components moved — attached wires re-orthogonalize.
+      const wires = rerouteAttachedWires(components, s.wires, s.sheets, ids);
+      return { components, ...(wires !== s.wires ? { wires } : {}) };
+    });
   },
 
   distributeSelected: (axis: 'x' | 'y') => {
@@ -732,14 +758,17 @@ export const useEditor = create<EditorState>((set, get) => ({
     selected.forEach((c, i) => {
       idToPos.set(c.id, start + step * i);
     });
-    set((s) => ({
-      components: s.components.map(c => {
+    set((s) => {
+      const components = s.components.map(c => {
         const pos = idToPos.get(c.id);
         if (pos === undefined) return c;
         if (axis === 'x') return { ...c, position: { ...c.position, x: pos } };
         return { ...c, position: { ...c.position, y: pos } };
-      }),
-    }));
+      });
+      // Distributed components moved — attached wires re-orthogonalize.
+      const wires = rerouteAttachedWires(components, s.wires, s.sheets, ids);
+      return { components, ...(wires !== s.wires ? { wires } : {}) };
+    });
   },
 
   deleteSelected: () => {
@@ -794,14 +823,24 @@ export const useEditor = create<EditorState>((set, get) => ({
       idMap.set(c.id, newId);
       return { ...c, id: newId, position: { x: c.position.x + 3, y: c.position.y + 3 }, parameters: { ...c.parameters }, simState: undefined };
     });
-    const newWires = s.clipboard.wires.map((w) => ({
-      id: genId('wire'),
-      from: { componentId: idMap.get(w.from.componentId) ?? w.from.componentId, terminalId: w.from.terminalId },
-      to: { componentId: idMap.get(w.to.componentId) ?? w.to.componentId, terminalId: w.to.terminalId },
-    }));
+    const newWires = s.clipboard.wires.map((w) => {
+      const nw: any = {
+        id: genId('wire'),
+        from: { componentId: idMap.get(w.from.componentId) ?? w.from.componentId, terminalId: w.from.terminalId },
+        to: { componentId: idMap.get(w.to.componentId) ?? w.to.componentId, terminalId: w.to.terminalId },
+      };
+      // Keep the copied routing shape: waypoints shift with the +3,+3 paste
+      // offset (KiCad behavior) instead of collapsing to the default L route.
+      if (w.waypoints && w.waypoints.length > 0) {
+        nw.waypoints = w.waypoints.map((wp) => ({ x: wp.x + 3, y: wp.y + 3 }));
+      }
+      return nw as Wire;
+    });
     set((st) => ({
       components: [...st.components, ...newComponents],
-      wires: [...st.wires, ...newWires],
+      // Pasted wires are re-orthogonalized against the NEW component
+      // positions so no diagonal can survive a paste.
+      wires: [...st.wires, ...rerouteAttachedWires(newComponents, newWires, st.sheets, new Set(newComponents.map((c) => c.id)))],
       selection: { type: null, id: null },
       multiSelection: {
         components: new Set(newComponents.map((c) => c.id)),
@@ -963,11 +1002,12 @@ export const useEditor = create<EditorState>((set, get) => ({
       const ids = new Set(s.multiSelection.components);
       if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
       const field = axis === 'x' ? 'mirrorX' : 'mirrorY';
-      return {
-        components: s.components.map((c) =>
-          ids.has(c.id) ? { ...c, [field]: !c[field] } : c,
-        ),
-      };
+      const components = s.components.map((c) =>
+        ids.has(c.id) ? { ...c, [field]: !c[field] } : c,
+      );
+      // Mirrored terminals move — attached wires re-orthogonalize.
+      const wires = rerouteAttachedWires(components, s.wires, s.sheets, ids);
+      return { components, ...(wires !== s.wires ? { wires } : {}) };
     });
   },
   rotateSelected: () => {
@@ -975,11 +1015,12 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((s) => {
       const ids = new Set(s.multiSelection.components);
       if (s.selection.type === 'component' && s.selection.id) ids.add(s.selection.id);
-      return {
-        components: s.components.map((c) =>
-          ids.has(c.id) ? { ...c, rotation: (((c.rotation + 1) % 4) as 0 | 1 | 2 | 3) } : c,
-        ),
-      };
+      const components = s.components.map((c) =>
+        ids.has(c.id) ? { ...c, rotation: (((c.rotation + 1) % 4) as 0 | 1 | 2 | 3) } : c,
+      );
+      // Rotated terminals move — attached wires re-orthogonalize.
+      const wires = rerouteAttachedWires(components, s.wires, s.sheets, ids);
+      return { components, ...(wires !== s.wires ? { wires } : {}) };
     });
   },
 
@@ -1645,9 +1686,15 @@ export const useEditor = create<EditorState>((set, get) => ({
   loadDocument: (doc, opts) => {
     // preserveUserState (see the interface comment): AI partial-apply path.
     const preserve = !!opts?.preserveUserState;
+    // Load-time wire normalization: documents that did NOT pass through
+    // examples.ts (share URLs, autosave/crash recovery, saved Library rows,
+    // imports, AI partial applies) can carry legacy diagonal waypoints —
+    // the renderer draws waypoints verbatim, so they would render slanted.
+    // Geometry-only: endpoints (and therefore the netlist) are untouched.
+    const normalized = orthogonalizeDocumentWires(doc);
     set((s) => ({
-      components: doc.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined, fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined })),
-      wires: doc.wires.map((w) => ({ ...w })),
+      components: normalized.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: undefined, fields: c.fields ? c.fields.map((f) => ({ ...f })) : undefined })),
+      wires: normalized.wires.map((w) => ({ ...w })),
       drawings: preserve ? s.drawings : doc.drawings ?? [],
       noConnects: preserve ? s.noConnects : doc.noConnects ?? [],
       groups: preserve ? s.groups : doc.groups ?? [],
