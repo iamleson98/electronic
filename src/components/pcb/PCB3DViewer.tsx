@@ -3,12 +3,17 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
-import { buildNodeMap, getTerminalsForComponent } from '@/lib/circuit/engine';
+import { buildNodeMap, getTerminalsForComponent, computeComponentCurrents } from '@/lib/circuit/engine';
 import { getPlugin } from '@/lib/circuit/registry';
 import { DEFAULT_MODELS } from '@/lib/pcb/3d-models';
 import { parseModel, modelToGeometry } from '@/lib/pcb/model-loader';
+import { buildComponentModel } from '@/lib/pcb/component-models-3d';
 import type { Footprint } from '@/lib/pcb/types';
 
 const FAILED_SENTINEL = Symbol('FAILED');
@@ -57,12 +62,18 @@ export function PCB3DViewer() {
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
+  const composerRef = useRef<EffectComposer | null>(null);
+  const bloomPassRef = useRef<UnrealBloomPass | null>(null);
   const pcbGroupRef = useRef<THREE.Group | null>(null);
   const modelsGroupRef = useRef<THREE.Group | null>(null); // Separate group for 3D models so we can update them without rebuilding everything else
   const modelCacheRef = useRef(createModelGeometryCache());
   const inFlightRef = useRef<Set<string>>(new Set());
   const pendingModelFootprintsRef = useRef<Set<string>>(new Set()); // footprint IDs waiting for their model
   const materialCacheRef = useRef(createMaterialCache());
+  /** true once any procedural model with live hooks (LED/7-seg) is attached */
+  const liveModelsRef = useRef(false);
+  /** plugin map memoized on the components array identity (live-state loop) */
+  const pluginMapCacheRef = useRef<{ components: unknown; plugins: Map<string, NonNullable<ReturnType<typeof getPlugin>>> } | null>(null);
   const probeLabelsRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const probeLayerRef = useRef<HTMLDivElement | null>(null);
   // Cache the (expensive) nodeMap used by voltage-probe labels, keyed on the
@@ -148,6 +159,13 @@ export function PCB3DViewer() {
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setSize(width, height);
       renderer.localClippingEnabled = true;
+      // Physically-based output: sRGB color space + filmic tone mapping —
+      // metals and colored plastics only look real with ACES.
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFShadowMap;
       container.appendChild(renderer.domElement);
       rendererRef.current = renderer;
 
@@ -159,14 +177,57 @@ export function PCB3DViewer() {
       controls.maxPolarAngle = Math.PI * 0.85;
       controlsRef.current = controls;
 
-      // Lights — soft three-point setup
-      scene.add(new THREE.AmbientLight(0xffffff, 0.45));
-      const key = new THREE.DirectionalLight(0xffffff, 0.85);
-      key.position.set(20, 40, 20); scene.add(key);
-      const fill = new THREE.DirectionalLight(0x93c5fd, 0.35);
-      fill.position.set(-20, 30, -10); scene.add(fill);
-      const back = new THREE.DirectionalLight(0xfbbf24, 0.22);
-      back.position.set(0, -20, -30); scene.add(back);
+      // Post-processing chain: render → bloom → output. The bloom pass is
+      // what makes emissive parts (lit LEDs, glowing traces, 7-seg digits)
+      // read as ACTUALLY lit — the halo is the visual cue for "powered".
+      const composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+      const bloomPass = new UnrealBloomPass(
+        new THREE.Vector2(width, height),
+        0.55, // strength — subtle halo, not a fog
+        0.45, // radius
+        0.72, // threshold — above ~0.72 only emissive/bright metal blooms
+      );
+      composer.addPass(bloomPass);
+      composer.addPass(new OutputPass());
+      composerRef.current = composer;
+      bloomPassRef.current = bloomPass;
+
+      // Lights — studio three-point setup + environment reflections.
+      // The environment map is what makes MeshStandardMaterial metal look
+      // like real metal (screen-space reflections come free with PMREM).
+      scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+      const hemi = new THREE.HemisphereLight(0xdfe8ff, 0x2a3140, 0.45);
+      scene.add(hemi);
+      const key = new THREE.DirectionalLight(0xffffff, 1.6);
+      key.position.set(25, 55, 30);
+      key.castShadow = true;
+      key.shadow.mapSize.set(1024, 1024);
+      key.shadow.camera.left = -80; key.shadow.camera.right = 80;
+      key.shadow.camera.top = 80; key.shadow.camera.bottom = -80;
+      key.shadow.camera.far = 200;
+      key.shadow.bias = -0.0004;
+      scene.add(key);
+      const fill = new THREE.DirectionalLight(0x93c5fd, 0.5);
+      fill.position.set(-30, 35, -12); scene.add(fill);
+      const back = new THREE.DirectionalLight(0xfbbf24, 0.25);
+      back.position.set(0, -18, -35); scene.add(back);
+      // Image-based lighting from three's built-in RoomEnvironment — no
+      // network fetch, generated once via PMREM. Async import keeps the
+      // init effect synchronous (the cleanup contract below stays intact).
+      import('three/examples/jsm/environments/RoomEnvironment.js')
+        .then(({ RoomEnvironment }) => {
+          if (cancelled || !rendererRef.current) return;
+          try {
+            const pmrem = new THREE.PMREMGenerator(rendererRef.current);
+            const env = pmrem.fromScene(new RoomEnvironment(), 0.04);
+            sceneRef.current!.environment = env.texture;
+            pmrem.dispose();
+          } catch {
+            // Environment optional — lights alone still shade correctly
+          }
+        })
+        .catch(() => { /* environment optional */ });
 
       // Grid — sized to board with margin
       const gridSize = Math.max(board.width, board.height) + 40;
@@ -240,6 +301,57 @@ export function PCB3DViewer() {
           });
         }
 
+        // ── Live component states: LED glow + 7-segment digits ────────────
+        // Procedural models expose hooks (__updateEmissive / __updateSegments);
+        // feed them the CURRENT simulation currents/state so the 3D view
+        // physically lights up with the circuit.
+        if (liveModelsRef.current && modelsGroupRef.current) {
+          const es = useEditor.getState();
+          const sim = es.simContext;
+          if (sim && es.components.length) {
+            // plugin map memoized on the components array identity
+            if (pluginMapCacheRef.current?.components !== es.components) {
+              const plugins = new Map<string, NonNullable<ReturnType<typeof getPlugin>>>();
+              for (const c of es.components) {
+                const p = getPlugin(c.type);
+                if (p) plugins.set(c.type, p);
+              }
+              pluginMapCacheRef.current = { components: es.components, plugins };
+            }
+            const plugins = pluginMapCacheRef.current!.plugins;
+            try {
+              const currents = computeComponentCurrents(es.components, es.wires, plugins, sim);
+              const st = (sim.state as any)?.__global ?? {};
+              for (const child of modelsGroupRef.current.children as any[]) {
+                if (child.__updateEmissive) {
+                  child.__updateEmissive(currents.get(child.__componentId) ?? 0);
+                } else if (child.__updateSegments) {
+                  // 7-seg display: segStates live in sim.state.__global keyed
+                  // by the component id (see physics engine's 7seg stamp)
+                  const segStates = (st[`7seg_${child.__componentId}`] ?? {}) as Record<string, boolean>;
+                  let mask = 0;
+                  const segBits: Record<string, number> = { a: 0, b: 1, c: 2, d: 3, e: 4, f: 5, g: 6 };
+                  for (const [seg, bit] of Object.entries(segBits)) {
+                    if (segStates[seg]) mask |= (1 << bit);
+                  }
+                  child.__updateSegments(mask);
+                }
+              }
+              if (typeof window !== 'undefined' && (window as any).__3D_PROBE__) {
+                (window as any).__3D_PROBE__({
+                  live: liveModelsRef.current,
+                  simTime: sim.time,
+                  children: (modelsGroupRef.current!.children as any[]).map((c) => ({
+                    componentId: c.__componentId,
+                    hasEmissiveHook: !!c.__updateEmissive,
+                    current: currents.get(c.__componentId) ?? null,
+                  })),
+                });
+              }
+            } catch { /* ignore */ }
+          }
+        }
+
         // Voltage probes — update DOM labels directly (no React re-render)
         if (stateRef.current.showVoltageProbes && probeLayerRef.current && cameraRef.current) {
           updateProbeLabels();
@@ -248,7 +360,12 @@ export function PCB3DViewer() {
           probeLabelsRef.current.forEach((el) => { el.style.display = 'none'; });
         }
 
-        renderer.render(scene, camera);
+        // Post-processed render: bloom for lit LEDs / glowing traces.
+        if (composerRef.current) {
+          composerRef.current.render();
+        } else {
+          renderer.render(scene, camera);
+        }
       };
       raf = requestAnimationFrame(animate);
 
@@ -258,6 +375,8 @@ export function PCB3DViewer() {
         const w = Math.max(1, containerRef.current.clientWidth);
         const h = Math.max(1, containerRef.current.clientHeight);
         rendererRef.current.setSize(w, h);
+        if (composerRef.current) composerRef.current.setSize(w, h);
+        if (bloomPassRef.current) bloomPassRef.current.setSize(w, h);
         cameraRef.current.aspect = w / h;
         cameraRef.current.updateProjectionMatrix();
       });
@@ -284,6 +403,9 @@ export function PCB3DViewer() {
             rendererRef.current.domElement.parentNode.removeChild(rendererRef.current.domElement);
           }
         }
+        if (composerRef.current) composerRef.current.dispose?.();
+        composerRef.current = null;
+        bloomPassRef.current = null;
         if (probeLayerRef.current && probeLayerRef.current.parentNode) {
           probeLayerRef.current.parentNode.removeChild(probeLayerRef.current);
         }
@@ -344,23 +466,89 @@ export function PCB3DViewer() {
     const group = pcbGroupRef.current;
     const BOARD_THICKNESS = 1.6;
 
-    // Board substrate
-    const boardGeo = new THREE.BoxGeometry(board.width, BOARD_THICKNESS, board.height);
+    // Board substrate — rounded-rect extrusion (real PCB outline look)
+    // + FR4 core between copper layers: lighter fiberglass visible on the
+    // board's side / in cross-section.
+    // NOTE: the shape's Y is NEGATED before rotateX(−π/2) so board-Y maps
+    // to world +Z unmirrored, and the front cap (normal +Y) ends up as the
+    // TOP face at y=0 — with rotateX(+π/2) instead, the top cap's normal
+    // faced DOWN, got backface-culled, and the camera saw the raw FR4 core
+    // through the hole (the "cream board" bug).
+    const boardLayerGeometry = (bw: number, bh: number, depth: number, corner: number): THREE.ExtrudeGeometry => {
+      const shape = new THREE.Shape();
+      shape.moveTo(corner, 0);
+      shape.lineTo(bw - corner, 0);
+      shape.quadraticCurveTo(bw, 0, bw, -corner);
+      shape.lineTo(bw, -(bh - corner));
+      shape.quadraticCurveTo(bw, -bh, bw - corner, -bh);
+      shape.lineTo(corner, -bh);
+      shape.quadraticCurveTo(0, -bh, 0, -(bh - corner));
+      shape.lineTo(0, -corner);
+      shape.quadraticCurveTo(0, 0, corner, 0);
+      const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false, curveSegments: 6 });
+      geo.rotateX(-Math.PI / 2);
+      geo.translate(0, -depth, 0);
+      return geo;
+    };
+    const corner = Math.min(2, board.width / 8, board.height / 8);
+    const w = board.width, h = board.height;
+    const boardGeo = boardLayerGeometry(w, h, BOARD_THICKNESS, corner);
     const boardMat = materialCacheRef.current.get('board', () =>
-      new THREE.MeshStandardMaterial({ color: 0x0d4a0d, roughness: 0.85, metalness: 0.05 }));
+      new THREE.MeshStandardMaterial({ color: 0x0a5c30, roughness: 0.55, metalness: 0.15 }));
     const boardMesh = new THREE.Mesh(boardGeo, boardMat);
-    boardMesh.position.set(board.width / 2, -BOARD_THICKNESS / 2, board.height / 2);
-    (boardMesh as any).__baseY = -BOARD_THICKNESS / 2;
+    boardMesh.position.set(0, 0, 0);
+    boardMesh.receiveShadow = true;
+    boardMesh.castShadow = true;
+    // __baseY must EQUAL position.y — the explosion/assembly loop re-pins
+    // every child to its __baseY each frame (a stale −0.8 here sank the
+    // board 0.8 mm under the FR4 core: the "cream board top" bug).
+    (boardMesh as any).__baseY = 0;
     group.add(boardMesh);
 
-    // Silkscreen
-    const silkGeo = new THREE.BoxGeometry(board.width - 2, 0.02, board.height - 2);
-    const silkMat = materialCacheRef.current.get('silk', () =>
-      new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: 0.9, metalness: 0.0 }));
-    const silkMesh = new THREE.Mesh(silkGeo, silkMat);
-    silkMesh.position.set(board.width / 2, 0.01, board.height / 2);
-    (silkMesh as any).__baseY = 0.01;
-    group.add(silkMesh);
+    // FR4 core edge (lighter fiberglass ring visible on the board's side)
+    const coreGeo = boardLayerGeometry(w, h, BOARD_THICKNESS * 0.5, corner);
+    const coreMesh = new THREE.Mesh(coreGeo, materialCacheRef.current.get('fr4core', () =>
+      new THREE.MeshStandardMaterial({ color: 0x9c8f5a, roughness: 0.8, metalness: 0.0 })));
+    coreMesh.scale.set(0.999, 1, 0.999);
+    coreMesh.position.set(0, -BOARD_THICKNESS * 0.25, 0);
+    (coreMesh as any).__baseY = -BOARD_THICKNESS * 0.25;
+    group.add(coreMesh);
+
+    // Silkscreen — a CanvasTexture plane above the board: refdes labels
+    // drawn at the footprint positions (what real boards have).
+    {
+      const silkCanvas = document.createElement('canvas');
+      const S = 8; // texels per mm
+      silkCanvas.width = Math.max(64, Math.round(w * S));
+      silkCanvas.height = Math.max(64, Math.round(h * S));
+      const sctx = silkCanvas.getContext('2d')!;
+      sctx.clearRect(0, 0, silkCanvas.width, silkCanvas.height);
+      sctx.fillStyle = '#e8eaec';
+      sctx.font = `bold ${Math.max(10, Math.round(S * 1.3))}px ui-monospace, monospace`;
+      sctx.textAlign = 'center';
+      sctx.textBaseline = 'middle';
+      for (const fp of footprints) {
+        const label = fp.refdes || fp.id;
+        sctx.fillText(label, fp.position.x * S, fp.position.y * S);
+        // small pin-1 dot
+        const p1 = fp.pads[0];
+        if (p1) {
+          sctx.beginPath();
+          sctx.arc((fp.position.x + p1.position.x) * S, (fp.position.y + p1.position.y) * S, S * 0.35, 0, Math.PI * 2);
+          sctx.fill();
+        }
+      }
+      const silkTex = new THREE.CanvasTexture(silkCanvas);
+      silkTex.anisotropy = 4;
+      const silkPlane = new THREE.Mesh(
+        new THREE.PlaneGeometry(w, h),
+        new THREE.MeshBasicMaterial({ map: silkTex, transparent: true, depthWrite: false }),
+      );
+      silkPlane.rotation.x = -Math.PI / 2;
+      silkPlane.position.set(w / 2, 0.015, h / 2);
+      (silkPlane as any).__baseY = 0.015;
+      group.add(silkPlane);
+    }
 
     const PAD_HEIGHT = 0.05;
     const TRACE_HEIGHT = 0.05;
@@ -409,8 +597,10 @@ export function PCB3DViewer() {
     }
 
     // Footprints + pads (NO 3D model loading here — that's in a separate effect)
+    // Gold ENIG finish — what real boards' exposed copper looks like after
+    // surface finishing (the old silver was raw unfinished copper).
     const padMat = materialCacheRef.current.get('pad', () =>
-      new THREE.MeshStandardMaterial({ color: 0xc0c0c0, roughness: 0.2, metalness: 0.9 }));
+      new THREE.MeshStandardMaterial({ color: 0xd4b96a, roughness: 0.3, metalness: 0.85 }));
     for (const fp of footprints) {
       // Pads
       for (const pad of fp.pads) {
@@ -418,14 +608,22 @@ export function PCB3DViewer() {
         // below) — using pad.drill here shrank every THT pad to its hole size.
         const padW = pad.size?.width || 0.6;
         const padH = pad.size?.height || 0.6;
-        const padGeo = new THREE.BoxGeometry(padW, PAD_HEIGHT, padH);
-        const padMesh = new THREE.Mesh(padGeo, padMat);
         const padY = fp.side === 'bottom' ? -BOARD_THICKNESS - PAD_HEIGHT : PAD_HEIGHT;
+        let padMesh: THREE.Mesh;
+        if (pad.shape === 'circle') {
+          padMesh = new THREE.Mesh(
+            new THREE.CylinderGeometry(Math.max(padW, padH) / 2, Math.max(padW, padH) / 2, PAD_HEIGHT * 2, 20),
+            padMat,
+          );
+        } else {
+          padMesh = new THREE.Mesh(new THREE.BoxGeometry(padW, PAD_HEIGHT * 2, padH), padMat);
+        }
         padMesh.position.set(
           fp.position.x + pad.position.x,
           padY,
           fp.position.y + pad.position.y,
         );
+        padMesh.receiveShadow = true;
         (padMesh as any).__baseY = padY;
         group.add(padMesh);
         if (pad.drill && pad.drill > 0) {
@@ -472,14 +670,49 @@ export function PCB3DViewer() {
       if (obj instanceof THREE.Mesh) obj.geometry?.dispose();
     }
 
-    // For each footprint that doesn't have a model yet, kick off loading
+    // For each footprint that doesn't have a model yet, attach one.
+    // Procedural factories FIRST (realistic multi-material models that read
+    // the component's parameters — resistor color bands, LED lens color,
+    // TO-92/DIP/TO-220 shapes); custom modelUrl / default-STL only as
+    // fallback for types without a factory.
     const cache = modelCacheRef.current;
     const inFlight = inFlightRef.current;
+    const editorComps = useEditor.getState().components;
     for (const fp of footprints) {
       // Skip if already attached or already loading
       if (attachedIds.has(fp.id)) continue;
 
       const modelKey = fp.modelUrl || `default:${fp.componentType}`;
+
+      const attachObject = (obj: THREE.Object3D) => {
+        if (!modelsGroupRef.current) return;
+        const BOARD_THICKNESS = 1.6;
+        const PAD_HEIGHT = 0.05;
+        obj.position.set(fp.position.x, PAD_HEIGHT, fp.position.y);
+        if (fp.side === 'bottom') {
+          obj.position.y = -BOARD_THICKNESS - PAD_HEIGHT;
+          obj.scale.y = -1;
+        }
+        obj.rotation.y = (fp.rotation * Math.PI) / 180;
+        (obj as any).__baseY = obj.position.y;
+        (obj as any).__footprintId = fp.id;
+        (obj as any).__componentId = fp.componentId;
+        modelsGroupRef.current.add(obj);
+      };
+
+      // 1) Procedural realistic model (synchronous, parameter-aware)
+      if (!fp.modelUrl) {
+        const comp = editorComps.find((c) => c.id === fp.componentId);
+        const procedural = buildComponentModel({
+          footprint: fp,
+          params: (comp?.parameters as Record<string, any>) ?? {},
+        });
+        if (procedural) {
+          attachObject(procedural);
+          liveModelsRef.current = true; // has __updateEmissive/__updateSegments hooks
+          continue;
+        }
+      }
 
       const attachMesh = (geo: THREE.BufferGeometry) => {
         if (!modelsGroupRef.current) return;
@@ -562,26 +795,33 @@ export function PCB3DViewer() {
   }, [footprints]);
 
   // ── High-quality rendering toggle ────────────────────────────────────────
+  // ACES tone mapping + sRGB are now ALWAYS on (they make the PBR materials
+  // read as real); HQ adds a hard spotlight + rim light instead of toggling
+  // the (already correct) tone pipeline.
   useEffect(() => {
     const scene = sceneRef.current;
     const renderer = rendererRef.current;
     if (!scene || !renderer) return;
     // Remove any existing HQ lights
-    const existingHemi = (scene as any).__hemiLight;
-    const existingRim = (scene as any).__rimLight;
-    if (existingHemi) { scene.remove(existingHemi); existingHemi.dispose(); delete (scene as any).__hemiLight; }
-    if (existingRim) { scene.remove(existingRim); existingRim.dispose(); delete (scene as any).__rimLight; }
+    const existingSpot = (scene as any).__hqSpot;
+    const existingRim = (scene as any).__hqRim;
+    if (existingSpot) { scene.remove(existingSpot); existingSpot.dispose?.(); delete (scene as any).__hqSpot; }
+    if (existingRim) { scene.remove(existingRim); existingRim.dispose(); delete (scene as any).__hqRim; }
     if (highQuality) {
-      const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.4);
-      scene.add(hemi);
-      (scene as any).__hemiLight = hemi;
-      const rim = new THREE.DirectionalLight(0x3b82f6, 0.3);
-      rim.position.set(-30, 20, -30);
+      const spot = new THREE.SpotLight(0xffffff, 400, 400, Math.PI / 6, 0.45, 1.9);
+      spot.position.set(35, 90, 45);
+      spot.castShadow = true;
+      spot.shadow.mapSize.set(2048, 2048);
+      spot.shadow.bias = -0.0003;
+      scene.add(spot);
+      (scene as any).__hqSpot = spot;
+      const rim = new THREE.DirectionalLight(0x3b82f6, 0.4);
+      rim.position.set(-40, 25, -40);
       scene.add(rim);
-      (scene as any).__rimLight = rim;
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      (scene as any).__hqRim = rim;
+      renderer.toneMappingExposure = 1.1;
     } else {
-      renderer.toneMapping = THREE.NoToneMapping;
+      renderer.toneMappingExposure = 1.0;
     }
   }, [highQuality]);
 
@@ -621,7 +861,7 @@ export function PCB3DViewer() {
       const screenX = (pos.x + 1) / 2 * w;
       const screenY = (1 - (pos.y + 1) / 2) * h;
 
-      // Compute voltage label
+      // Compute voltage/current/power label — full measurement readout
       let label = `${fp.refdes || fp.id}: —`;
       if (simContext) {
         const comp = editorState.components.find((c) => c.id === fp.componentId);
@@ -633,7 +873,21 @@ export function PCB3DViewer() {
               const firstTerm = terms[0];
               if (firstTerm) {
                 const v = simContext.nodeVoltage[firstTerm.nodeId];
-                label = `${fp.refdes || fp.id}: ${v != null ? v.toFixed(2) : '—'}V`;
+                // Current through the component (mA) + power (mW) — the
+                // same source of truth as the schematic's probe panel.
+                let iText = '';
+                let pText = '';
+                try {
+                  const plugins = new Map<string, NonNullable<ReturnType<typeof getPlugin>>>();
+                  for (const c of editorState.components) {
+                    const p = getPlugin(c.type);
+                    if (p) plugins.set(c.type, p);
+                  }
+                  const i = computeComponentCurrents(editorState.components, editorState.wires, plugins, simContext).get(comp.id) ?? 0;
+                  iText = ` · ${(i * 1000).toFixed(2)}mA`;
+                  pText = ` · ${(v != null ? v * i * 1000 : 0).toFixed(2)}mW`;
+                } catch { /* current optional */ }
+                label = `${fp.refdes || fp.id}: ${v != null ? v.toFixed(2) : '—'}V${iText}${pText}`;
               }
             } catch {
               // ignore
