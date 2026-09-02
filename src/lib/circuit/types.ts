@@ -119,6 +119,12 @@ export interface SimContext {
    */
   method?: 'euler' | 'trap' | 'gear';
   /**
+   * Current Newton-Raphson round index within the step (0 = first stamp).
+   * The engine sets this so non-linear stamps can escalate gmin SPICE-style
+   * after many rounds (nonlinear.ts escalateGmin). Undefined = 0.
+   */
+  newtonIter?: number;
+  /**
    * Net label name -> node id (e.g. 'VCC' -> 3). Lets behavioral sources
    * resolve V(netname) expressions. Undefined when the context was built
    * without a node map (tests, AI tools).
@@ -557,6 +563,21 @@ export interface ComponentPlugin {
    * default one-step lag. Circuits without feedback plugins pay zero cost.
    */
   feedback?: boolean;
+
+  /**
+   * Declare that this component's stamp is a linearization whose operating
+   * point depends on the CURRENT step's node voltages (diodes, BJTs, MOSFETs,
+   * zeners, comparators — anything that classifies a region from V or
+   * differentiates an exponential around V). The engine then iterates
+   * stamp → solve → re-stamp *within the same timestep* until the node
+   * voltages satisfy the SPICE convergence criteria
+   * (|ΔV| ≤ reltol·|V| + vntol, |ΔI| ≤ aitol), which is exactly the
+   * Newton-Raphson subiteration loop Falstad/CircuitJS1/SPICE run per step.
+   * Without this, the component is stamped once against the previous step's
+   * voltages — a one-step-lag linearization that misclassifies device
+   * regions on fast switching circuits. Linear circuits pay zero cost.
+   */
+  nonLinear?: boolean;
 }
 
 // ----- MNA system interface -----

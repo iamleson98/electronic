@@ -16,6 +16,13 @@ import { registerPlugin } from '../registry';
 import { drawLabel } from './draw';
 import { thermalVoltage, tempScaleIs } from '../sim-options';
 import { stateKey } from '../state-keys';
+import {
+  limitStep,
+  junctionVCrit,
+  shockleyCompanion,
+  escalateGmin,
+  junctionCapacitance,
+} from '../nonlinear';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shockley diode — full model
@@ -49,6 +56,7 @@ export const diodeShockley: ComponentPlugin = {
   keywords: ['diode', 'shockley', 'junction', 'rectifier'],
   defaultFootprint: 'D0805',
   datasheet: 'https://en.wikipedia.org/wiki/Diode_modelling',
+  nonLinear: true,
   render(ctx, params, cellSize) {
     ctx.beginPath();
     ctx.moveTo(0, cellSize); ctx.lineTo(2 * cellSize - 3, cellSize);
@@ -72,30 +80,60 @@ export const diodeShockley: ComponentPlugin = {
     const Is = params.Is as number;
     const N = params.N as number;
     const Rs = params.Rs as number;
+    const Cjo = params.Cjo as number;
+    const Vj = params.Vj as number;
+    const M = params.M as number;
+    const Tt = params.Tt as number;
     const Vt = thermalVoltage(27);   // 27°C default
-    // Get current voltage (initial guess = 0.7V if not yet solved)
+    const vscale = N * Vt;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('dio', comp, a, k);
-    const vGuess = st[key] ?? 0.7;
-    // Newton-Raphson linearization around current guess
-    const v = vGuess;
-    // Shockley: I = Is*(exp(v/(N*Vt)) - 1)
-    // Limit exponent to avoid overflow
-    const ev = Math.exp(Math.min(v / (N * Vt), 30));
-    const I = Is * (ev - 1);
-    const g = Is * ev / (N * Vt);
-    // Equivalent circuit: series Rs + diode
-    // Thevenin: V_eq = v - Rs*I (voltage at internal node), R_eq = 1/g + Rs
-    // Norton: I_eq = I - g*v = -Is*(ev - 1 - ev) = Is (since I = Is*(ev-1) and g*v = Is*ev)
-    // Wait — proper companion model: diode linearized as conductance g + current source I - g*v
-    // For the full circuit with Rs: stamp Rs as conductance, then stamp diode at internal node.
-    // We don't have an internal node — approximate by combining into single conductance:
-    // G_total = 1 / (1/g + Rs) = g / (1 + g*Rs)
-    // I_total = (I - g*v) * G_total / g (current source scaled)
-    const Gtotal = g / (1 + g * Rs);
-    const Ieq = (I - g * v) * (Gtotal / g);
-    sys.stampConductance(a, k, Gtotal);
-    sys.stampCurrentSource(a, k, Ieq);
+    // ── Newton-Raphson with CircuitJS1/SPICE voltage limiting ────────────
+    // The engine re-stamps this component once per Newton round (nonLinear:
+    // true below) with fresh node voltages. vPrev = last round's accepted
+    // junction voltage; the raw new estimate is limited along the exponential
+    // (limitStep) so the linearized current changes by at most ~e per round —
+    // without this, a 0.8 V estimate on Is=1e-14 explodes to e^31 ≈ 3e13 A.
+    const vPrev = (st[key + '_vl'] as number | undefined) ?? 0.7;
+    const vRaw = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+    const v = limitStep(vRaw, vPrev, vscale, junctionVCrit(vscale, Is));
+    st[key + '_vl'] = v;
+    // SPICE-style escalating gmin: keeps the matrix non-singular and tames
+    // stubborn convergence after many Newton rounds (CircuitJS1 Diode.java).
+    const gmin = escalateGmin(sim.newtonIter ?? 0);
+    // Shockley companion at the (limited) operating point v.
+    const { g, iEq } = shockleyCompanion(v, Is, vscale, gmin);
+    // ── Series resistance via a REAL internal node ───────────────────────
+    // Rs is in series with the junction; the correct MNA treatment is an
+    // internal pseudo-node (like makeLevel1MOS's Rd/Rs). The old code
+    // folded Rs into G_total = g/(1+g·Rs) — an approximation that
+    // distorts the linearization source when Rs is large.
+    let an = a;
+    if (Rs > 0) {
+      an = sys.addExtra() + 1; // pseudo-node id (extra index + 1)
+      sys.stampConductance(an, a, 1 / Rs);
+    }
+    sys.stampConductance(an, k, g);
+    sys.stampCurrentSource(an, k, iEq);
+    // ── Charge storage: Cj(v) + diffusion capacitance ────────────────────
+    // Cj = Cjo/(1−v/Vj)^M (depletion), Cd = Tt·g (diffusion, transit-time).
+    // Linearized at v with the backward-Euler capacitor companion
+    // (first-order keeps this robust; the parameters are small so BE's
+    // damping is invisible at normal timesteps).
+    const Ceq = junctionCapacitance(v, Cjo, Vj, M) + Tt * g;
+    if (Ceq > 0) {
+      const dt = Math.max(sim.dt, 1e-12);
+      const ckey = key + '_cj';
+      const vCjPrev = (st[ckey] as number | undefined) ?? v;
+      const gc = Ceq / dt;
+      // i(a→k) = gc·v + (−gc·vCjPrev) — stamp onto the internal junction
+      // node so the series Rs is outside the charge path (physical).
+      sys.stampConductance(an, k, gc);
+      sys.stampCurrentSource(an, k, -gc * vCjPrev);
+      // persist for the next step (BE history — see capacitor plugin);
+      // only on the first Newton round so re-stamps don't shift history
+      if ((sim.newtonIter ?? 0) === 0) st[ckey] = v;
+    }
   },
   step(params, terminals, sim, instance) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
@@ -151,6 +189,7 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       { key: 'Ikf', label: 'Forward Knee I', type: 'number', default: 1, unit: 'A', min: 1e-6, max: 100, step: 0.1 },
     ],
     keywords: ['bjt', 'transistor', isNpn ? 'npn' : 'pnp', 'gummel-poon'],
+    nonLinear: true,
     defaultFootprint: 'TO-92',
     render(ctx, params, cellSize) {
       ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
@@ -311,6 +350,7 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
       { key: 'Rs', label: 'Source Resistance', type: 'number', default: 0, unit: 'Ω', min: 0, max: 1000, step: 0.1 },
     ],
     keywords: ['mosfet', isNmos ? 'nmos' : 'pmos', 'level1', 'schichman-hodges'],
+    nonLinear: true,
     defaultFootprint: 'SOT-23',
     render(ctx, _params, cellSize) {
       ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
@@ -480,6 +520,7 @@ function makeJFET(type: 'n' | 'p'): ComponentPlugin {
       { key: 'Idss', label: 'Saturation Current', type: 'number', default: 0.01, unit: 'A', min: 1e-6, max: 1, step: 1e-4 },
     ],
     keywords: ['jfet', isN ? 'n-channel' : 'p-channel'],
+    nonLinear: true,
     defaultFootprint: 'TO-92',
     render(ctx, _params, cellSize) {
       ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;

@@ -372,6 +372,7 @@ function makeBSIM3Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
     ],
     boundingBox: { width: 3, height: 4 },
     keywords: ['mosfet', isNmos ? 'nmos' : 'pmos', 'bsim3', 'level49', 'compact', 'analog'],
+    nonLinear: true,
     defaultFootprint: 'SOT-23',
     render: (ctx, _params, cellSize) => {
       ctx.strokeStyle = '#cbd5e1';

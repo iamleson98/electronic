@@ -338,6 +338,7 @@ const led: ComponentPlugin = {
   category: 'io',
   description: 'Light-emitting diode with series resistance. Color parameter controls glow color.',
   symbol: 'LED',
+  nonLinear: true,
   boundingBox: { width: 4, height: 2 },
   terminals: [
     { id: 'a', label: 'A', position: { x: 0, y: 1 } },

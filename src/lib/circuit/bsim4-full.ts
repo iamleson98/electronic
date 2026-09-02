@@ -774,6 +774,7 @@ function makeBSIM4Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
     ],
     boundingBox: { width: 3, height: 4 },
     keywords: ['mosfet', isNmos ? 'nmos' : 'pmos', 'bsim4', 'level54', 'compact', 'analog', 'rf', 'gate-leak'],
+    nonLinear: true,
     defaultFootprint: 'SOT-23',
     render: (ctx, _params, cellSize) => {
       ctx.strokeStyle = '#cbd5e1';

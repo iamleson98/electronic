@@ -13,6 +13,7 @@ const pnp: ComponentPlugin = {
   category: 'semiconductor',
   description: 'PNP BJT with simple piecewise-linear model. Use as a switch (high-side).',
   symbol: 'PNP',
+  nonLinear: true,
   boundingBox: { width: 3, height: 4 },
   terminals: [
     { id: 'e', label: 'E', position: { x: 3, y: 0 } },
@@ -168,6 +169,7 @@ const nmos: ComponentPlugin = {
   category: 'semiconductor',
   description: 'N-channel enhancement MOSFET. Threshold model: on when Vgs > Vth.',
   symbol: 'NMOS',
+  nonLinear: true,
   boundingBox: { width: 3, height: 4 },
   terminals: [
     { id: 'd', label: 'D', position: { x: 3, y: 0 } },
@@ -290,6 +292,7 @@ const pmos: ComponentPlugin = {
   category: 'semiconductor',
   description: 'P-channel enhancement MOSFET. Threshold model: on when Vgs < -Vth (i.e. Vsg > Vth).',
   symbol: 'PMOS',
+  nonLinear: true,
   boundingBox: { width: 3, height: 4 },
   terminals: [
     { id: 's', label: 'S', position: { x: 3, y: 0 } },

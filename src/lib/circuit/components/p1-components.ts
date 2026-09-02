@@ -227,6 +227,7 @@ export const comparator: ComponentPlugin = {
   category: 'ic',
   description: 'Voltage comparator. Output = HIGH when V(+) > V(-), LOW otherwise. Open-collector output.',
   symbol: 'CMP',
+  nonLinear: true,
   boundingBox: { width: 6, height: 4 },
   terminals: [
     { id: 'inp', label: '+', position: { x: 0, y: 1 }, electricalType: 'input' as const },

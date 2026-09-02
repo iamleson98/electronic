@@ -1361,16 +1361,53 @@ export function simulateStep(
   }
 
   // ── Gauss–Seidel outer iteration for behavioral (feedback) sources ─────
+  // and Newton–Raphson subiteration for non-linear components ────────────
   // Plugins flagged `feedback: true` (bvSource / biSource) read node
   // voltages / branch currents inside stamp() — e.g. V = 2*V(in) or
   // I = I(V1). A single stamp/solve leaves those references one solve
   // behind (the "one-step lag"). Re-stamp with the fresh solution until
-  // the node voltages AND branch currents stop moving. Circuits with no
-  // feedback plugins skip this entirely — zero overhead.
-  if (
-    x && stateSnapshot &&
-    components.some((c) => plugins.get(c.type)?.feedback === true)
-  ) {
+  // the node voltages AND branch currents stop moving.
+  //
+  // Plugins flagged `nonLinear: true` (diodes, BJTs, MOSFETs, zeners, …)
+  // linearize around the current node voltages. SPICE / Falstad / CircuitJS1
+  // iterate stamp → solve → re-stamp *within the same timestep* until the
+  // solution satisfies |ΔV| ≤ reltol·|V| + vntol — the Newton subiteration
+  // loop (CircuitJS1 CirSim.runCircuit subiter loop, up to 5000 rounds,
+  // halving the timestep on failure). Without it, region classification
+  // (diode on/off, BJT sat/active, MOS sat/linear) lags one step behind on
+  // fast signals and produces wrong currents.
+  //
+  // Both flags share this loop: the same stamp→solve→measure residual
+  // machinery converges both. Circuits with neither flag skip this
+  // entirely — zero overhead for linear circuits.
+  const hasFeedback = components.some((c) => plugins.get(c.type)?.feedback === true);
+  const hasNonLinear = components.some((c) => plugins.get(c.type)?.nonLinear === true);
+  if (x && stateSnapshot && (hasFeedback || hasNonLinear)) {
+    // SPICE-style convergence tolerances for the Newton loop (ngspice
+    // defaults: reltol=1e-3, vntol=1e-6 V, aitol=1e-12 A).
+    const RELTOL = 1e-3;
+    const VNTOL = 1e-6;
+    const AITOL = 1e-12;
+    const MAX_ITER = hasNonLinear ? 100 : 20;
+    // Convergence test: |ΔV| ≤ RELTOL·|V| + VNTOL on every node and
+    // |ΔI| ≤ AITOL on every branch current (SPICE `convTest`).
+    const convergedNewton = (
+      prevV: Float64Array,
+      newV: Float64Array,
+      prevI: Float64Array,
+      newI: Float64Array,
+      nExtra: number,
+    ): boolean => {
+      for (let i = 1; i < numNodes; i++) {
+        if (Math.abs(newV[i] - prevV[i]) > RELTOL * Math.max(Math.abs(newV[i]), Math.abs(prevV[i])) + VNTOL) {
+          return false;
+        }
+      }
+      for (let i = 0; i < nExtra; i++) {
+        if (Math.abs(newI[i] - prevI[i]) > AITOL) return false;
+      }
+      return true;
+    };
     // Round 0 (the solve above) stamped against the incoming (previous
     // step's) voltages/currents. Measure how far the solve moved from what
     // those stamps saw, then feed the results back for the re-stamp rounds.
@@ -1385,8 +1422,16 @@ export function simulateStep(
       const d = Math.abs(iNew - sim.branchCurrent[i]);
       if (d > deltaI0) deltaI0 = d;
     }
-    if (deltaV0 >= 1e-9 || deltaI0 >= 1e-12) {
-      const MAX_ITER = 20;
+    // A Newton-converged round 0 (small residual against the SPICE
+    // tolerance) is already self-consistent — skip the loop entirely.
+    const newV0 = new Float64Array(numNodes);
+    for (let i = 1; i < numNodes; i++) newV0[i] = x[i - 1];
+    const newI0 = new Float64Array(attempt.sys.numExtra);
+    for (let i = 0; i < attempt.sys.numExtra; i++) newI0[i] = x[numNodes - 1 + i];
+    const round0Converged = convergedNewton(
+      sim.nodeVoltage, newV0, sim.branchCurrent, newI0, attempt.sys.numExtra,
+    );
+    if (!round0Converged && (deltaV0 >= 1e-9 || deltaI0 >= 1e-12)) {
       let prevDeltaV = Infinity;
       let nonDecreasing = 0;
       let dampAlpha = 0.5;   // blend factor once damping engages
@@ -1395,7 +1440,16 @@ export function simulateStep(
       // Feed round 0's results back so round 1 stamps against fresh values.
       for (let i = 1; i < numNodes; i++) sim.nodeVoltage[i] = x[i - 1];
       for (let i = 0; i < attempt.sys.numExtra; i++) sim.branchCurrent[i] = x[numNodes - 1 + i];
+      // (the first stamp/solve above ran at newtonIter = 0)
+      sim.newtonIter = 0;
       for (let k = 1; k < MAX_ITER; k++) {
+        // What THIS round's stamps will see (round k−1's feedback state).
+        // Captured up front — the residual/branch updates below mutate
+        // sim.nodeVoltage / sim.branchCurrent in place.
+        const prevVArr = new Float64Array(numNodes);
+        for (let i = 1; i < numNodes; i++) prevVArr[i] = sim.nodeVoltage[i];
+        const prevIArr = Float64Array.from(sim.branchCurrent);
+        sim.newtonIter = k;
         // Undo state mutated by the previous round's stamp (edge counters,
         // region latches) so every re-stamp applies transitions exactly once.
         restoreStateInPlace(stateMap, stateSnapshot);
@@ -1422,7 +1476,20 @@ export function simulateStep(
           if (d > deltaI) deltaI = d;
           sim.branchCurrent[i] = iNew;
         }
-        if (deltaV < 1e-9 && deltaI < 1e-12) break; // self-consistent
+        if (deltaV < 1e-9 && deltaI < 1e-12) break; // self-consistent (absolute test)
+        // SPICE tolerance test — the Newton loop's official exit: the solve
+        // moved less than reltol·|V| + vntol from what this round's stamps
+        // linearized around. Strictly stronger than the absolute test for
+        // large signals; reachable for small ones.
+        {
+          const newV = new Float64Array(numNodes);
+          for (let i = 1; i < numNodes; i++) newV[i] = round.x[i - 1];
+          const newI = new Float64Array(round.sys.numExtra);
+          for (let i = 0; i < round.sys.numExtra; i++) newI[i] = round.x[numNodes - 1 + i];
+          if (convergedNewton(prevVArr, newV, prevIArr, newI, round.sys.numExtra)) {
+            break; // SPICE-tolerance converged — this solve is self-consistent
+          }
+        }
         // Feed the solved voltages back for the next stamp round. Once the
         // residual has failed to decrease for two consecutive rounds (fixed
         // point oscillating, |loop gain| > 1), engage 50/50 damping — and

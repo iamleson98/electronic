@@ -13,6 +13,7 @@ const diode: ComponentPlugin = {
   category: 'semiconductor',
   description: 'Diode with exponential I-V characteristic. Simplified to a threshold model.',
   symbol: '▷',
+  nonLinear: true,
   boundingBox: { width: 4, height: 2 },
   terminals: [
     { id: 'a', label: 'A', position: { x: 0, y: 1 } },
@@ -97,6 +98,7 @@ const npn: ComponentPlugin = {
   category: 'semiconductor',
   description: 'NPN BJT with simple piecewise-linear model. Use as a switch.',
   symbol: 'NPN',
+  nonLinear: true,
   boundingBox: { width: 3, height: 4 },
   terminals: [
     { id: 'c', label: 'C', position: { x: 3, y: 0 } },
@@ -690,6 +692,7 @@ const zener: ComponentPlugin = {
   category: 'semiconductor',
   description: 'Zener diode with reverse breakdown voltage. Conducts in reverse when V > Vz.',
   symbol: 'Z',
+  nonLinear: true,
   boundingBox: { width: 4, height: 2 },
   terminals: [
     { id: 'a', label: 'A', position: { x: 0, y: 1 } },

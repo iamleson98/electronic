@@ -424,6 +424,7 @@ export const vcSwitch: ComponentPlugin = {
   category: 'passive',
   description: 'Voltage-controlled switch (SPICE S element). Switches between Ron and Roff based on control voltage.',
   symbol: 'S',
+  nonLinear: true,
   boundingBox: { width: 6, height: 4 },
   terminals: [
     { id: 'a', label: 'A', position: { x: 0, y: 1 }, electricalType: 'passive' },
