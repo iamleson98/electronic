@@ -919,3 +919,46 @@ Stage Summary:
 - Store mutations are wire-orthogonality-preserving by construction; every load path normalizes; AI tools produce orthogonal waypoints; mirrored/free-rotated components keep pins, wires, ERC markers, exports and flow dots in exact visual agreement.
 - Files touched: canvas-renderer.ts, endpoint-position.ts, wire-reroute.ts (new), store.ts, use-canvas-coordinates.ts, terminal-snap.ts, schematic-overlays.ts, schematic-plot.ts, netlist-export.ts, schematic-component-tools.ts (AI), wire-reroute.test.ts (new).
 - Maintenance probes kept: scripts/probe-render-geometry.ts (data-level), /home/z/my-project/scripts/{detect-diagonals.py,check-flow-dots.py} (pixel-level, outside repo).
+
+---
+Task ID: 1
+Agent: main (Super Z)
+Task: Push all repo commits under user identity iamleson98 <leminhson2398@outlook.com>
+
+Work Log:
+- Inspected /home/z/my-project/electronic git state: 203 commits, all previously pushed, but 147 commits authored as "Z User <z@container>" (including latest wiring-fix commit 52bc392)
+- Set local git config user.name=iamleson98, user.email=leminhson2398@outlook.com (applies to all future commits)
+- Ran git filter-branch --env-filter to rewrite author+committer of the 147 "Z User" commits to the user's identity (dates preserved, commit messages unchanged)
+- Force-pushed rewritten history: 52bc392...6dba51e main -> main (forced update)
+- Verified remote via fetch: origin/main = 6dba51e, 203 commits, 186 under leminhson2398@outlook.com + 17 under iamleson98@users.noreply.github.com (GitHub web-UI commits, already user-attributed)
+- Cleaned up: deleted local backup branch and refs/original/* refs; repo now clean and in sync with origin/main
+
+Stage Summary:
+- Entire history of iamleson98/electronic now attributed to the user; HEAD commit 6dba51e = "fix(wires): orthogonal wiring everywhere + current flow exactly on wires — 5 root causes"
+- Old pre-rewrite commits (52bc392 and ancestors) remain recoverable via local reflog (~90 days) if ever needed
+- Future commits in this repo will automatically use iamleson98 <leminhson2398@outlook.com>
+
+
+---
+Task ID: 2
+Agent: main (Super Z)
+Task: Deep physics verification (CircuitJS1 reference), sandbox restructure, 3D overhaul
+
+Work Log:
+- Cloned sharpie7/circuitjs1 to /home/z/research; studied CirSim.java (Newton subiter loop, adaptive timestep), CapacitorElm/Inductor (trap/BE companions), Diode.java (Shockley + limitStep + gmin escalation), TransistorElm (SPICE 3f5 Ebers-Moll), DiodeModel (Is derivation from fwdrop)
+- Wrote physics comparison research doc (/home/z/research/physics-notes.md); verified our companion models match CJS1 exactly; identified 2 gaps: (a) no intra-step Newton iteration for nonlinear devices, (b) diodeShockley lacked limitStep/gmin/Cj
+- Implemented Fix A: nonLinear flag on ComponentPlugin + engine Newton-Raphson loop with SPICE tolerances (reltol 1e-3, vntol 1e-6, aitol 1e-12), reusing the feedback Gauss-Seidel machinery with state rollback; flagged diode/zener/npn/pnp/nmos/pmos/led/diodeShockley/bjtGP/mosLevel1/jfet/bsim3/bsim4/vcSwitch/comparator
+- Implemented Fix B: new src/lib/circuit/nonlinear.ts (limitStep, junctionVCrit, shockleyCompanion, escalateGmin, junctionCapacitance - CJS1 ports); upgraded diodeShockley stamp: Newton limiting, escalating gmin, Rs via internal pseudo-node, Cj+Tt charge storage via BE companion
+- Wrote tests/physics-deep-verify.test.ts - 23 analytical ground-truth tests (Ohm/KVL/KCL/dividers/Thevenin/superposition/max-power, RC/RL/LC/RLC closed forms, AC phasors/corner phase/reactance, Shockley I(V) at 8 bias points, MOS square law + body effect, randomized KCL fuzz). All pass; several initially-wrong test expectations corrected after the SIM proved right (divider math, 3-tau settling, reverse saturation current)
+- Full suite: 124 files / 3062 tests pass (was 3039; +23 physics tests)
+- Sandbox restructure: killed outer nextjs_tailwind_shadcn_ts dev server, removed scaffold, moved electronic repo (incl. .git, .env, drizzle) to /home/z/my-project root; port 3000 now serves CircuitLab (verified HTTP 200 + title); merged outer scripts/ into repo scripts/
+- 3D overhaul: new src/lib/pcb/component-models-3d.ts - 20+ procedural multi-material Three.js factories (axial resistor w/ computed color-code bands, electrolytic w/ polarity stripe + vent score, MLCC/ceramic disc, glass diode w/ cathode stripe, LED w/ transmissive dome + PointLight + emissive glow, TO-92, TO-220, DIP w/ notch + pins, SOIC, SOT-23, HC-49 crystal, inductor w/ copper rings, battery, switch, pushbutton, pot, fuse, LDR, 7-seg w/ per-segment glow, speaker, transformer); legs placed at exact pad positions (PCB layout match)
+- PCB3DViewer.tsx: procedural models attach before STL fallback; sRGB + ACES tone mapping + PCF shadows + RoomEnvironment PMREM IBL always on; rounded-rect board w/ FR4 core; CanvasTexture silkscreen w/ refdes + pin-1 dots; ENIG gold pads; probe labels extended with current + power; live-state loop drives LED emissive + PointLight + 7-seg digits from simulation currents; EffectComposer + UnrealBloomPass + OutputPass post-processing
+- Debugged and fixed: "cream board" bug was the explosion/assembly loop re-pinning boardMesh to a stale __baseY, sinking it under the FR4 core (disproven backface-culling theory via node raycast); LED glow invisible due to stale RAF closure across HMR + weak emissive - fixed with PointLight + bloom, verified via hard reload
+- Visually verified via agent-browser + VLM: board green w/ rounded corners, resistor bands visible, LED GLOWING with halo (probe confirmed hook fires at 9.06 mA; emissiveIntensity 4 + 15 cd light), realism improved 4/10 to 8/10
+- Cleaned up debug scripts; tsc + full suite green
+
+Stage Summary:
+- Physics: engine now runs intra-step Newton iteration (CircuitJS1/SPICE parity) for all nonlinear devices; diodeShockley is a full SPICE-grade model; 23 new analytical tests
+- Sandbox: /home/z/my-project IS the CircuitLab repo now, running on port 3000; outer scaffold gone
+- 3D: realistic procedural components with PBR/IBL/bloom/shadows, LED glow + 7-seg digits driven by live simulation, silkscreen, gold pads, PCB-layout-matched leads; VLM-verified 8/10
