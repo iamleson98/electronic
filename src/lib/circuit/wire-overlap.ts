@@ -126,8 +126,12 @@ export interface WireRoutePlan {
  * FIRST candidate is always the renderer's default route ([] = direct line
  * or horizontal-first L-elbow), so an unobstructed wire looks exactly like
  * the classic "old way".
+ *
+ * Exported for example-wires.ts (batch normalization of hand-authored
+ * example documents) so interactive commits and example normalization
+ * share ONE candidate order.
  */
-function routeCandidates(start: Vec2, end: Vec2): Vec2[][] {
+export function routeCandidates(start: Vec2, end: Vec2): Vec2[][] {
   const dx = end.x - start.x;
   const dy = end.y - start.y;
   const alignedX = Math.abs(dx) < 1e-3; // vertical wire
