@@ -180,7 +180,11 @@ export const adc: ComponentPlugin = {
     for (let bit = 0; bit < 4; bit++) {
       const isHigh = (digitalValue >> (7 - bit)) & 1;
       const term = terminals.find(t => t.terminalId === `d${7 - bit}`);
-      if (term) sys.stampVoltageSource(term.nodeId, 0, isHigh ? vccV : 0);
+      // Unwired data pins are node 0 — stamping a voltage source between
+      // ground and ground leaves an all-zero branch row: SINGULAR matrix,
+      // the whole circuit fails to solve. Reading only some bits (e.g. just
+      // the MSB) is a normal use case, so every pin needs the guard.
+      if (term && term.nodeId !== 0) sys.stampVoltageSource(term.nodeId, 0, isHigh ? vccV : 0);
     }
   },
 };
@@ -232,7 +236,9 @@ export const dac: ComponentPlugin = {
     // Convert to analog voltage (4-bit → 0..15, mapped to 0..VREF)
     const analogV = (digitalValue / 15) * vrefV;
     const vout = terminals.find(t => t.terminalId === 'vout')!.nodeId;
-    sys.stampVoltageSource(vout, 0, analogV);
+    // Unwired VOUT (node 0) → stampVoltageSource(0, 0, ·) is an all-zero
+    // branch row → singular matrix → whole-circuit solve failure.
+    if (vout !== 0) sys.stampVoltageSource(vout, 0, analogV);
   },
 };
 
@@ -287,7 +293,14 @@ export const dcMotor: ComponentPlugin = {
     const omega = (st[key + '_w'] as number | undefined) ?? 0;
     const emf = K * omega;
     sys.stampConductance(a, b, 1 / r);
-    if (emf !== 0) sys.stampCurrentSource(a, b, emf / r);
+    // Motor law: V_ab = I·R + E → I = (V_ab − E)/R = G·V_ab − G·E. The Norton
+    // offset must therefore REMOVE G·E from the a→b element current: inject
+    // E/R into node a, extract from node b → stampCurrentSource(b, a, E/R).
+    // The old (a, b, E/R) direction made the back-EMF ASSIST the drive
+    // (I = (V+E)/R) — a motor that accelerated harder the faster it spun —
+    // while step()/measure() correctly integrated (v − E)/R, so the solver
+    // and the rotor/mechanics readout disagreed.
+    if (emf !== 0) sys.stampCurrentSource(b, a, emf / r);
   },
   step(params, terminals, sim, comp) {
     // Rotor dynamics: J·dω/dt = K·i − b·ω (motor torque minus viscous
@@ -938,7 +951,9 @@ export const crystalOscillator: ComponentPlugin = {
     const period = 1 / Math.max(1e-9, freq);
     const phase = (t % period) / period;
     const vOut = enabled ? (phase < 0.5 ? voh : vol) : vol;
-    sys.stampVoltageSource(out, 0, vOut);
+    // Unwired OUT (node 0) → stampVoltageSource(0, 0, ·) is an all-zero
+    // branch row → singular matrix → whole-circuit solve failure.
+    if (out !== 0) sys.stampVoltageSource(out, 0, vOut);
     // Minimal VCC load
     sys.stampConductance(vcc, gnd, 1e-6);
     const st = sim.state.__global ?? (sim.state.__global = {});

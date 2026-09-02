@@ -37,16 +37,24 @@ describe('computeFFT', () => {
     expect(r.xValues.length).toBe(0);
   });
 
-  it('DC signal: peak at frequency 0', () => {
-    // All samples = 1 → DC component at bin 0
+  it('DC signal: bin 0 reads the true amplitude (no mirror doubling)', () => {
+    // All samples = 1 → DC component at bin 0. The one-sided amplitude
+    // spectrum must NOT double the DC bin — it has no negative-frequency
+    // mirror — so a 1 V DC trace reads 1.0 at bin 0 (the pre-fix code read
+    // 2.0). The Hann window's own skirt puts a comparable magnitude at bin 1
+    // (window property, exactly one nonzero neighbor for a length-64 window),
+    // and everything beyond decays to ~0.
     const ys = new Array(64).fill(1);
     const r = computeFFT(mkTrace(ys, ys.map((_, i) => i * 1e-4)));
-    // Bin 0 should have the highest magnitude (DC)
+    expect(r.yValues[0]).toBeCloseTo(1.0, 6);
+    // energy stays concentrated at the lowest bins
     let maxIdx = 0, maxVal = 0;
     for (let i = 0; i < r.yValues.length; i++) {
       if (r.yValues[i] > maxVal) { maxVal = r.yValues[i]; maxIdx = i; }
     }
-    expect(maxIdx).toBe(0);
+    expect(maxIdx).toBeLessThanOrEqual(1);
+    // window skirt: bins ≥ 2 are negligible
+    expect(r.yValues[2]).toBeLessThan(0.3);
   });
 
   it('sine wave: peak at the signal frequency', () => {

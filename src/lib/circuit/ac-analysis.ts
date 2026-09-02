@@ -1,13 +1,16 @@
 // AC analysis — frequency-domain sweep wrapper.
 // ─────────────────────────────────────────────────────────────────────────────
-// This is a thin convenience wrapper around the full-featured `runAC()` in
-// analysis.ts. It produces a simple `{ points, operatingPoint }` shape that
-// the older UI code (Bode plot viewers, etc.) expects.
-//
-// For full AC analysis with complex traces, use `runAC()` from analysis.ts.
+// A self-contained simplified complex-nodal AC solver producing the
+// `{ points, operatingPoint }` shape the older UI code (Bode viewers) and
+// the AI analysis tools expect. It linearizes diodes/BJTs at the DC
+// operating point and stamps R/C/L/small-signal devices directly into a
+// nodal admittance matrix (voltage sources via a large-conductance pin).
+// The full complex-MNA engine with transmission lines, MOSFET small-signal
+// models and complex traces is `runAC()` in analysis.ts.
 
 import { solveDC, buildNodeMap, getTerminalsForComponent, computeComponentCurrents } from './engine';
 import { getPlugin } from './registry';
+import { stateKey } from './state-keys';
 import type { CircuitComponent, Wire, ComponentPlugin } from './types';
 
 export interface ACPoint {
@@ -278,7 +281,7 @@ function computeOutputVoltage(
       const L = Number(c.parameters.inductance) || 1e-12;
       const g = -1 / (omega * L);  // -j/(ωL)
       stampY(Yre, Yim, i1, i2, N, 0, g);
-    } else if (c.type === 'dcVoltage' || c.type === 'acVoltage') {
+    } else if (c.type === 'dcVoltage' || c.type === 'acVoltage' || c.type === 'pulseSource') {
       // Voltage sources in small-signal phasor analysis:
       //   stimulus      → pin V(+) − V(−) to the AC phasor acMag·e^{jφ}
       //   everything else → 0V = AC SHORT (this is why supply rails are AC
@@ -286,6 +289,9 @@ function computeOutputVoltage(
       //     their DC VALUE — injecting a spurious second stimulus into every
       //     biased circuit (an RC low-pass read 6× too high), and left
       //     non-stimulus AC sources completely unstamped (an AC open).
+      //     pulseSource belongs here too: a pulse train's small-signal value
+      //     is 0 V = short — leaving it unstamped made every node behind it
+      //     float on gmin alone.
       let vRe = 0, vIm = 0;
       if (c.id === source.id) {
         const phaseDeg = Number(c.parameters?.phase) || 0;
@@ -318,22 +324,42 @@ function computeOutputVoltage(
       // the + node and INJECTED into the − node. The old stamp injected into
       // + — a 180° phase error in every current-source-stimulated transfer
       // function.
+      // Superposition: non-stimulus sources contribute ZERO AC current (a DC
+      // current source is an AC open for signals). The old code injected the
+      // non-stimulus source's DC value as a phasor — a spurious second
+      // stimulus that inflated every transfer function of any circuit
+      // containing one (same bug class as the DC-supply pinning fixed above).
       let iRe = 0, iIm = 0;
       if (c.id === source.id) {
         const phaseDeg = Number(c.parameters?.phase) || 0;
         const phaseRad = (phaseDeg * Math.PI) / 180;
         iRe = acMag * Math.cos(phaseRad);
         iIm = acMag * Math.sin(phaseRad);
-      } else {
-        iRe = Number(c.parameters.current) || 0;
       }
-      if (i1 >= 0) { Ire[i1] -= iRe; Iim[i1] -= iIm; }
-      if (i2 >= 0) { Ire[i2] += iRe; Iim[i2] += iIm; }
+      if (iRe !== 0 || iIm !== 0) {
+        if (i1 >= 0) { Ire[i1] -= iRe; Iim[i1] -= iIm; }
+        if (i2 >= 0) { Ire[i2] += iRe; Iim[i2] += iIm; }
+      }
     } else if (c.type === 'diode' || c.type === 'led') {
-      // Approximate as a small-signal resistance at DC operating point.
-      // For simplicity, treat as a 1kΩ resistor in AC.
-      const g = 1e-3;
-      stampY(Yre, Yim, i1, i2, N, g, 0);
+      // Linearize at the ACTUAL DC operating point, consistent with the
+      // engine's piecewise model (forward = 1/onR, reverse = 1/offR) and with
+      // runAC() in analysis.ts. The old fixed 1 kΩ was ~4 decades off in
+      // reverse (leakage read as a 1 mA/V path) and off by the real dynamic
+      // resistance in forward — the Bode plot silently changed character
+      // depending on which solver path produced it.
+      const a = terms.find(t => t.terminalId === 'a')?.nodeId ?? 0;
+      const k = terms.find(t => t.terminalId === 'k')?.nodeId ?? 0;
+      const vAK = dcOp ? dcOp.nodeVoltage[a] - dcOp.nodeVoltage[k] : 0;
+      const vf = (c.parameters.forwardV as number) ?? (c.type === 'led' ? 2.0 : 0.7);
+      const rOn = c.type === 'led'
+        ? Math.max(0.01, (c.parameters.seriesR as number) ?? 220)
+        : Math.max(0.001, (c.parameters.onR as number) ?? 1);
+      const rOff = Math.max(1e3, (c.parameters.offR as number) ?? 1e7);
+      const st = dcOp?.state?.__global ?? {};
+      const on = st[stateKey(c.type, c, a, k)] ?? vAK > vf;
+      const ai = a > 0 ? a - 1 : -1;
+      const ki = k > 0 ? k - 1 : -1;
+      stampY(Yre, Yim, ai, ki, N, on ? 1 / rOn : 1 / rOff, 0);
     } else if (c.type === 'ground') {
       // Ground node is implicit (we don't include row/col 0)
     } else if (c.type === 'npn' || c.type === 'pnp') {

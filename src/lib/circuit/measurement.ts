@@ -390,6 +390,9 @@ export function computeFFT(trace: RealTrace): RealTrace {
   // Normalization: the Hann window's coherent gain is Σw = (N−1)/2, so a
   // bin-centered sinusoid of amplitude A gives |X[k]| = A·Σw/2. Dividing by
   // N/2 (rectangular-window convention) read amplitudes ~2× (6 dB) low.
+  // DC bin (and Nyquist, if present) must NOT be doubled: they have no
+  // negative-frequency mirror. The old 2× on bin 0 read a 5 V DC trace as
+  // 10 V at 0 Hz.
   const halfSize = fftSize / 2;
   const xValues = new Float64Array(halfSize);
   const yValues = new Float64Array(halfSize);
@@ -398,7 +401,8 @@ export function computeFFT(trace: RealTrace): RealTrace {
   const wsum = (N - 1) / 2; // Hann window sum over the N samples
   for (let i = 0; i < halfSize; i++) {
     xValues[i] = i * fs / fftSize;
-    yValues[i] = 2 * Math.hypot(re[i], im[i]) / wsum;
+    const mirrorless = i === 0; // DC has no negative-frequency mirror
+    yValues[i] = (mirrorless ? 1 : 2) * Math.hypot(re[i], im[i]) / wsum;
   }
   return {
     name: `FFT(${trace.name})`,
@@ -573,7 +577,12 @@ export function sampleStimulus(stimulus: Stimulus, times: Float64Array): Float64
         const { voff = 0, vamp = 1, freq = 50, td = 0, theta = 0, phase = 0 } = stimulus.params as any;
         if (t < td) { out[i] = voff; break; }
         const tt = t - td;
-        out[i] = voff + vamp * Math.exp(-theta * tt) * Math.sin(2 * Math.PI * freq * tt + phase);
+        // phase is DEGREES everywhere in this codebase (sources.ts parameter
+        // unit '°', ngspice SINE(...) PHASE) — convert to radians here. The
+        // old raw-radians read phase=90 as 90 rad ≈ 5156.6°, so the sampled
+        // waveform never matched the exported netlist's phase.
+        const phaseRad = (phase * Math.PI) / 180;
+        out[i] = voff + vamp * Math.exp(-theta * tt) * Math.sin(2 * Math.PI * freq * tt + phaseRad);
         break;
       }
       case 'pulse': {
@@ -615,7 +624,12 @@ export function sampleStimulus(stimulus: Stimulus, times: Float64Array): Float64
         const { v1 = 0, v2 = 5, td1 = 0, tau1 = 1e-3, td2 = 1e-3, tau2 = 1e-3 } = stimulus.params as any;
         if (t < td1) out[i] = v1;
         else if (t < td2) out[i] = v1 + (v2 - v1) * (1 - Math.exp(-(t - td1) / tau1));
-        else out[i] = v2 + (v1 - v2) * (1 - Math.exp(-(t - td2) / tau2));
+        // ngspice EXP second segment is CONTINUOUS: it superimposes a second
+        // exponential on the still-running first one instead of resetting to
+        // v2 (the old reset jumped by (v2−v1)·e^(−(td2−td1)/τ1) — 36.8 % of
+        // the step when τ1 = td2−td1).
+        else out[i] = v1 + (v2 - v1) * (1 - Math.exp(-(t - td1) / tau1))
+          + (v1 - v2) * (1 - Math.exp(-(t - td2) / tau2));
         break;
       }
       case 'sffm': {

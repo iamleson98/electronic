@@ -411,7 +411,11 @@ function makeNandGateUnit(unitLabel: string): ComponentPlugin {
       const v1 = sim.nodeVoltage[in1] ?? 0;
       const v2 = sim.nodeVoltage[in2] ?? 0;
       const outV = (v1 > 2.5 && v2 > 2.5) ? 0 : 5;
-      sys.stampVoltageSource(out, 0, outV);
+      // Unwired output → node 0 → an all-zero branch row → SINGULAR matrix,
+      // the whole circuit fails to solve. The sibling gate factory in this
+      // file guards this ("unwired output: stamping to node 0 would be
+      // singular"); these units must too.
+      if (out !== 0) sys.stampVoltageSource(out, 0, outV);
     },
     getFlowPath() { return [{ x: 0, y: 2 }, { x: 4, y: 2 }]; },
   };

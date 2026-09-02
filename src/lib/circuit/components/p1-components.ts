@@ -55,8 +55,14 @@ export const lm7805: ComponentPlugin = {
       sys.stampConductance(vout, gnd, 1 / r);
       sys.stampCurrentSource(gnd, vout, outV / r);
     } else {
-      // Dropout: pass through with R
+      // Dropout: a real 7805 in dropout delivers Vout ≈ Vin − Vdropout − I·ron
+      // — it NEVER rises above its setpoint. The old plain pass-through
+      // conductance gave Vout ≈ Vin (a 7805 fed 6 V output ~5.9 V > 5 V).
+      // Norton companion of the Thevenin (Vdropout, r):
+      //   I(vin→vout) = (V(in) − V(out) − dropout)/r
+      // → inject dropout/r into vout's row via stampCurrentSource(vout, vin).
       sys.stampConductance(vin, vout, 1 / r);
+      sys.stampCurrentSource(vout, vin, dropout / r);
     }
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 2, y: 2 }, { x: 4, y: 1 }]; },
@@ -97,7 +103,11 @@ export const lm317: ComponentPlugin = {
       sys.stampConductance(vout, gnd, 1 / r);
       sys.stampCurrentSource(gnd, vout, outV / r);
     } else {
+      // Dropout: Vout ≈ Vin − Vdropout − I·ron (a real LM317 in dropout
+      // tracks its input minus the dropout, never ABOVE the setpoint).
+      const dropout = 2; // LM317 datasheet dropout ≈ 2–3 V
       sys.stampConductance(vin, vout, 1 / r);
+      sys.stampCurrentSource(vout, vin, dropout / r);
     }
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
@@ -697,7 +707,10 @@ function makeSchmittGate(type: string, name: string, symbol: string, op: (a: boo
       // (The old code returned the raw input state for NOT — a non-inverting
       //  buffer — and forced the NAND output to always-LOW.)
       const output = isNot ? !aHigh : op(aHigh, bHigh);
-      if (y !== gnd) sys.stampVoltageSource(y, gnd, output ? vccV : 0);
+      // Guard on the OUTPUT node only: an unwired Y is node 0, and
+      // stampVoltageSource(0, gnd, v) would actively drive the part's own
+      // GND pin to −v (or leave a singular all-zero branch when both are 0).
+      if (y !== 0) sys.stampVoltageSource(y, gnd, output ? vccV : 0);
     },
     measure(params, terminals, sim) {
       const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
@@ -931,7 +944,11 @@ export const scr: ComponentPlugin = {
       if (vAK < 0) {
         on = false;
       } else {
-        const iA = vAK / Math.max(0.001, params.onR as number);
+        // The on-state companion is a Thevenin (vf, onR): the solved vAK is
+        // ≈ vf + i·onR, so the ACTUAL anode current is (vAK − vf)/onR. The
+        // old vAK/onR overestimated by vf/onR (15 A with defaults) — the
+        // holding-current test could never fire and the SCR latched forever.
+        const iA = (vAK - vf) / Math.max(0.001, params.onR as number);
         if (iA < holdingI) {
           on = false;
         }
@@ -1015,9 +1032,13 @@ export const triac: ComponentPlugin = {
       if (dir === 0) dir = v >= 0 ? 1 : -1;
       else if (v < 0 && dir > 0) dir = -1;
       else if (v > 0 && dir < 0) dir = 1;
-      // Holding current in the active direction
+      // Holding current in the active direction: the on-state companion is
+      // the directional Thevenin (onV, onR), so the solved |v| ≈ onV + i·onR
+      // and the actual current is (|v| − onV)/onR. The old |v|/onR
+      // overestimated by onV/onR (15 A with defaults) — the holding test
+      // never fired and the triac latched forever.
       const vDir = dir > 0 ? v : -v;
-      const i = vDir / Math.max(0.001, params.onR as number);
+      const i = (vDir - (params.onV as number)) / Math.max(0.001, params.onR as number);
       if (i < holdingI) on = false;
     }
     st[key] = on;
@@ -1241,16 +1262,45 @@ export const diac: ComponentPlugin = {
     const b = terminals.find(t => t.terminalId === 'b')!.nodeId;
     const vAB = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[b] ?? 0);
     const bv = params.breakoverV as number;
+    const onV = (params.onV as number) ?? 1.5;   // on-state drop (like the SCR)
+    const holdingI = (params.holdingI as number) ?? 0.005; // 5 mA, SCR-family default
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('diac', comp, a, b);
     const prevOn = st[key] ?? false;
-    // Hysteresis: turns on above breakover, stays on until current drops
-    const on = prevOn ? Math.abs(vAB) > 0.5 : Math.abs(vAB) > bv;
+    // Latches on above breakover, stays on while the actual device current
+    // is above the holding current (current-based release, like the SCR/triac
+    // in this file). The old voltage test |vAB| > 0.5 fought the on-state
+    // companion: on collapsed |vAB| to ~I·onR (< 0.5 V) → released → fired
+    // again at the full source voltage → the state flip-flopped on every
+    // re-stamp and the DC solve never converged. With the Thevenin (onV, onR)
+    // the on-state is a self-consistent fixed point: |vAB| ≈ onV + i·onR and
+    // the release test reads the true current (|vAB| − onV)/onR.
+    let on = prevOn;
+    if (!on) {
+      on = Math.abs(vAB) > bv;
+    } else {
+      const vMag = Math.abs(vAB);
+      const i = (vMag - onV) / Math.max(0.001, params.onR as number);
+      on = i >= holdingI;
+    }
     st[key] = on;
     if (on) {
       const r = Math.max(0.001, params.onR as number);
+      // Directional Thevenin: conducts in the direction it fired in. Track
+      // the latched direction like the triac.
+      let dir = (st[key + '_dir'] as number | undefined) ?? 0;
+      if (dir === 0) dir = vAB >= 0 ? 1 : -1;
+      else if (vAB < 0 && dir > 0) dir = -1;
+      else if (vAB > 0 && dir < 0) dir = 1;
+      st[key + '_dir'] = dir;
       sys.stampConductance(a, b, 1 / r);
+      if (dir > 0) {
+        sys.stampCurrentSource(b, a, onV / r);
+      } else {
+        sys.stampCurrentSource(a, b, onV / r);
+      }
     } else {
+      st[key + '_dir'] = 0;
       sys.stampConductance(a, b, 1 / (params.offR as number));
     }
   },

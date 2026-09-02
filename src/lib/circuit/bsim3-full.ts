@@ -100,7 +100,10 @@ export interface BSIM3Params {
 
 export const DEFAULT_BSIM3_PARAMS: BSIM3Params = {
   tox: 4e-9,           // 4nm oxide (130nm process)
-  nsub: 1e16,
+  // Channel doping consistent with a 130nm node (~1.7e17 cm⁻³). The old
+  // 1e16 (0.5µm-era) value combined with the now-correct DVT roll-off
+  // drove Vth negative — the default device could never turn off.
+  nsub: 1.7e17,
   ngate: 1e20,
   u0: 670,             // electrons, ~670 cm^2/V·s
   ua: 2.25e-9,
@@ -170,12 +173,24 @@ export function evaluateBSIM3(
   const sqrtPhi = Math.sqrt(Math.max(2 * phi_f - vbs, 0));
   const vth = p.vfb + 2 * phi_f + p.k1 * sqrtPhi - p.k2 * (2 * phi_f - vbs);
 
-  // 3. Short-channel Vth roll-off (simplified)
-  //    ΔVth = -dvt0 · (Vbi / L) · exp(-dvt1 · L / sqrt(2·φf - Vbs) / Leff)
-  //    We use a simplified form: just scale Vth down for short channels
-  const leff = Math.max(p.l - 0.1e-6, 0.05e-6); // 0.1μm reduction for side-diffusion
-  const vbi = VT * Math.log(Math.max(p.ngate / p.nsub, 1));
-  const deltaVth = -p.dvt0 * (vbi / Math.max(leff, 1e-9)) * Math.exp(-p.dvt1 * leff / Math.max(sqrtPhi * 1e-6, 1e-9));
+  // 3. Short-channel Vth roll-off — BSIM3v3.3.0 form (ngspice b3ld.c):
+  //    ΔVth = −DVT0·Θ0·(Vbi − φs),
+  //    Θ0   = e^(−DVT1·Leff/(2·lt)) + 2·e^(−DVT1·Leff/lt),
+  //    lt   = √(εsi·TOX·Xdep/εox),  Xdep = √(2·εsi·(φs − Vbs)/(q·NCH)),
+  //    Vbi  = VT·ln(NDS·NCH/ni²)  with NDS = 1×10²⁰ cm⁻³ (ngspice hardcode).
+  // The previous form divided Vbi by Leff (V/m units — ΔVth came out at
+  // −10⁶ V, Id at 34 kA) and used the depletion WIDTH as the roll-off
+  // length instead of the characteristic length lt.
+  // 2·LD side-diffusion with LD ≈ 10 nm (ngspice-style Leff = L − 2·LD).
+  // The old hardcoded 0.1 µm reduction left a 130 nm gate with only 50 nm
+  // of effective channel — far more short-channel roll-off than the node
+  // implies.
+  const leff = Math.max(p.l - 0.02e-6, 0.02e-6);
+  const vbi = VT * Math.log(Math.max((1e20 * p.nsub) / (NI * NI), 1));
+  const xdep = Math.sqrt((2 * EPS_SI * Math.max(2 * phi_f - vbs, 0.01)) / (Q * Math.max(p.nsub * 1e6, 1)));
+  const lt = Math.sqrt((EPS_SI / EPS_SIO2) * p.tox * xdep);
+  const theta0 = Math.exp((-p.dvt1 * leff) / (2 * lt)) + 2 * Math.exp((-p.dvt1 * leff) / lt);
+  const deltaVth = -p.dvt0 * theta0 * (vbi - 2 * phi_f);
   const vthEff = vth + deltaVth;
 
   // 4. Effective mobility (with Vbs-dependent degradation)
@@ -189,11 +204,11 @@ export function evaluateBSIM3(
   const mobilityDenom = 1 + p.ua * (vgst + vthEff) / p.tox + p.ub * Math.pow((vgst + vthEff) / p.tox, 2);
   const ueff = p.u0 / Math.max(mobilityDenom, 1e-3); // cm^2/V·s
 
-  // 6. Saturation voltage
-  //    Vdsat = (Vgs - Vth) / (1 + (Vgs - Vth)·a / (vsat·L))
-  //    For long channels Vdsat ≈ Vgs - Vth (square-law)
+  // 6. Saturation voltage — velocity saturation via the effective mobility:
+  //    Vdsat = Vov / (1 + μeff·Vov/(vsat·Leff))  (long channel → square law)
   const vgsMinusVth = Math.max(vgst, 0);
-  const a = 1 + p.a0 * vgsMinusVth / (p.vsat * leff * 1e6); // a0 has units of V^-1
+  const muSi = ueff * 1e-4; // mobility in m²/(V·s)
+  const a = 1 + (muSi * vgsMinusVth) / (p.vsat * leff);
   const vdsat = vgsMinusVth / a;
 
   // 7. Drain current in linear/saturation region
@@ -210,8 +225,10 @@ export function evaluateBSIM3(
   }
 
   const beta = ueff * cox * 1e-4 * p.w / leff; // μ in m^2/V·s, Cox in F/m^2, W/L dimensionless → A/V²
-  // Linear current (with velocity saturation)
-  const idLinear = beta * (vgst * vdsEff - vdsEff * vdsEff / 2) / (1 + vdsEff * a / (p.vsat * leff * 1e6));
+  // Linear current with velocity saturation: horizontal-field mobility
+  // degradation 1/(1 + μeff·Vds/(vsat·L)) (the average channel field is
+  // Vds/Leff; carriers cannot exceed vsat).
+  const idLinear = beta * (vgst * vdsEff - (vdsEff * vdsEff) / 2) / (1 + (muSi * vdsEff) / (p.vsat * leff));
 
   // Channel-length modulation (saturation only)
   const idSat = idLinear * (1 + p.pclm * (vds - vdsat));
@@ -240,15 +257,16 @@ function evalIdAt(vgs: number, vds: number, vbs: number, p: BSIM3Params, vthEff:
   const cox = EPS_SIO2 / p.tox;
   const vgst = vgs - vthEff;
   if (vgst <= 0) return 0;
-  const leff = Math.max(p.l - 0.1e-6, 0.05e-6);
+  const leff = Math.max(p.l - 0.02e-6, 0.02e-6);
   const mobilityDenom = 1 + p.ua * (vgst + vthEff) / p.tox + p.ub * Math.pow((vgst + vthEff) / p.tox, 2);
   const ueff = p.u0 / Math.max(mobilityDenom, 1e-3);
+  const muSi = ueff * 1e-4; // m²/(V·s)
   const vgsMinusVth = Math.max(vgst, 0);
-  const a = 1 + p.a0 * vgsMinusVth / (p.vsat * leff * 1e6);
+  const a = 1 + (muSi * vgsMinusVth) / (p.vsat * leff);
   const vdsat = vgsMinusVth / a;
   const vdsEff = Math.min(vds, vdsat);
   const beta = ueff * cox * 1e-4 * p.w / leff;
-  const idLinear = beta * (vgst * vdsEff - vdsEff * vdsEff / 2) / (1 + vdsEff * a / (p.vsat * leff * 1e6));
+  const idLinear = beta * (vgst * vdsEff - (vdsEff * vdsEff) / 2) / (1 + (muSi * vdsEff) / (p.vsat * leff));
   if (vds < vdsat) return idLinear;
   return idLinear * (1 + p.pclm * (vds - vdsat));
 }
@@ -440,10 +458,17 @@ function makeBSIM3Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
       const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
       const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
+      const b = terminals.find((t) => t.terminalId === 'b')?.nodeId ?? s;
       const p = buildParams(params);
-      const vgs = sim.nodeVoltage[g] - sim.nodeVoltage[s];
-      const vds = sim.nodeVoltage[d] - sim.nodeVoltage[s];
-      const op = evaluateBSIM3(vgs, vds, 0, p);
+      // Evaluate in the flip-world convention (P-channel: negate the signed
+      // terminal voltages) — the model is N-form, so feeding the raw negative
+      // P-channel Vgs/Vds read a fully-on device as subthreshold/off (Id≈0).
+      // Vbs comes from the actual body node (was hardcoded 0).
+      const sign = isNmos ? 1 : -1;
+      const vgs = sign * (sim.nodeVoltage[g] - sim.nodeVoltage[s]);
+      const vds = sign * (sim.nodeVoltage[d] - sim.nodeVoltage[s]);
+      const vbs = sign * (sim.nodeVoltage[b] - sim.nodeVoltage[s]);
+      const op = evaluateBSIM3(vgs, vds, vbs, p);
       return [
         { label: 'Vgs', value: vgs.toFixed(4), unit: 'V' },
         { label: 'Vds', value: vds.toFixed(4), unit: 'V' },

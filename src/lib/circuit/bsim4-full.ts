@@ -135,7 +135,10 @@ export const DEFAULT_BSIM4_PARAMS: BSIM4Params = {
   ngate: 1e20,           // heavily doped poly gate
   u0: 540,               // electrons, slightly lower than 130nm (stress/strain effects)
   vsat: 1.2e5,           // 1.2e5 m/s — higher saturation velocity at thin oxide
-  vfb: -0.35,            // flatter flat-band → smaller |Vth|
+  vfb: -0.7,             // flat-band giving Vth0 ≈ 0.55 V; with the correct
+                         // DVT roll-off the effective Vth lands at ~0.35 V
+                         // (the old -0.35 was tuned against the broken
+                         // V/m-units roll-off and no longer applies)
   k1: 0.45,              // reduced body effect for retrograde wells
   k2: -0.01,
   dvt0: 1.8,
@@ -227,14 +230,22 @@ export function evaluateBSIM4(
   const sqrtPhi = Math.sqrt(Math.max(2 * phi_f - vbs, 0));
   const vth = p.vfb + 2 * phi_f + p.k1 * sqrtPhi - p.k2 * (2 * phi_f - vbs);
 
-  // 3. Short-channel Vth roll-off (refined BSIM4 form)
-  //    ΔVth = -dvt0 · (Vbi / Leff) · exp(-dvt1 · Leff / λt)
-  //    where λt = √(Xdep² + Wdc²) ~ √(2·φf - Vbs)/scale
-  const leff = Math.max(p.l - 0.02e-6, 0.04e-6); // 20nm reduction for side-diffusion
-  const vbi = VT * Math.log(Math.max(p.ngate / p.nsub, 1));
-  const xdep = Math.sqrt(2 * EPS_SI * (2 * phi_f - vbs) / (Q * Math.max(p.nsub * 1e6, 1))); // m
-  const deltaVth = -p.dvt0 * (vbi / Math.max(leff, 1e-9)) *
-    Math.exp(-p.dvt1 * leff / Math.max(xdep, 1e-12));
+  // 3. Short-channel Vth roll-off — BSIM4v4.7 exact form (ngspice b4ld.c):
+  //    ΔVth = −DVT0·(Vbi − φs) / (2·cosh(DVT1·Leff/lt) − 2),
+  //    lt   = √(εsi·TOX·Xdep/εox),  Xdep = √(2·εsi·(φs − Vbs)/(q·NDEP)),
+  //    Vbi  = VT·ln(NSD·NDEP/ni²)  with NSD = 1×10²⁰ cm⁻³.
+  // The previous form divided Vbi by Leff (V/m units — ΔVth came out at
+  // −8.7 MV) and used the depletion width as the roll-off length.
+  const leff = Math.max(p.l - 0.02e-6, 0.04e-6); // 2·LD ≈ 20nm side-diffusion
+  const vbi = VT * Math.log(Math.max((1e20 * p.nsub) / (NI * NI), 1));
+  const xdep = Math.sqrt(2 * EPS_SI * Math.max(2 * phi_f - vbs, 0.01) / (Q * Math.max(p.nsub * 1e6, 1))); // m
+  const lt = Math.sqrt((EPS_SI / EPS_SIO2) * p.tox * xdep);
+  const coshArg = (p.dvt1 * leff) / Math.max(lt, 1e-12);
+  // 2·cosh(x)−2 → 0 for very short channels (the known BSIM4 divergence —
+  // the reason BSIM3 uses the exponential approximation); floor the
+  // denominator so ΔVth stays bounded.
+  const dvtDen = Math.max(2 * Math.cosh(coshArg) - 2, 0.1);
+  const deltaVth = -p.dvt0 * ((vbi - 2 * phi_f) / dvtDen);
   const vthEff = vth + deltaVth;
 
   // 4. Effective mobility (with Vgs-dependent degradation — same as BSIM3)
@@ -269,9 +280,11 @@ export function evaluateBSIM4(
     p.ub * Math.pow((vgst + vthEff) / p.tox, 2);
   const ueff = p.u0 / Math.max(mobilityDenom, 1e-3); // cm²/V·s
 
-  // 6. Saturation voltage — velocity saturation form
+  // 6. Saturation voltage — velocity saturation via the effective mobility
+  //    (same dimensionally-correct form as bsim3-full)
   const vgsMinusVth = Math.max(vgst, 0);
-  const a = 1 + p.a0 * vgsMinusVth / (p.vsat * leff * 1e6);
+  const muSi = ueff * 1e-4; // m²/(V·s)
+  const a = 1 + (muSi * vgsMinusVth) / (p.vsat * leff);
   const vdsat = vgsMinusVth / a;
 
   // 7. Drain current — linear/saturation, same structure as BSIM3
@@ -286,9 +299,10 @@ export function evaluateBSIM4(
   }
 
   const beta = ueff * cox * 1e-4 * p.w / leff; // A/V² (see bsim3-full for unit analysis)
-  // Linear current (with velocity saturation)
+  // Linear current with velocity saturation: horizontal-field mobility
+  // degradation 1/(1 + μeff·Vds/(vsat·L)) — same as bsim3-full.
   const idLinear = beta * (vgst * vdsEff - vdsEff * vdsEff / 2) /
-    (1 + vdsEff * a / (p.vsat * leff * 1e6));
+    (1 + (muSi * vdsEff) / (p.vsat * leff));
 
   // Channel-length modulation (saturation only)
   const idSat = idLinear * (1 + p.pclm * (vds - vdsat));
@@ -326,10 +340,14 @@ export function evaluateBSIM4(
     cgd = 0;
     cgb = 0;
   } else {
-    // Linear region — split symmetrically between source and drain
-    const frac = 0.5 - 0.5 * (vdsEff / Math.max(vdsat, 1e-3)); // gentle asymmetry
-    cgs = cIntrinsic * (0.5 + frac);
-    cgd = cIntrinsic * (0.5 - frac);
+    // Linear region — Meyer partition: Cgs grows from ½C at Vds=0 (symmetric
+    // channel) to ⅔C at Vds=Vdsat, Cgd shrinks from ½C to 0. The old
+    // `0.5 ± frac` with frac = 0.5−0.5·(Vds/Vdsat) ran the trend BACKWARDS
+    // (Cgs=C at Vds=0, Cgs=Cgd=½C at Vdsat) and jumped discontinuously
+    // against the saturation branch (½C → ⅔C, ½C → 0).
+    const x = Math.min(vdsEff / Math.max(vdsat, 1e-9), 1); // 0..1 across triode
+    cgs = cIntrinsic * (0.5 + (2 / 3 - 0.5) * x);
+    cgd = cIntrinsic * (0.5 - 0.5 * x);
     cgb = 0;
   }
 
@@ -514,13 +532,14 @@ function evalIdAt4(
   const mobilityDenom = 1 + p.ua * (vgst + vthEff) / p.tox +
     p.ub * Math.pow((vgst + vthEff) / p.tox, 2);
   const ueff = p.u0 / Math.max(mobilityDenom, 1e-3);
+  const muSi = ueff * 1e-4; // m²/(V·s)
   const vgsMinusVth = Math.max(vgst, 0);
-  const a = 1 + p.a0 * vgsMinusVth / (p.vsat * leff * 1e6);
+  const a = 1 + (muSi * vgsMinusVth) / (p.vsat * leff);
   const vdsat = vgsMinusVth / a;
   const vdsEff = Math.min(vds, vdsat);
   const beta = ueff * cox * 1e-4 * p.w / leff;
   const idLinear = beta * (vgst * vdsEff - vdsEff * vdsEff / 2) /
-    (1 + vdsEff * a / (p.vsat * leff * 1e6));
+    (1 + (muSi * vdsEff) / (p.vsat * leff));
   if (vds < vdsat) return idLinear;
   return idLinear * (1 + p.pclm * (vds - vdsat));
 }
@@ -810,6 +829,13 @@ function makeBSIM4Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
       const vGSguess = isNmos ? (st[key + '_vgs'] ?? 2) : -(st[key + '_vgs'] ?? 2);
       const vDSguess = isNmos ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? 1);
       const vBSguess = isNmos ? (st[key + '_vbs'] ?? 0) : -(st[key + '_vbs'] ?? 0);
+      // REAL (signed) previous-step terminal voltages for the capacitance
+      // companions — the charge Q_old = C·V_old must use the physical node
+      // voltages, NOT the flip-world magnitudes (P-channel: sign error in
+      // every companion source whenever the old bias ≠ 0).
+      const vGSold = (st[key + '_vgs'] as number | undefined) ?? 0;
+      const vDSold = (st[key + '_vds'] as number | undefined) ?? (isNmos ? 1 : -1);
+      const vBSold = (st[key + '_vbs'] as number | undefined) ?? 0;
       // Evaluate the BSIM4 model at the operating point
       const op = evaluateBSIM4(vGSguess, vDSguess, vBSguess, p);
       const sign = isNmos ? 1 : -1;
@@ -856,11 +882,11 @@ function makeBSIM4Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
           if (n1 > 0) sys.z[n1 - 1] += gC * vOld;
           if (n2 > 0) sys.z[n2 - 1] -= gC * vOld;
         };
-        stampCap(g, s, op.cgs, vGSguess);
-        stampCap(g, d, op.cgd, vGSguess - vDSguess);
-        stampCap(g, b, op.cgb, vGSguess - vBSguess);
-        stampCap(b, s, op.cbs, vBSguess);
-        stampCap(b, d, op.cbd, vBSguess - vDSguess);
+        stampCap(g, s, op.cgs, vGSold);
+        stampCap(g, d, op.cgd, vGSold - vDSold);
+        stampCap(g, b, op.cgb, vGSold - vBSold);
+        stampCap(b, s, op.cbs, vBSold);
+        stampCap(b, d, op.cbd, vBSold - vDSold);
       }
     },
     step: (params, terminals, sim, instance) => {
@@ -881,9 +907,13 @@ function makeBSIM4Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
       const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
       const p = buildParams(params);
-      const vgs = sim.nodeVoltage[g] - sim.nodeVoltage[s];
-      const vds = sim.nodeVoltage[d] - sim.nodeVoltage[s];
-      const vbs = sim.nodeVoltage[b] - sim.nodeVoltage[s];
+      // Evaluate in the flip-world convention (P-channel: negate the signed
+      // terminal voltages) — the model is N-form, so feeding the raw negative
+      // P-channel Vgs/Vds read a fully-on device as subthreshold/off.
+      const sign = isNmos ? 1 : -1;
+      const vgs = sign * (sim.nodeVoltage[g] - sim.nodeVoltage[s]);
+      const vds = sign * (sim.nodeVoltage[d] - sim.nodeVoltage[s]);
+      const vbs = sign * (sim.nodeVoltage[b] - sim.nodeVoltage[s]);
       const op = evaluateBSIM4(vgs, vds, vbs, p);
       return [
         { label: 'Vgs', value: vgs.toFixed(4), unit: 'V' },

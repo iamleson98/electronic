@@ -129,7 +129,10 @@ export function computeTHD(trace: RealTrace, maxHarmonics = 10): THDResult | nul
   const dt = dts[Math.floor(dts.length / 2)] || (xs[xs.length - 1] - xs[0]) / (xs.length - 1);
   if (dt <= 0 || !Number.isFinite(dt)) return null;
   const fs = 1 / dt;
-  const freqRes = fs / N;
+  // computeFFT zero-pads to nextPow2(N) — the actual bin spacing is
+  // fs/fftSize, not fs/N (N=100, fs=128 → 1.0 Hz, not 1.28 Hz).
+  const fftSize = 1 << Math.ceil(Math.log2(Math.max(N, 2)));
+  const freqRes = fs / fftSize;
 
   // Compute one-sided magnitude spectrum via existing FFT (Hann-windowed)
   const spectrum = computeFFT(trace);

@@ -1162,6 +1162,11 @@ export function simulateStep(
     nodeSets?: Record<string, number>;
     /** integration method for reactive companion models (default 'euler') */
     method?: 'euler' | 'trap' | 'gear';
+    /**
+     * Freeze sim.time at this value for every stamp/solve of this step
+     * (solveDC passes 0). Omit for normal transient stepping.
+     */
+    fixedTime?: number;
   },
 ): StepResult | null {
   const nodeMap = buildNodeMap(components, wires, plugins);
@@ -1180,7 +1185,14 @@ export function simulateStep(
   // Below that threshold, the dense solver wins (less overhead per stamp).
   const useSparse = shouldUseSparseSolver(numNodes - 1, maxExtras);
 
-  const time = prev && prev.nodeVoltage.length > 0 ? prev.time + dt : 0;
+  // `fixedTime` (used by solveDC) freezes sim.time across the outer fixed-point
+  // iterations. Without it, time advances by dt every iteration — AC/pulse
+  // sources would oscillate at a new random phase each round, the convergence
+  // check could never settle, and the returned "DC operating point" would
+  // carry an arbitrary source phase (polluting the transient's t=0 seed).
+  // ngspice semantics: time-dependent sources hold their t=0 value during
+  // .OP/.DC — which is exactly what the transient's first step also sees.
+  const time = simOptions?.fixedTime ?? (prev && prev.nodeVoltage.length > 0 ? prev.time + dt : 0);
 
   // initialize SimContext with previous voltages (for companion models).
   // If prev has no data yet (first step), allocate fresh arrays sized to numNodes.
@@ -1495,7 +1507,13 @@ export function solveDC(
   let prev: PrevState | undefined;
   let result: SimContext | null = null;
   for (let iter = 0; iter < maxIter; iter++) {
-    const r = simulateStep(components, wires, plugins, prev, DC_DT);
+    // fixedTime: hold every time-dependent source at its t=0 value for the
+    // whole solve (ngspice .OP semantics). Previously sim.time advanced by
+    // DC_DT each iteration, so AC sources sampled sin(2πf·k·1e6+φ) at a fresh
+    // random phase per round: the convergence test could never settle (always
+    // 50 iterations), and the returned operating point — which runTran uses
+    // to seed the transient — carried an arbitrary source phase.
+    const r = simulateStep(components, wires, plugins, prev, DC_DT, { fixedTime: 0 });
     if (!r) return null;
     result = r.sim;
     // check convergence

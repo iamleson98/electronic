@@ -172,11 +172,13 @@ describe('computeTHD', () => {
     expect(r!.numSamples).toBe(1000);
   });
 
-  it('frequencyResolution = fs / N', () => {
+  it('frequencyResolution = fs / fftSize (zero-padded to nextPow2)', () => {
     const trace = makeSineTrace(1000, 10000, 1000);
     const r = computeTHD(trace, 5);
     expect(r).not.toBeNull();
-    expect(r!.frequencyResolution).toBeCloseTo(10, 5);  // 10000/1000
+    // computeFFT zero-pads N=1000 → fftSize=1024: the true bin spacing is
+    // fs/1024, not the pre-fix fs/N (10 → 9.765625).
+    expect(r!.frequencyResolution).toBeCloseTo(10000 / 1024, 5);
   });
 
   it('SNR is positive for a clean sine', () => {

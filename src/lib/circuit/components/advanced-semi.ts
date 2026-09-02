@@ -193,8 +193,12 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       // Get previous voltages
       const st = sim.state.__global ?? (sim.state.__global = {});
       const key = stateKey('bjt', comp, c, b, e);
-      const vBEguess = isNpn ? (st[key + '_vbe'] ?? 0.7) : -(st[key + '_vbe'] ?? 0.7);
-      const vCEguess = isNpn ? (st[key + '_vce'] ?? 0.2) : -(st[key + '_vce'] ?? 0.2);
+      // PNP: work in the flipped world — negate the SIGNED stored voltages,
+      // and default the cold-start guess to the flipped ON value (−0.7 →
+      // +0.7 after negation). The old `?? 0.7` negated to −0.7 → exp(−27) ≈ 0:
+      // the very first stamp after power-up modeled the PNP as an open circuit.
+      const vBEguess = isNpn ? (st[key + '_vbe'] ?? 0.7) : -(st[key + '_vbe'] ?? -0.7);
+      const vCEguess = isNpn ? (st[key + '_vce'] ?? 0.2) : -(st[key + '_vce'] ?? -0.2);
       // Ebers-Moll simplified:
       // Ic = Is * (exp(vBE/Vt) - exp(-vCE/Vt)) * (1 + vCE/Vaf)
       // For active region (vCE > 0, vBE > 0): Ic ≈ Is*exp(vBE/Vt)*(1 + vCE/Vaf)
@@ -355,8 +359,13 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
       const vGSguess = isNmos ? (st[key + '_vgs'] ?? 2) : -(st[key + '_vgs'] ?? -2);
       const vDSguess = isNmos ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? -1);
       const vBSguess = isNmos ? (st[key + '_vbs'] ?? 0) : -(st[key + '_vbs'] ?? 0);
-      // Threshold magnitude with body effect: |Vth| = |Vto| + γ(√(2Φ−|Vbs|) − √2Φ)
-      const vthMag = (isNmos ? Vto0 : -Vto0) + Gamma * (Math.sqrt(Math.max(0, 2 * Phi - Math.abs(vBSguess))) - Math.sqrt(2 * Phi));
+      // Threshold magnitude with body effect, SIGNED (flip-world Vbs for the
+      // P-channel): Vth = Vto + γ(√(2ΦF − Vbs) − √(2ΦF)) — reverse body bias
+      // (Vbs < 0) RAISES Vth. The old Math.abs() mapped reverse bias into the
+      // forward-bias formula √(2ΦF − |Vbs|), so Vth DECREASED with reverse
+      // body bias (Vsb=2 V, Vto=1, γ=0.5: 0.41 V instead of the required
+      // 1.33 V — the device conducted ~4× the true current).
+      const vthMag = (isNmos ? Vto0 : -Vto0) + Gamma * (Math.sqrt(Math.max(0, 2 * Phi - vBSguess)) - Math.sqrt(2 * Phi));
       const vov = vGSguess - vthMag;
       // Compute Id
       let Id = 0;
@@ -497,28 +506,40 @@ function makeJFET(type: 'n' | 'p'): ComponentPlugin {
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
       const Vp = params.Vp as number;
       const Idss = params.Idss as number;
+      // Vp = 0: vov = 1 − vgs/0 → NaN stamps. The device is pinched off at
+      // zero gate drive by definition — stamp nothing (open circuit).
+      if (Math.abs(Vp) < 1e-9) return;
       const st = sim.state.__global ?? (sim.state.__global = {});
       const key = stateKey('jfet', comp, d, g, s);
+      // Flip-world (see makeLevel1MOS): the P-channel negates the SIGNED
+      // stored voltages AND the pinch-off voltage, then runs the N-channel
+      // Shockley formulas unchanged. The old code negated the voltages but
+      // NOT Vp, so vov = 1 + Vgs/Vp GREW with gate drive (a P-JFET that
+      // could never turn off), gm/gds came out NEGATIVE — a stamp that
+      // GENERATES energy, driving the drain above its own supply rail — and
+      // the saturation boundary −vov·Vp flipped sign so every P bias read
+      // "saturation".
       const vGSguess = isN ? (st[key + '_vgs'] ?? 0) : -(st[key + '_vgs'] ?? 0);
-      const vDSguess = isN ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? 1);
-      const vov = 1 - vGSguess / Vp;
+      const vDSguess = isN ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? -1);
+      const VpEff = isN ? Vp : -Vp;
+      const vov = 1 - vGSguess / VpEff;
       let Id = 0;
       let gm = 0;
       let gds = 0;
       if (vov > 0) {
-        if (vDSguess > -vov * Vp) {
+        if (vDSguess > -vov * VpEff) {
           // saturation: Id = Idss * vov^2
           Id = Idss * vov * vov;
-          gm = -2 * Idss * vov / Vp;
+          gm = -2 * Idss * vov / VpEff;
           gds = 0;
         } else {
           // Shockley triode region: Id = Idss·(2·vov·vds/(−Vp) − (vds/(−Vp))²).
           // Both terms below were sign-flipped (Id came out NEGATIVE for an
           // N-JFET, gm was negative → positive feedback) and discontinuous
           // with the saturation branch at the boundary.
-          Id = Idss * (-2 * vov * vDSguess / Vp - vDSguess * vDSguess / (Vp * Vp));
-          gm = 2 * Idss * vDSguess / (Vp * Vp);
-          gds = -2 * Idss * (vov / Vp + vDSguess / (Vp * Vp));
+          Id = Idss * (-2 * vov * vDSguess / VpEff - vDSguess * vDSguess / (VpEff * VpEff));
+          gm = 2 * Idss * vDSguess / (VpEff * VpEff);
+          gds = -2 * Idss * (vov / VpEff + vDSguess / (VpEff * VpEff));
         }
       }
       const sign = isN ? 1 : -1;
