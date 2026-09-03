@@ -9,6 +9,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
 import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
+import { ViewHelper } from 'three/examples/jsm/helpers/ViewHelper.js';
 import { usePCB } from '@/lib/pcb/store';
 import { useEditor } from '@/lib/circuit/store';
 import { buildNodeMap, getTerminalsForComponent, computeComponentCurrents } from '@/lib/circuit/engine';
@@ -56,24 +57,36 @@ const FAILED_SENTINEL = Symbol('FAILED');
 
 const BOARD_THICKNESS = 1.6;
 const MASK_T = 0.06;              // solder-mask slab thickness
-const COPPER_TOP_Y = 0.075;       // flush-mounted: embedded 0.01, proud 0.04
-const COPPER_BOT_Y = -1.685;
-const SILK_Y = 0.068;             // just above the top mask slab
-const MODEL_TOP_Y = 0.05;
-const MODEL_BOT_Y = -1.72;
+// ── Layer stack (realistic sandwich, KiCad-style) ─────────────────────
+// FR4 core spans y ∈ [−1.6, 0]; copper sits ON the substrate; the
+// semi-transparent LPI mask covers the copper (traces ghost through);
+// pads & via barrels pierce the mask as exposed ENIG gold; silk on top.
+const COPPER_TOP_Y = 0.08;        // top face of top copper (mask bottom)
+const COPPER_BOT_Y = -1.64;       // CENTER of bottom copper [−1.68, −1.6]
+const BOT_COPPER_Y = -1.68;       // lower face of bottom copper / mask top
+const SILK_Y = 0.148;             // just above the top mask slab
+const PAD_TOP_Y = 0.16;           // pads pierce the mask — exposed gold
+const PAD_BOT_Y = -1.68;          // bottom pads pierce down (spans to −1.76)
+const MODEL_TOP_Y = 0.15;
+const MODEL_BOT_Y = -1.74;
 
-/** World Y for a copper layer (inner layers sit inside the substrate —
- *  visible with the cross-section tool, like a real multilayer cutaway). */
+/** World Y for a copper layer — the CENTER of the copper slab (this is the
+ *  convention traceGeometries expects; pads use their own pierce heights). */
 function layerYOf(layer: string): number {
   switch (layer) {
-    case 'top': return COPPER_TOP_Y;
+    case 'top': return COPPER_TOP_Y - 0.04;
     case 'bottom': return COPPER_BOT_Y;
     case 'inner1': return -0.5;
     case 'inner2': return -0.85;
     case 'inner3': return -1.15;
     case 'inner4': return -1.45;
-    default: return COPPER_TOP_Y;
+    default: return COPPER_TOP_Y - 0.04;
   }
+}
+/** Flow-particle height per layer — above the mask so dots stay visible.
+ *  (FlowParticleField adds +0.12 to the value we hand it.) */
+function flowLayerYOf(layer: string): number {
+  return layer === 'bottom' ? -1.94 : 0.06;
 }
 
 // Cache 3D geometries across renders (model geometry cache — survives HMR).
@@ -148,6 +161,9 @@ function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
+// scratch vector for per-frame viewport resets (never allocate in the loop)
+const _v2 = new THREE.Vector2();
+
 // ─── Component param summary for the info card ───────────────────────────────
 
 function paramSummary(fp: Footprint, comp: { parameters?: Record<string, unknown> } | undefined): string {
@@ -189,7 +205,11 @@ export function PCB3DViewer() {
   const flowFieldRef = useRef<FlowParticleField | null>(null);
   /** per-net copper materials — recolored live for heat/net-color modes */
   const netMatsRef = useRef<Map<string, THREE.MeshPhysicalMaterial[]>>(new Map());
+  /** mask materials — opacity eased up in heat/net-color modes so the
+   *  recolored copper underneath becomes clearly readable */
+  const maskMatsRef = useRef<THREE.MeshPhysicalMaterial[]>([]);
   const clipPlaneRef = useRef<THREE.Plane | null>(null);
+  const viewHelperRef = useRef<ViewHelper | null>(null);
   const modelCacheRef = useRef(createModelGeometryCache());
   const inFlightRef = useRef<Set<string>>(new Set());
   const materialCacheRef = useRef(createMaterialCache());
@@ -225,7 +245,7 @@ export function PCB3DViewer() {
 
   // Visual options
   const [crossSection, setCrossSection] = useState(false);
-  const [crossSectionY, setCrossSectionY] = useState(0);
+  const [crossSectionX, setCrossSectionX] = useState(0.5); // 0..1 across board width
   const [aoEnabled, setAoEnabled] = useState(true);
   const [showCurrentFlow, setShowCurrentFlow] = useState(false);
   const [showVoltageHeat, setShowVoltageHeat] = useState(false);
@@ -240,7 +260,8 @@ export function PCB3DViewer() {
   // Use refs for animation-loop state (avoids re-render on every frame)
   const stateRef = useRef({
     crossSection: false,
-    crossSectionY: 0,
+    crossSectionX: 0.5,
+    boardW: 80,
     showCurrentFlow: false,
     showVoltageHeat: false,
     showNetColors: false,
@@ -250,7 +271,7 @@ export function PCB3DViewer() {
     selectedFpId: null as string | null,
   });
   useEffect(() => { stateRef.current.crossSection = crossSection; }, [crossSection]);
-  useEffect(() => { stateRef.current.crossSectionY = crossSectionY; }, [crossSectionY]);
+  useEffect(() => { stateRef.current.crossSectionX = crossSectionX; }, [crossSectionX]);
   useEffect(() => { stateRef.current.showCurrentFlow = showCurrentFlow; }, [showCurrentFlow]);
   useEffect(() => { stateRef.current.showVoltageHeat = showVoltageHeat; }, [showVoltageHeat]);
   useEffect(() => { stateRef.current.showNetColors = showNetColors; }, [showNetColors]);
@@ -296,13 +317,20 @@ export function PCB3DViewer() {
         alpha: false,
         powerPreference: 'high-performance',
         stencil: false,
+        // keep the drawing buffer valid after compositing: needed for the
+        // in-app Screenshot button (toDataURL outside the render task) and
+        // for stable captures on very slow GPUs (software GL at ~1 fps
+        // used to present cleared frames between draws)
+        preserveDrawingBuffer: true,
       });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setSize(width, height);
       renderer.localClippingEnabled = true;
       renderer.outputColorSpace = THREE.SRGBColorSpace;
-      renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.0;
+      // Neutral tone mapping (r167+): ACES hue-shifts saturated emissives —
+      // an RGB LED's red/green/blue must stay truthful for sim readouts.
+      renderer.toneMapping = THREE.NeutralToneMapping;
+      renderer.toneMappingExposure = 1.05;
       renderer.shadowMap.enabled = true;
       // r185 deprecated PCFSoftShadowMap (hard-edged fallback). VSM is the
       // supported soft-shadow path — radius + blurSamples give the soft
@@ -357,6 +385,13 @@ export function PCB3DViewer() {
       const gtao = new GTAOPass(scene, camera, width, height);
       gtao.output = GTAOPass.OUTPUT.Default;
       gtao.blendIntensity = 1.0;
+      // SCALE TUNING (critical): GTAO's default radius is 0.25 world units
+      // = 0.25 mm on a PCB — invisible. 4 mm radius grounds components on
+      // the mask with believable contact shadows at board scale.
+      try {
+        gtao.updateGtaoMaterial({ radius: 4, thickness: 3, distanceFallOff: 0.8, samples: 16 });
+        gtao.updatePdMaterial({ radius: 8, lumaPhi: 10, depthPhi: 2, normalPhi: 3 });
+      } catch { /* older three fallback: defaults */ }
       composer.addPass(gtao);
       gtaoPassRef.current = gtao;
       const bloomPass = new UnrealBloomPass(
@@ -433,8 +468,21 @@ export function PCB3DViewer() {
       scene.add(floor);
 
       // Persistent clipping plane — wired to every material at build time
-      const clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
+      // (see the cross-section comment above for orientation).
+      const clipPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
       clipPlaneRef.current = clipPlane;
+
+      // CAD-style XYZ orientation gizmo (corner axes — red X / green Y /
+      // blue Z). Clickable: tapping an axis animates the camera to it.
+      const helper = new ViewHelper(camera, renderer.domElement);
+      helper.center = new THREE.Vector3(board.width / 2, 0, board.height / 2);
+      viewHelperRef.current = helper;
+      const helperClick = (e: MouseEvent) => {
+        if (!viewHelperRef.current || !controlsRef.current) return;
+        viewHelperRef.current.center = controlsRef.current.target;
+        viewHelperRef.current.handleClick(e);
+      };
+      renderer.domElement.addEventListener('pointerup', helperClick, true);
 
       const pcbGroup = new THREE.Group();
       scene.add(pcbGroup);
@@ -463,7 +511,12 @@ export function PCB3DViewer() {
           const c = child as unknown as { __baseY?: number; position?: THREE.Vector3; scale?: THREE.Vector3; visible?: boolean };
           if (c.__baseY === undefined || !c.position || !c.scale) return;
           const baseY = c.__baseY;
-          c.position.y = baseY + (baseY > 0 ? exp * 5 : -exp * 2);
+          // Proportional lift: higher layers rise further, so the exploded
+          // view actually SEPARATES the stack (silk > pads > copper) instead
+          // of moving everything up by the same amount; bottom sinks too.
+          c.position.y = baseY + (baseY > 0
+            ? exp * (1 + baseY * 30)
+            : -exp * (1 + Math.abs(baseY) * 1.5));
           if (baseY > 0 && asm < 1) {
             c.position.y += (1 - asm) * 30;
             c.scale.setScalar(asm);
@@ -502,7 +555,7 @@ export function PCB3DViewer() {
 
         // cross-section — set plane constant (materials hold the plane ref)
         if (stateRef.current.crossSection && clipPlaneRef.current) {
-          clipPlaneRef.current.constant = stateRef.current.crossSectionY;
+          clipPlaneRef.current.constant = stateRef.current.crossSectionX * stateRef.current.boardW;
           renderer.localClippingEnabled = true;
         } else {
           renderer.localClippingEnabled = false;
@@ -612,10 +665,25 @@ export function PCB3DViewer() {
         // scene stats probe (debug/verification hook, refreshed ~1 Hz)
         if (typeof window !== 'undefined' && now - lastStatsT > 1000) {
           lastStatsT = now;
+          // DEBUG: expose renderer/scene/camera for live introspection
+          (window as unknown as Record<string, unknown>).__3D_DEBUG__ = {
+            renderer, scene, camera, controls,
+            get info() { return renderer.info.render; },
+          };
+          (window as unknown as Record<string, unknown>).__3D_VIEWHELPER__ = viewHelperRef.current;
           let pcbMeshes = 0;
           let modelMeshes = 0;
           pcbGroupRef.current?.traverse((c) => { if (c instanceof THREE.Mesh) pcbMeshes++; });
           modelsGroupRef.current?.traverse((c) => { if (c instanceof THREE.Mesh) modelMeshes++; });
+          // DEBUG: expose group bounding boxes (audit tooling)
+          const dbgB = (g: THREE.Group | null) => {
+            if (!g) return null;
+            const b = new THREE.Box3().expandByObject(g);
+            return b.isEmpty() ? null : {
+              min: [b.min.x, b.min.y, b.min.z].map((v) => Math.round(v * 10) / 10),
+              max: [b.max.x, b.max.y, b.max.z].map((v) => Math.round(v * 10) / 10),
+            };
+          };
           (window as unknown as Record<string, unknown>).__3D_STATS__ = {
             pcbMeshes,
             modelMeshes,
@@ -623,6 +691,9 @@ export function PCB3DViewer() {
             triangles: renderer.info.render.triangles,
             fps: Math.round(1000 / Math.max(1, frameStatsRef.current.avg)),
             tier: frameStatsRef.current.tier,
+            pcbBounds: dbgB(pcbGroupRef.current),
+            modelBounds: dbgB(modelsGroupRef.current),
+            flowBounds: dbgB(flowFieldRef.current ? (flowFieldRef.current.points as unknown as THREE.Group) : null),
           };
         }
 
@@ -648,11 +719,37 @@ export function PCB3DViewer() {
         }
 
         // render (tier 0 bypasses post-processing entirely)
+        // ViewHelper.render() sets its own corner viewport (and restores it)
+        // — but reset ours defensively anyway, editor.js-style, so a stale
+        // scissor/viewport from ANY pass can never shrink the main render.
+        {
+          const sz = renderer.getSize(_v2);
+          renderer.setViewport(0, 0, sz.x, sz.y);
+          renderer.setScissorTest(false);
+        }
         if (composerRef.current && frameStatsRef.current.tier > 0) {
           composerRef.current.render();
         } else {
           renderer.render(scene, camera);
         }
+        // orientation gizmo on top (its own corner viewport, after the main
+        // pass). CRITICAL: helper.render() calls renderer.render() with
+        // autoClear on — without disabling it, the gizmo's implicit clear
+        // WIPES THE WHOLE CANVAS (the clear is not clipped to the gizmo's
+        // 128 px viewport — no scissor), erasing the scene every frame.
+        try {
+          const helper = viewHelperRef.current;
+          if (helper) {
+            if (helper.animating) {
+              helper.update(1 / 60);
+              camera.updateProjectionMatrix();
+            } else {
+              renderer.autoClear = false;
+              helper.render(renderer);
+              renderer.autoClear = true;
+            }
+          }
+        } catch { /* gizmo optional */ }
 
         // screenshot capture (canvas is valid right after render)
         if (screenshotRef.current) {
@@ -764,6 +861,7 @@ export function PCB3DViewer() {
         renderer.domElement.removeEventListener('pointerdown', onPointerDown);
         renderer.domElement.removeEventListener('click', onClick);
         renderer.domElement.removeEventListener('dblclick', onDblClick);
+        renderer.domElement.removeEventListener('pointerup', helperClick, true);
         window.removeEventListener('keydown', onKey);
       };
 
@@ -973,8 +1071,8 @@ export function PCB3DViewer() {
       buildRingGeometry(fp, thickness),
       new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, depthWrite: false }),
     );
-    mesh.position.set(fp.position.x, 0.14, fp.position.y);
-    mesh.rotation.y = (fp.rotation * Math.PI) / 180;
+    mesh.position.set(fp.position.x, 0.18, fp.position.y);
+    mesh.rotation.y = -(fp.rotation * Math.PI) / 180;
     mesh.renderOrder = 20;
     sceneRef.current.add(mesh);
     ringRef.current = mesh;
@@ -1029,16 +1127,19 @@ export function PCB3DViewer() {
     }
   }
 
-  // mode transitions for copper coloring (heat is driven per-frame above)
+  // mode transitions for copper coloring (heat is driven per-frame above).
+  // Heat/net-color modes ease the mask opacity up so the recolored copper
+  // under the LPI reads clearly (KiCad x-ray-style data visualization).
   useEffect(() => {
-    const mats = netMatsRef.current;
+    for (const m of maskMatsRef.current) m.opacity = showVoltageHeat || showNetColors ? 0.35 : 0.62;
+    const netMats = netMatsRef.current;
     if (showNetColors && !showVoltageHeat) {
-      for (const [net, list] of mats) {
+      for (const [net, list] of netMats) {
         const c = netColor(net);
         for (const m of list) m.color.copy(c);
       }
     } else if (!showVoltageHeat) {
-      for (const [, list] of mats) {
+      for (const [, list] of netMats) {
         for (const m of list) m.color.set(GOLD_BASE);
       }
     }
@@ -1085,9 +1186,36 @@ export function PCB3DViewer() {
       flowFieldRef.current = null;
     }
 
-    if (footprints.length === 0 && traces.length === 0 && vias.length === 0) return;
+    if (footprints.length === 0 && traces.length === 0 && vias.length === 0) {
+      // EMPTY STATE GHOST: still render the bare board (FR4 + mask + silk
+      // title) so the viewport is never a dead void — you can verify the
+      // camera/lighting work and see the board you're about to populate.
+      const gw = board.width;
+      const gh = board.height;
+      const gcorner = Math.min(2.5, gw / 8, gh / 8);
+      const gFr4 = new THREE.Mesh(boardGeometry(gw, gh, BOARD_THICKNESS, gcorner), fr4Material());
+      gFr4.receiveShadow = true;
+      group.add(gFr4);
+      const gMask = new THREE.Mesh(boardGeometry(gw, gh, MASK_T, gcorner), solderMaskMaterial());
+      gMask.position.y = COPPER_TOP_Y + MASK_T;
+      gMask.receiveShadow = true;
+      group.add(gMask);
+      try {
+        const { texture } = buildSilkscreenTexture([], board);
+        const ghostMat = new THREE.MeshStandardMaterial({
+          map: texture, transparent: true, roughness: 0.75, metalness: 0.0,
+          color: 0x8b93a0, envMapIntensity: 0.25, depthWrite: false,
+        });
+        const silk = new THREE.Mesh(new THREE.PlaneGeometry(gw, gh), ghostMat);
+        silk.rotation.x = -Math.PI / 2;
+        silk.position.set(gw / 2, SILK_Y, gh / 2);
+        group.add(silk);
+      } catch { /* ghost silk optional */ }
+      return;
+    }
 
     const w = board.width;
+    stateRef.current.boardW = w;
     const h = board.height;
     const corner = Math.min(2.5, w / 8, h / 8);
     const clip = clipPlaneRef.current;
@@ -1104,15 +1232,16 @@ export function PCB3DViewer() {
 
     const maskMat = solderMaskMaterial();
     if (clip) { maskMat.clippingPlanes = [clip]; maskMat.clipShadows = true; }
-    // boardGeometry spans y ∈ [−depth, 0] — the mask slabs must be lifted so
-    // their TOP faces sit at +MASK_T / bottom at −(BOARD+MASK_T); leaving them
-    // untranslated buried the mask inside the FR4 and made copper float.
+    maskMatsRef.current = [maskMat];
+    // Real layer sandwich: FR4 [−1.6, 0] → copper [0, 0.08] → LPI mask
+    // [0.08, 0.14] (semi-transparent — copper ghosts through like KiCad)
+    // → silk at 0.148. Pads/vias pierce the mask as exposed gold.
     const topMask = new THREE.Mesh(boardGeometry(w, h, MASK_T, corner), maskMat);
-    topMask.position.y = MASK_T;
+    topMask.position.y = COPPER_TOP_Y + MASK_T;
     topMask.receiveShadow = true;
     group.add(topMask);
     const botMask = new THREE.Mesh(boardGeometry(w, h, MASK_T, corner), maskMat);
-    botMask.position.y = -BOARD_THICKNESS;
+    botMask.position.y = BOT_COPPER_Y;
     botMask.receiveShadow = true;
     group.add(botMask);
 
@@ -1157,23 +1286,28 @@ export function PCB3DViewer() {
       for (const pad of fp.pads) {
         const wp = padWorldPosition(fp, pad);
         const layer = (pad.layer ?? fp.side) || 'top';
-        const y = layerYOf(layer);
-        push(`${pad.net ?? fp.id}||${layer}`, padGeometry(pad, wp.x, wp.y, y, (fp.rotation * Math.PI) / 180), y);
+        // pads PIERCE the mask: top pads span [0.08, 0.16], exposing their
+        // gold tops above the LPI; bottom pads span [−1.76, −1.68].
+        const padY = layer === 'bottom' ? PAD_BOT_Y : PAD_TOP_Y;
+        push(`${pad.net ?? fp.id}||${layer}`, padGeometry(pad, wp.x, wp.y, padY, -(fp.rotation * Math.PI) / 180), padY);
         if (pad.drill && pad.drill > 0) {
           const drillR = Math.max(0.06, pad.drill / 2);
-          const drill = new THREE.CylinderGeometry(drillR, drillR, BOARD_THICKNESS + 0.1, 12);
-          drill.translate(wp.x, 0, wp.y);
+          // drill spans the full stack: pad top → past the bottom mask
+          const drill = new THREE.CylinderGeometry(drillR, drillR, PAD_TOP_Y - (PAD_BOT_Y - 0.08) + 0.04, 12);
+          drill.translate(wp.x, (PAD_TOP_Y + PAD_BOT_Y - 0.08) / 2, wp.y);
           drillGeos.push(drill);
-          if (hasModel) {
-            const fillet = solderFilletGeometry(pad, wp.x, wp.y, layer === 'bottom' ? COPPER_BOT_Y : COPPER_TOP_Y);
-            if (fillet) filletGeos.push(fillet);
-          }
+        }
+        // solder fillet on EVERY populated pad — THT meniscus or the smaller
+        // SMD reflow fillet (real boards are never "glued flat")
+        if (hasModel) {
+          const fillet = solderFilletGeometry(pad, wp.x, wp.y, layer === 'bottom' ? PAD_BOT_Y - 0.08 : PAD_TOP_Y);
+          if (fillet) filletGeos.push(fillet);
         }
       }
     }
 
     for (const via of vias) {
-      const [gold, drill] = viaGeometries(via, BOARD_THICKNESS);
+      const [gold, drill] = viaGeometries(via, PAD_TOP_Y, PAD_BOT_Y - 0.08);
       push(`${via.net}||via`, gold, undefined); // vias stay with the board
       drillGeos.push(drill);
     }
@@ -1218,7 +1352,7 @@ export function PCB3DViewer() {
         const merged = mergeAll(filletGeos);
         filletGeos.forEach((g) => { if (g !== merged) g.dispose(); });
         const mesh = new THREE.Mesh(merged, filletMat);
-        (mesh as unknown as { __baseY: number }).__baseY = COPPER_TOP_Y;
+        (mesh as unknown as { __baseY: number }).__baseY = PAD_TOP_Y;
         mesh.receiveShadow = true;
         mesh.castShadow = true;
         group.add(mesh);
@@ -1227,7 +1361,7 @@ export function PCB3DViewer() {
 
     // 4. Current-flow particle field for these traces
     try {
-      const ff = new FlowParticleField(traces, layerYOf);
+      const ff = new FlowParticleField(traces, flowLayerYOf);
       sceneRef.current.add(ff.points);
       flowFieldRef.current = ff;
     } catch { /* flow optional */ }
@@ -1268,21 +1402,23 @@ export function PCB3DViewer() {
   useEffect(() => {
     if (!modelsGroupRef.current) return;
 
-    const attachedIds = new Set<string>();
-    modelsGroupRef.current.traverse((child) => {
+    // Index currently attached root models by footprint id (roots live
+    // directly under modelsGroup — traverse() would also visit children).
+    const attached = new Map<string, THREE.Object3D>();
+    for (const child of modelsGroupRef.current.children) {
       const id = (child as unknown as { __footprintId?: string }).__footprintId;
-      if (id) attachedIds.add(id);
-    });
+      if (id) attached.set(id, child);
+    }
 
     const wantedIds = new Set<string>();
     for (const fp of footprints) wantedIds.add(fp.id);
 
     const toRemove: THREE.Object3D[] = [];
-    modelsGroupRef.current.traverse((child) => {
-      const id = (child as unknown as { __footprintId?: string }).__footprintId;
-      if (id && !wantedIds.has(id)) toRemove.push(child);
-    });
+    for (const [id, obj] of attached) {
+      if (!wantedIds.has(id)) toRemove.push(obj);
+    }
     for (const obj of toRemove) {
+      attached.delete((obj as unknown as { __footprintId: string }).__footprintId);
       modelsGroupRef.current.remove(obj);
       if (obj instanceof THREE.Mesh) obj.geometry?.dispose();
     }
@@ -1292,7 +1428,17 @@ export function PCB3DViewer() {
     const editorComps = useEditor.getState().components;
     const clip = clipPlaneRef.current;
     for (const fp of footprints) {
-      if (attachedIds.has(fp.id)) continue;
+      const existing = attached.get(fp.id);
+      if (existing) {
+        // Sync pose: a model must FOLLOW its footprint — after a move,
+        // rotate or side flip in PCB Layout the old code left it at its
+        // original spot, hovering over stale coordinates.
+        existing.position.set(fp.position.x, fp.side === 'bottom' ? MODEL_BOT_Y : MODEL_TOP_Y, fp.position.y);
+        existing.rotation.y = -(fp.rotation * Math.PI) / 180;
+        existing.scale.y = fp.side === 'bottom' ? -1 : 1;
+        (existing as unknown as { __baseY: number }).__baseY = existing.position.y;
+        continue;
+      }
 
       const modelKey = fp.modelUrl || `default:${fp.componentType}`;
 
@@ -1303,7 +1449,10 @@ export function PCB3DViewer() {
           obj.position.y = MODEL_BOT_Y;
           obj.scale.y = -1;
         }
-        obj.rotation.y = (fp.rotation * Math.PI) / 180;
+        // ROTATION SIGN: three's rotateY(+θ) is opposite-handed to the 2D
+        // board rotation (ctx.rotate / padWorldPosition) — models must use
+        // −θ or their legs land on MIRRORED pads for non-180° rotations.
+        obj.rotation.y = -(fp.rotation * Math.PI) / 180;
         (obj as unknown as { __baseY: number }).__baseY = obj.position.y;
         (obj as unknown as { __footprintId: string }).__footprintId = fp.id;
         (obj as unknown as { __componentId: string }).__componentId = fp.componentId;
@@ -1362,7 +1511,7 @@ export function PCB3DViewer() {
           mesh.position.y = MODEL_BOT_Y;
           mesh.scale.y = -1;
         }
-        mesh.rotation.y = (fp.rotation * Math.PI) / 180;
+        mesh.rotation.y = -(fp.rotation * Math.PI) / 180;
         (mesh as unknown as { __baseY: number }).__baseY = mesh.position.y;
         (mesh as unknown as { __footprintId: string }).__footprintId = fp.id;
         (mesh as unknown as { __componentId: string }).__componentId = fp.componentId;
@@ -1560,9 +1709,11 @@ export function PCB3DViewer() {
       )}
       {footprints.length === 0 && !loading && !error && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
-          <div className="text-lg font-semibold text-slate-300">3D PCB Preview</div>
-          <div className="text-sm text-slate-500">
-            Import a schematic in PCB Layout mode first, then switch to 3D View.
+          <div className="rounded-lg border border-slate-700/60 bg-slate-950/80 px-6 py-4 text-center shadow-xl backdrop-blur-sm">
+            <div className="text-lg font-semibold text-slate-200">3D PCB Preview</div>
+            <div className="mt-1 text-sm text-slate-400">
+              Import a schematic in PCB Layout mode first, then switch to 3D View.
+            </div>
           </div>
         </div>
       )}
@@ -1598,9 +1749,9 @@ export function PCB3DViewer() {
             <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Inspect</div>
             <button onClick={() => setCrossSection(!crossSection)} className={btn(crossSection)}>✂ Cross-section</button>
             {crossSection && (
-              <input type="range" min={-2} max={2} step={0.1} value={crossSectionY}
-                onChange={(e) => setCrossSectionY(parseFloat(e.target.value))}
-                className="w-36 px-1" aria-label="Cross-section height" />
+              <input type="range" min={0} max={1} step={0.02} value={crossSectionX}
+                onChange={(e) => setCrossSectionX(parseFloat(e.target.value))}
+                className="w-36 px-1" aria-label="Cross-section position" />
             )}
             <div className="flex items-center gap-1 px-2 py-0.5">
               <span className="text-slate-500">Explode</span>

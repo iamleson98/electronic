@@ -32,11 +32,12 @@ export interface NetFlowData {
 
 /** World-space position of a footprint pad (board mm, rotation applied). */
 export function padWorldPosition(fp: Footprint, pad: { position: { x: number; y: number } }): { x: number; y: number } {
-  const a = (fp.rotation * Math.PI) / 180;
-  const c = Math.cos(a);
-  const s = Math.sin(a);
-  const { x, y } = pad.position;
-  return { x: fp.position.x + x * c - y * s, y: fp.position.y + x * s + y * c };
+  // Pad positions are stored BOARD-ABSOLUTE with the footprint rotation
+  // already baked in (generateFootprints / rotateFootprint both write
+  // fp.position + rotated offset). Adding fp.position again would double-
+  // shift every pad off the board edge.
+  void fp;
+  return { x: pad.position.x, y: pad.position.y };
 }
 
 /**

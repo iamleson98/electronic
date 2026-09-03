@@ -268,16 +268,19 @@ export function solderFilletGeometry(pad: Pad, x: number, z: number, layerY: num
 }
 
 /**
- * Via: gold annular barrel spanning the board + dark drill hole.
- * Returns [goldGeo, drillGeo].
+ * Via: gold annular barrel spanning the whole stack — it PIERCES both
+ * solder masks (like a real plated through-hole) so the barrel caps show
+ * as exposed gold on both surfaces. Returns [goldGeo, drillGeo].
  */
-export function viaGeometries(via: Via, boardThickness: number): [THREE.BufferGeometry, THREE.BufferGeometry] {
+export function viaGeometries(via: Via, topY: number, botY: number): [THREE.BufferGeometry, THREE.BufferGeometry] {
   const outerR = Math.max(0.2, via.diameter / 2);
   const drillR = Math.max(0.08, via.drill / 2);
-  const gold = new THREE.CylinderGeometry(outerR, outerR, boardThickness + COPPER_THICKNESS, 16);
-  gold.translate(via.position.x, 0, via.position.y);
-  const drill = new THREE.CylinderGeometry(drillR, drillR, boardThickness + COPPER_THICKNESS + 0.04, 16);
-  drill.translate(via.position.x, 0, via.position.y);
+  const span = topY - botY;
+  const cy = (topY + botY) / 2;
+  const gold = new THREE.CylinderGeometry(outerR, outerR, span, 16);
+  gold.translate(via.position.x, cy, via.position.y);
+  const drill = new THREE.CylinderGeometry(drillR, drillR, span + 0.04, 16);
+  drill.translate(via.position.x, cy, via.position.y);
   return [gold, drill];
 }
 
@@ -289,10 +292,13 @@ export function boardGeometry(bw: number, bh: number, depth: number, corner: num
   // curveSegments 24: a 6-segment arc renders a visibly polygonal corner
   // (read as "jagged edge" at any zoom); 24 is visually circular.
   const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false, curveSegments: 24 });
-  // shape's +Y becomes board -Z (unmirrored), extrusion +Z becomes world -Y,
-  // then translate so the top cap sits at y = 0.
-  geo.rotateX(-Math.PI / 2);
-  geo.translate(0, -depth, 0);
+  // Coordinate contract: the whole 3D scene maps board point (x, y) to world
+  // (x, z=+y) — footprints, pads, traces, vias, silk all follow it.
+  // rotateX(+π/2): shape's +Y → world +Z (matching that contract), extrusion
+  // +Z → world −Y, so the top cap lands at y=0 and the slab spans
+  // y ∈ [−depth, 0]. (The previous −π/2 put the board at z ∈ [−h, 0] —
+  // disjoint from the circuit, which hung off its edge.)
+  geo.rotateX(Math.PI / 2);
   return geo;
 }
 
@@ -447,12 +453,15 @@ export function goldMaterial(): THREE.MeshPhysicalMaterial {
   });
 }
 
-/** Glossy solder mask — the real FR4 + mask look (dark green, clearcoat sheen). */
+/** Glossy semi-transparent LPI solder mask — the KiCad/Altium look:
+ *  copper sits UNDER the mask and ghosts through it (~12% transmission),
+ *  while exposed pads/vias punch through in ENIG gold. */
 export function solderMaskMaterial(color = 0x0b5e33): THREE.MeshPhysicalMaterial {
   const mat = new THREE.MeshPhysicalMaterial({
     color, roughness: 0.42, metalness: 0.05,
     clearcoat: 0.75, clearcoatRoughness: 0.28,
     sheen: 0.15, sheenRoughness: 0.5, sheenColor: new THREE.Color(0x66ff99),
+    transparent: true, opacity: 0.62, depthWrite: true,
   });
   // micro-surface normal noise — real solder mask has fine Orange-peel grain
   if (typeof document !== 'undefined') {

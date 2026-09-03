@@ -42,7 +42,7 @@ const MAT = {
   // Copper windings
   copper: new THREE.MeshPhysicalMaterial({ color: 0xb87333, roughness: 0.25, metalness: 0.95, clearcoat: 0.3, clearcoatRoughness: 0.25 }),
   // Resistor body (beige ceramic with a lacquer sheen)
-  resistorBody: new THREE.MeshPhysicalMaterial({ color: 0xc8b088, roughness: 0.55, metalness: 0.0, clearcoat: 0.25, clearcoatRoughness: 0.4 }),
+  resistorBody: new THREE.MeshPhysicalMaterial({ color: 0xd9c58f, roughness: 0.55, metalness: 0.0, clearcoat: 0.25, clearcoatRoughness: 0.4 }),
   // Electrolytic can (dark navy plastic sleeve)
   elecCan: new THREE.MeshPhysicalMaterial({ color: 0x1a2440, roughness: 0.4, metalness: 0.15, clearcoat: 0.5, clearcoatRoughness: 0.3 }),
   // Ceramic disc (orange-tan)
@@ -100,8 +100,22 @@ function padSpanZ(fp: Footprint): number {
  * HERE so models always land on the copper, whatever the layout engine
  * chose (guarantees the “match PCB layout” requirement).
  */
+/**
+ * Model-LOCAL leg positions for the footprint's pads. Pad.position is
+ * board-ABSOLUTE (rotation baked in), so subtract the footprint center and
+ * UN-rotate by the footprint angle — the result is the original def offset,
+ * which is exactly where legs belong in the model's un-rotated frame (the
+ * viewer then applies rotation.y = −θ, mapping them back onto the pads).
+ */
 function padPoints(fp: Footprint, maxPads = 4): [number, number][] {
-  const pts: [number, number][] = fp.pads.slice(0, maxPads).map((p) => [p.position.x, p.position.y]);
+  const a = (fp.rotation * Math.PI) / 180;
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  const pts: [number, number][] = fp.pads.slice(0, maxPads).map((p) => {
+    const dx = p.position.x - fp.position.x;
+    const dy = p.position.y - fp.position.y;
+    return [dx * c + dy * s, -dx * s + dy * c];
+  });
   return pts.length ? pts : [[-2.5, 0], [2.5, 0]];
 }
 
@@ -215,6 +229,18 @@ function electrolyticCap(ctx: ModelBuildContext): THREE.Group {
     new THREE.MeshStandardMaterial({ color: 0xbfc9d9, roughness: 0.5 }), 0, canH / 2, 0,
   );
   g.add(stripe);
+  // minus glyphs on the stripe — the actual polarity marking on real cans
+  // (a column of small dark "−" bars inside the light stripe)
+  const minusMat = new THREE.MeshStandardMaterial({ color: 0x1a2440, roughness: 0.55 });
+  const stripeAngle = Math.PI / 2 + 0.35 + (Math.PI - 0.7) / 2; // stripe center angle
+  const glyphR = canR * 1.03;
+  for (let i = -2; i <= 2; i++) {
+    const gx = Math.cos(stripeAngle) * glyphR;
+    const gz = Math.sin(stripeAngle) * glyphR;
+    const bar = mesh(new THREE.BoxGeometry(0.55, 0.1, 0.14), minusMat, gx, canH / 2 + i * (canH / 6.5), gz);
+    bar.lookAt(0, canH / 2 + i * (canH / 6.5), 0);
+    g.add(bar);
+  }
   // stripe + two leads at the ACTUAL pad positions (match PCB layout)
   for (const [x, z] of padPoints(ctx.footprint, 2)) {
     g.add(radialLead(x, z, 0.25));
@@ -279,9 +305,15 @@ function ledModel(ctx: ModelBuildContext): THREE.Group {
   };
   const colorName = (ctx.params.color as string) ?? 'red';
   const color = colorMap[colorName] ?? 0xff2418;
+  const tint = new THREE.Color(color);
+  // Water-clear / tinted epoxy dome: IOR 1.54, real transmission, a hint of
+  // attenuation — reads as glass, not painted plastic. When the sim runs,
+  // emissive + attenuation shift make the whole lens light up.
   const lensMat = new THREE.MeshPhysicalMaterial({
-    color, roughness: 0.08, metalness: 0.0,
-    transparent: true, opacity: 0.9, transmission: 0.25, thickness: 1.2,
+    color, roughness: 0.07, metalness: 0.0,
+    transparent: true, opacity: 0.92, transmission: 0.55, ior: 1.54, thickness: 2.2,
+    attenuationColor: tint, attenuationDistance: 3.2,
+    clearcoat: 1.0, clearcoatRoughness: 0.06,
     emissive: color, emissiveIntensity: 0,
   });
   const domeR = 2.5;
@@ -291,8 +323,23 @@ function ledModel(ctx: ModelBuildContext): THREE.Group {
   g.add(mesh(new THREE.CylinderGeometry(domeR, domeR * 1.02, 2.2, 24), lensMat, 0, 1.1, 0));
   const dome = mesh(new THREE.SphereGeometry(domeR, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2), lensMat, 0, 2.2, 0);
   g.add(dome);
-  // flange ring
-  g.add(mesh(new THREE.CylinderGeometry(domeR * 1.12, domeR * 1.12, 0.7, 24), lensMat, 0, 0.35, 0));
+  // flange ring with the classic FLAT SPOT (cathode marker on real 5 mm LEDs)
+  const flange = mesh(new THREE.CylinderGeometry(domeR * 1.12, domeR * 1.12, 0.7, 24), lensMat, 0, 0.35, 0);
+  const flat = mesh(new THREE.BoxGeometry(0.9, 0.72, 1.1), lensMat, -domeR * 1.02, 0.35, 0);
+  g.add(flange, flat);
+  // inner structure visible through the transmissive epoxy: metal reflector
+  // cup + die post (the "anvil") — the #1 detail that makes LEDs read real
+  const cup = mesh(
+    new THREE.CylinderGeometry(0.75, 0.35, 0.55, 16),
+    new THREE.MeshPhysicalMaterial({ color: 0xd9dde2, metalness: 1.0, roughness: 0.25 }),
+    0.28, 0.55, 0,
+  );
+  const post = mesh(
+    new THREE.BoxGeometry(0.3, 1.1, 0.3),
+    new THREE.MeshPhysicalMaterial({ color: 0x9aa0a6, metalness: 1.0, roughness: 0.3 }),
+    -0.28, 1.0, 0,
+  );
+  g.add(cup, post);
   // legs at the actual pad positions; anode ('a') is the longer one — tops
   // reach y = 1.6, inside the lens body
   const padPts = padPoints(ctx.footprint, 2);
@@ -307,14 +354,14 @@ function ledModel(ctx: ModelBuildContext): THREE.Group {
   const glowLight = new THREE.PointLight(color, 0, 30, 2);
   glowLight.position.set(0, 3.4, 0);
   g.add(glowLight);
-  // emissive core (the LED die) visible through the transmissive dome
+  // emissive die (visible through the transmissive dome)
   const core = mesh(new THREE.BoxGeometry(0.9, 0.9, 0.9), new THREE.MeshStandardMaterial({
     color: 0xffffff, emissive: color, emissiveIntensity: 0, roughness: 0.4,
   }), 0, 2.4, 0);
   g.add(core);
   // emissive hook — the render loop calls this with live sim current.
-  // Tuned so a 10 mA LED reads clearly lit WITHOUT blowing out ACES
-  // tonemapping + bloom (previous 4.0/15 cd washed the whole board white).
+  // Tuned so a 10 mA LED reads clearly lit WITHOUT blowing out tone
+  // mapping + bloom (previous 4.0/15 cd washed the whole board white).
   (g as any).__updateEmissive = (amps: number) => {
     const lit = Math.min(1, Math.abs(amps) / 0.008); // full glow at ~8 mA
     lensMat.emissiveIntensity = lit * 2.2;
@@ -617,20 +664,80 @@ function photoresistorModel(ctx: ModelBuildContext): THREE.Group {
   return g;
 }
 
+/**
+ * Arduino-style MCU MODULE: a compact blue daughter-board standing over the
+ * footprint's header pads — PCB, pin headers at the ACTUAL pad positions,
+ * USB-B jack, barrel jack, ATmega DIP + crystal. Scaled to the footprint's
+ * real pad span (the old fixed 68×53 mm STL stuck out past the board edge
+ * whenever the layout compressed the footprint).
+ */
+function arduinoModule(ctx: ModelBuildContext): THREE.Group {
+  const g = new THREE.Group();
+  const spanX = Math.max(6, padSpanX(ctx.footprint));
+  const spanZ = Math.max(10, padSpanZ(ctx.footprint));
+  // module PCB: a little wider than the pad grid, Uno-blue
+  const bw = Math.min(spanX + 6, 30);
+  const bl = Math.min(spanZ + 4, 60);
+  const pcbMat = new THREE.MeshPhysicalMaterial({
+    color: 0x00457c, roughness: 0.55, metalness: 0.05, clearcoat: 0.35, clearcoatRoughness: 0.4,
+  });
+  const pcb = mesh(new RoundedBoxGeometry(bw, 1.6, bl, 2, 0.3), pcbMat, 0, 2.4, 0);
+  g.add(pcb);
+  // pin headers — at the REAL pad positions (both rows if the footprint has
+  // them), black plastic + gold pins reaching down through the board
+  const pts = padPoints(ctx.footprint, 30);
+  const headerMat = new THREE.MeshPhysicalMaterial({ color: 0x14161a, roughness: 0.6, metalness: 0.05 });
+  for (const [x, z] of pts) {
+    g.add(mesh(new THREE.BoxGeometry(0.9, 1.2, 0.9), headerMat, x, 1.9, z));
+    g.add(mesh(new THREE.BoxGeometry(0.34, 2.0, 0.34), MAT.lead, x, 0.4, z));
+  }
+  // USB-B jack at one end
+  g.add(mesh(new RoundedBoxGeometry(4.4, 3.4, 5.2, 2, 0.35),
+    new THREE.MeshPhysicalMaterial({ color: 0xb8bcc2, roughness: 0.35, metalness: 0.9, clearcoat: 0.4 }),
+    0, 4.5, bl / 2 - 2.6));
+  // barrel jack at the other end
+  g.add(mesh(new RoundedBoxGeometry(3.4, 3.2, 4.2, 2, 0.3),
+    new THREE.MeshPhysicalMaterial({ color: 0x1a1a1e, roughness: 0.5, metalness: 0.3, clearcoat: 0.25 }),
+    0, 4.3, -bl / 2 + 2.2));
+  // ATmega DIP chip on top, across the module
+  const chipL = Math.min(spanZ * 0.55, 22);
+  g.add(mesh(new RoundedBoxGeometry(bw * 0.55, 2.6, chipL, 2, 0.25), MAT.dipBody, 0, 4.4, -bl * 0.08));
+  // crystal + a couple of SMD passives for texture
+  g.add(mesh(new THREE.CylinderGeometry(1.1, 1.1, 2.2, 12),
+    new THREE.MeshPhysicalMaterial({ color: 0x9aa0a6, roughness: 0.3, metalness: 0.85 }),
+    -bw * 0.3, 4.0, bl * 0.12));
+  for (const [cx, cz, cw, cl] of [[bw * 0.28, bl * 0.18, 1.2, 2.0], [bw * 0.28, bl * 0.3, 1.6, 0.8], [-bw * 0.28, -bl * 0.05, 1.0, 2.0]] as const) {
+    g.add(mesh(new THREE.BoxGeometry(cw, 0.5, cl), MAT.mlcc, cx, 3.55, cz));
+  }
+  return g;
+}
+
 /** 7-segment display: black body + 8 emissive segment bars. */
 function sevenSegmentModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
   const spanX = Math.max(8, padSpanX(ctx.footprint));
   const w = spanX * 0.8;
   const h = w * 0.6;
-  g.add(mesh(new THREE.BoxGeometry(w, 3, h), MAT.blackPlastic, 0, 1.5, 0));
-  g.add(mesh(new THREE.BoxGeometry(w * 0.82, 0.1, h * 0.68),
-    new THREE.MeshStandardMaterial({ color: 0x3a0d0d, roughness: 0.3 }), 0, 3.02, 0));
-  // emissive segments (a–g + dp) — lit state driven by __updateEmissive
-  const segMat = new THREE.MeshStandardMaterial({
-    color: 0xff2020, emissive: 0xff2020, emissiveIntensity: 0, roughness: 0.3,
+  const bodyH = 3;
+  // black epoxy body
+  g.add(mesh(new THREE.BoxGeometry(w, bodyH, h), MAT.blackPlastic, 0, bodyH / 2, 0));
+  // recessed face well: a slightly inset dark plate (the diffuser face real
+  // displays have) with a raised bezel frame around it — segments glow from
+  // INSIDE the well, not floating on a flat top
+  const faceY = bodyH + 0.02;
+  const faceMat = new THREE.MeshPhysicalMaterial({
+    color: 0x40060a, roughness: 0.35, metalness: 0.0, clearcoat: 0.6, clearcoatRoughness: 0.25,
   });
-  const sw = w * 0.09, sl = w * 0.26;
+  g.add(mesh(new THREE.BoxGeometry(w * 0.9, 0.12, h * 0.8), faceMat, 0, faceY - 0.03, 0));
+  // bezel frame (4 thin bars around the face)
+  const bez = new THREE.MeshPhysicalMaterial({ color: 0x101013, roughness: 0.55, metalness: 0.05 });
+  g.add(mesh(new THREE.BoxGeometry(w * 0.96, 0.34, h * 0.06), bez, 0, faceY + 0.06, h * 0.42));
+  g.add(mesh(new THREE.BoxGeometry(w * 0.96, 0.34, h * 0.06), bez, 0, faceY + 0.06, -h * 0.42));
+  g.add(mesh(new THREE.BoxGeometry(w * 0.07, 0.34, h * 0.8), bez, w * 0.445, faceY + 0.06, 0));
+  g.add(mesh(new THREE.BoxGeometry(w * 0.07, 0.34, h * 0.8), bez, -w * 0.445, faceY + 0.06, 0));
+  // emissive segments (a–g + dp) — recessed into the face well, glowing
+  // through; lit state driven by __updateSegments. Off-state color = the
+  // dark red of unlit segment plastic (never fully invisible).
   const segs: [number, number][] = [
     [0, h * 0.28],          // a — top
     [-w * 0.25, h * 0.14],  // b
@@ -641,22 +748,32 @@ function sevenSegmentModel(ctx: ModelBuildContext): THREE.Group {
     [0, 0],                 // g — middle
   ];
   const segMeshes: THREE.Mesh[] = [];
+  const sw = w * 0.09, sl = w * 0.26;
   for (const [sx, sz] of segs) {
     const vertical = Math.abs(sx) > 0.01;
     // per-segment material CLONE — each segment glows independently
-    const segMatClone = segMat.clone();
+    const segMatClone = new THREE.MeshStandardMaterial({
+      color: 0x551111, emissive: 0xff2020, emissiveIntensity: 0, roughness: 0.3,
+    });
     const seg = mesh(
       new THREE.BoxGeometry(vertical ? sw : sl, 0.14, vertical ? sl : sw),
-      segMatClone, sx, 3.12, sz,
+      segMatClone, sx, faceY, sz,
     );
     g.add(seg);
     segMeshes.push(seg);
   }
+  // decimal point (bottom-right, same glow treatment)
+  const dpMat = new THREE.MeshStandardMaterial({
+    color: 0x551111, emissive: 0xff2020, emissiveIntensity: 0, roughness: 0.3,
+  });
+  const dp = mesh(new THREE.CylinderGeometry(sw * 0.5, sw * 0.5, 0.14, 12), dpMat, w * 0.38, faceY, -h * 0.32);
+  dp.rotation.x = Math.PI / 2;
+  g.add(dp);
   (g as any).__updateSegments = (onMask: number) => {
     // bit0..6 = a..g — segments stay visible (red plastic) and GLOW when lit
     for (let i = 0; i < 7; i++) {
       const on = ((onMask >> i) & 1) === 1;
-      (segMeshes[i].material as THREE.MeshStandardMaterial).emissiveIntensity = on ? 1.8 : 0;
+      (segMeshes[i].material as THREE.MeshStandardMaterial).emissiveIntensity = on ? 2.4 : 0;
     }
   };
   (g as any).__updateSegments(0); // start dark; the render loop lights them
@@ -767,6 +884,8 @@ const FACTORIES: Record<string, ModelFactory> = {
   transformer: transformerModel,
   coupledInductor: transformerModel,
   voltageRegulator: to220,
+  arduinoReal: arduinoModule,
+  arduino: arduinoModule,
 };
 
 /**
