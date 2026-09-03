@@ -962,3 +962,24 @@ Stage Summary:
 - Physics: engine now runs intra-step Newton iteration (CircuitJS1/SPICE parity) for all nonlinear devices; diodeShockley is a full SPICE-grade model; 23 new analytical tests
 - Sandbox: /home/z/my-project IS the CircuitLab repo now, running on port 3000; outer scaffold gone
 - 3D: realistic procedural components with PBR/IBL/bloom/shadows, LED glow + 7-seg digits driven by live simulation, silkscreen, gold pads, PCB-layout-matched leads; VLM-verified 8/10
+
+---
+Task ID: 3d-world-class
+Agent: main (Super Z)
+Task: Deep research 3D circuit simulation; make the 3D viewer world-class and production ready
+
+Work Log:
+- Audited the live app (agent-browser + VLM + React-fiber probes): found the 3D view scored 2/10 — traces invisible, board split in two, pads/components floating, no silk, 7-seg as floating dots. Root-cause analysis at scene level (bounds dumps, pixel readbacks, manual render tests) identified FIVE geometry bugs, not a polish problem.
+- Launched a research agent (30+ web searches, three.js r185 source verification, interactive-html-bom source inspection) → research/3d-pcb-rendering-research.md with concrete specs (mask opacity, GTAO radius scale, LED IOR/transmission recipe, component colors, draw-call budgets).
+- Fixed 5 root causes: (1) boardGeometry z-axis mismatch (board disjoint from circuit), (2) padWorldPosition double-adding fp.position on board-absolute pads, (3) model padPoints reading absolute pads as local, (4) rotateY handedness vs 2D board rotation (−θ now), (5) model pose never syncing with footprint moves. Plus ViewHelper auto-clear wiping the canvas (renderer.autoClear=false around its render) and preserveDrawingBuffer for the Screenshot button.
+- Rebuilt the layer stack KiCad-style: FR4 → copper ON substrate → semi-transparent LPI mask (0.62; traces ghost through) → silk; pads/vias pierce the mask as ENIG gold; drills span the full stack; bottom side mirrored; flow particles per layer; heat/net modes ease mask to 0.35.
+- Rendering upgrades: GTAO radius 4mm tuning (default 0.25 invisible at PCB scale), NeutralToneMapping, clickable XYZ gizmo, proportional explode lift, vertical cross-section cutaway (replacing the broken horizontal cut), empty-state ghost board + readable hint card.
+- Component models: LED transmissive dome (IOR 1.54, reflector cup + anvil, flange flat), 7-seg with bezel/recessed face/DP/off-state, procedural scale-aware arduinoReal module (replaced the fixed 68×53mm STL that overhung boards), resistor #d9c58f, electrolytic − glyphs, SMD+THT solder fillets.
+- Also fixed sandbox stability: dev server OOM (4GB box) — production build for serving, memory-capped dev for iteration; robust DOM-level Radix menu clicking (scripts/wc3d-flow.sh + dom-*.js) for repeatable visual verification.
+- Verified: LED circuit 7-7.5/10, Arduino clock 8-9/10 (from 2/10); legs-on-pads pixel-verified; traces ghost under mask; heat/flow/net/probe/cross-section/explode/empty modes all VLM-verified; 238 draw calls (clock) within budget; tsc/eslint clean; 3062 tests pass; next build ok.
+- Committed 70b8b0b and pushed to origin/main as iamleson98.
+
+Stage Summary:
+- The 3D viewer was geometrically broken (5 compounding coordinate/handedness bugs); it is now a KiCad-grade physically-correct PCB render with live simulation visualization.
+- All interactive modes verified visually; performance within draw-call budget; production build green.
+- Verification tooling persisted: scripts/wc3d-flow.sh (example→PCB→autoroute→3D flow), scripts/render-test.js + render-probe.js + fiber-probe.js (scene introspection), research/3d-pcb-rendering-research.md (spec sources).
