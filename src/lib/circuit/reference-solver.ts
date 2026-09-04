@@ -108,6 +108,31 @@ export class ReferenceSolver {
         if (i2 > 0) { A[i2-1][col] -= 1; A[col][i2-1] -= 1; }
         if (ic1 > 0) A[col][ic1-1] -= mu;
         if (ic2 > 0) A[col][ic2-1] += mu;
+      } else if (s.type === 'CCCS') {
+        // Current-controlled current source: I(n1→n2) = beta · I(ctrlBranch),
+        // where the control variable is the current through the named branch
+        // (a voltage source or CCVS). The control current is MNA extra-variable
+        // x[ctrlCol], so we inject beta * x[ctrlCol] into the KCL of n1/n2.
+        const ctrlCol = branchIndices.get(s.ctrlBranch);
+        if (ctrlCol === undefined) continue; // control branch never registered → skip
+        const col = n + ctrlCol;
+        const beta = s.value;
+        if (i1 > 0) A[i1-1][col] += beta;
+        if (i2 > 0) A[i2-1][col] -= beta;
+      } else if (s.type === 'CCVS') {
+        // Current-controlled voltage source: V(n1)−V(n2) = r · I(ctrlBranch).
+        // Adds an extra branch variable (the CCVS current) AND a KVL constraint
+        // tying V(n1)−V(n2) to r·x[ctrlCol].
+        const ctrlCol = branchIndices.get(s.ctrlBranch);
+        const bIdx = branchIndices.get(s.name)!;
+        const col = n + bIdx;
+        const r = s.value;
+        if (i1 > 0) { A[i1-1][col] += 1; A[col][i1-1] += 1; }
+        if (i2 > 0) { A[i2-1][col] -= 1; A[col][i2-1] -= 1; }
+        if (ctrlCol !== undefined) {
+          const cc = n + ctrlCol;
+          A[col][cc] -= r;
+        }
       }
     }
     // Gaussian elimination

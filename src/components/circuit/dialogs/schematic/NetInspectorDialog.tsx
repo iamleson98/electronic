@@ -9,23 +9,16 @@
 //   - SavedViewsDialog
 //   - HierarchicalSheetsDialog
 
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
-import type { ERCError } from '@/lib/circuit/erc';
-import type { NetClass, PageSetup } from '@/lib/circuit/types';
 import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { toast } from 'sonner';
-import { Search, Replace, AlertTriangle, CheckCircle, Shield, Network, Settings, Layers, BookOpen, Plus } from 'lucide-react';
+import { Network } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Net Inspector dialog — list all nets, click to highlight
@@ -39,7 +32,6 @@ interface NetInfo {
 }
 
 export function NetInspectorDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const components = useEditor((s) => s.components);
   const wires = useEditor((s) => s.wires);
   const netClasses = useEditor((s) => s.netClasses);
   const [nets, setNets] = useState<NetInfo[]>([]);
@@ -58,10 +50,6 @@ export function NetInspectorDialog({ open, onClose }: { open: boolean; onClose: 
     };
     const newNode = () => { const id = parent.length; parent.push(id); return id; };
     const termKey = (cId: string, tId: string) => `${cId}:${tId}`;
-    for (const c of components) {
-      // pseudo — we don't have plugin list here, so just use component id + terminal label
-      // (use a simple approximation: each component is one net)
-    }
     for (const w of wires) {
       const fromKey = termKey(w.from.componentId, w.from.terminalId);
       const toKey = termKey(w.to.componentId, w.to.terminalId);
@@ -90,7 +78,7 @@ export function NetInspectorDialog({ open, onClose }: { open: boolean; onClose: 
     netInfos.sort((a, b) => a.name.localeCompare(b.name));
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setNets(netInfos);
-  }, [open, components, wires]);
+  }, [open, wires]);
 
   const filtered = nets.filter((n) => !filter || n.name.toLowerCase().includes(filter.toLowerCase()) || n.components.some((c) => c.includes(filter)));
 

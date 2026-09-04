@@ -10,7 +10,7 @@ export async function register() {
     const { runMigrations } = await import('./lib/db');
     try {
       await runMigrations();
-      console.log('[instrumentation] DB migrations applied');
+      console.warn('[instrumentation] DB migrations applied');
     } catch (err) {
       // Don't crash the server — surface the error so the first request can
       // give a more helpful message via getDb()'s retry path.

@@ -13,9 +13,6 @@ import { Param, Stat } from './shared';
 
 import { useEffect, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
-import type { AnalysisConfig, AnalysisResult } from '@/lib/circuit/analysis';
-import type { SimOptions } from '@/lib/circuit/sim-options';
-import { exportRawFile, TraceMath, computeFFT, complexToMagnitude, complexToPhase, complexToDb, type MeasCommand, parseMeasLine, type Stimulus, sampleStimulus, stimulusToSPICE } from '@/lib/circuit/measurement';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
@@ -23,15 +20,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Switch } from '@/components/ui/switch';
-import { Textarea } from '@/components/ui/textarea';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Badge } from '@/components/ui/badge';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from 'sonner';
 import {
-  Activity, BarChart3, Sliders, Gauge, Waves, Sigma, AlertTriangle, CheckCircle,
-  Save, FunctionSquare, Microscope, Wand2,
+  Waves,
 } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -52,7 +43,12 @@ export function BatchSweepDialog({ open, onClose }: { open: boolean; onClose: ()
   const [runs, setRuns] = useState(50);
   const [tolerance, setTolerance] = useState(0.05);
   const [dist, setDist] = useState<'uniform' | 'gaussian' | 'worst_case'>('uniform');
-  const [results, setResults] = useState<any>(null);
+  interface BatchRunResults {
+    traces: { xValues: Float64Array; yValues: Float64Array }[];
+    durationMs: number;
+    stats?: { min: number; max: number; mean: number; std: number };
+  }
+  const [results, setResults] = useState<BatchRunResults | null>(null);
 
   useEffect(() => {
     if (open && !componentId && components.length > 0) {
@@ -71,7 +67,7 @@ export function BatchSweepDialog({ open, onClose }: { open: boolean; onClose: ()
       start, stop, step,
       runs, tolerance,
       distribution: dist,
-      inner: { type: 'ac', sweep: 'dec', nPoints: 5, fStart: 10, fStop: 100000, sourceId: components.find(c => c.type === 'acVoltage')?.id ?? '', outputNode: 'p' } as any,
+      inner: { type: 'ac', sweep: 'dec' as const, nPoints: 5, fStart: 10, fStop: 100000, sourceId: components.find(c => c.type === 'acVoltage')?.id ?? '', outputNode: 'p' },
     });
     setResults(result);
     if (result.stats) {
@@ -91,7 +87,7 @@ export function BatchSweepDialog({ open, onClose }: { open: boolean; onClose: ()
           <div className="grid grid-cols-2 gap-2">
             <div>
               <Label className="text-slate-300 text-xs">Batch Type</Label>
-              <Select value={batchType} onValueChange={(v) => setBatchType(v as any)}>
+              <Select value={batchType} onValueChange={(v) => setBatchType(v as 'step' | 'mc' | 'worst')}>
                 <SelectTrigger className="bg-slate-800 border-slate-700 h-8"><SelectValue /></SelectTrigger>
                 <SelectContent className="bg-slate-800">
                   <SelectItem value="step">.step (parametric)</SelectItem>
@@ -132,7 +128,7 @@ export function BatchSweepDialog({ open, onClose }: { open: boolean; onClose: ()
               </div>
               <div>
                 <Label className="text-slate-300 text-xs">Distribution</Label>
-                <Select value={dist} onValueChange={(v) => setDist(v as any)}>
+                <Select value={dist} onValueChange={(v) => setDist(v as 'uniform' | 'gaussian' | 'worst_case')}>
                   <SelectTrigger className="bg-slate-800 border-slate-700 h-8"><SelectValue /></SelectTrigger>
                   <SelectContent className="bg-slate-800">
                     <SelectItem value="uniform">Uniform</SelectItem>

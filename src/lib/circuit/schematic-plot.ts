@@ -183,9 +183,15 @@ function loadImage(url: string): Promise<HTMLImageElement> {
 
 export async function exportSchematicPDF(doc: CircuitDocument): Promise<Blob> {
   if (typeof window === 'undefined') throw new Error('PDF export requires a browser');
-  const pngBlob = await exportSchematicPNG(doc, 3);
-  const pngDataUrl = await blobToDataURL(pngBlob);
-  const pngBase64 = pngDataUrl.split(',')[1] ?? '';
+
+  // Render the schematic SVG to a raster at 3x scale, then encode as JPEG so
+  // the image can be embedded with the /DCTDecode filter — the only image
+  // filter broadly supported by PDF viewers for photographic data. (The old
+  // code wrote raw base64 PNG bytes under a non-existent /Base64Decode filter,
+  // producing a corrupt/blank image in every strict PDF reader.)
+  const { dataUrl, pxWidth, pxHeight } = await renderSchematicToJPEG(doc, 3);
+  // Strip the "data:image/jpeg;base64," prefix to get the raw base64 bytes.
+  const jpegBase64 = dataUrl.split(',')[1] ?? '';
 
   const bbox = computeBBox(doc.components);
   const padGrid = 4;
@@ -195,7 +201,7 @@ export async function exportSchematicPDF(doc: CircuitDocument): Promise<Blob> {
   const wPt = Math.ceil(wMm * 2.834645);
   const hPt = Math.ceil(hMm * 2.834645);
 
-  // minimal PDF — single page, embedded PNG
+  // minimal PDF — single page, embedded JPEG (DCTDecode)
   const objects: string[] = [];
   objects.push(`1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n`);
   objects.push(`2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n`);
@@ -203,8 +209,8 @@ export async function exportSchematicPDF(doc: CircuitDocument): Promise<Blob> {
   // content stream: draw image scaled to page
   const stream = `q\n${wPt} 0 0 ${hPt} 0 0 cm\n/Im0 Do\nQ\n`;
   objects.push(`4 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}endstream\nendobj\n`);
-  // image XObject
-  objects.push(`5 0 obj\n<< /Type /XObject /Subtype /Image /Width ${Math.ceil(wMm * 3 * 2)} /Height ${Math.ceil(hMm * 3 * 2)} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /Base64Decode /Length ${pngBase64.length} >>\nstream\n${pngBase64}\nendstream\nendobj\n`);
+  // image XObject — a JPEG stream with the DCTDecode (lossy) filter
+  objects.push(`5 0 obj\n<< /Type /XObject /Subtype /Image /Width ${pxWidth} /Height ${pxHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBase64.length} >>\nstream\n${jpegBase64}\nendstream\nendobj\n`);
 
   const header = `%PDF-1.4\n`;
   let body = '';
@@ -226,13 +232,33 @@ export async function exportSchematicPDF(doc: CircuitDocument): Promise<Blob> {
   return new Blob([pdf], { type: 'application/pdf' });
 }
 
-function blobToDataURL(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(new Error('FileReader failed'));
-    reader.readAsDataURL(blob);
-  });
+/**
+ * Rasterize the schematic SVG to a JPEG data URL at the given scale.
+ * Returns the encoded data URL and the exact pixel dimensions so the PDF
+ * image XObject is self-consistent with its stream contents.
+ */
+async function renderSchematicToJPEG(
+  doc: CircuitDocument,
+  scale: number,
+): Promise<{ dataUrl: string; pxWidth: number; pxHeight: number }> {
+  const svg = exportSchematicSVG(doc);
+  const blob = new Blob([svg], { type: 'image/svg+xml' });
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await loadImage(url);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.width * scale));
+    canvas.height = Math.max(1, Math.round(img.height * scale));
+    const ctx = canvas.getContext('2d')!;
+    // White background (JPEG has no alpha channel) to match the SVG's paper.
+    ctx.fillStyle = '#fafafa';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+    return { dataUrl, pxWidth: canvas.width, pxHeight: canvas.height };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

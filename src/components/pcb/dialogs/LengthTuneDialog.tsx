@@ -8,14 +8,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
-import { Layers3, SlidersHorizontal, Activity, CheckCircle2, X } from 'lucide-react';
-import {
-  DEFAULT_LAYER_STACK, FOUR_LAYER_STACK, SIX_LAYER_STACK,
-  LAYER_COLORS, type CopperLayer, type LayerStack,
-} from '@/lib/pcb/types';
+import { Activity } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Layer Stack Dialog — pick 2/4/6-layer stackup, configure dielectric thickness

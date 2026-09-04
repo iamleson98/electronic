@@ -370,7 +370,7 @@ function evalCircleArc(entities: Map<number, STEPEntity>, e: STEPEntity, start: 
     return Math.atan2(dot(radial, binormal), dot(radial, refDir));
   };
   const startAngle = projectAngle(start);
-  let endAngle = projectAngle(end);
+  const endAngle = projectAngle(end);
   const dist = lengthV(sub(start, end));
   const isFullCircle = dist < Math.max(EPS, radius * 1e-3);
   let dAngle: number;

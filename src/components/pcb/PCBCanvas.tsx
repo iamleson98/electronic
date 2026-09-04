@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePCB } from '@/lib/pcb/store';
-import { useEditor } from '@/lib/circuit/store';
 import type { Pad, CopperLayer } from '@/lib/pcb/types';
 import {
   drawDRCErrors,
@@ -16,7 +15,6 @@ import { DEFAULT_DRC_CONFIG } from '@/lib/pcb/drc';
 import { segmentHasClearanceConflict } from '@/lib/pcb/auto-router';
 import { computeNetCompletion, flagSatisfiedRatsnestLegs } from '@/lib/pcb/netlist-verify';
 import { useAutoDRC } from '@/lib/auto-rule-hooks';
-import { LAYER_COLORS } from '@/lib/pcb/types';
 import { toast } from 'sonner';
 
 const PX_PER_MM = 8;
@@ -552,8 +550,6 @@ export function PCBCanvas() {
       const h = fp.bodySize.height * PX_PER_MM * zoom;
       const isSelected = selectedFootprintId === fp.id;
       const isCrossProbe = crossProbeComponentIds.has(fp.componentId);
-      const pal = LAYER_PALETTE[fp.side] ?? LAYER_PALETTE.top;
-
       ctx.save();
       ctx.translate(center.x, center.y);
       ctx.rotate((fp.rotation * Math.PI) / 180);
@@ -740,7 +736,7 @@ export function PCBCanvas() {
     ctx.restore();
   }, [size, pan, zoom, board, footprints, traces, vias, unsatisfiedRatsnest, padNets, activeLayer, tool,
       defaultTraceWidth, selectedFootprintId, selectedTraceId, routingFrom, routingPath,
-      showRatsnest, showGrid, showPadNets, cursor, mmToScreen, drcErrors, copperPours, keepouts, teardrops, showKeepouts, hoveredDRC, crossProbeComponentIds, layerStack]);
+      showRatsnest, showGrid, showPadNets, cursor, mmToScreen, drcErrors, copperPours, keepouts, teardrops, showKeepouts, hoveredDRC, crossProbeComponentIds, layerStack, netClasses]);
 
   // ----- Mouse handlers (unchanged) -----
   const onMouseDown = (e: React.MouseEvent) => {
@@ -846,7 +842,7 @@ export function PCBCanvas() {
 
   const onMouseUp = () => { panRef.current = null; dragRef.current = null; };
 
-  const handleWheel = (clientX: number, clientY: number, deltaY: number) => {
+  const handleWheel = useCallback((clientX: number, clientY: number, deltaY: number) => {
     const rect = canvasRef.current!.getBoundingClientRect();
     const sx = clientX - rect.left;
     const sy = clientY - rect.top;
@@ -856,7 +852,7 @@ export function PCBCanvas() {
     const mmY = (sy - pan.y) / (PX_PER_MM * zoom);
     setZoom(newZoom);
     setPan({ x: sx - mmX * PX_PER_MM * newZoom, y: sy - mmY * PX_PER_MM * newZoom });
-  };
+  }, [zoom, pan]);
 
   // Native non-passive wheel listener — React registers onWheel as PASSIVE
   // at the root, so a JSX handler could not preventDefault (page scrolled

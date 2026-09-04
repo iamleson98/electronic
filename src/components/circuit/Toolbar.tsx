@@ -46,11 +46,9 @@ import { confirmDialog } from '@/lib/confirm';
 export function Toolbar() {
   const running = useEditor((s) => s.running);
   const speed = useEditor((s) => s.speed);
-  const dt = useEditor((s) => s.dt);
   const simError = useEditor((s) => s.simError);
   const setRunning = useEditor((s) => s.setRunning);
   const setSpeed = useEditor((s) => s.setSpeed);
-  const setDt = useEditor((s) => s.setDt);
   const step = useEditor((s) => s.step);
   const reset = useEditor((s) => s.reset);
 
@@ -77,14 +75,6 @@ export function Toolbar() {
   const past = useEditor((s) => s.past.length);
   const future = useEditor((s) => s.future.length);
   // KiCad-parity new state
-  const units = useEditor((s) => s.units);
-  const setUnits = useEditor((s) => s.setUnits);
-  const showPinNumbers = useEditor((s) => s.showPinNumbers);
-  const setShowPinNumbers = useEditor((s) => s.setShowPinNumbers);
-  const showPinNames = useEditor((s) => s.showPinNames);
-  const setShowPinNames = useEditor((s) => s.setShowPinNames);
-  const showPinElecTypes = useEditor((s) => s.showPinElecTypes);
-  const setShowPinElecTypes = useEditor((s) => s.setShowPinElecTypes);
   const showRefdes = useEditor((s) => s.showRefdes);
   const setShowRefdes = useEditor((s) => s.setShowRefdes);
   const showValues = useEditor((s) => s.showValues);
@@ -95,6 +85,17 @@ export function Toolbar() {
   const setTheme = useEditor((s) => s.setTheme);
   const activeTool = useEditor((s) => s.activeTool);
   const setActiveTool = useEditor((s) => s.setActiveTool);
+  // Tools the canvas interaction layer actually implements. The rest exist in
+  // the store type but have no canvas handler — selecting them previously did
+  // nothing at all (silent dead UI). Route them to a toast instead so the
+  // user gets feedback instead of a no-op checkbox.
+  const pickTool = (t: typeof activeTool) => {
+    if (t === 'wire' || t === 'select') {
+      setActiveTool(activeTool === t ? 'select' : t);
+      return;
+    }
+    toast.info(`"${t}" tool is not implemented yet — use the Component palette instead`);
+  };
   const straightenWires = useEditor((s) => s.straightenWires);
   const hasBendyWires = useEditor((s) => s.wires.some((w) => w.waypoints && w.waypoints.length > 0));
 
@@ -192,7 +193,7 @@ export function Toolbar() {
           toast.success(`Imported ${file.name}`);
         }
         if (result.warnings.length > 0) {
-          console.log('Import warnings:', result.warnings);
+          console.warn('Import warnings:', result.warnings);
         }
       } catch (err) {
         toast.error('Import failed: ' + (err as Error).message);
@@ -247,7 +248,7 @@ export function Toolbar() {
 
   const handleExportBOM = useCallback((format: 'csv' | 'html' | 'xml') => {
     const doc = serialize();
-    const ext = format;
+    // const ext = format;
     if (format === 'csv') {
       downloadText(exportBOMCSV(doc), `bom_${Date.now()}.csv`, 'text/csv');
     } else if (format === 'html') {
@@ -262,8 +263,8 @@ export function Toolbar() {
     <TooltipProvider delayDuration={200}>
       <div className="flex items-center gap-0.5 border-b border-slate-800 bg-slate-900 px-2 py-1.5 overflow-hidden">
         {/* Brand — compact, no text on narrow screens */}
-        <div className="mr-1 flex flex-shrink-0 items-center gap-2 pr-2">
-          <div className="flex h-6 w-6 items-center justify-center rounded bg-gradient-to-br from-cyan-400 to-emerald-500 text-slate-900">
+        <div className="mr-1 flex shrink-0 items-center gap-2 pr-2">
+          <div className="flex h-6 w-6 items-center justify-center rounded bg-linear-to-br from-cyan-400 to-emerald-500 text-slate-900">
             <Zap size={14} strokeWidth={2.5} />
           </div>
           <span className="hidden text-sm font-semibold text-slate-100 xl:inline">CircuitLab</span>
@@ -272,7 +273,7 @@ export function Toolbar() {
         {/* Hierarchical sheet breadcrumb — only when inside a sub-sheet */}
         {activeSheet && (
           <div
-            className="mr-1 flex flex-shrink-0 items-center gap-1 rounded-md border border-emerald-700/50 bg-emerald-950/40 px-2 py-0.5 text-xs font-mono whitespace-nowrap shadow-sm"
+            className="mr-1 flex shrink-0 items-center gap-1 rounded-md border border-emerald-700/50 bg-emerald-950/40 px-2 py-0.5 text-xs font-mono whitespace-nowrap shadow-sm"
             role="navigation"
             aria-label="Sheet hierarchy breadcrumb"
           >
@@ -285,9 +286,9 @@ export function Toolbar() {
               <span className="hidden sm:inline">Root</span>
             </button>
             <ChevronRight size={12} className="text-slate-500" />
-            <span className="max-w-[80px] truncate font-semibold text-emerald-300" title={activeSheet}>
+            <span className="max-w-20 truncate font-semibold text-emerald-300" title={activeSheet}>
               {sheets.find((s) => s.fileName === activeSheet)?.sheetName ??
-                childSheets[activeSheet]?.sheets?.find?.((s: any) => s.fileName === activeSheet)?.sheetName ??
+                childSheets[activeSheet]?.sheets?.find?.((s: { fileName: string; sheetName?: string }) => s.fileName === activeSheet)?.sheetName ??
                 activeSheet.replace(/\.kicad_sch$/, '')}
             </span>
             {(() => {
@@ -335,7 +336,7 @@ export function Toolbar() {
         </Tooltip>
 
         {/* Undo / Redo — always visible */}
-        <div className="mx-0.5 h-5 w-px flex-shrink-0 bg-slate-700" />
+        <div className="mx-0.5 h-5 w-px shrink-0 bg-slate-700" />
         <Tooltip>
           <TooltipTrigger asChild>
             <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => undo()} disabled={past === 0 || running}>
@@ -372,7 +373,7 @@ export function Toolbar() {
 
         {/* ─── SECONDARY CONTROLS (visible on md+ screens) ─── */}
         <div className="hidden md:flex items-center gap-1">
-          <div className="mx-0.5 h-5 w-px flex-shrink-0 bg-slate-700" />
+          <div className="mx-0.5 h-5 w-px shrink-0 bg-slate-700" />
           {/* Speed control — compact */}
           <div className="flex items-center gap-1 px-1">
             <Gauge size={12} className="text-slate-400" />
@@ -390,7 +391,7 @@ export function Toolbar() {
 
         {/* ─── TERTIARY CONTROLS (visible on lg+ screens) ─── */}
         <div className="hidden lg:flex items-center gap-1">
-          <div className="mx-0.5 h-5 w-px flex-shrink-0 bg-slate-700" />
+          <div className="mx-0.5 h-5 w-px shrink-0 bg-slate-700" />
           {/* Examples dropdown */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -512,49 +513,49 @@ export function Toolbar() {
                 Wire
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
-                checked={activeTool === 'bus'} onCheckedChange={() => setActiveTool(activeTool === 'bus' ? 'select' : 'bus')}>
+                checked={activeTool === 'bus'} onCheckedChange={() => pickTool('bus')}>
                 Bus
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
-                checked={activeTool === 'label'} onCheckedChange={() => setActiveTool(activeTool === 'label' ? 'select' : 'label')}>
+                checked={activeTool === 'label'} onCheckedChange={() => pickTool('label')}>
                 Local Label
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
-                checked={activeTool === 'globalLabel'} onCheckedChange={() => setActiveTool(activeTool === 'globalLabel' ? 'select' : 'globalLabel')}>
+                checked={activeTool === 'globalLabel'} onCheckedChange={() => pickTool('globalLabel')}>
                 Global Label
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
-                checked={activeTool === 'hierLabel'} onCheckedChange={() => setActiveTool(activeTool === 'hierLabel' ? 'select' : 'hierLabel')}>
+                checked={activeTool === 'hierLabel'} onCheckedChange={() => pickTool('hierLabel')}>
                 Hierarchical Label
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
-                checked={activeTool === 'junction'} onCheckedChange={() => setActiveTool(activeTool === 'junction' ? 'select' : 'junction')}>
+                checked={activeTool === 'junction'} onCheckedChange={() => pickTool('junction')}>
                 Junction
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
-                checked={activeTool === 'noConnect'} onCheckedChange={() => setActiveTool(activeTool === 'noConnect' ? 'select' : 'noConnect')}>
+                checked={activeTool === 'noConnect'} onCheckedChange={() => pickTool('noConnect')}>
                 No-Connect (N)
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
-                checked={activeTool === 'powerPort'} onCheckedChange={() => setActiveTool(activeTool === 'powerPort' ? 'select' : 'powerPort')}>
+                checked={activeTool === 'powerPort'} onCheckedChange={() => pickTool('powerPort')}>
                 Power Port
               </DropdownMenuCheckboxItem>
               <DropdownMenuSeparator className="bg-slate-700" />
               <DropdownMenuLabel className="text-slate-300">Drawing Primitives</DropdownMenuLabel>
               <DropdownMenuCheckboxItem
-                checked={activeTool === 'text'} onCheckedChange={() => setActiveTool(activeTool === 'text' ? 'select' : 'text')}>
+                checked={activeTool === 'text'} onCheckedChange={() => pickTool('text')}>
                 Text
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
-                checked={activeTool === 'line'} onCheckedChange={() => setActiveTool(activeTool === 'line' ? 'select' : 'line')}>
+                checked={activeTool === 'line'} onCheckedChange={() => pickTool('line')}>
                 Line
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
-                checked={activeTool === 'poly'} onCheckedChange={() => setActiveTool(activeTool === 'poly' ? 'select' : 'poly')}>
+                checked={activeTool === 'poly'} onCheckedChange={() => pickTool('poly')}>
                 Polygon
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
-                checked={activeTool === 'image'} onCheckedChange={() => setActiveTool(activeTool === 'image' ? 'select' : 'image')}>
+                checked={activeTool === 'image'} onCheckedChange={() => pickTool('image')}>
                 Image
               </DropdownMenuCheckboxItem>
             </DropdownMenuContent>
@@ -718,7 +719,7 @@ export function Toolbar() {
         />
 
         {/* Clear button — right-aligned, always visible */}
-        <div className="ml-auto flex flex-shrink-0 items-center gap-1">
+        <div className="ml-auto flex shrink-0 items-center gap-1">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button

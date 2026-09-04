@@ -642,6 +642,34 @@ export function CircuitCanvas() {
     view.pan = { x: 0, y: 0 };
     markDirty();
   };
+
+  // Saved-view loading: the dialog dispatches `circuitlab:load-view` with the
+  // stored camera {x, y, zoom}. Previously nothing listened for this event,
+  // so "Load" silently did nothing. Apply the camera directly to the view.
+  // Also answer the toolbar's `circuitlab:request-camera` poll so "Save
+  // Current" captures the live pan/zoom instead of a stale {0,0,1}.
+  useEffect(() => {
+    const onLoadView = (e: Event) => {
+      const v = (e as CustomEvent<{ x: number; y: number; zoom: number }>).detail;
+      if (!v || !Number.isFinite(v.x) || !Number.isFinite(v.y) || !Number.isFinite(v.zoom)) return;
+      const view = viewRef.current;
+      view.pan = { x: v.x, y: v.y };
+      view.zoom = Math.max(0.4, Math.min(4, v.zoom));
+      markDirty();
+    };
+    const onRequestCamera = () => {
+      const view = viewRef.current;
+      window.dispatchEvent(new CustomEvent('circuitlab:camera', {
+        detail: { x: view.pan.x, y: view.pan.y, zoom: view.zoom },
+      }));
+    };
+    window.addEventListener('circuitlab:load-view', onLoadView);
+    window.addEventListener('circuitlab:request-camera', onRequestCamera);
+    return () => {
+      window.removeEventListener('circuitlab:load-view', onLoadView);
+      window.removeEventListener('circuitlab:request-camera', onRequestCamera);
+    };
+  }, [markDirty, viewRef]);
   const zoomToFit = () => {
     const view = viewRef.current;
     const comps = useEditor.getState().components;

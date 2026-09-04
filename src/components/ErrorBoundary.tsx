@@ -58,7 +58,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     const name = this.props.name ?? 'Component';
 
     return (
-      <div className="flex min-h-[200px] flex-col items-center justify-center gap-4 p-6 text-center">
+      <div className="flex min-h-50 flex-col items-center justify-center gap-4 p-6 text-center">
         <div className="text-lg font-semibold text-rose-400">{name} crashed</div>
         <div className="max-w-lg rounded-lg border border-rose-900/50 bg-rose-950/20 p-3 text-left text-xs">
           <div className="mb-1 font-mono text-rose-300">{error?.message ?? 'Unknown error'}</div>
@@ -100,8 +100,8 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   }
 }
 
-export function withErrorBoundary(Component: React.ComponentType<any>, options: { name?: string }) {
-  const Wrapped = (props: any) => (
+export function withErrorBoundary<P extends object>(Component: React.ComponentType<P>, options: { name?: string }) {
+  const Wrapped = (props: P) => (
     <ErrorBoundary name={options.name}>
       <Component {...props} />
     </ErrorBoundary>
@@ -114,7 +114,7 @@ export function withErrorBoundary(Component: React.ComponentType<any>, options: 
  * Report an error to the error monitoring system.
  * Previously this was a no-op — now it calls the real error-monitoring module.
  */
-export function reportError(error: Error, errorInfo?: any): void {
+export function reportError(error: Error, errorInfo?: unknown): void {
   console.error('[ErrorBoundary] Reported error:', error, errorInfo);
   try {
     reportErrorToMonitor(error, errorInfo);

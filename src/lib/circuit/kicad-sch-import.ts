@@ -16,6 +16,7 @@
 
 import type { CircuitComponent, CircuitDocument, Wire, ComponentPlugin, Vec2 } from './types';
 import { getPlugin, getAllPlugins } from './registry';
+import { terminalPos as terminalPosOf } from './endpoint-position';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Minimal s-expression parser
@@ -127,20 +128,15 @@ export function parseKicadSch(text: string): KicadImportResult {
   let idCounter = 0;
   const nextId = () => `k_${Date.now().toString(36)}_${idCounter++}`;
 
-  // Parse wires
+  // Parse wires — collect raw segments first; terminal resolution happens
+  // AFTER symbols are parsed (terminals don't exist yet at this point).
+  const rawWireSegs: { a: Vec2; b: Vec2 }[] = [];
   for (const wireNode of findAllChildren(root, 'wire')) {
     const ptsNode = findChild(wireNode, 'pts');
     if (!ptsNode) continue;
     const xyNodes = findAllChildren(ptsNode, 'xy');
     if (xyNodes.length < 2) continue;
-    const a = parseXY(xyNodes[0]);
-    const b = parseXY(xyNodes[1]);
-    // wires in KiCad connect two endpoints — we don't have terminal IDs so we
-    // create pseudo-components "wireend_A" / "wireend_B" and connect via wire
-    // For simplicity, we just skip non-terminal wires (they don't map to our model)
-    // — but we DO emit them as "loose" wires for net inference in the editor.
-    // TODO: proper wire-to-terminal resolution
-    warnings.push(`Wire from (${a.x},${a.y}) to (${b.x},${b.y}) imported as graphical line — terminal mapping is not yet supported`);
+    rawWireSegs.push({ a: parseXY(xyNodes[0]), b: parseXY(xyNodes[1]) });
   }
 
   // Parse symbols (component placements)
@@ -197,25 +193,68 @@ export function parseKicadSch(text: string): KicadImportResult {
     components.push(comp);
   }
 
-  // Parse no_connect markers — associate with nearest component terminal
-  for (const ncNode of findAllChildren(root, 'no_connect')) {
-    const atNode = findChild(ncNode, 'at');
-    if (!atNode) continue;
-    const pos = parseXY(atNode);
-    // find nearest terminal within 1 grid unit
+  // Resolve raw KiCad wire segments to component terminals. Each endpoint
+  // snaps to the nearest terminal within tolerance (rotation-aware); segments
+  // whose endpoint lands on no terminal become junctions at that point so the
+  // net topology is preserved instead of silently dropped.
+  const SNAP_TOL_GRID = 1.5;
+  const junctionAt = new Map<string, string>(); // "gx,gy" -> junction comp id
+  const nearestTerminal = (mm: Vec2): { compId: string; termId: string; dist: number } | null => {
     let nearest: { compId: string; termId: string; dist: number } | null = null;
+    const gx = mm.x / 2.54;
+    const gy = mm.y / 2.54;
     for (const comp of components) {
       const plugin = getPlugin(comp.type);
       if (!plugin) continue;
       for (const t of plugin.terminals) {
-        const tx = comp.position.x + t.position.x;
-        const ty = comp.position.y + t.position.y;
-        const d = Math.hypot(tx - pos.x / 2.54, ty - pos.y / 2.54);
-        if (d < 1.5 && (!nearest || d < nearest.dist)) {
+        const tp = terminalPosOf(comp, t, plugin);
+        const d = Math.hypot(tp.x - gx, tp.y - gy);
+        if (d < SNAP_TOL_GRID && (!nearest || d < nearest.dist)) {
           nearest = { compId: comp.id, termId: t.id, dist: d };
         }
       }
     }
+    return nearest;
+  };
+  const endpointFor = (mm: Vec2): { componentId: string; terminalId: string } => {
+    const hit = nearestTerminal(mm);
+    if (hit) return { componentId: hit.compId, terminalId: hit.termId };
+    // No terminal nearby: create (or reuse) a junction pseudo-component so
+    // the segment still lands somewhere routable and visible.
+    const gx = Math.round((mm.x / 2.54) * 2) / 2;
+    const gy = Math.round((mm.y / 2.54) * 2) / 2;
+    const key = `${gx},${gy}`;
+    let jid = junctionAt.get(key);
+    if (!jid) {
+      jid = nextId();
+      junctionAt.set(key, jid);
+      const jplugin = getPlugin('junction');
+      components.push({
+        id: jid,
+        type: 'junction',
+        position: { x: gx, y: gy },
+        rotation: 0,
+        parameters: jplugin ? { ...defaultParams(jplugin) } : {},
+      });
+    }
+    return { componentId: jid, terminalId: 'a' };
+  };
+  for (const seg of rawWireSegs) {
+    const from = endpointFor(seg.a);
+    const to = endpointFor(seg.b);
+    // Skip degenerate self-loops on the same terminal.
+    if (from.componentId === to.componentId && from.terminalId === to.terminalId) continue;
+    wires.push({ id: nextId(), from, to });
+  }
+  if (junctionAt.size > 0) {
+    warnings.push(`${junctionAt.size} wire endpoint(s) landed on empty space and were kept as junction dots — review connectivity`);
+  }
+
+  // Parse no_connect markers — associate with nearest component terminal
+  for (const ncNode of findAllChildren(root, 'no_connect')) {
+    const atNode = findChild(ncNode, 'at');
+    if (!atNode) continue;
+    const nearest = nearestTerminal(parseXY(atNode));
     if (nearest) {
       noConnects.push({ componentId: nearest.compId, terminalId: nearest.termId });
     }

@@ -30,7 +30,6 @@ interface PinDef {
 
 export function SubCircuitDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const components = useEditor((s) => s.components);
-  const wires = useEditor((s) => s.wires);
   const serialize = useEditor((s) => s.serialize);
 
   const [name, setName] = useState('');
@@ -167,7 +166,7 @@ export function SubCircuitDialog({ open, onClose }: { open: boolean; onClose: ()
           <Label className="text-xs text-slate-400 mb-2 block">
             Select terminals to expose as pins ({allTerminals.length} available)
           </Label>
-          <ScrollArea className="h-[280px]">
+          <ScrollArea className="h-70">
             <div className="space-y-1">
               {allTerminals.length === 0 && (
                 <div className="text-center py-6 text-xs text-slate-500">
@@ -188,7 +187,7 @@ export function SubCircuitDialog({ open, onClose }: { open: boolean; onClose: ()
                       checked={!!pin?.enabled}
                       onCheckedChange={() => togglePin(t)}
                     />
-                    <span className="text-xs font-mono text-slate-300 min-w-[140px]">{t.label}</span>
+                    <span className="text-xs font-mono text-slate-300 min-w-35">{t.label}</span>
                     {pin?.enabled && (
                       <>
                         <Input

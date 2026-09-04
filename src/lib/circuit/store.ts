@@ -1992,7 +1992,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         const validation = validatePhysics(simComponents, simWires, plugins, result.sim);
         physicsViolations = validation.violations;
         if (!validation.passed) {
-          // eslint-disable-next-line no-console
+           
           console.warn('[Physics] Violations detected:', validation.violations.length);
         }
       } catch (e) {

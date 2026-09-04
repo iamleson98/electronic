@@ -33,26 +33,26 @@ const MAT = {
   // Epoxy / molded plastic bodies
   blackPlastic: new THREE.MeshPhysicalMaterial({ color: 0x1c1c20, roughness: 0.5, metalness: 0.05, clearcoat: 0.45, clearcoatRoughness: 0.35 }),
   darkPlastic: new THREE.MeshPhysicalMaterial({ color: 0x2a2a30, roughness: 0.55, metalness: 0.05, clearcoat: 0.4, clearcoatRoughness: 0.4 }),
-  // DIP body (matte black epoxy)
-  dipBody: new THREE.MeshPhysicalMaterial({ color: 0x141416, roughness: 0.6, metalness: 0.02, clearcoat: 0.3, clearcoatRoughness: 0.45 }),
-  // Bright tinned-steel leads / pins
-  lead: new THREE.MeshPhysicalMaterial({ color: 0xb8bcc2, roughness: 0.28, metalness: 1.0, clearcoat: 0.25, clearcoatRoughness: 0.2 }),
+  // DIP body (matte black epoxy — real DIP is very matte, almost no gloss)
+  dipBody: new THREE.MeshPhysicalMaterial({ color: 0x141416, roughness: 0.7, metalness: 0.02, clearcoat: 0.12, clearcoatRoughness: 0.5 }),
+  // Bright tinned-steel leads / pins — slightly brighter for ENIG-matching look
+  lead: new THREE.MeshPhysicalMaterial({ color: 0xc0c5cc, roughness: 0.26, metalness: 1.0, clearcoat: 0.25, clearcoatRoughness: 0.18 }),
   // Aluminum can tops (crystals, electrolytics)
   aluminum: new THREE.MeshStandardMaterial({ color: 0x9aa0a6, roughness: 0.35, metalness: 0.9 }),
   // Copper windings
   copper: new THREE.MeshPhysicalMaterial({ color: 0xb87333, roughness: 0.25, metalness: 0.95, clearcoat: 0.3, clearcoatRoughness: 0.25 }),
-  // Resistor body (beige ceramic with a lacquer sheen)
-  resistorBody: new THREE.MeshPhysicalMaterial({ color: 0xd9c58f, roughness: 0.55, metalness: 0.0, clearcoat: 0.25, clearcoatRoughness: 0.4 }),
+  // Resistor body (Yageo carbon-film beige — slightly lighter, warmer lacquer)
+  resistorBody: new THREE.MeshPhysicalMaterial({ color: 0xe8d5a3, roughness: 0.5, metalness: 0.0, clearcoat: 0.2, clearcoatRoughness: 0.45 }),
   // Electrolytic can (dark navy plastic sleeve)
   elecCan: new THREE.MeshPhysicalMaterial({ color: 0x1a2440, roughness: 0.4, metalness: 0.15, clearcoat: 0.5, clearcoatRoughness: 0.3 }),
   // Ceramic disc (orange-tan)
   ceramic: new THREE.MeshPhysicalMaterial({ color: 0xd9a066, roughness: 0.7, metalness: 0.0, clearcoat: 0.12, clearcoatRoughness: 0.5 }),
   // MLCC / SMD tan body
   mlcc: new THREE.MeshPhysicalMaterial({ color: 0xc9a876, roughness: 0.65, metalness: 0.0, clearcoat: 0.15, clearcoatRoughness: 0.45 }),
-  // Glass diode (translucent red-brown)
+  // Glass diode (translucent red-brown — DO-35 glass is quite transparent)
   diodeGlass: new THREE.MeshPhysicalMaterial({
-    color: 0x8b1a1a, roughness: 0.15, metalness: 0.0,
-    transparent: true, opacity: 0.85, transmission: 0.35,
+    color: 0x8b1a1a, roughness: 0.12, metalness: 0.0,
+    transparent: true, opacity: 0.65, transmission: 0.55,
   }),
   // Black diode body (DO-41 power diodes)
   diodeBody: new THREE.MeshPhysicalMaterial({ color: 0x16161a, roughness: 0.45, metalness: 0.05, clearcoat: 0.4, clearcoatRoughness: 0.35 }),
@@ -60,8 +60,8 @@ const MAT = {
   tab: new THREE.MeshPhysicalMaterial({ color: 0x8f959c, roughness: 0.28, metalness: 0.95, clearcoat: 0.2, clearcoatRoughness: 0.25 }),
   // Gold ENIG pad finish
   enig: new THREE.MeshPhysicalMaterial({ color: 0xd4b96a, roughness: 0.22, metalness: 1.0, clearcoat: 0.35, clearcoatRoughness: 0.2 }),
-  // Lead-free solder (fillets, joints)
-  solder: new THREE.MeshPhysicalMaterial({ color: 0xd9dde2, roughness: 0.16, metalness: 0.95, clearcoat: 0.55, clearcoatRoughness: 0.12 }),
+  // Lead-free solder (fillets, joints) — brighter, shinier for realism
+  solder: new THREE.MeshPhysicalMaterial({ color: 0xd9dde2, roughness: 0.12, metalness: 0.95, clearcoat: 0.7, clearcoatRoughness: 0.12 }),
 };
 
 /** Clone-safe helper: mesh with geometry + material, positioned. */
@@ -121,21 +121,40 @@ function padPoints(fp: Footprint, maxPads = 4): [number, number][] {
 
 /** Radial through-hole lead at (x, z) going down through the board. */
 function radialLead(x: number, z: number, r = 0.25, depth = 2.4): THREE.Mesh {
-  return mesh(new THREE.CylinderGeometry(r, r, depth, 8), MAT.lead, x, -depth / 2 + r, z);
+  return mesh(new THREE.CylinderGeometry(r, r, depth, 12), MAT.lead, x, -depth / 2 + r, z);
 }
 
-/** Radial lead (wire) with a bend: horizontal then vertical through-board. */
-function bentLead(x: number, leadLen: number, r = 0.25): THREE.Group {
+/**
+ * Formed axial THT lead: ONE continuous tinned wire — a vertical pin through
+ * the board joined to a horizontal run toward the component body by a smooth
+ * 90° bend. Built as a single TubeGeometry along a centripetal Catmull-Rom
+ * curve, so the bend reads as a real bent lead, not two dismembered sticks
+ * (the old two-cylinder approach left a gap at the elbow and an octagonal
+ * cross-section that faceted at every angle).
+ *
+ * @param padX        pad position on the X axis (board coordinates, model-local)
+ * @param bodyHalfLen half-length of the body cylinder (the horizontal run
+ *                    must reach the body end this far from the body center)
+ * @param r           wire radius (mm)
+ * @param bodyY       body center height above the board (mm) — where the lead
+ *                    exits the end cap
+ */
+function bentLead(padX: number, bodyHalfLen: number, r = 0.25, bodyY = 0.9): THREE.Group {
   const g = new THREE.Group();
-  // horizontal segment along X from leadLen toward the body center
-  const hGeo = new THREE.CylinderGeometry(r, r, leadLen, 8);
-  const h = mesh(hGeo, MAT.lead, x - Math.sign(x) * leadLen / 2, r, 0);
-  h.rotation.z = Math.PI / 2;
-  g.add(h);
-  // vertical segment going down through the board
-  const vGeo = new THREE.CylinderGeometry(r, r, 2.2, 8);
-  const v = mesh(vGeo, MAT.lead, x, -1.1 + r, 0);
-  g.add(v);
+  const bendR = 0.9;                      // bend radius (centerline)
+  const dir = padX >= 0 ? -1 : 1;         // horizontal run points toward the body center
+  const bodyEndX = dir * bodyHalfLen;     // X of the body's end cap on this side
+  const pts = [
+    new THREE.Vector3(padX, -2.5, 0),             // through the board bottom edge
+    new THREE.Vector3(padX, bodyY, 0),            // rise to the body axis height
+    new THREE.Vector3(padX + dir * bendR, bodyY, 0), // bend shoulder
+    new THREE.Vector3(bodyEndX, bodyY, 0),        // horizontal run into the body end
+  ];
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal', 0.5);
+  const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 32, r, 10, false), MAT.lead);
+  tube.castShadow = true;
+  tube.receiveShadow = true;
+  g.add(tube);
   return g;
 }
 
@@ -151,10 +170,15 @@ function resistorBands(rOhms: number): number[] {
   let mult = 0;
   while (r < 1 && mult > -6) { r *= 10; mult--; }
   while (r >= 100 && mult < 6) { r /= 10; mult++; }
-  // 2 significant digits + multiplier
+  // 2 significant digits + multiplier exponent. `mult` is the power-of-ten
+  // exponent in `d1d2 × 10^mult`, so it maps directly to the resistor band
+  // color index (0 = black / ×10⁰, 1 = brown / ×10¹, 2 = red / ×10², …).
+  // (The old `(mult + 9) % 10` was off by one — it produced brown instead of
+  // red for 1 kΩ — and wrapped wrong for the negative sub-ohm exponents.)
   const d1 = Math.floor(r / 10);
   const d2 = Math.floor(r) % 10;
-  return [d1, d2, (mult + 9) % 10]; // multiplier index 0 = black
+  const band = Math.max(0, Math.min(9, mult));
+  return [d1, d2, band]; // multiplier index 0 = black
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -197,10 +221,10 @@ function axialResistor(ctx: ModelBuildContext): THREE.Group {
     band.rotation.z = Math.PI / 2;
     g.add(band);
   }
-  // leads to the pads
-  const leadX = span / 2;
-  g.add(bentLead(leadX, span / 2 - bodyLen / 2 + 1.2));
-  g.add(bentLead(-leadX, span / 2 - bodyLen / 2 + 1.2));
+  // formed leads to the pads (single curved wire, body end → pad)
+  const bodyY = r + 0.25;
+  g.add(bentLead(span / 2, bodyLen / 2, 0.25, bodyY));
+  g.add(bentLead(-span / 2, bodyLen / 2, 0.25, bodyY));
   return g;
 }
 
@@ -213,6 +237,17 @@ function electrolyticCap(ctx: ModelBuildContext): THREE.Group {
   // can body
   const can = mesh(new THREE.CylinderGeometry(canR, canR * 1.03, canH, 28), MAT.elecCan, 0, canH / 2, 0);
   g.add(can);
+  // crimp ring at the can base — the slight bulge where the aluminum can
+  // is mechanically crimped around the rubber bung. A subtle torus that
+  // reads as "real electrolytic" at any zoom level.
+  const crimpRing = new THREE.Mesh(
+    new THREE.TorusGeometry(canR * 1.04, 0.22, 8, 28),
+    MAT.aluminum,
+  );
+  crimpRing.rotation.x = Math.PI / 2;
+  crimpRing.position.y = 0.28;
+  crimpRing.castShadow = true;
+  g.add(crimpRing);
   // aluminum top with a subtle bevel
   const top = mesh(new THREE.CylinderGeometry(canR * 0.97, canR * 0.97, 0.3, 28), MAT.aluminum, 0, canH + 0.1, 0);
   g.add(top);
@@ -290,8 +325,8 @@ function glassDiode(ctx: ModelBuildContext): THREE.Group {
     st.rotation.z = Math.PI / 2;
     g.add(st);
   }
-  g.add(bentLead(span / 2, span / 2 - bodyLen / 2 + 0.8, 0.2));
-  g.add(bentLead(-span / 2, span / 2 - bodyLen / 2 + 0.8, 0.2));
+  g.add(bentLead(span / 2, bodyLen / 2, 0.2, r));
+  g.add(bentLead(-span / 2, bodyLen / 2, 0.2, r));
   return g;
 }
 
@@ -323,10 +358,37 @@ function ledModel(ctx: ModelBuildContext): THREE.Group {
   g.add(mesh(new THREE.CylinderGeometry(domeR, domeR * 1.02, 2.2, 24), lensMat, 0, 1.1, 0));
   const dome = mesh(new THREE.SphereGeometry(domeR, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2), lensMat, 0, 2.2, 0);
   g.add(dome);
-  // flange ring with the classic FLAT SPOT (cathode marker on real 5 mm LEDs)
-  const flange = mesh(new THREE.CylinderGeometry(domeR * 1.12, domeR * 1.12, 0.7, 24), lensMat, 0, 0.35, 0);
-  const flat = mesh(new THREE.BoxGeometry(0.9, 0.72, 1.1), lensMat, -domeR * 1.02, 0.35, 0);
-  g.add(flange, flat);
+  // flange ring with the classic FLAT SPOT (cathode marker on real 5 mm LEDs).
+  // Previous approach: full cylinder + a separate BoxGeometry "cut" — looked
+  // like a glued-on chunk. Now uses an extruded Shape with a flat segment
+  // so the flange is ONE seamless mesh with a machined-in flat.
+  const flangeR = domeR * 1.12;
+  const flangeH = 0.7;
+  {
+    const shape = new THREE.Shape();
+    const segments = 48;
+    const flatAngle = 0.55; // radians the flat chord spans (~32°)
+    // flat is centered on the −X side (cathode side); the arc wraps from
+    // just past the flat all the way around back to the flat's other edge.
+    const startAngle = Math.PI + flatAngle / 2;
+    const totalAngle = Math.PI * 2 - flatAngle;
+    for (let i = 0; i <= segments; i++) {
+      const a = startAngle + (totalAngle / segments) * i;
+      const px = Math.cos(a) * flangeR;
+      const py = Math.sin(a) * flangeR;
+      if (i === 0) shape.moveTo(px, py);
+      else shape.lineTo(px, py);
+    }
+    shape.closePath(); // straight line across the flat
+    const flangeGeo = new THREE.ExtrudeGeometry(shape, { depth: flangeH, bevelEnabled: false, curveSegments: 1 });
+    // ExtrudeGeometry extrudes along +Z; rotate so the shape lies in XZ and
+    // extrusion runs along Y (like a CylinderGeometry standing on the board).
+    flangeGeo.rotateX(-Math.PI / 2);
+    const flangeMesh = new THREE.Mesh(flangeGeo, lensMat);
+    flangeMesh.castShadow = true;
+    flangeMesh.receiveShadow = true;
+    g.add(flangeMesh);
+  }
   // inner structure visible through the transmissive epoxy: metal reflector
   // cup + die post (the "anvil") — the #1 detail that makes LEDs read real
   const cup = mesh(
@@ -371,23 +433,38 @@ function ledModel(ctx: ModelBuildContext): THREE.Group {
   return g;
 }
 
-/** TO-92 transistor: half-round black body + 3 flat legs. */
+/** TO-92 transistor: D-shaped black body + 3 round splayed leads. */
 function to92(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
   const spanZ = Math.max(2.0, padSpanZ(ctx.footprint));
   const bodyR = Math.min(2.6, Math.max(1.9, spanZ * 0.62));
   const bodyH = 5.2;
-  // half-cylinder (theta arc) + flat face toward -X
+  const bodyY = bodyH / 2 + 0.8;
+  // D-shaped body: full round section + a flat back face, built from a
+  // cylinder arc (round) plus a thin flat plate on the −X face (label side).
   const body = mesh(
-    new THREE.CylinderGeometry(bodyR, bodyR, bodyH, 24, 1, false, Math.PI, Math.PI),
-    MAT.blackPlastic, 0, bodyH / 2 + 0.8, 0,
+    new THREE.CylinderGeometry(bodyR, bodyR, bodyH, 28, 1, false, Math.PI * 0.5, Math.PI * 1.5),
+    MAT.blackPlastic, 0, bodyY, 0,
   );
   g.add(body);
-  // flat face panel
-  g.add(mesh(new THREE.BoxGeometry(0.35, bodyH, bodyR * 2), MAT.blackPlastic, -bodyR + 0.18, bodyH / 2 + 0.8, 0));
-  // 3 legs
-  for (let i = -1; i <= 1; i++) {
-    g.add(mesh(new THREE.BoxGeometry(0.5, 3.4, 0.35), MAT.lead, -bodyR * 0.5, -0.9, i * spanZ / 2.2));
+  // flat back panel (the molded flat face where the part number is printed)
+  g.add(mesh(new RoundedBoxGeometry(0.5, bodyH, bodyR * 2, 2, 0.15), MAT.blackPlastic, -bodyR + 0.2, bodyY, 0));
+  // 3 round tinned leads that splay slightly toward the pads. Real TO-92
+  // leads are Ø0.45 mm round wires, not rectangular beams. The middle/edge
+  // legs spread outward so they land on the footprint's pad row.
+  const padPts = padPoints(ctx.footprint, 3);
+  const legs = padPts.length >= 3 ? padPts : [[-bodyR * 0.5, -spanZ / 2.2], [-bodyR * 0.5, 0], [-bodyR * 0.5, spanZ / 2.2]];
+  for (let i = 0; i < 3; i++) {
+    const [px, pz] = legs[i];
+    const topX = -bodyR * 0.35 + (i === 1 ? 0.3 : -0.15);
+    const curve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(px, -2.5, pz),
+      new THREE.Vector3(px, 0.6, pz),
+      new THREE.Vector3(topX, bodyY - 0.8, pz),
+    ], false, 'centripetal', 0.5);
+    const lead = new THREE.Mesh(new THREE.TubeGeometry(curve, 20, 0.22, 8, false), MAT.lead);
+    lead.castShadow = true;
+    g.add(lead);
   }
   return g;
 }
@@ -405,14 +482,27 @@ function to220(ctx: ModelBuildContext): THREE.Group {
     new THREE.MeshStandardMaterial({ color: 0x0a1628 }), -1.6, 8.4, 0);
   hole.rotation.z = Math.PI / 2;
   g.add(hole);
-  // plastic body
-  g.add(mesh(new THREE.BoxGeometry(3.2, 10.2, bodyW * 0.86), MAT.blackPlastic, 0.2, 5.1, 0));
+  // plastic body — rounded edges for the molded look
+  g.add(mesh(new RoundedBoxGeometry(3.2, 10.2, bodyW * 0.86, 2, 0.2), MAT.blackPlastic, 0.2, 5.1, 0));
   // front face label plate (subtle lighter inset)
   g.add(mesh(new THREE.BoxGeometry(0.25, 6.2, bodyW * 0.62),
     new THREE.MeshStandardMaterial({ color: 0x2e2e34, roughness: 0.5 }), 1.85, 6.0, 0));
-  // 3 thick legs
-  for (let i = -1; i <= 1; i++) {
-    g.add(mesh(new THREE.BoxGeometry(0.65, 4.2, 0.55), MAT.lead, 0.6, -1.6, i * spanZ / 2.15));
+  // 3 formed leads: they exit the body bottom, bend outward 90°, then drop
+  // straight down to the pads — the signature TO-220 lead shape. Built as
+  // one rounded-box per lead (flat tab, not a round wire) that bends at the
+  // body edge. The middle lead exits from the body center; the two outer
+  // leads splay to the pad row.
+  const padPts = padPoints(ctx.footprint, 3);
+  const leadDefs = padPts.length >= 3
+    ? padPts.map(([px, pz]) => ({ px, pz }))
+    : [{ px: 0.6, pz: -spanZ / 2.15 }, { px: 0.6, pz: 0 }, { px: 0.6, pz: spanZ / 2.15 }];
+  for (const { px, pz } of leadDefs) {
+    // vertical pin through the board
+    g.add(mesh(new THREE.BoxGeometry(0.6, 2.6, 0.5), MAT.lead, px, 0.4, pz));
+    // shoulder bend from the body down toward the pin
+    g.add(mesh(new THREE.BoxGeometry(1.6, 0.5, 0.5), MAT.lead, px + 0.5, 1.6, pz));
+    // body-exit connector
+    g.add(mesh(new THREE.BoxGeometry(0.6, 1.4, 0.5), MAT.lead, px, 2.5, pz));
   }
   return g;
 }
@@ -426,8 +516,8 @@ function dipIC(ctx: ModelBuildContext): THREE.Group {
   const bodyL = Math.max(spanX * 0.92, npins / 2 * 1.35 + 1.2);
   const bodyW = Math.max(spanZ * 0.8, 4);
   const bodyH = 3.2;
-  // body
-  g.add(mesh(new THREE.BoxGeometry(bodyL, bodyH, bodyW), MAT.dipBody, 0, bodyH / 2 + 0.4, 0));
+  // body — rounded edges for the molded epoxy look
+  g.add(mesh(new RoundedBoxGeometry(bodyL, bodyH, bodyW, 2, 0.15), MAT.dipBody, 0, bodyH / 2 + 0.4, 0));
   // pin-1 notch (half-cylinder cut, approximated with a dark inset cylinder)
   const notchMat = new THREE.MeshStandardMaterial({ color: 0x0c0c0e, roughness: 0.7 });
   const notch = mesh(new THREE.CylinderGeometry(0.8, 0.8, bodyW + 0.06, 16), notchMat, -bodyL / 2 + 0.8, bodyH + 0.42, 0);
@@ -437,16 +527,20 @@ function dipIC(ctx: ModelBuildContext): THREE.Group {
   g.add(mesh(new THREE.CylinderGeometry(0.55, 0.55, 0.12, 12),
     new THREE.MeshStandardMaterial({ color: 0x3a3a40, roughness: 0.6 }),
     -bodyL / 2 + 2.0, bodyH + 0.44, -bodyW / 2 + 0.9));
-  // pins: two rows along ±Z, angled shoulder + pin
+  // pins: two rows along ±Z — real DIP leads are round Ø0.45 mm tinned wire
+  // with a shoulder that exits the body horizontally then bends 90° down.
   const pinCount = Math.max(2, Math.round(npins / 2));
+  const pinR = 0.23;
   for (const rowZ of [-1, 1]) {
     for (let i = 0; i < pinCount; i++) {
       const px = -bodyL / 2 + (bodyL / (pinCount + 0.001)) * (i + 0.5) * 0.98 + bodyL / (pinCount * 4);
       const z = rowZ * (spanZ / 2);
-      // shoulder going out
-      g.add(mesh(new THREE.BoxGeometry(0.55, 0.9, 1.1), MAT.lead, px, bodyH / 2 + 0.1, z - rowZ * 0.55));
-      // leg going down
-      g.add(mesh(new THREE.BoxGeometry(0.5, 3.2, 0.55), MAT.lead, px, -0.8, z));
+      // shoulder: horizontal cylinder exiting the body side
+      const shoulder = mesh(new THREE.CylinderGeometry(pinR, pinR, 1.6, 8), MAT.lead, px, bodyH / 2 - 0.2, z - rowZ * 0.5);
+      shoulder.rotation.x = Math.PI / 2;
+      g.add(shoulder);
+      // vertical pin going down through the board
+      g.add(mesh(new THREE.CylinderGeometry(pinR, pinR, 3.4, 8), MAT.lead, px, -0.9, z));
     }
   }
   return g;
@@ -461,7 +555,7 @@ function soicIC(ctx: ModelBuildContext): THREE.Group {
   const bodyL = spanX * 0.9;
   const bodyW = Math.max(spanZ * 0.78, 2.5);
   const bodyH = 1.6;
-  g.add(mesh(new THREE.BoxGeometry(bodyL, bodyH, bodyW), MAT.dipBody, 0, bodyH / 2 + 0.15, 0));
+  g.add(mesh(new RoundedBoxGeometry(bodyL, bodyH, bodyW, 2, 0.1), MAT.dipBody, 0, bodyH / 2 + 0.15, 0));
   // pin-1 chamfer marker (small beige dot)
   g.add(mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.08, 10),
     new THREE.MeshStandardMaterial({ color: 0x8a8a90, roughness: 0.5 }),
@@ -482,7 +576,7 @@ function soicIC(ctx: ModelBuildContext): THREE.Group {
 function sot23(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
   const spanZ = Math.max(1.8, padSpanZ(ctx.footprint));
-  const body = mesh(new THREE.BoxGeometry(1.6, 1.1, 2.9), MAT.blackPlastic, 0, 0.65, 0);
+  const body = mesh(new RoundedBoxGeometry(1.6, 1.1, 2.9, 2, 0.08), MAT.blackPlastic, 0, 0.65, 0);
   g.add(body);
   // 2 pins one side, 1 pin the other (classic SOT-23)
   const pinMat = MAT.lead;
@@ -576,7 +670,7 @@ function switchModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
   const spanZ = Math.max(4, padSpanZ(ctx.footprint));
   const w = Math.max(6, spanZ + 1);
-  g.add(mesh(new THREE.BoxGeometry(4.5, 4, w), MAT.darkPlastic, 0, 2, 0));
+  g.add(mesh(new RoundedBoxGeometry(4.5, 4, w, 2, 0.3), MAT.darkPlastic, 0, 2, 0));
   // metal bushing + lever
   g.add(mesh(new THREE.CylinderGeometry(1.5, 1.5, 1.2, 16), MAT.aluminum, 0, 4.6, 0));
   const lever = mesh(new THREE.BoxGeometry(0.9, 3.6, 0.9), MAT.lead, 0, 6.8, 0);
@@ -594,7 +688,7 @@ function pushButtonModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
   const spanZ = Math.max(4, padSpanZ(ctx.footprint));
   const w = Math.max(5.5, spanZ + 0.5);
-  g.add(mesh(new THREE.BoxGeometry(w, 3.4, w), MAT.darkPlastic, 0, 1.7, 0));
+  g.add(mesh(new RoundedBoxGeometry(w, 3.4, w, 2, 0.3), MAT.darkPlastic, 0, 1.7, 0));
   g.add(mesh(new THREE.CylinderGeometry(w * 0.28, w * 0.28, 2.0, 20),
     new THREE.MeshStandardMaterial({ color: 0x3b82f6, roughness: 0.35 }), 0, 4.2, 0));
   for (const s of [-1, 1]) {
@@ -610,7 +704,7 @@ function potentiometerModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
   const spanZ = Math.max(3.5, padSpanZ(ctx.footprint));
   const w = Math.max(6, spanZ + 1.5);
-  g.add(mesh(new THREE.BoxGeometry(5, 5.5, w), MAT.darkPlastic, 0, 2.75, 0));
+  g.add(mesh(new RoundedBoxGeometry(5, 5.5, w, 2, 0.3), MAT.darkPlastic, 0, 2.75, 0));
   g.add(mesh(new THREE.CylinderGeometry(1.5, 1.5, 6, 16), MAT.aluminum, 0, 8.2, 0));
   g.add(mesh(new THREE.CylinderGeometry(2.6, 2.6, 2.6, 20), MAT.blackPlastic, 0, 11.4, 0));
   // pointer groove on the knob
@@ -642,8 +736,9 @@ function fuseModel(ctx: ModelBuildContext): THREE.Group {
   const wire = mesh(new THREE.CylinderGeometry(0.09, 0.09, bodyLen * 0.8, 6), MAT.copper, 0, r, 0);
   wire.rotation.z = Math.PI / 2;
   g.add(wire);
-  g.add(bentLead(span / 2, span / 2 - bodyLen / 2 + 1.0, 0.22));
-  g.add(bentLead(-span / 2, span / 2 - bodyLen / 2 + 1.0, 0.22));
+  // formed leads from the fuse end caps down to the pads (body axis at r)
+  g.add(bentLead(span / 2, bodyLen / 2, 0.22, r));
+  g.add(bentLead(-span / 2, bodyLen / 2, 0.22, r));
   return g;
 }
 
@@ -719,8 +814,8 @@ function sevenSegmentModel(ctx: ModelBuildContext): THREE.Group {
   const w = spanX * 0.8;
   const h = w * 0.6;
   const bodyH = 3;
-  // black epoxy body
-  g.add(mesh(new THREE.BoxGeometry(w, bodyH, h), MAT.blackPlastic, 0, bodyH / 2, 0));
+  // black epoxy body with rounded edges
+  g.add(mesh(new RoundedBoxGeometry(w, bodyH, h, 2, 0.2), MAT.blackPlastic, 0, bodyH / 2, 0));
   // recessed face well: a slightly inset dark plate (the diffuser face real
   // displays have) with a raised bezel frame around it — segments glow from
   // INSIDE the well, not floating on a flat top
@@ -777,12 +872,21 @@ function sevenSegmentModel(ctx: ModelBuildContext): THREE.Group {
     }
   };
   (g as any).__updateSegments(0); // start dark; the render loop lights them
-  // pins
-  const pinCount = Math.max(4, Math.min(10, ctx.footprint.pads.length));
-  for (let i = 0; i < pinCount; i++) {
-    const px = -w / 2 + (w / pinCount) * (i + 0.5);
-    for (const rowZ of [-1, 1]) {
-      g.add(mesh(new THREE.BoxGeometry(0.4, 2.0, 0.4), MAT.lead, px, -0.8, rowZ * (h / 2 - 0.5)));
+  // DIP-style round leads — two rows along ±Z at the REAL pad positions.
+  // Round Ø0.45 mm tinned pins (real 7-seg modules use a 10-pin DIP header),
+  // not the old square beams.
+  const padPts = padPoints(ctx.footprint, 12);
+  if (padPts.length >= 2) {
+    for (const [px, pz] of padPts) {
+      g.add(radialLead(px, pz, 0.22, 2.6));
+    }
+  } else {
+    const pinCount = Math.max(4, Math.min(10, ctx.footprint.pads.length));
+    for (let i = 0; i < pinCount; i++) {
+      const px = -w / 2 + (w / pinCount) * (i + 0.5);
+      for (const rowZ of [-1, 1]) {
+        g.add(radialLead(px, rowZ * (h / 2 - 0.5), 0.22, 2.6));
+      }
     }
   }
   return g;

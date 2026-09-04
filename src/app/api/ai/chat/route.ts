@@ -14,7 +14,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getProvider, AIProviderConfigError, type ChatMessage, type ProviderName } from '@/lib/ai/provider';
 import { TOOLS_BY_NAME, getToolDefinitions, type ToolContext } from '@/lib/ai/tools';
-import type { CircuitDocument, CircuitComponent, Wire } from '@/lib/circuit/types';
+import type { CircuitDocument, CircuitComponent, ComponentPlugin, Wire } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
 import { buildSystemPrompt, MUTATING_TOOL_NAMES, runAutoVerify, autoVerifyNeedsAttention, buildAutoVerifyMessages } from '@/lib/ai/system-prompt';
 import { buildContextPreamble } from '@/lib/ai/netlist-summary';
@@ -84,7 +84,7 @@ export async function POST(req: NextRequest) {
     };
 
     // Build plugins map for the components in the circuit
-    const plugins = new Map<string, any>();
+    const plugins = new Map<string, ComponentPlugin>();
     for (const c of doc.components) {
       const p = getPlugin(c.type);
       if (p) plugins.set(c.type, p);
@@ -123,7 +123,14 @@ export async function POST(req: NextRequest) {
     // AI loop: call provider, execute tools, repeat.
     // 50 iterations allows building complex circuits (e.g. a full power
     // supply = 11 components + 18 wires via patterns, or larger via raw calls).
-    const executedToolCalls: any[] = [];
+    interface ExecutedToolCall {
+      name: string;
+      args: unknown;
+      result?: unknown;
+      error?: string;
+      ok?: boolean;
+    }
+    const executedToolCalls: ExecutedToolCall[] = [];
     const MAX_ITERATIONS = 50;
     let circuitMutated = false;
     let autoVerifyCount = 0;
@@ -170,7 +177,7 @@ export async function POST(req: NextRequest) {
             continue;
           }
 
-          let args: any;
+          let args: Record<string, unknown>;
           try {
             args = JSON.parse(tc.function.arguments);
           } catch (e) {

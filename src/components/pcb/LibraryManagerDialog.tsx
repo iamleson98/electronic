@@ -4,10 +4,9 @@ import { useState, useMemo } from 'react';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from '@/components/ui/dialog';
-import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Library, Search, Package, ExternalLink } from 'lucide-react';
-import { getAllPlugins, getPluginsByCategory } from '@/lib/circuit/registry';
+import { Library, Search, ExternalLink } from 'lucide-react';
+import { getPluginsByCategory } from '@/lib/circuit/registry';
 import { searchParts, type PartInfo } from '@/lib/pcb/part-database';
 import { footprintDefs } from '@/lib/pcb/footprints';
 

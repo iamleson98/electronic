@@ -11,27 +11,16 @@ import { Param, TraceSparkline } from './shared';
 //   - StimuliEditor: build PWL/SINE/PULSE/SFFM/EXP stimuli
 //   - ResultsViewer: display traces + measurements + statistics
 
-import { useEffect, useState } from 'react';
-import { useEditor } from '@/lib/circuit/store';
-import type { AnalysisConfig, AnalysisResult } from '@/lib/circuit/analysis';
-import type { SimOptions } from '@/lib/circuit/sim-options';
-import { exportRawFile, TraceMath, computeFFT, complexToMagnitude, complexToPhase, complexToDb, type MeasCommand, parseMeasLine, type Stimulus, sampleStimulus, stimulusToSPICE } from '@/lib/circuit/measurement';
+import { useState } from 'react';
+import { sampleStimulus, stimulusToSPICE, type Stimulus } from '@/lib/circuit/measurement';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Switch } from '@/components/ui/switch';
-import { Textarea } from '@/components/ui/textarea';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Badge } from '@/components/ui/badge';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { toast } from 'sonner';
 import {
-  Activity, BarChart3, Sliders, Gauge, Waves, Sigma, AlertTriangle, CheckCircle,
-  Save, FunctionSquare, Microscope, Wand2,
+  Microscope, Wand2,
 } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -45,7 +34,7 @@ export function StimuliEditorDialog({ open, onClose }: { open: boolean; onClose:
   const [voff, setVoff] = useState(0);
   const [vamp, setVamp] = useState(1);
   const [freq, setFreq] = useState(50);
-  const [td, setTd] = useState(0);
+  const [td] = useState(0);
   const [preview, setPreview] = useState<Float64Array>(new Float64Array(0));
   const [spiceText, setSpiceText] = useState('');
 
@@ -71,7 +60,7 @@ export function StimuliEditorDialog({ open, onClose }: { open: boolean; onClose:
           <div className="grid grid-cols-4 gap-2">
             <div>
               <Label className="text-slate-300 text-xs">Type</Label>
-              <Select value={stimType} onValueChange={(v) => setStimType(v as any)}>
+              <Select value={stimType} onValueChange={(v) => setStimType(v as Stimulus['type'])}>
                 <SelectTrigger className="bg-slate-800 border-slate-700 h-8"><SelectValue /></SelectTrigger>
                 <SelectContent className="bg-slate-800">
                   <SelectItem value="sine">SINE</SelectItem>

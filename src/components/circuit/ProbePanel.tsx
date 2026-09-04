@@ -37,7 +37,7 @@ export function ProbePanel() {
   const simError = useEditor((s) => s.simError);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const spectrumCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  // const containerRef = useRef<HTMLDivElement | null>(null);
 
   // ─── Oscilloscope (scope-viewer) state ────────────────────────────────
   // Deliberately panel-local React state (NOT the editor store): scope view
@@ -56,15 +56,15 @@ export function ProbePanel() {
   // ─── Parameter sweep slider ──────────────────────────────────────────
   const [sweepCompId, setSweepCompId] = useState('');
   const [sweepParam, setSweepParam] = useState('resistance');
-  const [sweepMin, setSweepMin] = useState(100);
-  const [sweepMax, setSweepMax] = useState(10000);
+  const [sweepMin] = useState(100);
+  const [sweepMax] = useState(10000);
   const [sweepValue, setSweepValue] = useState(1000);
   const setParameter = useEditor((s) => s.setParameter);
 
   // build a per-component measurements list
   const measurements: { componentId: string; name: string; symbol: string; items: { label: string; value: string; unit?: string }[] }[] = [];
   if (simContext && components.length > 0) {
-    const plugins = new Map<string, any>();
+    const plugins = new Map<string, NonNullable<ReturnType<typeof getPlugin>>>();
     for (const c of components) {
       const p = getPlugin(c.type);
       if (p) plugins.set(c.type, p);
@@ -79,7 +79,7 @@ export function ProbePanel() {
         if (m && m.length > 0) {
           measurements.push({ componentId: comp.id, name: plugin.name, symbol: plugin.symbol, items: m });
         }
-      } catch (err) {
+      } catch {
         // ignore measure errors
       }
     }
@@ -168,7 +168,7 @@ export function ProbePanel() {
       xLabel: 'Time (s)',
       yLabel: 'Voltage (V)',
     };
-    const results = measCommands.map(cmd => execMeas(cmd, realTrace as any));
+    const results = measCommands.map(cmd => execMeas(cmd, realTrace));
     setMeasResults(results);
   };
 
@@ -800,7 +800,7 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
         <div className="flex flex-wrap items-center gap-1">
           <span className="text-[9px] uppercase tracking-wider text-slate-500">Time</span>
           <ToolBtn label="Decrease timebase (finer)" onClick={() => stepTimebase(-1)}>−</ToolBtn>
-          <span className="w-[84px] text-center font-mono text-[10px] text-slate-200" aria-live="polite">{formatTimebase(scopeConfig.timebase)}</span>
+          <span className="w-21 text-center font-mono text-[10px] text-slate-200" aria-live="polite">{formatTimebase(scopeConfig.timebase)}</span>
           <ToolBtn label="Increase timebase (coarser)" onClick={() => stepTimebase(1)}>+</ToolBtn>
           <span className="ml-auto flex items-center gap-1 font-mono text-[10px]" title="Trigger — display only; traces stream continuously">
             <Zap size={10} className={trig.armed ? 'text-orange-400' : 'text-slate-600'} aria-hidden="true" />
@@ -832,7 +832,7 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
             )}
           </select>
           <ToolBtn label="Decrease volts per division" onClick={() => stepVoltsPerDiv(-1)} disabled={!selected}>−</ToolBtn>
-          <span className="w-[84px] text-center font-mono text-[10px] text-slate-200" aria-live="polite">{selected ? formatVoltageScale(selected.voltageScale) : '—'}</span>
+          <span className="w-21 text-center font-mono text-[10px] text-slate-200" aria-live="polite">{selected ? formatVoltageScale(selected.voltageScale) : '—'}</span>
           <ToolBtn label="Increase volts per division" onClick={() => stepVoltsPerDiv(1)} disabled={!selected}>+</ToolBtn>
           <ToolBtn
             label={selected?.coupling === 'AC' ? 'Switch coupling to DC' : 'Switch coupling to AC (removes DC offset)'}
@@ -844,7 +844,7 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
           </ToolBtn>
           <span className="text-[9px] uppercase tracking-wider text-slate-500" title="Vertical offset — voltage at screen center">Ofs</span>
           <ToolBtn label="Decrease vertical offset" onClick={() => stepOffset(-1)} disabled={!selected}>−</ToolBtn>
-          <span className="w-[70px] text-center font-mono text-[10px] text-slate-200" aria-live="polite">{selected ? formatVoltage(selected.voltageOffset) : '—'}</span>
+          <span className="w-17.5 text-center font-mono text-[10px] text-slate-200" aria-live="polite">{selected ? formatVoltage(selected.voltageOffset) : '—'}</span>
           <ToolBtn label="Increase vertical offset" onClick={() => stepOffset(1)} disabled={!selected}>+</ToolBtn>
         </div>
 
@@ -948,15 +948,18 @@ function SpectrumTab({ traces, canvasRef }: SpectrumTabProps) {
   const trace = traces[traceIdx];
 
   // Build a RealTrace suitable for computeFFT/computeTHD
-  const realTrace = trace && trace.samples.length >= 8 ? {
+  const realTrace = useMemo(() => trace && trace.samples.length >= 8 ? {
     name: trace.label,
     xValues: Float64Array.from(trace.samples.map(s => s.time)),
     yValues: Float64Array.from(trace.samples.map(s => s.voltage)),
     xLabel: 'Time (s)',
     yLabel: 'Voltage (V)',
-  } : null;
+  } : null, [trace]);
 
-  const thdResult: THDResult | null = realTrace ? computeTHD(realTrace as any, maxHarmonics) : null;
+  const thdResult: THDResult | null = useMemo(
+    () => realTrace ? computeTHD(realTrace, maxHarmonics) : null,
+    [realTrace, maxHarmonics],
+  );
 
   // Draw the spectrum bar chart
   useEffect(() => {
@@ -1003,7 +1006,7 @@ function SpectrumTab({ traces, canvasRef }: SpectrumTabProps) {
     // Re-derive the spectrum via computeFFT (kept separate from thdResult for chart)
     // thdResult.harmonics holds the discrete peaks; for a continuous bar chart
     // we downsample the raw spectrum.
-    const fullSpectrum = computeFFT(realTrace as any);
+    const fullSpectrum = computeFFT(realTrace);
     const downsampled = downsampleSpectrum(fullSpectrum.yValues, fullSpectrum.xValues, 48);
 
     const padding = 8;

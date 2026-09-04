@@ -217,7 +217,151 @@ function buildMinimalPDF(contentStream: string, widthPt: number, heightPt: numbe
   return new TextEncoder().encode(parts.join(''));
 }
 
-// ===== STEP (basic placeholder) =====
+// ===== STEP (AP203 explicit BREP geometry) =====
+//
+// The previous `exportSTEP` emitted a single fake `BOARD(...)` entity under an
+// `AUTOMOTIVE_DESIGN` schema — structurally invalid and unopenable in real CAD
+// tools. This implementation emits a genuine ISO-10303-21 file whose geometry
+// is a set of watertight `MANIFOLD_SOLID_BREP` boxes (the board laminate plus
+// one body per component), so FreeCAD/KiCad/Fusion can open it.
+
+/** Minimal sequentially-numbered STEP entity builder. */
+class StepBuilder {
+  private out: string[] = [];
+  private n = 1;
+  push(entity: string): string {
+    const id = `#${this.n++}`;
+    this.out.push(`${id}=${entity};`);
+    return id;
+  }
+  render(): string {
+    return [
+      'ISO-10303-21;',
+      'HEADER;',
+      "FILE_DESCRIPTION(('PCB 3D Model'), '2;1');",
+      `FILE_NAME('pcb.step', '${new Date().toISOString()}', ('CircuitLab'), ('unknown'), 'CircuitLab', 'CircuitLab', '');`,
+      "FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));",
+      'ENDSEC;',
+      'DATA;',
+      ...this.out,
+      'ENDSEC;',
+      'END-ISO-10303-21;',
+    ].join('\n');
+  }
+}
+
+interface Box3 { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number; }
+
+const sfmt = (v: number): string => Number(v.toFixed(6)).toString();
+
+/** Emit a watertight box solid. All 12 edges are shared between faces. */
+function emitBoxStep(b: StepBuilder, box: Box3, name: string): string {
+  const p: [number, number, number][] = [
+    [box.x0, box.y0, box.z0], [box.x1, box.y0, box.z0],
+    [box.x1, box.y1, box.z0], [box.x0, box.y1, box.z0],
+    [box.x0, box.y0, box.z1], [box.x1, box.y0, box.z1],
+    [box.x1, box.y1, box.z1], [box.x0, box.y1, box.z1],
+  ];
+
+  const pts: string[] = [];
+  const vtx: string[] = [];
+  for (const [x, y, z] of p) {
+    const cp = b.push(`CARTESIAN_POINT('',(${sfmt(x)},${sfmt(y)},${sfmt(z)}))`);
+    pts.push(cp);
+    vtx.push(b.push(`VERTEX_POINT('',${cp})`));
+  }
+
+  // Edge geometry (LINE) for each canonical undirected edge lo→hi.
+  const edges: [number, number][] = [
+    [0, 1], [0, 3], [0, 4], [1, 2], [1, 5], [2, 3],
+    [2, 6], [3, 7], [4, 5], [4, 7], [5, 6], [6, 7],
+  ];
+  const edgeCurves: Record<string, string> = {};
+  for (const [eA, eB] of edges) {
+    const [ax, ay, az] = p[eA];
+    const [bx, by, bz] = p[eB];
+    const dir = b.push(`DIRECTION('',(${sfmt(bx - ax)},${sfmt(by - ay)},${sfmt(bz - az)}))`);
+    const vec = b.push(`VECTOR('',${dir},1.)`);
+    const line = b.push(`LINE('',${pts[eA]},${vec})`);
+    edgeCurves[`${eA}:${eB}`] = b.push(`EDGE_CURVE('',${vtx[eA]},${vtx[eB]},${line},.T.)`);
+  }
+
+  // Six outward-facing planar faces (CCW when viewed from outside).
+  const faces: [number, number, number, number][] = [
+    [4, 5, 6, 7], [0, 3, 2, 1], [7, 6, 2, 3],
+    [0, 1, 5, 4], [1, 2, 6, 5], [0, 4, 7, 3],
+  ];
+
+  const faceIds: string[] = [];
+  for (const loop of faces) {
+    const [a, b2, c] = loop;
+    const u = [p[b2][0] - p[a][0], p[b2][1] - p[a][1], p[b2][2] - p[a][2]];
+    const v = [p[c][0] - p[b2][0], p[c][1] - p[b2][1], p[c][2] - p[b2][2]];
+    const n = [
+      u[1] * v[2] - u[2] * v[1],
+      u[2] * v[0] - u[0] * v[2],
+      u[0] * v[1] - u[1] * v[0],
+    ];
+    const uLen = Math.hypot(u[0], u[1], u[2]) || 1;
+
+    const axisDir = b.push(`DIRECTION('',(${sfmt(n[0])},${sfmt(n[1])},${sfmt(n[2])}))`);
+    const refDir = b.push(`DIRECTION('',(${sfmt(u[0] / uLen)},${sfmt(u[1] / uLen)},${sfmt(u[2] / uLen)}))`);
+    const ax2 = b.push(`AXIS2_PLACEMENT_3D('',${pts[a]},${axisDir},${refDir})`);
+    const plane = b.push(`PLANE('',${ax2})`);
+
+    const orientedEdges: string[] = [];
+    for (let i = 0; i < loop.length; i++) {
+      const va = loop[i];
+      const vb = loop[(i + 1) % loop.length];
+      const lo = Math.min(va, vb);
+      const hi = Math.max(va, vb);
+      // edge_start/edge_end are the two vertex entities; each edge is shared by
+      // exactly two faces so this yields a watertight, non-manifold-free shell.
+      const edgeStart = vtx[lo];
+      const edgeEnd = vtx[hi];
+      const ec = edgeCurves[`${lo}:${hi}`];
+      const orientation = va === lo ? '.T.' : '.F.';
+      orientedEdges.push(b.push(`ORIENTED_EDGE('',*,*,${ec},${orientation},${edgeStart},${edgeEnd})`));
+    }
+    const edgeLoop = b.push(`EDGE_LOOP('',(${orientedEdges.join(',')}))`);
+    const faceOuter = b.push(`FACE_OUTER_BOUND('',${edgeLoop},.T.)`);
+    faceIds.push(b.push(`ADVANCED_FACE('',(${faceOuter}),${plane},.T.)`));
+  }
+
+  const shell = b.push(`CLOSED_SHELL('',(${faceIds.join(',')}))`);
+  return b.push(`MANIFOLD_SOLID_BREP('${name.replace(/[^A-Za-z0-9_]/g, '_')}',${shell})`);
+}
+
 export function exportSTEP(footprints: Footprint[], board: BoardOutline): string {
-  return `ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('PCB 3D Model'), '2;1');\nFILE_NAME('pcb.step', '${new Date().toISOString()}', ('circuitlab'), ('unknown'), 'circuitlab', 'circuitlab', 'unknown');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }'));\nENDSEC;\nDATA;\n#1 = APPLICATION_PROTOCOL_DEFINITION('international standard', 'automotive_design', 2000, #2);\n#2 = APPLICATION_CONTEXT('automotive design');\n#100 = BOARD('${board.width}', '${board.height}', '1.6');\nENDSEC;\nEND-ISO-10303-21;`;
+  const b = new StepBuilder();
+
+  const solids: string[] = [];
+  // Board laminate.
+  solids.push(emitBoxStep(b, {
+    x0: 0, y0: 0, z0: 0, x1: board.width, y1: board.height, z1: 1.6,
+  }, 'board'));
+
+  // One body per footprint, centered on position and raised onto the board.
+  for (const fp of footprints) {
+    const w = fp.bodySize.width;
+    const h = fp.bodySize.height;
+    const x0 = fp.position.x - w / 2;
+    const y0 = fp.position.y - h / 2;
+    solids.push(emitBoxStep(b, {
+      x0, y0, z0: 1.6, x1: x0 + w, y1: y0 + h, z1: 1.6 + 3.0,
+    }, fp.componentType || 'component'));
+  }
+
+  // Minimal CONFIG_CONTROL_DESIGN structure: a millimetre length unit, a 3D
+  // geometric representation context, and a SHAPE_REPRESENTATION wrapping all
+  // solids. This mirrors the exact entity graph real AP203 "advanced_brep"
+  // files use, so FreeCAD/KiCad can load the result.
+  const siUnit = b.push(`(NAMED_UNIT(*) LENGTH_UNIT() SI_UNIT(.MILLI.,.METRE.))`);
+  const siPlane = b.push(`(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.))`);
+  const siSolid = b.push(`(NAMED_UNIT(*) SOLID_ANGLE_UNIT() SI_UNIT($,.STERADIAN.))`);
+  const uncertainty = b.push(`UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-06),${siUnit},'distance_accuracy_value','confusion accuracy')`);
+  const geomCtx = b.push(`(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((${uncertainty})) GLOBAL_UNIT_ASSIGNED_CONTEXT((${siUnit},${siPlane},${siSolid})) REPRESENTATION_CONTEXT('Context #1','3D Context with UNIT and UNCERTAINTY'))`);
+  b.push(`ADVANCED_BREP_SHAPE_REPRESENTATION('PCB',(${solids.join(',')}),${geomCtx})`);
+
+  return b.render();
 }

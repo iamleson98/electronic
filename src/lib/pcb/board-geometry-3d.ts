@@ -115,10 +115,10 @@ export interface TracePolyline {
  */
 export function traceGeometries(trace: Trace, layerY: number): THREE.BufferGeometry[] {
   const t = COPPER_THICKNESS;
-  // visual width floor: 0.25 mm autorouter traces are sub-pixel at board
-  // zoom (pure shimmer, impossible to anti-alias) — 0.32 mm keeps geometry
-  // honest-to-scale while staying renderable at default framing
-  const width = Math.max(0.32, trace.width);
+  // visual width floor: 0.15 mm keeps thin autorouter traces (0.2–0.25 mm)
+  // renderable at default framing. MSAA ×4 + SMAA together anti-alias the
+  // resulting thin geometry without the "pure shimmer" of sub-pixel lines.
+  const width = Math.max(0.15, trace.width);
   const r = width / 2;
   const geos: THREE.BufferGeometry[] = [];
   const pts: { x: number; y: number }[] = [];
@@ -137,7 +137,14 @@ export function traceGeometries(trace: Trace, layerY: number): THREE.BufferGeome
     const len = Math.hypot(dx, dy);
     if (len < 1e-4) continue;
     const box = new THREE.BoxGeometry(len, t, width);
-    const m = new THREE.Matrix4().makeRotationY(Math.atan2(dy, dx));
+    // Rotation sign (CRITICAL): board (x, y) maps to world (x, z=+y), and
+    // three's makeRotationY(θ) sends local +X → (cos θ, 0, −sin θ). To point
+    // the box's long axis along the REAL trace direction (dx, dy) we need
+    // cos θ = dx/len and −sin θ = dy/len ⇒ θ = atan2(−dy, dx). The old
+    // atan2(dy, dx) mirrored every diagonal about the X axis — autoroute's
+    // 45° segments rendered on the WRONG diagonal (axis-aligned segments
+    // were unaffected, which is why it passed a casual glance).
+    const m = new THREE.Matrix4().makeRotationY(Math.atan2(-dy, dx));
     m.setPosition((a.x + b.x) / 2, layerY, (a.y + b.y) / 2);
     box.applyMatrix4(m);
     geos.push(box);
@@ -445,11 +452,34 @@ export function flattenModel(root: THREE.Object3D): THREE.Group {
 
 // ─── Materials (board furniture) ─────────────────────────────────────────────
 
-/** ENIG gold — exposed copper after surface finish. */
+/** ENIG gold — exposed pads & via barrels after surface finish. */
 export function goldMaterial(): THREE.MeshPhysicalMaterial {
   return new THREE.MeshPhysicalMaterial({
     color: 0xd9b96c, roughness: 0.24, metalness: 1.0,
     clearcoat: 0.35, clearcoatRoughness: 0.25,
+  });
+}
+
+/** Per-layer copper colors matching the 2D PCB canvas palette.
+ *  Traces should look like raw copper (not gold) — only exposed pads are ENIG. */
+const COPPER_LAYER_COLORS: Record<string, number> = {
+  top: 0xcd7f32,    // copper-brown (#cd7f32)
+  inner1: 0xdaa520, // goldenrod (#daa520)
+  inner2: 0x2ea043, // green (#2ea043)
+  inner3: 0xa855f7, // purple (#a855f7)
+  inner4: 0x06b6d4, // cyan (#06b6d4)
+  bottom: 0x4682b4, // steel-blue (#4682b4)
+  via: 0xd9b96c,    // ENIG gold for via barrels
+};
+
+/** Raw copper trace material — per-layer color matching the 2D canvas.
+ *  Slightly rougher and less reflective than ENIG gold (real copper is
+ *  matte under the mask, not mirror-shiny). */
+export function copperMaterial(layer: string): THREE.MeshPhysicalMaterial {
+  const color = COPPER_LAYER_COLORS[layer] ?? COPPER_LAYER_COLORS.top;
+  return new THREE.MeshPhysicalMaterial({
+    color, roughness: 0.35, metalness: 0.9,
+    clearcoat: 0.15, clearcoatRoughness: 0.4,
   });
 }
 
@@ -458,10 +488,10 @@ export function goldMaterial(): THREE.MeshPhysicalMaterial {
  *  while exposed pads/vias punch through in ENIG gold. */
 export function solderMaskMaterial(color = 0x0b5e33): THREE.MeshPhysicalMaterial {
   const mat = new THREE.MeshPhysicalMaterial({
-    color, roughness: 0.42, metalness: 0.05,
-    clearcoat: 0.75, clearcoatRoughness: 0.28,
-    sheen: 0.15, sheenRoughness: 0.5, sheenColor: new THREE.Color(0x66ff99),
-    transparent: true, opacity: 0.62, depthWrite: true,
+    color, roughness: 0.48, metalness: 0.05,
+    clearcoat: 0.55, clearcoatRoughness: 0.32,
+    sheen: 0.1, sheenRoughness: 0.5, sheenColor: new THREE.Color(0x66ff99),
+    transparent: true, opacity: 0.5, depthWrite: true,
   });
   // micro-surface normal noise — real solder mask has fine Orange-peel grain
   if (typeof document !== 'undefined') {
@@ -488,9 +518,37 @@ export function solderMaskMaterial(color = 0x0b5e33): THREE.MeshPhysicalMaterial
   return mat;
 }
 
-/** FR4 core (visible on board edges / cross-section). */
+/** FR4 core (visible on board edges / cross-section).
+ *  Real FR4 has a visible glass-weave pattern (7628 glass, ~1.5 mm pitch)
+ *  and copper layers visible as thin orange lines in the edge cross-section. */
 export function fr4Material(): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({ color: 0xa89a5e, roughness: 0.85, metalness: 0.0 });
+  const mat = new THREE.MeshStandardMaterial({ color: 0xa89a5e, roughness: 0.85, metalness: 0.0 });
+  // Glass-weave bump map: subtle cross-hatch that's visible when zoomed in
+  if (typeof document !== 'undefined') {
+    try {
+      const c = document.createElement('canvas');
+      c.width = c.height = 128;
+      const ctx = c.getContext('2d')!;
+      ctx.fillStyle = '#808080'; // 50% gray = flat
+      ctx.fillRect(0, 0, 128, 128);
+      // 7628 glass weave: ~1.5 mm pitch at board scale, pattern repeats ~85 px
+      const pitch = 24; // pixels per weave tile
+      ctx.strokeStyle = '#8a8a8a';
+      ctx.lineWidth = 1.2;
+      for (let x = 0; x < 128; x += pitch) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 128); ctx.stroke();
+      }
+      for (let y = 0; y < 128; y += pitch) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(128, y); ctx.stroke();
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(12, 12);
+      mat.normalMap = tex;
+      mat.normalScale = new THREE.Vector2(0.03, 0.03);
+    } catch { /* weave optional */ }
+  }
+  return mat;
 }
 
 /** Lead-free solder — bright, slightly warm silver. */

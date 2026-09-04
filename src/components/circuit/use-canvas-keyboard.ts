@@ -11,13 +11,14 @@
 import { useEffect } from 'react';
 import type { RefObject } from 'react';
 import { useEditor } from '@/lib/circuit/store';
+import type { Selection } from '@/lib/circuit/store';
 import type { HoverState } from './canvas-types';
 
 export function useCanvasKeyboard(opts: {
   running: boolean;
   hoverRef: RefObject<HoverState>;
   cancelWire: () => void;
-  setSelection: (sel: any) => void;
+  setSelection: (sel: Selection) => void;
   deleteComponent: (id: string) => void;
   rotateComponent: (id: string) => void;
   setActiveSheet: (s: string) => void;

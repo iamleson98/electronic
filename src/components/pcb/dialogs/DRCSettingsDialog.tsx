@@ -6,16 +6,12 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
-import { Layers3, SlidersHorizontal, Activity, CheckCircle2, X } from 'lucide-react';
-import {
-  DEFAULT_LAYER_STACK, FOUR_LAYER_STACK, SIX_LAYER_STACK,
-  LAYER_COLORS, type CopperLayer, type LayerStack,
-} from '@/lib/pcb/types';
+import { SlidersHorizontal, X } from 'lucide-react';
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Layer Stack Dialog — pick 2/4/6-layer stackup, configure dielectric thickness
@@ -78,7 +74,7 @@ export function DRCSettingsDialog({ open, onClose }: { open: boolean; onClose: (
               <div className="space-y-1">
                 {Object.entries(errorTypeCounts).map(([type, count]) => (
                   <div key={type} className="flex items-center gap-2 text-xs">
-                    <span className="font-mono text-slate-300 min-w-[140px]">{type}</span>
+                    <span className="font-mono text-slate-300 min-w-35">{type}</span>
                     <Badge variant="outline" className="text-slate-400">{count}</Badge>
                     <select
                       value={severityOverrides[type] ?? 'default'}
@@ -118,10 +114,10 @@ export function DRCSettingsDialog({ open, onClose }: { open: boolean; onClose: (
                   return (
                     <li key={i} className="px-3 py-2 flex items-center gap-2">
                       <Badge variant={err.severity === 'error' ? 'destructive' : 'outline'}
-                             className={err.severity === 'warning' ? 'border-amber-500 text-amber-400' : ''}>
+                        className={err.severity === 'warning' ? 'border-amber-500 text-amber-400' : ''}>
                         {err.severity}
                       </Badge>
-                      <span className="text-xs font-mono text-slate-400 min-w-[100px]">{err.type}</span>
+                      <span className="text-xs font-mono text-slate-400 min-w-25">{err.type}</span>
                       <span className="flex-1 text-sm text-slate-100">{err.message}</span>
                       <button
                         className="text-slate-500 hover:text-rose-400 p-1 rounded"

@@ -12,20 +12,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import type { ERCError } from '@/lib/circuit/erc';
-import type { NetClass, PageSetup } from '@/lib/circuit/types';
 import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { toast } from 'sonner';
-import { Search, Replace, AlertTriangle, CheckCircle, Shield, Network, Settings, Layers, BookOpen, Plus } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Shield } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Find/Replace dialog — KiCad Ctrl+F
@@ -40,7 +33,6 @@ export function ViolationsBrowserDialog({ open, onClose }: { open: boolean; onCl
 
   const refresh = useCallback(() => {
     const r = runFullERCCheck();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setErrors(r.errors);
   }, [runFullERCCheck]);
 

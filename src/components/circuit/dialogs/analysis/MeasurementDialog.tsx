@@ -10,27 +10,19 @@
 //   - StimuliEditor: build PWL/SINE/PULSE/SFFM/EXP stimuli
 //   - ResultsViewer: display traces + measurements + statistics
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
-import type { AnalysisConfig, AnalysisResult } from '@/lib/circuit/analysis';
-import type { SimOptions } from '@/lib/circuit/sim-options';
-import { exportRawFile, TraceMath, computeFFT, complexToMagnitude, complexToPhase, complexToDb, type MeasCommand, parseMeasLine, type Stimulus, sampleStimulus, stimulusToSPICE } from '@/lib/circuit/measurement';
+import { parseMeasLine } from '@/lib/circuit/measurement';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from 'sonner';
 import {
-  Activity, BarChart3, Sliders, Gauge, Waves, Sigma, AlertTriangle, CheckCircle,
-  Save, FunctionSquare, Microscope, Wand2,
+  Sigma,
 } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -55,7 +47,7 @@ export function MeasurementDialog({ open, onClose }: { open: boolean; onClose: (
       toast.error('No traces to measure — run an analysis first');
       return;
     }
-    const tr = lastResult.traces[0] as any;
+    const tr = lastResult.traces[0];
     const result = runMeasurement(cmd, tr);
     setResults([...results, result]);
     toast.success(`Measurement "${result.name}" = ${result.value.toFixed(6)}`);

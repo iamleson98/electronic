@@ -19,7 +19,7 @@ import {
   FlipHorizontal, FileText, Pencil, Tag,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { exportBOM, exportIPC2581 } from '@/lib/pcb/additional-exports';
+import { exportBOM, exportIPC2581, exportDXF, exportSVG, exportVRML, exportPCBPDF, exportSTEP } from '@/lib/pcb/additional-exports';
 import { exportAllGerbersX2 } from '@/lib/pcb/gerber-export';
 import { importKiCadFootprint, importKiCadFootprintsFromFile } from '@/lib/pcb/kicad-import';
 import { footprintDefs } from '@/lib/pcb/footprints';
@@ -33,7 +33,7 @@ const MENU_SEP = 'bg-slate-700';
 
 /** Thin vertical divider between toolbar groups. */
 function ToolbarDivider() {
-  return <div className="mx-0.5 h-5 w-px flex-shrink-0 bg-slate-700" />;
+  return <div className="mx-0.5 h-5 w-px shrink-0 bg-slate-700" />;
 }
 
 /** Compact icon-only toggle button with a tooltip (quick tool modes, view toggles). */
@@ -196,7 +196,7 @@ export function PCBToolbar() {
 
   const handleGerberX2Export = () => {
     const s = usePCB.getState();
-    const files = exportAllGerbersX2(s.footprints, s.traces, s.vias, s.board);
+    const files = exportAllGerbersX2(s.footprints, s.traces, s.vias, s.board, s.copperPours);
     for (const file of files) {
       const blob = new Blob([file.content], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
@@ -233,6 +233,54 @@ export function PCBToolbar() {
     a.click();
     URL.revokeObjectURL(url);
     toast.success('IPC-2581 exported');
+  };
+
+  /** Download a text artifact (previously these exporters existed but had no UI). */
+  const downloadText = (content: string, filename: string, mime: string) => {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDXFExport = () => {
+    const s = usePCB.getState();
+    downloadText(exportDXF(s.footprints, s.traces, s.vias, s.board), 'pcb.dxf', 'application/dxf');
+    toast.success('DXF exported');
+  };
+
+  const handleSVGExport = () => {
+    const s = usePCB.getState();
+    downloadText(exportSVG(s.footprints, s.traces, s.vias, s.board), 'pcb.svg', 'image/svg+xml');
+    toast.success('SVG exported');
+  };
+
+  const handleVRMLExport = () => {
+    const s = usePCB.getState();
+    downloadText(exportVRML(s.footprints, s.traces, s.vias, s.board), 'pcb.wrl', 'model/vrml');
+    toast.success('VRML exported');
+  };
+
+  const handlePCBPDFExport = () => {
+    const s = usePCB.getState();
+    const bytes = exportPCBPDF(s.footprints, s.traces, s.vias, s.board);
+    const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pcb.pdf';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success('PCB PDF exported');
+  };
+
+  const handleSTEPExport = () => {
+    const s = usePCB.getState();
+    downloadText(exportSTEP(s.footprints, s.board), 'pcb.step', 'model/step');
+    toast.success('STEP 3D model exported');
   };
 
   const handleAutoRoute = () => {
@@ -379,18 +427,36 @@ export function PCBToolbar() {
   };
 
   const handleAddBlindVia = () => {
-    // Add a blind via at the center of the selected footprint (or board center)
-    const fp = usePCB.getState().footprints.find((f) => f.id === selectedFootprintId);
-    const pos = fp ? fp.position : { x: usePCB.getState().board.width / 2, y: usePCB.getState().board.height / 2 };
-    usePCB.getState().addTypedVia(pos, 'unrouted', 'blind', 'top', 'inner1');
-    toast.success('Blind via added (top → inner1)');
+    // Add a blind via at the center of the selected footprint (or board center).
+    // Guard: blind vias need an inner layer — on a 2-layer stack fall back to
+    // a through via instead of referencing a nonexistent `inner1`.
+    const st = usePCB.getState();
+    const fp = st.footprints.find((f) => f.id === selectedFootprintId);
+    const pos = fp ? fp.position : { x: st.board.width / 2, y: st.board.height / 2 };
+    const layers = st.layerStack?.layers ?? ['top', 'bottom'];
+    const inner = layers.find((l) => l !== 'top' && l !== 'bottom');
+    if (!inner) {
+      st.addTypedVia(pos, 'unrouted', 'tht', 'top', 'bottom');
+      toast.warning('No inner layer on this 2-layer board — added a through via instead');
+      return;
+    }
+    st.addTypedVia(pos, 'unrouted', 'blind', 'top', inner);
+    toast.success(`Blind via added (top → ${inner})`);
   };
 
   const handleAddMicroVia = () => {
-    const fp = usePCB.getState().footprints.find((f) => f.id === selectedFootprintId);
-    const pos = fp ? fp.position : { x: usePCB.getState().board.width / 2, y: usePCB.getState().board.height / 2 };
-    usePCB.getState().addTypedVia(pos, 'unrouted', 'micro', 'top', 'inner1');
-    toast.success('Microvia added (top → inner1, laser-drilled)');
+    const st = usePCB.getState();
+    const fp = st.footprints.find((f) => f.id === selectedFootprintId);
+    const pos = fp ? fp.position : { x: st.board.width / 2, y: st.board.height / 2 };
+    const layers = st.layerStack?.layers ?? ['top', 'bottom'];
+    const inner = layers.find((l) => l !== 'top' && l !== 'bottom');
+    if (!inner) {
+      st.addTypedVia(pos, 'unrouted', 'tht', 'top', 'bottom');
+      toast.warning('No inner layer on this 2-layer board — added a through via instead');
+      return;
+    }
+    st.addTypedVia(pos, 'unrouted', 'micro', 'top', inner);
+    toast.success(`Microvia added (top → ${inner}, laser-drilled)`);
   };
 
   const handleCopperPour = () => {
@@ -432,8 +498,8 @@ export function PCBToolbar() {
           horizontal scroll (invisible scrollbar) only as a very-narrow-viewport fallback. */}
       <div className="flex flex-nowrap items-center gap-0.5 overflow-x-auto border-b border-slate-800 bg-slate-900 px-2 py-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {/* Brand */}
-        <div className="mr-1 flex flex-shrink-0 items-center gap-2 pr-2">
-          <div className="flex h-7 w-7 items-center justify-center rounded bg-gradient-to-br from-emerald-500 to-cyan-600 text-white">
+        <div className="mr-1 flex shrink-0 items-center gap-2 pr-2">
+          <div className="flex h-7 w-7 items-center justify-center rounded bg-linear-to-br from-emerald-500 to-cyan-600 text-white">
             <Zap size={16} strokeWidth={2.5} />
           </div>
           <span className="hidden text-sm font-semibold text-slate-100 xl:inline">PCB Layout</span>
@@ -492,6 +558,26 @@ export function PCBToolbar() {
             <DropdownMenuItem className={MENU_ITEM} onClick={handleIPC2581Export}>
               <FileDown size={14} className="mr-2" /> IPC-2581
               <span className="ml-auto text-[10px] text-slate-500">XML</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem className={MENU_ITEM} onClick={handleSTEPExport}>
+              <FileDown size={14} className="mr-2" /> 3D Model (STEP)
+              <span className="ml-auto text-[10px] text-slate-500">.step</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem className={MENU_ITEM} onClick={handleDXFExport}>
+              <FileDown size={14} className="mr-2" /> Mechanical (DXF)
+              <span className="ml-auto text-[10px] text-slate-500">.dxf</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem className={MENU_ITEM} onClick={handleSVGExport}>
+              <FileDown size={14} className="mr-2" /> Vector (SVG)
+              <span className="ml-auto text-[10px] text-slate-500">.svg</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem className={MENU_ITEM} onClick={handleVRMLExport}>
+              <FileDown size={14} className="mr-2" /> 3D (VRML)
+              <span className="ml-auto text-[10px] text-slate-500">.wrl</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem className={MENU_ITEM} onClick={handlePCBPDFExport}>
+              <FileDown size={14} className="mr-2" /> Board (PDF)
+              <span className="ml-auto text-[10px] text-slate-500">.pdf</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -650,7 +736,7 @@ export function PCBToolbar() {
         <ToolbarDivider />
 
         {/* Layer selector — red = top copper, blue = bottom copper (industry convention) */}
-        <div className="flex flex-shrink-0 items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -682,7 +768,7 @@ export function PCBToolbar() {
         {/* Trace width */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <div className="flex flex-shrink-0 items-center gap-1.5 px-1">
+            <div className="flex shrink-0 items-center gap-1.5 px-1">
               <span className="hidden text-xs text-slate-400 lg:inline">Width</span>
               <Slider
                 value={[defaultTraceWidth * 10]}
@@ -712,7 +798,7 @@ export function PCBToolbar() {
         </QuickToolButton>
 
         {/* ── Right side: verification + primary manufacturing export ── */}
-        <div className="ml-auto flex flex-shrink-0 items-center gap-0.5">
+        <div className="ml-auto flex shrink-0 items-center gap-0.5">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -769,6 +855,7 @@ export function PCBToolbar() {
 
       {/* Footprint Editor dialog */}
       <FootprintEditorDialog
+        key={showFootprintEditor ? 'open' : 'closed'}
         open={showFootprintEditor}
         onClose={() => setShowFootprintEditor(false)}
         onSave={() => {

@@ -49,8 +49,6 @@ async function main() {
   for (const comp of doc.components) {
     if (!comp.simState) comp.simState = {};
   }
-  let prev: any = undefined;
-  let sim: SimContext | null = null;
   let simContext: SimContext | null = null;
 
   const readSegVoltages = (sim: SimContext, segId: string) => {

@@ -1250,7 +1250,7 @@ class Router {
       const allowSweep = pass >= 3 && ripUpBudget > 0;
 
       for (const net of [...netOrder]) {
-        let legs = pending.get(net);
+        const legs = pending.get(net);
         if (!legs) continue;
         const remaining: RouteLeg[] = [];
         for (const leg of legs) {

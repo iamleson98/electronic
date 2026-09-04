@@ -42,7 +42,6 @@ import { toast } from 'sonner';
 import { confirmDialog } from '@/lib/confirm';
 import type { CopperLayer, FootprintDef, FootprintPadDef } from '@/lib/pcb/types';
 import { footprintDefs } from '@/lib/pcb/footprints';
-import { LAYER_COLORS } from '@/lib/pcb/types';
 
 const PX_PER_MM = 8;          // pixels per mm at zoom = 1 (matches PCBCanvas)
 const GRID_MM = 0.1;          // snap-to-grid resolution (finer than routing grid)
@@ -314,14 +313,6 @@ export function FootprintEditorDialog({ open, onClose, onSave, initialDesign }: 
     return () => ro.disconnect();
   }, []);
 
-  // Load initialDesign when it changes
-  useEffect(() => {
-    if (open && initialDesign) {
-      setDesign(initialDesign);
-      setSelectedId(null);
-    }
-  }, [open, initialDesign]);
-
   // Auto-fit view when design body changes drastically (load sample / new)
   useEffect(() => {
     if (!open) return;
@@ -334,7 +325,6 @@ export function FootprintEditorDialog({ open, onClose, onSave, initialDesign }: 
       y: size.height / 2,
       zoom: targetZoom,
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, size.width, size.height]);
 
   // ── Coordinate helpers ──────────────────────────────────────────────
@@ -876,7 +866,7 @@ export function FootprintEditorDialog({ open, onClose, onSave, initialDesign }: 
           {/* Top toolbar */}
           <div className="flex items-center gap-1 border-b border-slate-800 bg-slate-900 px-3 py-2">
             <div className="mr-2 flex items-center gap-2 pr-3">
-              <div className="flex h-7 w-7 items-center justify-center rounded bg-gradient-to-br from-emerald-500 to-cyan-600 text-slate-900">
+              <div className="flex h-7 w-7 items-center justify-center rounded bg-linear-to-br from-emerald-500 to-cyan-600 text-slate-900">
                 <Frame size={16} strokeWidth={2.5} />
               </div>
               <span className="hidden text-sm font-semibold text-slate-100 sm:inline">Footprint Editor</span>
@@ -1144,15 +1134,14 @@ function ToolButton({
     <button
       onClick={onClick}
       title={label}
-      className={`flex h-9 w-9 items-center justify-center rounded-md transition-colors ${
-        active
+      className={`flex h-9 w-9 items-center justify-center rounded-md transition-colors ${active
           ? danger
             ? 'bg-rose-600 text-white'
             : 'bg-emerald-500 text-slate-900'
           : danger
             ? 'text-rose-400 hover:bg-slate-800 hover:text-rose-300'
             : 'text-slate-300 hover:bg-slate-800 hover:text-slate-100'
-      }`}
+        }`}
     >
       {icon}
     </button>

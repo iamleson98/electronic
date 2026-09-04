@@ -101,7 +101,7 @@ export function SpiceImportDialog({ open, onClose }: { open: boolean; onClose: (
             value={netlist}
             onChange={(e) => setNetlist(e.target.value)}
             placeholder={sampleNetlist}
-            className="min-h-[300px] bg-slate-950 border-slate-700 font-mono text-xs text-slate-200"
+            className="min-h-75 bg-slate-950 border-slate-700 font-mono text-xs text-slate-200"
             spellCheck={false}
           />
           <div className="flex items-center gap-2 mt-2">

@@ -25,8 +25,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
 import {
-  Activity, Waves, Sigma, AlertTriangle, CheckCircle,
-  Save, FunctionSquare, Microscope, Wand2,
+  Activity,
 } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,7 +79,7 @@ export function AnalysisDialog({ open, onClose }: { open: boolean; onClose: () =
         config = { type: 'tf', inputSourceId: sourceId, outputNode };
         break;
       case 'sens':
-        config = { type: 'sens', outputNode, mode: 'dc', parameter: param } as any;
+        config = { type: 'sens', outputNode, mode: 'dc', parameter: param } as AnalysisConfig;
         break;
       case 'noise':
         config = { type: 'noise', outputNode, inputSourceId: sourceId, fStart, fStop, nPoints, sweep: sweepType };
@@ -144,7 +143,7 @@ export function AnalysisDialog({ open, onClose }: { open: boolean; onClose: () =
               <div className="grid grid-cols-4 gap-2">
                 <div>
                   <Label className="text-slate-300 text-xs">Sweep</Label>
-                  <Select value={sweepType} onValueChange={(v) => setSweepType(v as any)}>
+                  <Select value={sweepType} onValueChange={(v) => setSweepType(v as 'dec' | 'oct' | 'lin')}>
                     <SelectTrigger className="bg-slate-800 border-slate-700 h-8"><SelectValue /></SelectTrigger>
                     <SelectContent className="bg-slate-800">
                       <SelectItem value="dec">Decade</SelectItem>

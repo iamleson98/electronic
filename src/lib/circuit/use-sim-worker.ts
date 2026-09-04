@@ -69,12 +69,13 @@ export function useSimWorker() {
       };
       // Ping the worker to check if it's ready
       worker.postMessage({ type: 'ping' });
+      const pendingRequests = pendingRef.current;
       return () => {
         worker.terminate();
         workerRef.current = null;
         // Settle in-flight requests on unmount
-        for (const resolve of pendingRef.current.values()) resolve(null);
-        pendingRef.current.clear();
+        for (const resolve of pendingRequests.values()) resolve(null);
+        pendingRequests.clear();
       };
     } catch {
       // Worker creation failed (e.g., CSP restriction) — fall back to sync

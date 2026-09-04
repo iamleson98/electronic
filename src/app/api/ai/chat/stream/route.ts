@@ -31,7 +31,7 @@
 // Plus `: ping` comment heartbeats every 15s while the turn runs.
 
 import { NextRequest } from 'next/server';
-import { getTurnManager, type TurnEvent, type TurnSubscriber } from '@/lib/ai/turn-manager';
+import { getTurnManager, type TurnEvent, type TurnParams, type TurnSubscriber } from '@/lib/ai/turn-manager';
 import { checkRateLimit, clientIpFromRequest } from '@/lib/ai/rate-limit';
 
 export const runtime = 'nodejs';
@@ -42,7 +42,8 @@ function formatSse(ev: TurnEvent): string {
 }
 
 export async function POST(req: NextRequest) {
-  let body: any = null;
+  type StreamRequestBody = TurnParams & { resume?: { turnId?: unknown } };
+  let body: StreamRequestBody | null = null;
   try {
     body = await req.json();
   } catch {
@@ -55,7 +56,8 @@ export async function POST(req: NextRequest) {
   const mgr = getTurnManager();
 
   let turnId: string | null = null;
-  const resumeId: string | undefined = body?.resume?.turnId;
+  const resumeRaw: unknown = body?.resume?.turnId;
+  const resumeId: string | undefined = typeof resumeRaw === 'string' ? resumeRaw : undefined;
 
   if (resumeId && typeof resumeId === 'string') {
     // Resuming an existing turn — no rate limit (no new provider work), and

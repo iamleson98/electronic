@@ -594,30 +594,49 @@ function applyTransform(v: [number, number, number], xform: { translation: [numb
   return [x, y, z];
 }
 
-/** Append an IndexedFaceSet's triangulated geometry to the output arrays. */
-function appendFaceSet(set: VRMLFaceSet, outPos: number[], outNorm: number[], xform: any, _color?: [number, number, number]): void {
-  // Split coordIndex into faces
+/** Split a flat VRML index list (with -1 face terminators) into faces. */
+function splitVRMLIndices(indices: number[]): number[][] {
   const faces: number[][] = [];
   let cur: number[] = [];
-  for (const idx of set.coordIndex) {
+  for (const idx of indices) {
     if (idx === -1) { if (cur.length >= 3) faces.push(cur); cur = []; }
     else cur.push(idx);
   }
   if (cur.length >= 3) faces.push(cur);
+  return faces;
+}
 
+/** Append an IndexedFaceSet's triangulated geometry to the output arrays. */
+function appendFaceSet(set: VRMLFaceSet, outPos: number[], outNorm: number[], xform: any, _color?: [number, number, number]): void {
+  const faces = splitVRMLIndices(set.coordIndex);
   const pts = set.points;
   const hasNormals = set.hasNormals && set.normals.length >= 3;
 
-  for (const face of faces) {
+  // normalIndex is a per-face-corner list of NORMAL indices (parallel to
+  // coordIndex). When present it must drive which normal is used at each
+  // corner — reusing the coord index here produced wrong smoothing whenever
+  // the two lists diverged (very common in STEP→VRML exports). Fall back to
+  // the coord indices when normalIndex is absent.
+  const normalFaces = set.normalIndex.length > 0
+    ? splitVRMLIndices(set.normalIndex)
+    : faces.map((f) => f.slice());
+
+  for (let f = 0; f < faces.length; f++) {
+    const face = faces[f];
+    const nface = normalFaces[f] ?? face;
     const triIndices = triangulateFan(face);
     for (let t = 0; t < triIndices.length; t += 3) {
       for (let k = 0; k < 3; k++) {
-        const idx = triIndices[t + k];
+        const corner = t + k;
+        const idx = triIndices[corner];
         const px = pts[idx * 3] ?? 0, py = pts[idx * 3 + 1] ?? 0, pz = pts[idx * 3 + 2] ?? 0;
         const [tx, ty, tz] = applyTransform([px, py, pz], xform);
         outPos.push(tx, ty, tz);
         if (hasNormals) {
-          const nx = set.normals[idx * 3] ?? 0, ny = set.normals[idx * 3 + 1] ?? 0, nz = set.normals[idx * 3 + 2] ?? 0;
+          // Normal index = normalFaces[f][corner] (the corner-corresponding
+          // entry), not the coord index.
+          const nIdx = nface[corner] ?? idx;
+          const nx = set.normals[nIdx * 3] ?? 0, ny = set.normals[nIdx * 3 + 1] ?? 0, nz = set.normals[nIdx * 3 + 2] ?? 0;
           // Rotate normal (no translation for normals)
           const tx2 = { ...xform, translation: [0, 0, 0] as [number, number, number] };
           const [tnx, tny, tnz] = applyTransform([nx, ny, nz], tx2);
@@ -821,13 +840,20 @@ export function parseOBJ(text: string): LoadedModel {
             triVerts.push(verts[vi] ?? 0, verts[vi + 1] ?? 0, verts[vi + 2] ?? 0);
           }
           outPos.push(...triVerts);
-          let n0: [number, number, number] | null = null;
-          if (tri[0].n >= 0) {
-            const n0i = tri[0].n * 3;
-            n0 = [norms[n0i] ?? 0, norms[n0i + 1] ?? 0, norms[n0i + 2] ?? 0];
-          }
-          if (n0) {
-            for (let k = 0; k < 3; k++) outNorm.push(n0[0], n0[1], n0[2]);
+          // Per-vertex normals: use EACH corner's own normal index. The old
+          // code took only vertex 0's normal and duplicated it across the
+          // triangle, flattening smooth shading on non-planar/faceted models.
+          let hasAnyNormal = false;
+          for (const t of tri) if (t.n >= 0) hasAnyNormal = true;
+          if (hasAnyNormal) {
+            for (const t of tri) {
+              if (t.n >= 0) {
+                const ni = t.n * 3;
+                outNorm.push(norms[ni] ?? 0, norms[ni + 1] ?? 0, norms[ni + 2] ?? 0);
+              } else {
+                outNorm.push(0, 0, 0);
+              }
+            }
           } else {
             const n = triangleNormal(triVerts[0], triVerts[1], triVerts[2],
                                      triVerts[3], triVerts[4], triVerts[5],
@@ -880,6 +906,11 @@ export function modelToGeometry(model: LoadedModel): THREE.BufferGeometry {
   geo.setAttribute('normal', new THREE.BufferAttribute(model.normals, 3));
   if (model.indices && model.indices.length > 0) {
     geo.setIndex(new THREE.BufferAttribute(model.indices, 1));
+  }
+  // Carry the parsed material color (VRML diffuseColor / future OBJ mtl) so the
+  // viewer can tint the mesh instead of discarding it in favor of a flat gray.
+  if (model.color) {
+    geo.userData.color = model.color;
   }
   geo.computeBoundingBox();
   geo.computeBoundingSphere();

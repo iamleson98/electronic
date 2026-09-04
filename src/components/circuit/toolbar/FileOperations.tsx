@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { toast } from 'sonner';
 import { Save, Upload, Trash2, Undo2, Redo2 } from 'lucide-react';
+import type { CircuitDocument } from '@/lib/circuit/types';
 
 export function FileOperations({
   running,
@@ -21,7 +22,7 @@ export function FileOperations({
   past: number;
   future: number;
   serialize: () => string;
-  loadDocument: (doc: any) => void;
+  loadDocument: (doc: CircuitDocument) => void;
   clear: () => void;
   undo: () => void;
   redo: () => void;

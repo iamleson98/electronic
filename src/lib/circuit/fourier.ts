@@ -238,7 +238,7 @@ export function downsampleSpectrum(
     const lo = Math.pow(10, logMin + i * step);
     const hi = Math.pow(10, logMin + (i + 1) * step);
     let max = 0;
-    let centerFreq = Math.sqrt(lo * hi);
+    const centerFreq = Math.sqrt(lo * hi);
     for (let j = 0; j < freqs.length; j++) {
       if (freqs[j] >= lo && freqs[j] < hi) {
         if (mags[j] > max) {

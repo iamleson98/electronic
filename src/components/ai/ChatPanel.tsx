@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useChatSession, stepLabelFor, type ChatMessage, type ToolCallEntry } from '@/lib/ai/chat-session';
 import { summarizeCircuitDoc } from '@/lib/ai/circuit-summary';
+import type { CircuitComponent, Wire } from '@/lib/circuit/types';
 import { useEditor } from '@/lib/circuit/store';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -578,7 +579,7 @@ function StepsAccordion({ message, isActive }: { message: ChatMessage; isActive:
  * (bill of materials) and how they are wired (net connections). Computed
  * deterministically from the applied document — never from model text.
  */
-function CircuitSummaryCard({ components, wires }: { components: any[]; wires: any[] }) {
+function CircuitSummaryCard({ components, wires }: { components: CircuitComponent[]; wires: Wire[] }) {
   const summary = useMemo(
     () => summarizeCircuitDoc(components ?? [], wires ?? []),
     [components, wires],

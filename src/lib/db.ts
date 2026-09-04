@@ -145,7 +145,7 @@ async function baselineIfPushed(client: Client): Promise<void> {
       args: [hash, e.when],
     });
   }
-  console.log(`[db] baselined ${entries.length} migration(s) — schema was created by drizzle-kit push`);
+  console.warn(`[db] baselined ${entries.length} migration(s) — schema was created by drizzle-kit push`);
 }
 
 /**

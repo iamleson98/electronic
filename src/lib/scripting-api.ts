@@ -28,7 +28,7 @@ export interface ScriptingAPI {
   on: (event: string, callback: (data: any) => void) => () => void;
 }
 
-let eventListeners = new Map<string, Set<(data: any) => void>>();
+const eventListeners = new Map<string, Set<(data: any) => void>>();
 
 function emit(event: string, data: any) {
   const l = eventListeners.get(event);
@@ -103,5 +103,5 @@ export function installScriptingAPI(): void {
   if (typeof window === 'undefined') return;
   if ((window as any).circuitlab) return;
   (window as any).circuitlab = createScriptingAPI();
-  console.log('%c[CircuitLab] Scripting API ready — use `circuitlab` in console.', 'color: #22d3ee;');
+  console.warn('%c[CircuitLab] Scripting API ready — use `circuitlab` in console.', 'color: #22d3ee;');
 }

@@ -17,7 +17,7 @@ import {
 } from './complex-solver';
 import { mergeOptions, type SimOptions, type ConvergenceReport, toKelvin } from './sim-options';
 import { thermalVoltage } from './sim-options';
-import { runSens as _runSens, type SensConfig } from './sensitivity';
+import { runSens as _runSens, type SensConfig, computeACModeSensitivity } from './sensitivity';
 import { stateKey } from './state-keys';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -515,65 +515,86 @@ export function runDCSweep(
   const start = performance.now();
   const options = mergeOptions(opts);
 
-  const vValues: number[] = [];
-  // Guard: a zero/NaN step (or a step pointing away from the stop value)
-  // would loop forever / produce nothing — fail loudly instead.
-  const stepValid = Number.isFinite(config.vStep) && config.vStep !== 0;
-  const directionValid = stepValid && (
-    (config.vStep > 0 && config.vStop >= config.vStart) ||
-    (config.vStep < 0 && config.vStop <= config.vStart)
-  );
-  if (directionValid) {
-    for (let v = config.vStart; (config.vStep > 0 ? v <= config.vStop + 1e-9 : v >= config.vStop - 1e-9); v += config.vStep) {
-      vValues.push(v);
-      if (vValues.length > 100000) break; // hard safety cap
-    }
-  }
-
-  // single sweep (no nested)
-  const xValues = new Float64Array(vValues.length);
-  const yValues = new Float64Array(vValues.length);
-  for (let i = 0; i < vValues.length; i++) {
-    const v = vValues[i];
-    // clone components with overridden source voltage
-    const modifiedComponents = components.map((c) => {
-      if (c.id === config.sourceId) {
-        return { ...c, parameters: { ...c.parameters, voltage: v, current: v } };
+  const buildSweepValues = (vStart: number, vStop: number, vStep: number): number[] => {
+    const vals: number[] = [];
+    const stepValid = Number.isFinite(vStep) && vStep !== 0;
+    const directionValid = stepValid && (
+      (vStep > 0 && vStop >= vStart) ||
+      (vStep < 0 && vStop <= vStart)
+    );
+    if (directionValid) {
+      for (let v = vStart; (vStep > 0 ? v <= vStop + 1e-9 : v >= vStop - 1e-9); v += vStep) {
+        vals.push(v);
+        if (vals.length > 100000) break; // hard safety cap
       }
-      return c;
+    }
+    return vals;
+  };
+
+  const vValues = buildSweepValues(config.vStart, config.vStop, config.vStep);
+
+  // Build the nested sweep's source-value list (when requested). Multiple
+  // source overrides combine independently into the cloned components.
+  const nestedValues = config.nested
+    ? buildSweepValues(config.nested.vStart, config.nested.vStop, config.nested.vStep)
+    : [];
+
+  const solveAt = (overrides: Record<string, number>): number => {
+    const modifiedComponents = components.map((c) => {
+      const v = overrides[c.id];
+      if (v === undefined) return c;
+      return { ...c, parameters: { ...c.parameters, voltage: v, current: v } };
     });
     const result = solveDC(modifiedComponents, wires, plugins, options.itl1);
-    xValues[i] = v;
-    if (result) {
-      // find output node voltage
-      let vOut = 0;
-      if (config.outputNode) {
-        const nodeMap = buildNodeMap(modifiedComponents, wires, plugins);
-        for (const [key, nodeId] of nodeMap.terminalNode) {
-          if (key.endsWith(`:${config.outputNode}`) || key === config.outputNode) {
-            vOut = result.nodeVoltage[nodeId] ?? 0;
-            break;
-          }
-        }
+    if (!result) return 0;
+    if (!config.outputNode) return 0;
+    const nodeMap = buildNodeMap(modifiedComponents, wires, plugins);
+    for (const [key, nodeId] of nodeMap.terminalNode) {
+      if (key.endsWith(`:${config.outputNode}`) || key === config.outputNode) {
+        return result.nodeVoltage[nodeId] ?? 0;
       }
-      yValues[i] = vOut;
-    } else {
-      yValues[i] = 0;
     }
-  }
-
-  const trace: RealTrace = {
-    name: `V(${config.outputNode ?? 'out'})`,
-    xValues, yValues,
-    xLabel: `${config.sourceId} (V or A)`,
-    yLabel: 'Output (V)',
+    return 0;
   };
+
+  // Nesting: emit one trace per nested source value (the outer source still
+  // drives the x axis), matching ngspice's family-of-curves output.
+  const traces: RealTrace[] = [];
+  if (nestedValues.length > 1) {
+    for (const nv of nestedValues) {
+      const xValues = new Float64Array(vValues.length);
+      const yValues = new Float64Array(vValues.length);
+      for (let i = 0; i < vValues.length; i++) {
+        xValues[i] = vValues[i];
+        yValues[i] = solveAt({ [config.sourceId]: vValues[i], [config.nested!.sourceId]: nv });
+      }
+      traces.push({
+        name: `V(${config.outputNode ?? 'out'}) @ ${config.nested!.sourceId}=${nv}`,
+        xValues, yValues,
+        xLabel: `${config.sourceId} (V or A)`,
+        yLabel: 'Output (V)',
+      });
+    }
+  } else {
+    const xValues = new Float64Array(vValues.length);
+    const yValues = new Float64Array(vValues.length);
+    for (let i = 0; i < vValues.length; i++) {
+      xValues[i] = vValues[i];
+      yValues[i] = solveAt({ [config.sourceId]: vValues[i] });
+    }
+    traces.push({
+      name: `V(${config.outputNode ?? 'out'})`,
+      xValues, yValues,
+      xLabel: `${config.sourceId} (V or A)`,
+      yLabel: 'Output (V)',
+    });
+  }
 
   return {
     type: 'dc',
-    traces: [trace],
+    traces,
     scalars: {},
-    report: { converged: true, iterations: vValues.length, finalDelta: 0, attempts: [] },
+    report: { converged: true, iterations: vValues.length * Math.max(1, nestedValues.length), finalDelta: 0, attempts: [] },
     durationMs: performance.now() - start,
   };
 }
@@ -635,7 +656,11 @@ export function runTF(
   // 3. Compute input resistance: Rin = V_in / I_in where I_in is the current
   //    drawn from the input source. Since we set V_in = 1V above, Rin = 1 / I_in.
   //    For a voltage source, the branch current returned by the solver is the
-  //    current flowing through it — that IS I_in.
+  //    current flowing through it — that IS I_in. We read it directly from the
+  //    per-component currents (computeComponentCurrents handles every device
+  //    type: resistors, semiconductors, capacitors, inductors, ...), so this
+  //    is exact for any circuit — the old resistor-only KCL approximation
+  //    underestimated I_in and overestimated Rin on circuits with transistors.
   const inputComp = modifiedComponents.find((c) => c.id === config.inputSourceId);
   let rin = Infinity;
   if (inputComp) {
@@ -643,51 +668,18 @@ export function runTF(
     if (inputPlugin) {
       const inputTerms = getTerminalsForComponent(inputComp, inputPlugin, nodeMap);
       const pNode = inputTerms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
-      const vIn = dcOp.nodeVoltage[pNode] ?? 0;
-      // For a voltage source, use the branch current directly.
-      // For a current source, Rin is undefined (it's a current drive).
+      const nNode = inputTerms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+      const vIn = (dcOp.nodeVoltage[pNode] ?? 0) - (dcOp.nodeVoltage[nNode] ?? 0);
       if (inputComp.type === 'dcVoltage' || inputComp.type === 'acVoltage') {
-        // Find the branch index for this source by linear-scanning the components
-        // — the solver stamps voltage sources in component order, so we need to
-        // count how many voltage sources precede this one.
-        let vSourceIdx = 0;
-        for (const c of modifiedComponents) {
-          if (c.id === inputComp.id) break;
-          const p = plugins.get(c.type);
-          if (p && (c.type === 'dcVoltage' || c.type === 'acVoltage')) vSourceIdx++;
-        }
-        // The branch currents in dcOp.branchCurrent are indexed by source order.
-        // We don't have a direct map from component → branch index, so we
-        // approximate by computing I_in via KCL at the + node: sum of currents
-        // flowing out of + node through other components = I_in.
-        // For a 1V source, Rin = 1V / I_in.
-        let iIn = 0;
-        for (const c of modifiedComponents) {
-          if (c.id === inputComp.id) continue;
-          const p = plugins.get(c.type);
-          if (!p) continue;
-          const terms = getTerminalsForComponent(c, p, nodeMap);
-          // Sum current contributions: for a resistor between pNode and any other node,
-          // current flowing OUT of pNode = (V_p - V_other) / R
-          for (const t of terms) {
-            if (t.nodeId === pNode) {
-              const otherTerm = terms.find(tt => tt !== t);
-              if (!otherTerm) continue;
-              const vOther = dcOp.nodeVoltage[otherTerm.nodeId] ?? 0;
-              if (c.type === 'resistor') {
-                const R = Number(c.parameters.resistance) || 1e-12;
-                iIn += (vIn - vOther) / R;
-              }
-              // Other component types contribute via their own stamp; we approximate
-              // using just resistors for now. For circuits with semiconductors or
-              // sources, this underestimates I_in and overestimates Rin.
-            }
-          }
-        }
+        const compCurrents = computeComponentCurrents(modifiedComponents, wires, plugins, dcOp);
+        // Convention: current through the source from p → n (positive when the
+        // source supplies power into the circuit from its + terminal).
+        const iIn = compCurrents.get(inputComp.id) ?? 0;
         if (Math.abs(iIn) > 1e-15) {
           rin = Math.abs(vIn / iIn);
         }
       }
+      // For a current source input, Rin is undefined (ideal current drive) → Infinity.
     }
   }
 
@@ -862,16 +854,20 @@ export function runPZ(
     Q: Math.abs(p.re) > 1e-9 ? Math.abs(p.im) / (2 * Math.abs(p.re)) : 0,
   }));
 
-  // Zeros: for output-input transfer function, remove the input row and compute
-  // eigenvalues of the reduced matrix. Simplified: use the same A but with the
-  // input row zeroed except for the diagonal.
-  // (Full implementation requires identifying the input node's row/col.)
-  const zeros = poles.slice(0, Math.max(1, Math.floor(poles.length / 2))).map((p) => ({
-    real: -p.real,
-    imag: -p.imag,
-    freq: p.freq,
-    Q: p.Q,
-  }));
+  // Zeros: finite zeros of the input→output transfer function H(s) = N(s)/D(s).
+  //
+  // Method: probe the exact small-signal AC system (same builder runAC uses)
+  // on a log frequency sweep and look at |H(jω)| directly:
+  //   - each pole contributes −20 dB/dec of roll-off above its corner,
+  //   - each zero contributes +20 dB/dec of lift above its corner.
+  // Starting from the DC gain, we walk up in frequency; whenever the
+  // magnitude slope flattens by ≈+20 dB/dec relative to the all-pole
+  // prediction (−20 dB/dec per pole corner passed), a zero corner is recorded
+  // at that frequency. A pure RC lowpass therefore correctly reports NO zeros
+  // (the old code negated half the poles and invented zeros that don't exist).
+  const zeros = fitTransferZerosFromACResponse(
+    components, wires, plugins, dcOp, config, poles, options,
+  );
 
   // Build traces: pole locations and zero locations on the complex plane
   const poleX = new Float64Array(poles.length);
@@ -914,6 +910,99 @@ export function runPZ(
     report: { converged: true, iterations: eig.length, finalDelta: 0, attempts: ['QR iteration'] },
     durationMs: performance.now() - start,
   };
+}
+
+/**
+ * Locate finite transfer-function zeros from the exact AC magnitude response.
+ *
+ * Builds the small-signal AC system at each frequency of a log sweep
+ * (1 Hz → 100 MHz, 40 pts/dec) with the first independent source as the
+ * stimulus and measures |H(jω)| = |Vout/Vin|. Pole corners push the slope
+ * down by −20 dB/dec each; a zero corner pushes it back up by +20 dB/dec.
+ * Whenever the local slope rises ≥ +15 dB/dec above the all-pole prediction
+ * (−20 dB/dec × poles-passed), a real zero is recorded at that frequency.
+ * Returns an empty list when no such lift is observed (e.g. plain RC
+ * lowpass) — correctly reporting "no finite zeros" instead of fabricating
+ * values from the pole list.
+ */
+function fitTransferZerosFromACResponse(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  dcOp: SimContext,
+  config: PZConfig,
+  poles: { real: number; imag: number; freq: number; Q: number }[],
+  options: SimOptions,
+): { real: number; imag: number; freq: number; Q: number }[] {
+  const zeros: { real: number; imag: number; freq: number; Q: number }[] = [];
+
+  // Stimulus: first independent source; output from the PZ config.
+  const stimulus = components.find((c) =>
+    c.type === 'dcVoltage' || c.type === 'acVoltage' || c.type === 'currentSource' ||
+    c.type === 'pulseSource' || c.type === 'sineSource' || c.type === 'acCurrent',
+  );
+  if (!stimulus) return zeros;
+
+  const acConfig: ACAnalysisConfig = {
+    type: 'ac', sweep: 'dec', nPoints: 40, fStart: 1, fStop: 1e8,
+    sourceId: stimulus.id, acMag: 1, acPhase: 0,
+    outputNode: config.outputNode,
+  };
+
+  const probeMap = buildNodeMap(components, wires, plugins);
+  let vOutNode = 0;
+  for (const [key, nodeId] of probeMap.terminalNode) {
+    if (key.endsWith(`:${config.outputNode}`) || key === config.outputNode) { vOutNode = nodeId; break; }
+  }
+  if (vOutNode === 0) return zeros;
+
+  const freqs: number[] = [];
+  for (let d = 0; d < 8; d++) {
+    for (let i = 0; i < 40; i++) freqs.push(Math.pow(10, d + i / 40));
+  }
+  const mags: number[] = [];
+  for (const f of freqs) {
+    const omega = 2 * Math.PI * f;
+    const built = buildACSystemAtFrequency(components, wires, plugins, dcOp, omega, acConfig, options.gmin, options.temp);
+    if (!built) { mags.push(NaN); continue; }
+    const x = solveComplexMna(built.sys);
+    if (!x) { mags.push(NaN); continue; }
+    const v = x[vOutNode - 1] ?? { re: 0, im: 0 };
+    mags.push(Math.hypot(v.re, v.im));
+  }
+
+  // Local slope in dB/dec via central differences on valid points.
+  const slopes: number[] = new Array(freqs.length).fill(NaN);
+  for (let i = 1; i < freqs.length - 1; i++) {
+    const m0 = mags[i - 1], m1 = mags[i + 1];
+    if (!(m0 > 0) || !(m1 > 0) || !Number.isFinite(m0) || !Number.isFinite(m1)) continue;
+    const dDb = 20 * Math.log10(m1 / m0);
+    const dDec = Math.log10(freqs[i + 1] / freqs[i - 1]);
+    if (dDec > 0) slopes[i] = dDb / dDec;
+  }
+
+  // Pole corner frequencies (real-pole magnitude only — complex pairs share it).
+  const poleCorners = poles
+    .map((p) => Math.hypot(p.real, p.imag) / (2 * Math.PI))
+    .filter((f) => Number.isFinite(f) && f > 0)
+    .sort((a, b2) => a - b2);
+
+  let lastZeroFreq = 0;
+  for (let i = 1; i < freqs.length - 1; i++) {
+    const s = slopes[i];
+    if (!Number.isFinite(s)) continue;
+    const f = freqs[i];
+    const polesPassed = poleCorners.filter((pc) => pc < f).length;
+    const expected = -20 * polesPassed;
+    // A zero corner lifts the slope ≈ +20 dB/dec above the all-pole line.
+    // Require a full octave of separation from the previous detection so a
+    // single broad lift isn't counted twice.
+    if (s - expected >= 15 && f > lastZeroFreq * 2) {
+      lastZeroFreq = f;
+      zeros.push({ real: -f * 2 * Math.PI, imag: 0, freq: f, Q: 0.5 });
+    }
+  }
+  return zeros;
 }
 
 /**
@@ -1076,61 +1165,123 @@ export function runNoise(
   const start = performance.now();
   const options = mergeOptions(opts);
 
-  // Compute DC operating point
+  // Compute DC operating point (bias currents for shot noise).
   const dcOp = solveDC(components, wires, plugins, options.itl1);
   if (!dcOp) {
     return { type: 'noise', traces: [], scalars: {}, report: { converged: false, iterations: 0, attempts: [] }, durationMs: performance.now() - start };
+  }
+
+  const kB = 1.380649e-23;
+  const T = toKelvin(options.temp);
+  const q = 1.602176634e-19;
+
+  // Resolve output/reference node ids once.
+  const nodeMap = buildNodeMap(components, wires, plugins);
+  let vOutNode = 0;
+  let vRefNode = 0;
+  for (const [key, nodeId] of nodeMap.terminalNode) {
+    if (key.endsWith(`:${config.outputNode}`) || key === config.outputNode) vOutNode = nodeId;
+    if (config.outputRef && (key.endsWith(`:${config.outputRef}`) || key === config.outputRef)) vRefNode = nodeId;
+  }
+
+  // One-time bias-current lookup for shot-noise devices.
+  const compCurrents = computeComponentCurrents(components, wires, plugins, dcOp);
+
+  // Collect every noise source as an equivalent PARALLEL current source with a
+  // uniform current-PSD density in A²/Hz. Referred to the output through the
+  // (frequency-dependent) transfer impedance of the small-signal network.
+  interface NoiseSource { n1: number; n2: number; psdA2Hz: number; }
+  const sources: NoiseSource[] = [];
+
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (!plugin) continue;
+    const terms = getTerminalsForComponent(comp, plugin, nodeMap);
+    const nodeOf = (id: string) => terms.find((t) => t.terminalId === id)?.nodeId ?? 0;
+
+    if (comp.type === 'resistor') {
+      const R = Math.max(1e-9, comp.parameters.resistance as number);
+      const a = nodeOf('a');
+      const b = nodeOf('b');
+      // Thermal noise as a Norton equivalent: i_n² = 4kT/R A²/Hz.
+      if (a !== b) sources.push({ n1: a, n2: b, psdA2Hz: (4 * kB * T) / R });
+    } else if (comp.type === 'diode' || comp.type === 'led') {
+      const a = nodeOf('a');
+      const k = nodeOf('k');
+      const I = Math.abs(compCurrents.get(comp.id) ?? 0);
+      if (a !== k && I > 0) sources.push({ n1: a, n2: k, psdA2Hz: 2 * q * I });
+    } else if (comp.type === 'npn' || comp.type === 'pnp') {
+      // Collector-emitter shot noise (base shot is much smaller and omitted).
+      const c = nodeOf('c');
+      const e = nodeOf('e');
+      const Ic = Math.abs(compCurrents.get(comp.id) ?? 0);
+      if (c !== e && Ic > 0) sources.push({ n1: c, n2: e, psdA2Hz: 2 * q * Ic });
+    } else if (comp.type === 'nmos' || comp.type === 'pmos') {
+      // Channel thermal noise approximated via the DC drain current
+      // (I_D ≈ gm·V_ov/2 in saturation → 4kT·(2/3)·gm ≈ (8/3)·kT·gm).
+      const d = nodeOf('d');
+      const s = nodeOf('s');
+      const Id = Math.abs(compCurrents.get(comp.id) ?? 0);
+      // gm estimate from the same saturation law the AC linearization uses.
+      const vth = (comp.parameters.vth as number) ?? 2.0;
+      const Kp = (comp.parameters.kp as number) ?? 0.1;
+      const gm = Id > 0 ? Math.sqrt(2 * Kp * Id) : 0;
+      if (d !== s && gm > 0) sources.push({ n1: d, n2: s, psdA2Hz: (8 / 3) * kB * T * gm });
+    }
   }
 
   const freqs = generateSweepFrequencies(config.sweep, config.nPoints, config.fStart, config.fStop);
   const xValues = new Float64Array(freqs.length);
   const yValues = new Float64Array(freqs.length);
 
-  // For each frequency, sum thermal + shot noise contributions from all devices
-  // Thermal noise: 4*kT*G (per resistor) — sqrt(4*kT*R*Δf) per resistor
-  // Shot noise: 2*q*I*Δf (per diode/BJT, at the actual DC bias current)
-  const kB = 1.380649e-23;
-  const T = toKelvin(options.temp);
-  const q = 1.602176634e-19;
-  const deltaF = 1; // 1 Hz bandwidth
-
-  // Diode/LED bias currents from the DC operating point (the old code assumed
-  // a hardcoded 1 mA for every diode regardless of bias).
-  const diodeCurrent = new Map<string, number>();
-  {
-    const nm = buildNodeMap(components, wires, plugins);
-    const compCurrents = computeComponentCurrents(components, wires, plugins, dcOp);
-    for (const comp of components) {
-      if (comp.type === 'diode' || comp.type === 'led') {
-        const plugin = plugins.get(comp.type);
-        if (!plugin) continue;
-        const terms = getTerminalsForComponent(comp, plugin, nm);
-        const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-        const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
-        const v = dcOp.nodeVoltage[a] - dcOp.nodeVoltage[k];
-        const vf = (comp.parameters.forwardV as number) ?? (comp.type === 'led' ? 2.0 : 0.7);
-        // only forward-biased junctions contribute shot noise
-        diodeCurrent.set(comp.id, v > vf ? Math.abs(compCurrents.get(comp.id) ?? 0) : 0);
-      }
-    }
-  }
+  // A config whose no source carries AC excitation → the small-signal network
+  // has zero independent stimulus, which is exactly what .noise wants (noise
+  // sources are internal; the transfer function is computed per source).
+  const acConfig = {
+    type: 'ac' as const,
+    sweep: config.sweep,
+    nPoints: config.nPoints,
+    fStart: config.fStart,
+    fStop: config.fStop,
+    sourceId: '__noise_none__',
+    acMag: 0,
+    acPhase: 0,
+  };
 
   for (let i = 0; i < freqs.length; i++) {
     const f = freqs[i];
     xValues[i] = f;
-    let totalNoisePower = 0;
-    for (const comp of components) {
-      if (comp.type === 'resistor') {
-        const R = Math.max(1e-9, comp.parameters.resistance as number);
-        // thermal noise: 4*kT*R (V²/Hz)
-        totalNoisePower += 4 * kB * T * R * deltaF;
-      } else if (comp.type === 'diode' || comp.type === 'led') {
-        // shot noise: 2*q*I (A²/Hz) at the actual forward current
-        const I = diodeCurrent.get(comp.id) ?? 0;
-        if (I > 0) totalNoisePower += 2 * q * I * deltaF;
-      }
+    const omega = 2 * Math.PI * Math.max(f, 1e-12);
+
+    const built = buildACSystemAtFrequency(components, wires, plugins, dcOp, omega, acConfig, options.gmin, options.temp);
+    if (!built) { yValues[i] = 0; continue; }
+    const sys = built.sys;
+
+    const nodeVoltage = (x: Complex[], nodeId: number): Complex =>
+      nodeId > 0 ? (x[nodeId - 1] ?? { re: 0, im: 0 }) : { re: 0, im: 0 };
+
+    let totalPowerV2Hz = 0;
+    for (const src of sources) {
+      // Inject a unit current source (1 A) between n1 and n2 and solve for the
+      // output voltage → the transfer impedance Z (V/A) from that noise source
+      // to the output. solveComplexMna copies A and z, so we can safely mutate
+      // sys.z in place and restore it afterwards.
+      const savedZ = Float64Array.from(sys.z);
+      sys.z.fill(0);
+      if (src.n1 > 0) sys.z[2 * (src.n1 - 1)] -= 1;
+      if (src.n2 > 0) sys.z[2 * (src.n2 - 1)] += 1;
+      const x = solveComplexMna(sys);
+      sys.z.set(savedZ);
+      if (!x) continue;
+      const vOut = nodeVoltage(x, vOutNode);
+      const vRef = nodeVoltage(x, vRefNode);
+      const re = vOut.re - vRef.re;
+      const im = vOut.im - vRef.im;
+      const transferMag2 = re * re + im * im;
+      totalPowerV2Hz += src.psdA2Hz * transferMag2;
     }
-    yValues[i] = Math.sqrt(totalNoisePower);
+
+    yValues[i] = Math.sqrt(totalPowerV2Hz);
   }
 
   return {

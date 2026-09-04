@@ -53,10 +53,10 @@ export function ComponentIcon({ type, size = 40 }: ComponentIconProps) {
     ctx.lineJoin = 'round';
     try {
       // Render with default parameters
-      const defaults: Record<string, any> = {};
+      const defaults: Record<string, unknown> = {};
       for (const p of plugin.parameters) defaults[p.key] = p.default;
       plugin.render(ctx, defaults, cellSize, undefined, undefined);
-    } catch (e) {
+    } catch {
       // Fallback: draw the symbol text
       ctx.fillStyle = '#67e8f9';
       ctx.font = `bold ${size * 0.4}px ui-monospace, monospace`;

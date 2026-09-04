@@ -31,6 +31,7 @@ import {
   voltageColor,
   fr4Material,
   goldMaterial,
+  copperMaterial,
   solderMaskMaterial,
   drillMaterial,
   solderMaterial,
@@ -256,6 +257,8 @@ export function PCB3DViewer() {
   const [autoRotate, setAutoRotate] = useState(false);
   const [selectedFpId, setSelectedFpId] = useState<string | null>(null);
   const [perfMode, setPerfMode] = useState(false);
+  const [maskOpacity, setMaskOpacity] = useState(0.5); // 0 = raw copper, 1 = fully hidden
+  const [maskColor, setMaskColor] = useState(0x0b5e33); // green default
 
   // Use refs for animation-loop state (avoids re-render on every frame)
   const stateRef = useRef({
@@ -269,6 +272,8 @@ export function PCB3DViewer() {
     assembly: 1,
     showVoltageProbes: false,
     selectedFpId: null as string | null,
+    maskOpacity: 0.5,
+    maskColor: 0x0b5e33,
   });
   useEffect(() => { stateRef.current.crossSection = crossSection; }, [crossSection]);
   useEffect(() => { stateRef.current.crossSectionX = crossSectionX; }, [crossSectionX]);
@@ -279,6 +284,8 @@ export function PCB3DViewer() {
   useEffect(() => { stateRef.current.assembly = assemblyProgress; }, [assemblyProgress]);
   useEffect(() => { stateRef.current.showVoltageProbes = showVoltageProbes; }, [showVoltageProbes]);
   useEffect(() => { stateRef.current.selectedFpId = selectedFpId; }, [selectedFpId]);
+  useEffect(() => { stateRef.current.maskOpacity = maskOpacity; }, [maskOpacity]);
+  useEffect(() => { stateRef.current.maskColor = maskColor; }, [maskColor]);
 
   // Clear the assembly-play interval if the viewer unmounts mid-animation
   useEffect(() => () => {
@@ -299,6 +306,8 @@ export function PCB3DViewer() {
     let raf = 0;
     const container = containerRef.current;
     if (!container) return;
+    const materialCache = materialCacheRef.current;
+    const probeLabels = probeLabelsRef.current;
 
     try {
       const scene = new THREE.Scene();
@@ -396,9 +405,9 @@ export function PCB3DViewer() {
       gtaoPassRef.current = gtao;
       const bloomPass = new UnrealBloomPass(
         new THREE.Vector2(width, height),
-        0.35,  // strength — halo only on genuinely lit parts
-        0.5,   // radius
-        0.85,  // threshold — above ACES-white; emissive LEDs / hot copper only
+        0.2,   // strength — subtle glow, no washout
+        0.45,  // radius
+        0.8,   // threshold — only genuinely bright emissive/bloom
       );
       composer.addPass(bloomPass);
       bloomPassRef.current = bloomPass;
@@ -441,10 +450,10 @@ export function PCB3DViewer() {
       key.shadow.blurSamples = 16;
       scene.add(key);
       (scene as unknown as Record<string, unknown>).__keyLight = key;
-      const fill = new THREE.DirectionalLight(0xbfd4ff, 0.25);
+      const fill = new THREE.DirectionalLight(0xbfd4ff, 0.18);
       scene.add(fill);
       (scene as unknown as Record<string, unknown>).__fillLight = fill;
-      const rim = new THREE.DirectionalLight(0xffffff, 0.35);
+      const rim = new THREE.DirectionalLight(0xffffff, 0.2);
       scene.add(rim);
       (scene as unknown as Record<string, unknown>).__rimLight = rim;
 
@@ -456,7 +465,7 @@ export function PCB3DViewer() {
             const pmrem = new THREE.PMREMGenerator(rendererRef.current);
             const env = pmrem.fromScene(new RoomEnvironment(), 0.04);
             sceneRef.current!.environment = env.texture;
-            sceneRef.current!.environmentIntensity = 0.45;
+            sceneRef.current!.environmentIntensity = 0.5;
             pmrem.dispose();
           } catch { /* environment optional */ }
         })
@@ -891,7 +900,7 @@ export function PCB3DViewer() {
         scene.traverse((child) => {
           if (child instanceof THREE.Mesh) child.geometry?.dispose();
         });
-        materialCacheRef.current.dispose();
+        materialCache.dispose();
         if (rendererRef.current) {
           rendererRef.current.dispose();
           if (rendererRef.current.domElement?.parentNode) {
@@ -905,7 +914,7 @@ export function PCB3DViewer() {
         if (probeLayerRef.current && probeLayerRef.current.parentNode) {
           probeLayerRef.current.parentNode.removeChild(probeLayerRef.current);
         }
-        probeLabelsRef.current.clear();
+        probeLabels.clear();
       };
     } catch (err) {
       if (!cancelled) setError(`3D init failed: ${(err as Error).message}`);
@@ -1131,7 +1140,8 @@ export function PCB3DViewer() {
   // Heat/net-color modes ease the mask opacity up so the recolored copper
   // under the LPI reads clearly (KiCad x-ray-style data visualization).
   useEffect(() => {
-    for (const m of maskMatsRef.current) m.opacity = showVoltageHeat || showNetColors ? 0.35 : 0.62;
+    const base = stateRef.current.maskOpacity;
+    for (const m of maskMatsRef.current) m.opacity = showVoltageHeat || showNetColors ? Math.min(base, 0.35) : base;
     const netMats = netMatsRef.current;
     if (showNetColors && !showVoltageHeat) {
       for (const [net, list] of netMats) {
@@ -1144,6 +1154,14 @@ export function PCB3DViewer() {
       }
     }
   }, [showNetColors, showVoltageHeat, footprints, traces]);
+
+  // Manual mask opacity override (slider in the UI panel). Heat/net-color
+  // modes still clamp to a max of 0.35 so recolored copper stays readable.
+  useEffect(() => {
+    const base = maskOpacity;
+    const heatOrNet = showVoltageHeat || showNetColors;
+    for (const m of maskMatsRef.current) m.opacity = heatOrNet ? Math.min(base, 0.35) : base;
+  }, [maskOpacity, showVoltageHeat, showNetColors]);
 
   // ── AO toggle ─────────────────────────────────────────────────────────────
   useEffect(() => { aoEnabledRef.current = aoEnabled; }, [aoEnabled]);
@@ -1230,7 +1248,8 @@ export function PCB3DViewer() {
     fr4.castShadow = true;
     group.add(fr4);
 
-    const maskMat = solderMaskMaterial();
+    const maskMat = solderMaskMaterial(stateRef.current.maskColor);
+    maskMat.opacity = stateRef.current.maskOpacity;
     if (clip) { maskMat.clippingPlanes = [clip]; maskMat.clipShadows = true; }
     maskMatsRef.current = [maskMat];
     // Real layer sandwich: FR4 [−1.6, 0] → copper [0, 0.08] → LPI mask
@@ -1274,7 +1293,7 @@ export function PCB3DViewer() {
     for (const trace of traces) {
       const y = layerYOf(trace.layer);
       for (const geo of traceGeometries(trace, y)) {
-        push(`${trace.net}||${trace.layer}`, geo, y);
+        push(`${trace.net}||${trace.layer}||trace`, geo, y);
       }
     }
 
@@ -1289,7 +1308,7 @@ export function PCB3DViewer() {
         // pads PIERCE the mask: top pads span [0.08, 0.16], exposing their
         // gold tops above the LPI; bottom pads span [−1.76, −1.68].
         const padY = layer === 'bottom' ? PAD_BOT_Y : PAD_TOP_Y;
-        push(`${pad.net ?? fp.id}||${layer}`, padGeometry(pad, wp.x, wp.y, padY, -(fp.rotation * Math.PI) / 180), padY);
+        push(`${pad.net ?? fp.id}||${layer}||pad`, padGeometry(pad, wp.x, wp.y, padY, -(fp.rotation * Math.PI) / 180), padY);
         if (pad.drill && pad.drill > 0) {
           const drillR = Math.max(0.06, pad.drill / 2);
           // drill spans the full stack: pad top → past the bottom mask
@@ -1308,7 +1327,7 @@ export function PCB3DViewer() {
 
     for (const via of vias) {
       const [gold, drill] = viaGeometries(via, PAD_TOP_Y, PAD_BOT_Y - 0.08);
-      push(`${via.net}||via`, gold, undefined); // vias stay with the board
+      push(`${via.net}||via||via`, gold, undefined); // vias stay with the board
       drillGeos.push(drill);
     }
 
@@ -1322,8 +1341,12 @@ export function PCB3DViewer() {
       } catch {
         merged = geos[0];
       }
-      const net = key.split('||')[0];
-      const mat = goldTemplate.clone();
+      const [net, layer, kind] = key.split('||');
+      // Pads & vias = ENIG gold; traces = per-layer copper color (matching 2D canvas)
+      const isPadOrVia = kind === 'pad' || kind === 'via';
+      const mat = isPadOrVia
+        ? goldTemplate.clone()
+        : copperMaterial(layer);
       if (clip) { mat.clippingPlanes = [clip]; mat.clipShadows = true; }
       const list = netMatsRef.current.get(net) ?? [];
       list.push(mat);
@@ -1493,8 +1516,15 @@ export function PCB3DViewer() {
 
       const attachMesh = (geo: THREE.BufferGeometry) => {
         if (!modelsGroupRef.current) return;
+        // Use the model's own material color (VRML diffuseColor / OBJ mtl) when
+        // the loader parsed one; otherwise fall back to the standard gray.
+        const colorArr = geo.userData?.color as [number, number, number] | undefined;
         const mat = materialCacheRef.current.get(`model:${modelKey}`, () =>
-          new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.4, metalness: 0.6 }));
+          new THREE.MeshStandardMaterial({
+            color: colorArr ? new THREE.Color(colorArr[0], colorArr[1], colorArr[2]) : 0x333333,
+            roughness: 0.4,
+            metalness: 0.6,
+          }));
         if (clip) mat.clippingPlanes = [clip];
         const mesh = new THREE.Mesh(geo, mat);
         geo.computeBoundingBox();
@@ -1519,6 +1549,18 @@ export function PCB3DViewer() {
         modelsGroupRef.current.add(mesh);
       };
 
+      // Parametric box fallback: footprints with no procedural factory and
+      // no DEFAULT_MODELS entry previously got NO 3D body at all (only pads).
+      // Build a body-sized box so every placed part is visible in 3D.
+      const attachFallbackBox = () => {
+        const w = Math.max(1, fp.bodySize.width);
+        const h = Math.max(1, fp.bodySize.height);
+        const geo = new THREE.BoxGeometry(w, 2, h);
+        geo.translate(0, 1, 0); // base sits on the board surface
+        attachMesh(geo);
+        cache.set(modelKey, geo.clone());
+      };
+
       const cached = cache.get(modelKey);
       // The cache survives HMR, where a FAILED sentinel Symbol from the OLD
       // module version no longer === this module's sentinel — so gate on the
@@ -1527,7 +1569,12 @@ export function PCB3DViewer() {
         attachMesh((cached as THREE.BufferGeometry).clone());
         continue;
       }
-      if (cached) continue; // FAILED sentinel (this module's or a stale one)
+      if (cached) {
+        // A previous load failed: still show the fallback box rather than
+        // leaving the footprint body-less.
+        attachFallbackBox();
+        continue;
+      }
 
       inFlight.add(modelKey);
       (async () => {
@@ -1551,7 +1598,17 @@ export function PCB3DViewer() {
               if (innerKey === modelKey) attachMesh(geo.clone());
             }
           } else {
-            cache.set(modelKey, FAILED_SENTINEL);
+            // Unknown type with no default STL: fall back to a body-sized
+            // box so the part is still visible instead of pads-only.
+            const w = Math.max(1, fp.bodySize.width);
+            const h = Math.max(1, fp.bodySize.height);
+            const geo = new THREE.BoxGeometry(w, 2, h);
+            geo.translate(0, 1, 0);
+            cache.set(modelKey, geo);
+            for (const fpInner of footprints) {
+              const innerKey = fpInner.modelUrl || `default:${fpInner.componentType}`;
+              if (innerKey === modelKey) attachMesh(geo.clone());
+            }
           }
         } catch {
           cache.set(modelKey, FAILED_SENTINEL);
@@ -1778,6 +1835,31 @@ export function PCB3DViewer() {
               title="Ground-truth ambient occlusion — disables automatically on slow GPUs">
               ◐ Ambient occl.
             </button>
+            <div className="flex items-center gap-1 px-2 py-0.5">
+              <span className="text-slate-500">Mask</span>
+              <input type="range" min={0} max={1} step={0.05} value={maskOpacity}
+                onChange={(e) => setMaskOpacity(parseFloat(e.target.value))}
+                className="w-24" aria-label="Solder mask opacity"
+                title="0 = raw copper, 1 = fully hidden mask" />
+            </div>
+            <div className="flex gap-1 px-2 pb-0.5">
+              {[
+                { c: 0x0b5e33, label: 'Grn' },
+                { c: 0x2563eb, label: 'Blu' },
+                { c: 0xdc2626, label: 'Red' },
+                { c: 0x1a1a1e, label: 'Blk' },
+                { c: 0xf5f5f4, label: 'Wht' },
+              ].map(({ c, label }) => (
+                <button key={label} onClick={() => setMaskColor(c)}
+                  className={`rounded px-1.5 py-0.5 text-[9px] font-semibold transition-colors ${
+                    maskColor === c ? 'ring-1 ring-white/60 text-white' : 'text-slate-500 hover:text-slate-300'
+                  }`}
+                  style={{ backgroundColor: `#${c.toString(16).padStart(6, '0')}` }}
+                  title={label === 'Grn' ? 'Green' : label === 'Blu' ? 'Blue' : label === 'Red' ? 'Red' : label === 'Blk' ? 'Black' : 'White'}>
+                  {label}
+                </button>
+              ))}
+            </div>
             <button onClick={() => { screenshotRef.current = `pcb-3d-${Date.now()}.png`; }}
               className="rounded px-2 py-1 text-left text-slate-300 transition-colors hover:bg-slate-800">
               📷 Screenshot

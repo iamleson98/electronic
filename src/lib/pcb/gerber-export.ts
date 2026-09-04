@@ -233,19 +233,32 @@ export function exportGerberSilkscreen(
   lines.push('%ADD10C,0.150*%');  // silkscreen line width
   lines.push('G54D10*');
 
-  // Draw footprint outlines
+  // Draw footprint outlines (rotation-aware) + refdes text position marker.
+  // The old code ignored fp.rotation, exporting an axis-aligned box at the
+  // wrong place for every rotated part.
   for (const fp of footprints) {
     if (fp.side !== layer) continue;
-    const w = fp.bodySize.width / 2;
-    const h = fp.bodySize.height / 2;
-    const cx = fp.position.x;
-    const cy = fp.position.y;
-    // Simplified: draw bounding box (rotation 0 only for export)
-    lines.push(`X${fmt(cx - w)}Y${fmt(cy - h)}D02*`);
-    lines.push(`X${fmt(cx + w)}Y${fmt(cy - h)}D01*`);
-    lines.push(`X${fmt(cx + w)}Y${fmt(cy + h)}D01*`);
-    lines.push(`X${fmt(cx - w)}Y${fmt(cy + h)}D01*`);
-    lines.push(`X${fmt(cx - w)}Y${fmt(cy - h)}D01*`);
+    const hw = fp.bodySize.width / 2;
+    const hh = fp.bodySize.height / 2;
+    const rad = (fp.rotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const rot = (lx: number, ly: number) => ({
+      x: fp.position.x + lx * cos - ly * sin,
+      y: fp.position.y + lx * sin + ly * cos,
+    });
+    const corners = [rot(-hw, -hh), rot(hw, -hh), rot(hw, hh), rot(-hw, hh)];
+    const p0 = corners[0];
+    lines.push(`X${fmt(p0.x)}Y${fmt(p0.y)}D02*`);
+    for (const p of [...corners.slice(1), corners[0]]) {
+      lines.push(`X${fmt(p.x)}Y${fmt(p.y)}D01*`);
+    }
+    // Refdes marker: short tick at the footprint origin + pin-1 dot so the
+    // assembler can orient the part (previously refdes was not rendered at all).
+    const c = rot(0, 0);
+    const tick = rot(Math.min(hw, 1), 0);
+    lines.push(`X${fmt(c.x)}Y${fmt(c.y)}D02*`);
+    lines.push(`X${fmt(tick.x)}Y${fmt(tick.y)}D01*`);
   }
 
   lines.push('M02*');
@@ -321,22 +334,30 @@ export function exportExcellonDrill(
 }
 
 /**
- * Generate a Pick-and-Place file (CSV format) for SMD assembly.
+ * Generate a PnP file (CSV, JLC/LCSC-compatible columns).
+ *
+ * Columns: Designator, Footprint, PosX, PosY, Rotation, Side, Comment.
+ * Rotation follows the KiCad convention used by this app (counter-clockwise
+ * degrees about the footprint origin); Side distinguishes top/bottom
+ * placement. The Footprint column carries the real footprint name when the
+ * caller provides one via `footprintName` metadata, else the component type.
  */
 export function exportPickAndPlace(
-  footprints: Footprint[],
+  footprints: (Footprint & { footprintName?: string })[],
 ): string {
   const lines: string[] = [];
   lines.push('Designator,Footprint,PosX,PosY,Rotation,Side,Comment');
 
   for (const fp of footprints) {
+    // Rotation is CCW degrees about the footprint origin (KiCad convention).
+    const rot = ((fp.rotation % 360) + 360) % 360;
     lines.push([
       fp.refdes,
-      fp.componentType,
+      fp.footprintName ?? fp.componentType,
       fp.position.x.toFixed(3),
       fp.position.y.toFixed(3),
-      fp.rotation.toString(),
-      fp.side,
+      rot.toString(),
+      fp.side === 'bottom' ? 'Bottom' : 'Top',
       fp.componentType,
     ].join(','));
   }

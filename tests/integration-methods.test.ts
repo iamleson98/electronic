@@ -381,13 +381,13 @@ describe('RL step response with trapezoidal', () => {
     const circ = rlCircuit();
     let prev: any;
     const r1 = simulateStep(circ.components, circ.wires, circ.plugins, prev, 1e-3, { method: 'trap' });
-    prev = {
+    const nextPrev = {
       nodeVoltage: r1!.sim.nodeVoltage,
       branchCurrent: r1!.sim.branchCurrent,
       time: r1!.sim.time,
       state: r1!.sim.state,
     };
-    const r2 = simulateStep(circ.components, circ.wires, circ.plugins, prev, 1e-3, { method: 'trap' });
+    const r2 = simulateStep(circ.components, circ.wires, circ.plugins, nextPrev, 1e-3, { method: 'trap' });
     const st = r2!.sim.state.__global ?? {};
     expect(st['ind_l1_vp']).toBeDefined();
     // v_L at end of step 2 = 10 − 1000·i_2 = 10 − 7.7778 = 2.2222 V

@@ -317,11 +317,13 @@ export function runFullERC(
   }
 
   // Check 2: Missing ground
-  const hasGround = components.some(c => c.type === 'ground' || c.type === 'powerGND' || c.type === 'powerFlag');
+  // A PWR_FLAG marks a net as externally-driven but is NOT a ground reference
+  // itself; only an actual ground (GND) symbol satisfies a "no ground" check.
+  const hasGround = components.some(c => c.type === 'ground' || c.type === 'powerGND');
   if (!hasGround && components.length > 0) {
     errors.push({
       type: 'missing_ground', severity: 'error',
-      message: 'Circuit has no ground reference — add a Ground component or PWR_FLAG',
+      message: 'Circuit has no ground reference — add a Ground component',
       componentId: '', terminalId: '', position: { x: 0, y: 0 },
       exclusionKey: 'missing-ground',
     });

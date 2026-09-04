@@ -44,6 +44,8 @@ export interface DRCConfig {
   minCourtyard: number;
   /** minimum silk-to-pad clearance in mm */
   minSilkClearance: number;
+  /** maximum differential-pair length skew in mm (default 0.5) */
+  maxDiffSkew?: number;
 }
 
 /** Minimum substrate web between two drilled holes (KiCad hole_to_hole
@@ -568,15 +570,30 @@ export function runDRC(
     }
   }
 
-  // 14. Check for starved thermals (GND pads with no trace connection)
-  const traceNets = new Set(traces.map((t) => t.net));
-  for (const fp of footprints) {
-    for (const pad of fp.pads) {
-      if (!pad.net) continue;
-      if (pad.net === 'GND' && !traceNets.has('GND')) {
-        // Check if copper pour covers GND
-        // This is a simplified check — a full check would verify thermal spokes
-        // Skip if we know there's a pour (checked elsewhere)
+  // 14. Starved thermals: a GND pad with no trace AND no via within one pad
+  // radius has no thermal path to a plane — flag it. (The old code detected
+  // the condition but never pushed an error, so the `starved_thermal` type
+  // was dead.)
+  {
+    const gndViaPositions = vias.filter((v) => v.net === 'GND').map((v) => v.position);
+    const gndTraceNets = new Set(traces.filter((t) => t.net === 'GND').map((t) => t.net));
+    for (const fp of footprints) {
+      for (const pad of fp.pads) {
+        if (pad.net !== 'GND') continue;
+        if (gndTraceNets.size > 0) continue; // GND routed by traces — fine
+        const padR = Math.max(pad.size.width, pad.size.height) / 2;
+        const nearVia = gndViaPositions.some((vp) =>
+          Math.hypot(vp.x - pad.position.x, vp.y - pad.position.y) <= padR + config.minAnnularRing,
+        );
+        if (!nearVia) {
+          errors.push({
+            type: 'starved_thermal',
+            severity: 'warning',
+            message: `GND pad ${fp.refdes ?? fp.id}:${pad.id} has no trace or nearby via — no thermal path to a plane`,
+            position: pad.position,
+            layer: pad.layer,
+          });
+        }
       }
     }
   }
@@ -601,13 +618,13 @@ export function runDRC(
     const lenA = traceLength(a);
     const lenB = traceLength(b);
     const skew = Math.abs(lenA - lenB);
-    const maxSkew = 0.5; // 0.5mm default max skew (configurable later)
+    const maxSkew = config.maxDiffSkew ?? 0.5;
     if (skew > maxSkew) {
       // Position the error at the midpoint of the longer trace
       const longer = lenA > lenB ? a : b;
       const midSeg = longer.segments[Math.floor(longer.segments.length / 2)];
       errors.push({
-        type: 'clearance', // reusing existing type — could be 'skew' if we extend the type
+        type: 'clearance',
         severity: 'warning',
         message: `Diff pair skew: ${pairKey} length diff ${skew.toFixed(3)}mm > ${maxSkew}mm (P=${lenA.toFixed(2)}mm, N=${lenB.toFixed(2)}mm)`,
         position: midSeg ? { x: (midSeg.start.x + midSeg.end.x) / 2, y: (midSeg.start.y + midSeg.end.y) / 2 } : { x: 0, y: 0 },

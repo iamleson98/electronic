@@ -1,20 +1,15 @@
 'use client';
 
-import { useState } from 'react';
 import { usePCB } from '@/lib/pcb/store';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { Badge } from '@/components/ui/badge';
-import { toast } from 'sonner';
-import { Layers3, SlidersHorizontal, Activity, CheckCircle2, X } from 'lucide-react';
+import { Layers3, CheckCircle2 } from 'lucide-react';
 import {
   DEFAULT_LAYER_STACK, FOUR_LAYER_STACK, SIX_LAYER_STACK,
-  LAYER_COLORS, type CopperLayer, type LayerStack,
+  LAYER_COLORS, type LayerStack,
 } from '@/lib/pcb/types';
 
 // ─────────────────────────────────────────────────────────────────────────────

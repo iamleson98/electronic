@@ -9,23 +9,17 @@
 //   - SavedViewsDialog
 //   - HierarchicalSheetsDialog
 
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
-import type { ERCError } from '@/lib/circuit/erc';
-import type { NetClass, PageSetup } from '@/lib/circuit/types';
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
-import { Search, Replace, AlertTriangle, CheckCircle, Shield, Network, Settings, Layers, BookOpen, Plus } from 'lucide-react';
+import { BookOpen, Plus } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Find/Replace dialog — KiCad Ctrl+F
@@ -127,7 +121,7 @@ export function HierarchicalSheetsDialog({ open, onClose }: { open: boolean; onC
                                 />
                                 <button
                                   className="text-rose-400 hover:text-rose-300 px-2"
-                                  onClick={() => useEditor.getState().removeSheetPin(s.id, pin.id)}
+                                  onClick={() => removeSheetPin(s.id, pin.id)}
                                   title="Remove pin"
                                 >×</button>
                               </div>

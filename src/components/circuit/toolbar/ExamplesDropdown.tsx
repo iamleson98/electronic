@@ -6,12 +6,13 @@ import {
 import { Button } from '@/components/ui/button';
 import { exampleCategories } from '@/lib/circuit/examples';
 import { FileText, ChevronDown } from 'lucide-react';
+import type { CircuitDocument } from '@/lib/circuit/types';
 
 export function ExamplesDropdown({
   loadDocument,
   disabled,
 }: {
-  loadDocument: (doc: any) => void;
+  loadDocument: (doc: CircuitDocument) => void;
   disabled: boolean;
 }) {
   return (

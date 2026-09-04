@@ -22,7 +22,7 @@ import { getTurnManager } from '@/lib/ai/turn-manager';
 export const runtime = 'nodejs';
 
 export async function POST(req: NextRequest) {
-  let body: any = null;
+  let body: { turnId?: unknown; clientId?: unknown } | null = null;
   try {
     body = await req.json();
   } catch {
