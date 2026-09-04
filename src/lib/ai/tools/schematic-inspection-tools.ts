@@ -2,7 +2,7 @@
 // Auto-extracted from the original ai/tools/index.ts during refactor.
 
 import type { Tool } from './types';
-import { getPlugin } from '@/lib/circuit/registry';
+import { getAllPlugins, getPlugin, getPluginsByCategory } from '@/lib/circuit/registry';
 
 // ─────────────────────────────────────────────────────────────────────────────
 

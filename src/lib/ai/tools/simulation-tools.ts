@@ -4,6 +4,8 @@
 import type { Tool } from './types';
 import { simulateStep, buildNodeMap, computeComponentCurrents, computeWireCurrents, solveDC } from '@/lib/circuit/engine';
 import { runAutoVerify } from '@/lib/ai/system-prompt';
+import { SimContext } from '@/lib/circuit/types';
+import { validatePhysics } from '@/lib/circuit/physics-validator';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
