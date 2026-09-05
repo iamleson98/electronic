@@ -12,7 +12,7 @@
 //      can apply the mutations)
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getProvider, AIProviderConfigError, type ChatMessage, type ProviderName } from '@/lib/ai/provider';
+import { getProvider, AIProviderConfigError, type ChatMessage, type ProviderName, type CustomProviderConfig } from '@/lib/ai/provider';
 import { TOOLS_BY_NAME, getToolDefinitions, type ToolContext } from '@/lib/ai/tools';
 import type { CircuitDocument, CircuitComponent, ComponentPlugin, Wire } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
@@ -47,6 +47,8 @@ interface RequestBody {
   provider?: ProviderName;
   /** Per-request model override (chosen from the AI panel model dropdown). */
   model?: string;
+  /** User-configured OpenAI-compatible endpoint (provider === 'custom'). */
+  custom?: CustomProviderConfig | null;
 }
 
 export async function POST(req: NextRequest) {
@@ -97,7 +99,7 @@ export async function POST(req: NextRequest) {
     };
 
     // Get the AI provider (per-request override if provided)
-    const provider = getProvider(body.provider, body.model);
+    const provider = getProvider(body.provider, body.model, body.custom ?? undefined);
     const toolDefs = getToolDefinitions();
 
     // Context preamble — the same netlist + operating-point visibility the

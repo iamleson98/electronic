@@ -1776,8 +1776,9 @@ export function PCB3DViewer() {
       )}
       {!loading && !error && footprints.length > 0 && (
         <>
-          {/* right-side control panel */}
-          <div className="absolute right-2 top-2 flex w-40 flex-col gap-0.5 rounded-md border border-slate-700/60 bg-slate-900/90 p-2 text-xs shadow-xl">
+          {/* right-side control panel — scrollable, collapsible sections so it
+              never overflows the viewport on short screens */}
+          <div className="absolute right-2 top-2 z-10 flex max-h-[calc(100%-3.5rem)] w-44 flex-col gap-0.5 overflow-y-auto overscroll-contain rounded-md border border-slate-700/60 bg-slate-900/90 p-2 text-xs shadow-xl backdrop-blur-sm [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-700">
             <div className="px-2 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Camera</div>
             <div className="grid grid-cols-2 gap-1">
               <button onClick={() => frameBoard()} className={btn(false)}>⤢ Fit</button>

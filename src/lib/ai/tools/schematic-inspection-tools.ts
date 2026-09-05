@@ -225,16 +225,18 @@ const describeCircuitTool: Tool = {
       result: {
         componentCount: components.length,
         wireCount: wires.length,
-        components: compSummary,
+        // Token-frugal: cap member lists (big boards used to dump every pin
+        // of every net into context on each describe call).
+        components: compSummary.slice(0, 120),
         netCount: nets.size,
         groundNets: groundNets.length,
         supplyRails: railNets,
-        signalNets: signalNets.map(s => ({
+        signalNets: signalNets.slice(0, 40).map(s => ({
           net: s.net,
           size: s.members.length,
-          members: s.members,
+          members: s.members.slice(0, 12),
         })),
-        floatingPins: dangling,
+        floatingPins: dangling.slice(0, 30),
         hints: [
           dangling.length > 0 ? `${dangling.length} unwired pin(s) — check whether they should be connected (e.g. source n → ground).` : 'All pins wired.',
           ...(groundNets.length === 0 && components.length > 0 ? ['No ground in the circuit — the simulator requires a ground reference!'] : []),

@@ -62,10 +62,19 @@ const runSimulationTool: Tool = {
     const compCurrents = computeComponentCurrents(ctx.doc.components, ctx.doc.wires, plugins, sim);
     const wireCurrents = computeWireCurrents(ctx.doc.components, ctx.doc.wires, plugins, sim);
 
+    // Token-frugal: round to 4 significant digits (full float64 precision
+    // wastes ~2× tokens and the model never needs 1e-15 resolution).
+    const round = (v: number): number => {
+      if (!isFinite(v)) return 0;
+      if (v === 0) return 0;
+      const mag = Math.floor(Math.log10(Math.abs(v)));
+      const factor = Math.pow(10, 3 - mag);
+      return Math.round(v * factor) / factor;
+    };
     // Map terminal → voltage
     const voltages: Record<string, number> = {};
     for (const [key, nodeIdx] of nodeMap.terminalNode) {
-      voltages[key] = sim.nodeVoltage[nodeIdx] ?? 0;
+      voltages[key] = round(sim.nodeVoltage[nodeIdx] ?? 0);
     }
 
     // Trapezoidal ringing-guard telemetry: how many times the (−1)^n mode was
@@ -81,10 +90,15 @@ const runSimulationTool: Tool = {
         stepsCompleted,
         ...(lastError ? { stoppedEarly: true, stopReason: lastError } : {}),
         ...(trapRings !== undefined ? { trapRingsSuppressed: trapRings } : {}),
-        finalTime: sim.time,
+        finalTime: round(sim.time),
         nodeVoltages: voltages,
-        componentCurrents: Array.from(compCurrents.entries()).map(([id, i]) => ({ componentId: id, currentA: i })),
-        wireCurrents: Array.from(wireCurrents.entries()).map(([id, i]) => ({ wireId: id, currentA: i })),
+        componentCurrents: Array.from(compCurrents.entries()).map(([id, i]) => ({ componentId: id, currentA: round(i) })),
+        // Wire currents are the noisiest channel (one entry per wire) — cap
+        // at 40 and drop sub-nA entries so big boards don't flood context.
+        wireCurrents: Array.from(wireCurrents.entries())
+          .filter(([, i]) => Math.abs(i) >= 1e-9)
+          .slice(0, 40)
+          .map(([id, i]) => ({ wireId: id, currentA: round(i) })),
       },
     };
   },
@@ -107,7 +121,8 @@ const getVoltageTool: Tool = {
     const nodeMap = buildNodeMap(ctx.doc.components, ctx.doc.wires, ctx.plugins);
     const nodeIdx = nodeMap.terminalNode.get(`${args.componentId}:${args.terminalId}`);
     if (nodeIdx === undefined) return { ok: false, error: `Terminal ${args.componentId}:${args.terminalId} not found` };
-    return { ok: true, result: { voltage: ctx.simContext.nodeVoltage[nodeIdx] } };
+    const v = ctx.simContext.nodeVoltage[nodeIdx] ?? 0;
+    return { ok: true, result: { voltage: Math.round(v * 1e4) / 1e4 } };
   },
 };
 
@@ -127,7 +142,7 @@ const getCurrentTool: Tool = {
     const currents = computeComponentCurrents(ctx.doc.components, ctx.doc.wires, ctx.plugins, ctx.simContext);
     const i = currents.get(args.componentId);
     if (i === undefined) return { ok: false, error: `Component ${args.componentId} not found or has no current` };
-    return { ok: true, result: { currentA: i } };
+    return { ok: true, result: { currentA: Math.round(i * 1e6) / 1e6 } };
   },
 };
 
@@ -174,7 +189,8 @@ const solveDCTool: Tool = {
     const nodeMap = buildNodeMap(ctx.doc.components, ctx.doc.wires, ctx.plugins);
     const voltages: Record<string, number> = {};
     for (const [key, nodeIdx] of nodeMap.terminalNode) {
-      voltages[key] = sim.nodeVoltage[nodeIdx] ?? 0;
+      const v = sim.nodeVoltage[nodeIdx] ?? 0;
+      voltages[key] = Math.round(v * 1e4) / 1e4;
     }
     return { ok: true, result: { nodeVoltages: voltages } };
   },

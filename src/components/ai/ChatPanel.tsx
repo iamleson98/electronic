@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useChatSession, stepLabelFor, type ChatMessage, type ToolCallEntry } from '@/lib/ai/chat-session';
 import { summarizeCircuitDoc } from '@/lib/ai/circuit-summary';
+import { CUSTOM_ENDPOINT_PRESETS, findPresetByUrl, customEndpointNeedsKey } from '@/lib/ai/provider-models';
 import type { CircuitComponent, Wire } from '@/lib/circuit/types';
 import { useEditor } from '@/lib/circuit/store';
 import { Button } from '@/components/ui/button';
@@ -14,7 +15,7 @@ import {
   ChevronDown, ChevronRight, Send, Sparkles, Loader2, X, AlertCircle, CheckCircle2,
   Wrench, Undo2, Eye, GitBranch, Cpu, KeyRound, ExternalLink, Square, WifiOff,
   SquareSlash, RotateCcw, ClipboardList, CircuitBoard, Cable, Clock,
-  PackageX,
+  PackageX, Settings2,
 } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66,12 +67,23 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
   const selectedModel = useChatSession(s => s.selectedModel);
   const setProvider = useChatSession(s => s.setProvider);
   const setModel = useChatSession(s => s.setModel);
+  const customEndpoint = useChatSession(s => s.customEndpoint);
+  const setCustomEndpoint = useChatSession(s => s.setCustomEndpoint);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const totalTokens = useChatSession(s => s.totalTokens);
   const resetTokens = useChatSession(s => s.resetTokens);
   const send = useChatSession(s => s.send);
   const stop = useChatSession(s => s.stop);
 
   const isLoading = !!active;
+
+  const handleProviderChange = (name: 'zai' | 'openai' | 'anthropic' | 'custom') => {
+    if (name === 'custom') {
+      setSettingsOpen(true);
+      return;
+    }
+    setProvider(name);
+  };
 
   // One-time initialization: provider list + resume a turn that was in flight
   // when the page reloaded (network drop, refresh, crash).
@@ -136,7 +148,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="flex h-full w-full flex-col border-l border-slate-800 bg-slate-950">
+    <div className="relative flex h-full w-full flex-col border-l border-slate-800 bg-slate-950">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
         <div className="flex items-center gap-2">
@@ -156,10 +168,10 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                 <div>
                   <Select
                     value={selectedProvider}
-                    onValueChange={(v) => setProvider(v as 'zai' | 'openai' | 'anthropic')}
+                    onValueChange={(v) => handleProviderChange(v as 'zai' | 'openai' | 'anthropic' | 'custom')}
                     disabled={providersLoading || providers.length === 0}
                   >
-                    <SelectTrigger className="h-7 w-[130px] gap-1 border-slate-700 bg-slate-800 px-2 text-xs text-slate-200 cursor-pointer hover:border-slate-600">
+                    <SelectTrigger className="h-7 w-32.5 gap-1 border-slate-700 bg-slate-800 px-2 text-xs text-slate-200 cursor-pointer hover:border-slate-600">
                       <Cpu className="h-3 w-3 text-cyan-400" />
                       <SelectValue placeholder="Provider…" />
                     </SelectTrigger>
@@ -168,13 +180,16 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                         <SelectItem
                           key={p.name}
                           value={p.name}
-                          disabled={!p.available}
+                          // 'custom' is always selectable — configured in settings.
+                          disabled={!p.available && p.name !== 'custom'}
                           className="cursor-pointer"
                         >
                           <div className="flex flex-col">
                             <span className="text-xs font-medium">{p.label}</span>
-                            <span className={`text-[10px] ${p.available ? 'text-slate-400' : 'text-amber-400'}`}>
-                              {p.available ? `${p.models.length} models` : `needs ${p.requiresKey}`}
+                            <span className={`text-[10px] ${p.available || p.name === 'custom' ? 'text-slate-400' : 'text-amber-400'}`}>
+                              {p.name === 'custom'
+                                ? (customEndpoint.baseUrl ? customEndpoint.baseUrl : 'configure URL + key')
+                                : p.available ? `${p.models.length} models` : `needs ${p.requiresKey}`}
                             </span>
                           </div>
                         </SelectItem>
@@ -188,8 +203,18 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
-          {/* Model selector */}
+          {/* Model selector — hidden for custom (model lives in settings) */}
           {(() => {
+            if (selectedProvider === 'custom') {
+              return (
+                <span
+                  className="hidden h-7 max-w-40 truncate px-2 font-mono text-[11px] leading-7 text-cyan-300 sm:inline"
+                  title={customEndpoint.model || 'Set the model in settings (gear icon)'}
+                >
+                  {customEndpoint.model || 'set model…'}
+                </span>
+              );
+            }
             const provider = providers.find(p => p.name === selectedProvider);
             const models = provider?.models ?? [];
             if (models.length === 0) return null;
@@ -199,7 +224,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                 onValueChange={(v) => setModel(v)}
                 disabled={providersLoading}
               >
-                <SelectTrigger className="h-7 w-[160px] gap-1 border-slate-700 bg-slate-800 px-2 text-xs text-slate-200 cursor-pointer hover:border-slate-600">
+                <SelectTrigger className="h-7 w-40 gap-1 border-slate-700 bg-slate-800 px-2 text-xs text-slate-200 cursor-pointer hover:border-slate-600">
                   <SelectValue placeholder="Model…" />
                 </SelectTrigger>
                 <SelectContent>
@@ -218,6 +243,25 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
               </Select>
             );
           })()}
+          {/* Custom endpoint settings (API URL + key + model for any agent) */}
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setSettingsOpen(true)}
+                  className={`h-7 w-7 cursor-pointer hover:bg-slate-800 ${selectedProvider === 'custom' && !customEndpoint.baseUrl ? 'text-amber-400' : ''}`}
+                  title="AI provider settings — endpoint, key, model"
+                >
+                  <Settings2 className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                <p>AI settings — endpoint, key, model</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
           {/* Auto / Review toggle */}
           <Button
             variant="ghost"
@@ -257,6 +301,42 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
       {/* Messages */}
       <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto">
         <div className="space-y-4 p-4">
+          {selectedProvider === 'custom' && !customEndpoint.baseUrl && !active && (
+            <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 p-3 text-xs text-amber-200">
+              <p className="font-medium">Custom AI endpoint needs setup.</p>
+              <p className="mt-1 text-amber-200/80">
+                Open settings (gear icon above) and enter the API URL, model, and key —
+                e.g. a local Ollama (<span className="font-mono">http://localhost:11434/v1</span>) or any OpenAI-compatible agent.
+              </p>
+              <button
+                onClick={() => setSettingsOpen(true)}
+                className="mt-2 cursor-pointer rounded bg-amber-800/60 px-2 py-1 font-medium text-amber-100 hover:bg-amber-700/60"
+              >
+                Open settings
+              </button>
+            </div>
+          )}
+          {selectedProvider === 'custom' && !!customEndpoint.baseUrl && !customEndpoint.apiKey.trim() && customEndpointNeedsKey(customEndpoint.baseUrl) && !active && (
+            <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 p-3 text-xs text-amber-200">
+              <p className="font-medium">
+                {(findPresetByUrl(customEndpoint.baseUrl)?.label ?? 'This endpoint')} needs an API key.
+              </p>
+              <p className="mt-1 text-amber-200/80">
+                {(() => {
+                  const preset = findPresetByUrl(customEndpoint.baseUrl);
+                  return preset
+                    ? <>Get a key at {preset.keyUrl} and paste it in settings — requests without one are rejected (HTTP 401).</>
+                    : <>Paste a key in settings — hosted endpoints reject keyless requests (HTTP 401).</>;
+                })()}
+              </p>
+              <button
+                onClick={() => setSettingsOpen(true)}
+                className="mt-2 cursor-pointer rounded bg-amber-800/60 px-2 py-1 font-medium text-amber-100 hover:bg-amber-700/60"
+              >
+                Open settings
+              </button>
+            </div>
+          )}
           {messages.length === 0 && !active && (
             <div className="space-y-3">
               <div className="rounded-lg border border-purple-900/30 bg-purple-950/20 p-4 text-sm text-slate-300">
@@ -294,7 +374,7 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={isLoading ? 'AI is working — press Stop to interrupt…' : 'Ask me to build, analyze, or debug a circuit…'}
-            className="min-h-[60px] max-h-[200px] resize-none bg-slate-900 pr-12 text-sm text-slate-100 placeholder:text-slate-500"
+            className="min-h-15 max-h-50 resize-none bg-slate-900 pr-12 text-sm text-slate-100 placeholder:text-slate-500"
           />
           <Button
             onClick={handleSendClick}
@@ -316,6 +396,223 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
             : 'Enter to send · Shift+Enter for newline · Ctrl+Z to undo AI changes'}
         </p>
       </div>
+
+      {/* Custom endpoint settings dialog */}
+      {settingsOpen && (
+        <CustomEndpointDialog
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Custom endpoint settings — preset URL select + per-preset model select +
+// API key. Presets cover Muse Spark, Gemini, DeepSeek, GPT, OpenRouter,
+// Together, Groq (free), Ollama/LM Studio (local free). Stored in
+// localStorage; sent per-request; never in env.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function CustomEndpointDialog({ onClose }: { onClose: () => void }) {
+  const customEndpoint = useChatSession(s => s.customEndpoint);
+  const setCustomEndpoint = useChatSession(s => s.setCustomEndpoint);
+  const setProvider = useChatSession(s => s.setProvider);
+  const [presetId, setPresetId] = useState(customEndpoint.presetId || 'muse-spark');
+  const preset = CUSTOM_ENDPOINT_PRESETS.find(p => p.id === presetId) ?? CUSTOM_ENDPOINT_PRESETS[0];
+  const [url, setUrl] = useState(customEndpoint.baseUrl || preset.baseUrl);
+  const [key, setKey] = useState(customEndpoint.apiKey);
+  const [model, setModelState] = useState(customEndpoint.model || preset.models[0]?.id || '');
+  const [showKey, setShowKey] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const pickPreset = (id: string) => {
+    const p = CUSTOM_ENDPOINT_PRESETS.find(x => x.id === id);
+    if (!p) return;
+    setPresetId(id);
+    setUrl(p.baseUrl);
+    setModelState(p.models[0]?.id || '');
+    setTestResult(null);
+  };
+
+  // Pasted a raw URL — recognize it as a preset when it matches.
+  const onUrlChange = (v: string) => {
+    setUrl(v);
+    const hit = findPresetByUrl(v);
+    if (hit && hit.id !== presetId) {
+      setPresetId(hit.id);
+      if (!model || !hit.models.some(m => m.id === model)) setModelState(hit.models[0]?.id || '');
+    }
+  };
+
+  const save = () => {
+    setCustomEndpoint({ baseUrl: url.trim(), apiKey: key, model: model.trim(), presetId });
+    setProvider('custom');
+    onClose();
+  };
+
+  const testConnection = async () => {
+    const base = url.trim().replace(/\/+$/, '');
+    if (!base) {
+      setTestResult({ ok: false, message: 'Pick a preset or enter an API URL first.' });
+      return;
+    }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      // Token-cheap probe: /models list when available (no completion tokens).
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (key) headers['Authorization'] = `Bearer ${key}`;
+      let res = await fetch(`${base}/models`, { headers });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        const ids: string[] = Array.isArray(data?.data) ? data.data.map((m: { id?: string }) => m.id).filter(Boolean) : [];
+        const hasModel = model.trim() ? ids.includes(model.trim()) : true;
+        setTestResult({
+          ok: true,
+          message: ids.length > 0
+            ? `Connected — ${ids.length} model(s).${model.trim() && !hasModel ? ` Note: "${model.trim()}" not in list.` : ''}`
+            : 'Connected — endpoint reachable.',
+        });
+      } else {
+        // No /models route — try a minimal chat completion instead (4 tokens).
+        res = await fetch(`${base}/chat/completions`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ model: model.trim() || 'default', messages: [{ role: 'user', content: 'ping' }], max_tokens: 4 }),
+        });
+        if (res.ok) setTestResult({ ok: true, message: 'Connected — chat endpoint answered.' });
+        else setTestResult({ ok: false, message: `HTTP ${res.status}: ${(await res.text()).slice(0, 160)}` });
+      }
+    } catch (e) {
+      setTestResult({ ok: false, message: `Unreachable: ${(e as Error).message.slice(0, 160)}` });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div
+      className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="AI provider settings"
+    >
+      <div
+        className="max-h-full w-full max-w-sm overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 p-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-slate-100">AI provider settings</h3>
+          <Button variant="ghost" size="icon" onClick={onClose} className="h-7 w-7 cursor-pointer hover:bg-slate-800" title="Close">
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <p className="mb-3 text-xs leading-relaxed text-slate-400">
+          Pick an endpoint, pick a model, paste a key — the assistant uses it immediately.
+          The key stays in your browser (localStorage) and is only sent to your endpoint.
+        </p>
+        <label className="mb-1 block text-xs font-medium text-slate-300" htmlFor="ai-custom-preset">
+          API URL <span className="font-normal text-slate-500">(preset — select, no typing)</span>
+        </label>
+        <Select value={presetId} onValueChange={pickPreset}>
+          <SelectTrigger id="ai-custom-preset" className="mb-1 h-8 w-full gap-1 border-slate-700 bg-slate-950 px-2.5 text-xs text-slate-100 cursor-pointer hover:border-slate-600">
+            <SelectValue placeholder="Endpoint…" />
+          </SelectTrigger>
+          <SelectContent>
+            {CUSTOM_ENDPOINT_PRESETS.map(p => (
+              <SelectItem key={p.id} value={p.id} className="cursor-pointer">
+                <div className="flex flex-col">
+                  <span className="text-xs font-medium">{p.label}</span>
+                  <span className="font-mono text-[10px] text-slate-500">{p.baseUrl}</span>
+                </div>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <input
+          value={url}
+          onChange={(e) => onUrlChange(e.target.value)}
+          placeholder="https://…/v1"
+          spellCheck={false}
+          aria-label="Custom API base URL"
+          className="mb-3 w-full rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1.5 font-mono text-[11px] text-slate-400 placeholder:text-slate-600 focus:border-cyan-600 focus:outline-none"
+        />
+        <label className="mb-1 block text-xs font-medium text-slate-300" htmlFor="ai-custom-model">
+          Model <span className="font-normal text-slate-500">(top free + flagship-smart per endpoint)</span>
+        </label>
+        <Select value={model} onValueChange={(v) => setModelState(v)}>
+          <SelectTrigger id="ai-custom-model" className="mb-3 h-8 w-full gap-1 border-slate-700 bg-slate-950 px-2.5 text-xs text-slate-100 cursor-pointer hover:border-slate-600">
+            <SelectValue placeholder="Model…" />
+          </SelectTrigger>
+          <SelectContent>
+            {preset.models.map(m => (
+              <SelectItem key={m.id} value={m.id} className="cursor-pointer">
+                <div className="flex flex-col">
+                  <span className="text-xs font-medium">
+                    {m.label}
+                    {m.free && <span className="ml-1 text-emerald-400">●</span>}
+                  </span>
+                  <span className="font-mono text-[10px] text-slate-500">{m.id} — {m.description}</span>
+                </div>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <label className="mb-1 block text-xs font-medium text-slate-300" htmlFor="ai-custom-key">
+          API key <span className="font-normal text-slate-500">({preset.keyPlaceholder}) — </span>
+          <a href={preset.keyUrl} target="_blank" rel="noreferrer" className="font-normal text-cyan-400 hover:underline" onClick={(e) => e.stopPropagation()}>
+            get key
+          </a>
+        </label>
+        <div className="relative mb-1">
+          <input
+            id="ai-custom-key"
+            type={showKey ? 'text' : 'password'}
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            placeholder={preset.keyPlaceholder}
+            spellCheck={false}
+            autoComplete="off"
+            className="w-full rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1.5 pr-14 font-mono text-xs text-slate-100 placeholder:text-slate-600 focus:border-cyan-600 focus:outline-none"
+          />
+          <button
+            onClick={() => setShowKey(!showKey)}
+            className="absolute right-1 top-1/2 -translate-y-1/2 cursor-pointer rounded px-1.5 py-0.5 text-[10px] text-slate-500 hover:text-slate-300"
+            title={showKey ? 'Hide key' : 'Show key'}
+          >
+            {showKey ? 'hide' : 'show'}
+          </button>
+        </div>
+        <p className="mb-3 text-[10px] leading-relaxed text-slate-600">
+          Stored only in this browser. Requests go browser → your Next.js server → your endpoint (server-to-server, no CORS issues).
+        </p>
+        {testResult && (
+          <p className={`mb-3 rounded-md border px-2 py-1.5 text-xs ${testResult.ok ? 'border-emerald-800/60 bg-emerald-950/30 text-emerald-200' : 'border-rose-800/60 bg-rose-950/30 text-rose-200'}`}>
+            {testResult.message}
+          </p>
+        )}
+        <div className="flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={testConnection}
+            disabled={testing}
+            className="h-8 cursor-pointer text-xs hover:bg-slate-800"
+          >
+            {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Test'}
+          </Button>
+          <div className="flex-1" />
+          <Button variant="ghost" size="sm" onClick={onClose} className="h-8 cursor-pointer text-xs hover:bg-slate-800">
+            Cancel
+          </Button>
+          <Button size="sm" onClick={save} disabled={!url.trim() || !model.trim()} className="h-8 cursor-pointer text-xs">
+            Save & use
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -330,19 +627,18 @@ function StatusLine({ message }: { message: ChatMessage }) {
 
   const Icon =
     active.phase === 'reconnecting' || active.phase === 'restarting' ? WifiOff
-    : active.phase === 'stopping' ? SquareSlash
-    : Loader2;
+      : active.phase === 'stopping' ? SquareSlash
+        : Loader2;
   const color =
     active.phase === 'reconnecting' || active.phase === 'restarting' ? 'text-amber-400'
-    : active.phase === 'stopping' ? 'text-rose-400'
-    : 'text-purple-400';
+      : active.phase === 'stopping' ? 'text-rose-400'
+        : 'text-purple-400';
 
   return (
-    <div className={`mb-2 flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs ${
-      active.phase === 'reconnecting' || active.phase === 'restarting'
-        ? 'border-amber-800/50 bg-amber-950/20 text-amber-200'
-        : 'border-purple-900/40 bg-purple-950/20 text-slate-300'
-    }`}>
+    <div className={`mb-2 flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs ${active.phase === 'reconnecting' || active.phase === 'restarting'
+      ? 'border-amber-800/50 bg-amber-950/20 text-amber-200'
+      : 'border-purple-900/40 bg-purple-950/20 text-slate-300'
+      }`}>
       <Icon className={`h-3.5 w-3.5 ${color} ${active.phase === 'stopping' ? '' : 'animate-spin'}`} aria-hidden="true" />
       <span className="flex-1">{active.statusText}</span>
       {active.reconnectAttempt > 0 && (
@@ -401,23 +697,22 @@ function ProgressAccordion({ message, isActive }: { message: ChatMessage; isActi
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger
-        className={`group flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors cursor-pointer ${
-          isActive
-            ? 'border-purple-800/60 bg-purple-950/30 hover:bg-purple-950/50'
-            : 'border-slate-800 bg-slate-900/50 hover:bg-slate-800/60'
-        }`}
+        className={`group flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors cursor-pointer ${isActive
+          ? 'border-purple-800/60 bg-purple-950/30 hover:bg-purple-950/50'
+          : 'border-slate-800 bg-slate-900/50 hover:bg-slate-800/60'
+          }`}
         aria-expanded={open}
       >
         {open
           ? <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
           : <ChevronRight className="h-3.5 w-3.5 text-slate-500" />}
         {isActive ? (
-          <span className="relative flex h-2 w-2 flex-shrink-0" aria-hidden="true">
+          <span className="relative flex h-2 w-2 shrink-0" aria-hidden="true">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-purple-400 opacity-75" />
             <span className="relative inline-flex h-2 w-2 rounded-full bg-purple-400" />
           </span>
         ) : (
-          <Clock className="h-3.5 w-3.5 flex-shrink-0 text-slate-500" aria-hidden="true" />
+          <Clock className="h-3.5 w-3.5 shrink-0 text-slate-500" aria-hidden="true" />
         )}
         <span className={`flex-1 font-medium ${isActive ? 'animate-pulse text-purple-200' : 'text-slate-400'}`}>
           {title}
@@ -430,7 +725,7 @@ function ProgressAccordion({ message, isActive }: { message: ChatMessage; isActi
       <CollapsibleContent>
         <div
           ref={textRef}
-          className={`mt-1 whitespace-pre-wrap break-words rounded-md border border-slate-800/60 bg-slate-950/60 p-2.5 text-xs leading-relaxed text-slate-400 ${SCROLL_AREA}`}
+          className={`mt-1 whitespace-pre-wrap wrap-break-word rounded-md border border-slate-800/60 bg-slate-950/60 p-2.5 text-xs leading-relaxed text-slate-400 ${SCROLL_AREA}`}
         >
           {text}
           {isActive && (
@@ -456,11 +751,11 @@ function StepRow({ step }: { step: ToolCallEntry & { live?: string } }) {
     <Collapsible open={open} onOpenChange={setOpen}>
       <div className="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-slate-800/40">
         {live ? (
-          <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-purple-400" aria-hidden="true" />
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-purple-400" aria-hidden="true" />
         ) : failed ? (
-          <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 text-rose-500" aria-hidden="true" />
+          <AlertCircle className="h-3.5 w-3.5 shrink-0 text-rose-500" aria-hidden="true" />
         ) : (
-          <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 text-emerald-500" aria-hidden="true" />
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" aria-hidden="true" />
         )}
         {live ? (
           <span className="flex-1 truncate text-xs text-purple-300">{live}</span>
@@ -473,8 +768,8 @@ function StepRow({ step }: { step: ToolCallEntry & { live?: string } }) {
             >
               <span className="truncate">{stepLabelFor(step.name)}</span>
               {open
-                ? <ChevronDown className="h-3 w-3 flex-shrink-0 text-slate-600" />
-                : <ChevronRight className="h-3 w-3 flex-shrink-0 text-slate-600" />}
+                ? <ChevronDown className="h-3 w-3 shrink-0 text-slate-600" />
+                : <ChevronRight className="h-3 w-3 shrink-0 text-slate-600" />}
             </button>
           </CollapsibleTrigger>
         ) : (
@@ -535,17 +830,16 @@ function StepsAccordion({ message, isActive }: { message: ChatMessage; isActive:
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger
-        className={`group flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors cursor-pointer ${
-          isActive
-            ? 'border-cyan-900/50 bg-cyan-950/20 hover:bg-cyan-950/40'
-            : 'border-slate-800 bg-slate-900/50 hover:bg-slate-800/60'
-        }`}
+        className={`group flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors cursor-pointer ${isActive
+          ? 'border-cyan-900/50 bg-cyan-950/20 hover:bg-cyan-950/40'
+          : 'border-slate-800 bg-slate-900/50 hover:bg-slate-800/60'
+          }`}
         aria-expanded={open}
       >
         {open
           ? <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
           : <ChevronRight className="h-3.5 w-3.5 text-slate-500" />}
-        <ClipboardList className={`h-3.5 w-3.5 flex-shrink-0 ${isActive ? 'text-cyan-400' : 'text-slate-500'}`} aria-hidden="true" />
+        <ClipboardList className={`h-3.5 w-3.5 shrink-0 ${isActive ? 'text-cyan-400' : 'text-slate-500'}`} aria-hidden="true" />
         <span className="flex-1 font-medium text-slate-400">Steps</span>
         <span className="font-mono text-[10px] text-slate-500">{steps.length}</span>
         {isActive ? (
@@ -635,13 +929,12 @@ function CircuitSummaryCard({ components, wires }: { components: CircuitComponen
           <ul className="space-y-1">
             {summary.nets.map((net, i) => (
               <li key={i} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 border-t border-slate-800/60 py-1 first:border-t-0">
-                <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
-                  net.name === 'GND'
-                    ? 'bg-slate-800 text-slate-300'
-                    : net.name.startsWith('+')
-                      ? 'bg-rose-950/60 text-rose-300'
-                      : 'bg-cyan-950/60 text-cyan-300'
-                }`}>
+                <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${net.name === 'GND'
+                  ? 'bg-slate-800 text-slate-300'
+                  : net.name.startsWith('+')
+                    ? 'bg-rose-950/60 text-rose-300'
+                    : 'bg-cyan-950/60 text-cyan-300'
+                  }`}>
                   {net.name}
                 </span>
                 <span className="font-mono text-[10px] leading-relaxed text-slate-500">
@@ -727,15 +1020,14 @@ function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: 
     <div className="flex justify-start">
       <div className="max-w-[90%] space-y-2">
         <div className="flex items-start gap-2">
-          <div className="mt-0.5 flex-shrink-0">
+          <div className="mt-0.5 shrink-0">
             <Sparkles className="h-4 w-4 text-purple-400" />
           </div>
           <div
-            className={`flex-1 space-y-2 rounded-lg rounded-tl-sm px-3 py-2 text-sm ${
-              message.error
-                ? 'border border-rose-800 bg-rose-950/30 text-rose-200'
-                : 'border border-slate-800 bg-slate-900 text-slate-200'
-            }`}
+            className={`flex-1 space-y-2 rounded-lg rounded-tl-sm px-3 py-2 text-sm ${message.error
+              ? 'border border-rose-800 bg-rose-950/30 text-rose-200'
+              : 'border border-slate-800 bg-slate-900 text-slate-200'
+              }`}
           >
             {isActive && <StatusLine message={message} />}
 
@@ -751,7 +1043,7 @@ function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: 
             ) : null}
 
             {hasContent && (
-              <div className="whitespace-pre-wrap break-words">{message.content}</div>
+              <div className="whitespace-pre-wrap wrap-break-word">{message.content}</div>
             )}
 
             {message.stopped && (

@@ -7,7 +7,7 @@
 // These tests run without making real API calls — they only exercise the
 // factory and metadata logic, not the chat() method.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { getProvider, getAvailableProviders, _resetSandboxConfigCache, type ProviderName } from '../src/lib/ai/provider';
 
 const ORIGINAL_ENV = { ...process.env };
@@ -143,14 +143,58 @@ describe('getProvider — model overrides', () => {
 });
 
 describe('getAvailableProviders', () => {
-  it('returns exactly 3 providers', () => {
+  it('returns exactly 4 providers (incl. custom endpoint)', () => {
     const list = getAvailableProviders();
-    expect(list.length).toBe(3);
+    expect(list.length).toBe(4);
   });
 
-  it('returns zai, openai, anthropic in order', () => {
+  it('returns zai, openai, anthropic, custom in order', () => {
     const list = getAvailableProviders();
-    expect(list.map(p => p.name)).toEqual(['zai', 'openai', 'anthropic']);
+    expect(list.map(p => p.name)).toEqual(['zai', 'openai', 'anthropic', 'custom']);
+  });
+
+  it('custom endpoint is always selectable (user-configured URL/key/model)', () => {
+    const custom = getAvailableProviders().find(p => p.name === 'custom')!;
+    expect(custom.available).toBe(true);
+    // Without a per-request URL the factory throws an actionable config error.
+    expect(() => getProvider('custom')).toThrow(/API URL/);
+    const prov = getProvider('custom', undefined, { baseUrl: 'http://localhost:11434/v1', model: 'llama3.1' });
+    expect(prov.name).toBe('custom');
+    expect(prov.model).toBe('llama3.1');
+  });
+
+  it('custom endpoint throws a clear config error when a hosted URL has no key (e.g. Groq)', () => {
+    // Groq without a key used to send a keyless request that came back as an
+    // opaque HTTP 401 + console stack trace — now it fails fast with guidance.
+    expect(() => getProvider('custom', undefined, { baseUrl: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' }))
+      .toThrow(/needs an API key/);
+  });
+
+  it('custom endpoint allows keyless local URLs (Ollama/LM Studio)', () => {
+    expect(getProvider('custom', undefined, { baseUrl: 'http://localhost:11434/v1', model: 'llama3.3' }).name).toBe('custom');
+    expect(getProvider('custom', undefined, { baseUrl: 'http://localhost:1234/v1', model: 'local-model' }).name).toBe('custom');
+  });
+
+  it('sends the frontend custom URL and API key to that exact endpoint', async () => {
+    process.env.CUSTOM_AI_BASE_URL = 'https://server-default.example/v1';
+    process.env.CUSTOM_AI_API_KEY = 'server-default-key';
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const provider = getProvider('custom', undefined, {
+      baseUrl: 'https://frontend.example/openai/v1/chat/completions',
+      apiKey: 'frontend-key',
+      model: 'frontend-model',
+    });
+    await provider.chat([{ role: 'user', content: 'hello' }]);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://frontend.example/openai/v1/chat/completions');
+    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer frontend-key');
+    expect(JSON.parse(String(init.body)).model).toBe('frontend-model');
   });
 
   it('zai availability reflects the environment (api-key > sandbox > unconfigured)', () => {

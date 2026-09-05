@@ -260,16 +260,44 @@ export function padGeometry(pad: Pad, x: number, z: number, layerY: number, rotZ
 }
 
 /**
- * Solder fillet (meniscus): a squashed shiny dome on a THT pad where a
- * component lead is soldered. Only drawn for populated footprints.
+ * Solder fillet (meniscus): a shiny joint that GRIPS the component lead.
+ * Two shapes:
+ *  • THT (drill > 0): concave cone (volcano) centered on the lead hole —
+ *    solder wicks UP the lead wire, so the fillet peaks at the lead and
+ *    slopes down to the pad edge. A squashed dome peaked at the WRONG place
+ *    (pad center vs lead position) is what made joints look "terrible".
+ *  • SMD (no drill): low concave wedge from pad edge toward the termination.
+ * Only drawn for populated footprints.
  */
 export function solderFilletGeometry(pad: Pad, x: number, z: number, layerY: number): THREE.BufferGeometry | null {
   const w = pad.size?.width || 0.8;
   const h = pad.size?.height || 0.8;
-  const r = Math.max(0.22, Math.min(w, h) * 0.52);
+  const isTHT = (pad.drill ?? 0) > 0;
+  if (isTHT) {
+    // volcano cone: lead hole radius → pad edge, peak hugging the lead
+    const leadR = Math.max(0.25, (pad.drill ?? 0.8) / 2 + 0.08);
+    const padR = Math.max(leadR + 0.15, Math.min(w, h) * 0.52);
+    const H = 0.55; // wick-up height along the lead
+    // LatheGeometry profile: (radius, y) from lead surface out to pad edge,
+    // concave meniscus curve between them
+    const pts: THREE.Vector2[] = [];
+    const N = 8;
+    for (let i = 0; i <= N; i++) {
+      const t = i / N;
+      // concave: high near lead, curving down to pad edge
+      const r = leadR + (padR - leadR) * t;
+      const y = H * (1 - t) * (1 - t) + 0.02;
+      pts.push(new THREE.Vector2(r, y));
+    }
+    const geo = new THREE.LatheGeometry(pts, 20);
+    geo.translate(x, layerY, z);
+    if (!geo.getAttribute('uv')) geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(geo.getAttribute('position').count * 2), 2));
+    return geo;
+  }
+  const r = Math.max(0.22, Math.min(w, h) * 0.42);
   const geo = new THREE.SphereGeometry(r, 14, 10);
-  geo.scale(1, 0.38, 1);
-  geo.translate(x, layerY + r * 0.1, z);
+  geo.scale(1, 0.3, 1);
+  geo.translate(x, layerY + r * 0.06, z);
   if (!geo.getAttribute('uv')) geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(geo.getAttribute('position').count * 2), 2));
   return geo;
 }

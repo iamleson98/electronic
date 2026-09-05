@@ -13,7 +13,7 @@
 // Used by the provider layer to give the AI Assistant panel token-level
 // streaming instead of waiting for the full completion.
 
-import type { ToolCall } from './provider';
+import type { ToolCall } from './provider-types';
 
 /** One parsed SSE event: the decoded JSON payload (or raw string if not JSON). */
 export interface SseEvent {

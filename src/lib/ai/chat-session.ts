@@ -23,6 +23,7 @@ import { create } from 'zustand';
 import { useEditor } from '@/lib/circuit/store';
 import { usePCB } from '@/lib/pcb/store';
 import { parseSseStream } from './sse';
+import { customEndpointNeedsKey, findPresetByUrl } from './provider-models';
 import { toast } from 'sonner';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,13 +104,22 @@ export interface ActiveTurn {
 }
 
 interface ProviderInfo {
-  name: 'zai' | 'openai' | 'anthropic';
+  name: 'zai' | 'openai' | 'anthropic' | 'custom';
   label: string;
   available: boolean;
   requiresKey: string | null;
   model: string;
   models: { id: string; label: string; description: string; free: boolean }[];
   mode?: 'api-key' | 'sandbox' | 'unconfigured';
+}
+
+/** User-configured OpenAI-compatible endpoint (localStorage, per-request). */
+export interface CustomEndpointConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  /** Preset id the URL came from (drives the per-preset model list). */
+  presetId: string;
 }
 
 interface ChatSessionState {
@@ -121,12 +131,15 @@ interface ChatSessionState {
   totalTokens: { prompt: number; completion: number; total: number };
   // Provider / model selection (persisted to localStorage)
   providers: ProviderInfo[];
-  selectedProvider: 'zai' | 'openai' | 'anthropic';
+  selectedProvider: 'zai' | 'openai' | 'anthropic' | 'custom';
   selectedModel: string;
   providersLoading: boolean;
+  /** Custom endpoint config (URL/key/model) — persisted to localStorage. */
+  customEndpoint: CustomEndpointConfig;
+  setCustomEndpoint(cfg: Partial<CustomEndpointConfig>): void;
 
   initProviders(): Promise<void>;
-  setProvider(name: 'zai' | 'openai' | 'anthropic'): void;
+  setProvider(name: 'zai' | 'openai' | 'anthropic' | 'custom'): void;
   setModel(model: string): void;
   setAutoApply(v: boolean): void;
   resetTokens(): void;
@@ -152,6 +165,10 @@ const MODEL_STORAGE_KEY = 'circuit-lab.ai-model';
 const AUTO_APPLY_STORAGE_KEY = 'circuit-lab.ai-auto-apply';
 const ACTIVE_TURN_STORAGE_KEY = 'circuit-lab.ai.active-turn';
 const CLIENT_ID_STORAGE_KEY = 'circuit-lab.ai.client-id';
+const CUSTOM_URL_STORAGE_KEY = 'circuit-lab.ai-custom-url';
+const CUSTOM_KEY_STORAGE_KEY = 'circuit-lab.ai-custom-key';
+const CUSTOM_MODEL_STORAGE_KEY = 'circuit-lab.ai-custom-model';
+const CUSTOM_PRESET_STORAGE_KEY = 'circuit-lab.ai-custom-preset';
 
 const MAX_RECONNECTS = 10;
 const RECONNECT_BACKOFFS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 20_000, 20_000, 20_000, 30_000, 30_000];
@@ -1070,6 +1087,20 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
   selectedProvider: 'zai',
   selectedModel: 'glm-4.6',
   providersLoading: true,
+  customEndpoint: {
+    baseUrl: (typeof window !== 'undefined' ? window.localStorage.getItem(CUSTOM_URL_STORAGE_KEY) : null) ?? '',
+    apiKey: (typeof window !== 'undefined' ? window.localStorage.getItem(CUSTOM_KEY_STORAGE_KEY) : null) ?? '',
+    model: (typeof window !== 'undefined' ? window.localStorage.getItem(CUSTOM_MODEL_STORAGE_KEY) : null) ?? '',
+    presetId: (typeof window !== 'undefined' ? window.localStorage.getItem(CUSTOM_PRESET_STORAGE_KEY) : null) ?? 'muse-spark',
+  },
+  setCustomEndpoint: (cfg) => {
+    const next = { ...get().customEndpoint, ...cfg };
+    set({ customEndpoint: next });
+    localStorageSet(CUSTOM_URL_STORAGE_KEY, next.baseUrl);
+    localStorageSet(CUSTOM_KEY_STORAGE_KEY, next.apiKey);
+    localStorageSet(CUSTOM_MODEL_STORAGE_KEY, next.model);
+    localStorageSet(CUSTOM_PRESET_STORAGE_KEY, next.presetId);
+  },
 
   initProviders: async () => {
     try {
@@ -1078,10 +1109,12 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
       const data = await res.json();
       const providers: ProviderInfo[] = data.providers || [];
       const stored = localStorageGet(PROVIDER_STORAGE_KEY);
-      const serverDefault = data.default as 'zai' | 'openai' | 'anthropic' | undefined;
-      const initial = (stored === 'zai' || stored === 'openai' || stored === 'anthropic' ? stored : null) || serverDefault || 'zai';
+      const serverDefault = data.default as 'zai' | 'openai' | 'anthropic' | 'custom' | undefined;
+      const initial = (stored === 'zai' || stored === 'openai' || stored === 'anthropic' || stored === 'custom' ? stored : null) || serverDefault || 'zai';
       const info = providers.find(p => p.name === initial);
-      const providerName = info && info.available ? initial : 'zai';
+      // 'custom' is always selectable (user-configured endpoint) even when
+      // the server reports no default for it.
+      const providerName = (info && info.available) || initial === 'custom' ? initial : 'zai';
       const providerInfo = providers.find(p => p.name === providerName);
       const storedModel = localStorageGet(MODEL_STORAGE_KEY);
       const modelToUse = providerInfo && storedModel && providerInfo.models.some(m => m.id === storedModel)
@@ -1094,6 +1127,9 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
           { name: 'zai', label: 'Z.ai (GLM)', available: true, requiresKey: null, model: 'glm-4.6', mode: 'sandbox', models: [
             { id: 'glm-4.6', label: 'GLM-4.6 (Default, Free)', description: 'Z.ai built-in model.', free: true },
           ] },
+          { name: 'custom', label: 'Custom endpoint', available: true, requiresKey: null, model: 'default', models: [
+            { id: 'custom', label: 'Custom endpoint', description: 'User-configured OpenAI-compatible API.', free: false },
+          ] },
         ],
         selectedProvider: 'zai',
         selectedModel: 'glm-4.6',
@@ -1105,6 +1141,14 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
   setProvider: (name) => {
     localStorageSet(PROVIDER_STORAGE_KEY, name);
     const info = get().providers.find(p => p.name === name);
+    if (name === 'custom') {
+      // Custom endpoint: model comes from the endpoint settings, not the
+      // provider catalog. Keep whatever the user typed there.
+      const customModel = get().customEndpoint.model.trim();
+      set({ selectedProvider: name, selectedModel: customModel || 'custom' });
+      toast.success('AI provider: Custom endpoint');
+      return;
+    }
     set({ selectedProvider: name, selectedModel: info?.model ?? get().selectedModel });
     if (info) {
       localStorageSet(MODEL_STORAGE_KEY, info.model);
@@ -1130,6 +1174,26 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
   send: (text) => {
     if (!text.trim() || get().active || runtime) return;
 
+    // Fail fast for a keyless hosted custom endpoint (e.g. Groq picked but
+    // no key pasted): don't burn a server turn that can only come back as an
+    // opaque HTTP 401 — surface the actionable message immediately.
+    if (get().selectedProvider === 'custom') {
+      const customCfg = get().customEndpoint;
+      if (!customCfg.baseUrl.trim()) {
+        toast.error('Custom AI endpoint needs setup — open settings (gear icon) and set the API URL.');
+        return;
+      }
+      if (!customCfg.apiKey.trim() && customEndpointNeedsKey(customCfg.baseUrl)) {
+        const preset = findPresetByUrl(customCfg.baseUrl);
+        toast.error(
+          preset
+            ? `${preset.label} needs an API key — open settings (gear icon) and paste one (get it at ${preset.keyUrl}).`
+            : 'This endpoint needs an API key — open settings (gear icon) and paste one.',
+        );
+        return;
+      }
+    }
+
     const editorState = useEditor.getState();
     const circuitSnapshot: CircuitSnapshot = {
       components: JSON.parse(JSON.stringify(editorState.components)),
@@ -1154,6 +1218,8 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
     const userMsg: ChatMessage = { id: `u_${Date.now()}`, role: 'user', content: text, timestamp: Date.now() };
     const assistantMsg: ChatMessage = { id: assistantMsgId, role: 'assistant', content: '', timestamp: Date.now(), loading: true, toolCalls: [] };
 
+    const isCustom = get().selectedProvider === 'custom';
+    const custom = get().customEndpoint;
     const requestBody = {
       messages: apiMessages,
       circuit: circuitSnapshot,
@@ -1162,7 +1228,10 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
       simRunning: editorState.running,
       selectedComponentId: editorState.selection?.type === 'component' ? editorState.selection.id : null,
       provider: get().selectedProvider,
-      model: get().selectedModel,
+      model: isCustom ? (custom.model.trim() || 'default') : get().selectedModel,
+      // Custom endpoint credentials travel per-request (localStorage-sourced,
+      // never env). The server uses them only for the outbound API call.
+      ...(isCustom ? { custom: { baseUrl: custom.baseUrl.trim(), apiKey: custom.apiKey, model: custom.model.trim() || 'default' } } : {}),
       clientId: getClientId(),
     };
 

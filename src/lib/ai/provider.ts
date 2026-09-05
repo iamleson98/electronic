@@ -31,10 +31,21 @@ import path from 'path';
 import os from 'os';
 import type { ToolCall, ChatMessage, ToolDefinition, ChatResult } from './provider-types';
 import { accumulateOpenAiStream } from './sse';
+import type { ProviderName, ModelInfo } from './provider-models';
+import { AVAILABLE_MODELS, customEndpointNeedsKey, findPresetByUrl } from './provider-models';
 
 export type { ToolCall, ToolDefinition, ChatMessage, ChatResult } from './provider-types';
+// Client-safe catalog (re-exported so server imports keep working; the
+// canonical definitions live in provider-models.ts which has no Node imports).
+export type { ProviderName, ModelInfo, CustomEndpointPreset } from './provider-models';
+export { AVAILABLE_MODELS, CUSTOM_ENDPOINT_PRESETS, findPresetByUrl, customEndpointNeedsKey, isLocalEndpoint } from './provider-models';
 
-export type ProviderName = 'zai' | 'openai' | 'anthropic';
+/** Per-request custom endpoint override (user-configured OpenAI-compatible agent). */
+export interface CustomProviderConfig {
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+}
 
 export interface AIProvider {
   name: ProviderName;
@@ -97,35 +108,6 @@ const SANDBOX_NETWORK_HINT =
   'The Z.ai sandbox gateway (internal-api.z.ai) is only reachable from inside the Z.ai coding sandbox — ' +
   'this deployment is running elsewhere. To use the AI assistant here, set the ZAI_API_KEY environment variable ' +
   '(create a key at https://z.ai → API Keys) and restart. Server-to-server API calls work from any domain.';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Available models per provider — curated list of top free / low-cost models.
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface ModelInfo {
-  id: string;
-  label: string;
-  description: string;
-  free: boolean;
-}
-
-export const AVAILABLE_MODELS: Record<ProviderName, ModelInfo[]> = {
-  zai: [
-    { id: 'glm-4.6', label: 'GLM-4.6 (Default)', description: 'Most capable Z.ai model — best for complex circuit design.', free: true },
-    { id: 'glm-4.5', label: 'GLM-4.5', description: 'Previous generation flagship.', free: true },
-    { id: 'glm-4-flash', label: 'GLM-4 Flash (Fast)', description: 'Lighter model for fast responses.', free: true },
-  ],
-  openai: [
-    { id: 'gpt-4o-mini', label: 'GPT-4o mini (Cheapest)', description: 'Fast and affordable. Best for most tasks.', free: false },
-    { id: 'gpt-4o', label: 'GPT-4o', description: 'Most capable OpenAI model.', free: false },
-    { id: 'gpt-4.1-nano', label: 'GPT-4.1 nano (Cheapest)', description: 'Smallest GPT-4.1 variant.', free: false },
-    { id: 'gpt-4.1-mini', label: 'GPT-4.1 mini', description: 'Balanced cost/performance.', free: false },
-  ],
-  anthropic: [
-    { id: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku (Fastest)', description: 'Fast and affordable Claude.', free: false },
-    { id: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet', description: 'Most capable Claude.', free: false },
-  ],
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Z.ai configuration detection (shared by the factory + providers route)
@@ -926,6 +908,122 @@ class AnthropicProvider implements AIProvider {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Custom OpenAI-compatible provider — user-configured endpoint (any agent).
+// The client sends { baseUrl, apiKey, model } per request (stored in
+// localStorage, never in env). Server-side only: the key never leaves the
+// server except inside the outbound Authorization header.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class CustomProvider implements AIProvider {
+  name: ProviderName = 'custom';
+  model: string;
+  private baseUrl: string;
+  private apiKey: string;
+
+  constructor(cfg: CustomProviderConfig) {
+    this.model = cfg.model?.trim() || 'default';
+    this.baseUrl = (cfg.baseUrl || '').replace(/\/+$/, '');
+    this.apiKey = cfg.apiKey || '';
+  }
+
+  private async doFetch(body: unknown, timeoutMs: number, signal?: AbortSignal): Promise<Response> {
+    const { signal: combined, cleanup } = combineSignals(timeoutMs, signal);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (this.apiKey) headers['Authorization'] = `Bearer ${this.apiKey}`;
+      const endpoint = /\/chat\/completions\/?$/i.test(this.baseUrl)
+        ? this.baseUrl
+        : `${this.baseUrl}/chat/completions`;
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: combined,
+      });
+      if (!response.ok) {
+        const errorBody = await response.text();
+        if (response.status === 401 || response.status === 403) {
+          throw new AIProviderConfigError(
+            `Custom AI endpoint rejected the credentials (HTTP ${response.status}): ${errorBody.slice(0, 300)} — check the API key in the AI panel settings.`,
+          );
+        }
+        throw new Error(`Custom AI endpoint error ${response.status}: ${errorBody.slice(0, 500)}`);
+      }
+      return response;
+    } catch (e) {
+      if (e instanceof AIProviderConfigError) throw e;
+      if (isNetworkError(e)) {
+        throw new Error(`Could not reach the custom AI endpoint at ${this.baseUrl}: ${(e as Error).message}. Check the API URL in the AI panel settings.`);
+      }
+      throw e;
+    } finally {
+      cleanup();
+    }
+  }
+
+  async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions): Promise<ChatResult> {
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages,
+      temperature: options?.temperature ?? 0.4,
+      max_tokens: options?.max_tokens ?? 16384,
+    };
+    if (tools && tools.length > 0) {
+      body.tools = tools;
+      body.tool_choice = 'auto';
+    }
+    return runWithRetries(async () => {
+      const response = await this.doFetch(body, 180_000, options?.signal);
+      const data = await response.json();
+      const choice = data.choices?.[0];
+      if (!choice?.message) throw new Error(`Custom AI endpoint returned a malformed response: ${JSON.stringify(data).slice(0, 300)}`);
+      return {
+        content: choice.message.content || '',
+        tool_calls: choice.message.tool_calls,
+        finish_reason: choice.finish_reason === 'tool_calls' ? 'tool_calls' : choice.finish_reason,
+        usage: data.usage ? {
+          prompt_tokens: data.usage.prompt_tokens,
+          completion_tokens: data.usage.completion_tokens,
+          total_tokens: data.usage.total_tokens,
+        } : undefined,
+      } as ChatResult;
+    }, 'custom', options?.signal, options?.onRetry);
+  }
+
+  async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions, onTextDelta?: (text: string) => void): Promise<ChatResult> {
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages,
+      temperature: options?.temperature ?? 0.4,
+      max_tokens: options?.max_tokens ?? 16384,
+      stream: true,
+    };
+    if (tools && tools.length > 0) {
+      body.tools = tools;
+      body.tool_choice = 'auto';
+    }
+    return runWithRetries(async () => {
+      const response = await this.doFetch(body, 60_000, options?.signal);
+      if (!response.body) throw new Error('Custom AI endpoint returned no stream body');
+      const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+      try {
+        const result = await accumulateOpenAiStream(reader, onTextDelta);
+        return {
+          content: result.content,
+          tool_calls: result.tool_calls,
+          finish_reason: result.finish_reason,
+          usage: result.usage,
+        } as ChatResult;
+      } finally {
+        if (options?.signal?.aborted) {
+          try { await reader.cancel(); } catch { /* already closed */ }
+        }
+      }
+    }, 'custom', options?.signal, options?.onRetry);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Anthropic helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -960,10 +1058,42 @@ function mapAnthropicStopReason(reason: string | undefined): 'stop' | 'length' |
  *   3. 'zai' (built-in fallback)
  *
  * The `model` parameter overrides the provider's default model.
+ * Pass `custom` for a user-configured OpenAI-compatible endpoint.
  */
-export function getProvider(requested?: ProviderName, model?: string): AIProvider {
+export function getProvider(requested?: ProviderName, model?: string, custom?: CustomProviderConfig): AIProvider {
   const name = (requested || process.env.AI_PROVIDER || 'zai').toLowerCase() as ProviderName;
   switch (name) {
+    case 'custom': {
+      // A frontend-supplied configuration is authoritative for this request.
+      // Do not silently mix it with server environment credentials.
+      const hasRequestConfig = custom !== undefined && custom !== null;
+      const baseUrl = (hasRequestConfig ? custom.baseUrl : process.env.CUSTOM_AI_BASE_URL || '').trim();
+      if (!baseUrl) {
+        throw new AIProviderConfigError(
+          'Custom AI provider selected but no API URL is configured. ' +
+          'Open the AI panel settings (gear icon) and set the API URL, model, and key.',
+        );
+      }
+      const apiKey = (hasRequestConfig ? custom.apiKey || '' : process.env.CUSTOM_AI_API_KEY || '').trim();
+      // Fail fast with an actionable message instead of sending a keyless
+      // request that the endpoint rejects with an opaque HTTP 401 (which
+      // used to surface as a scary console stack trace). Local endpoints
+      // (Ollama/LM Studio) accept an empty key; hosted ones (Groq, OpenAI,
+      // …) do not.
+      if (!apiKey && customEndpointNeedsKey(baseUrl)) {
+        const preset = findPresetByUrl(baseUrl);
+        const where = preset ? `${preset.label} (${preset.keyUrl})` : 'your endpoint provider';
+        throw new AIProviderConfigError(
+          `Custom AI endpoint (${baseUrl}) needs an API key, but none is set. ` +
+          `Get a key at ${where} and paste it in the AI panel settings (gear icon).`,
+        );
+      }
+      return new CustomProvider({
+        baseUrl,
+        apiKey,
+        model: hasRequestConfig ? custom.model || model || 'default' : model || process.env.CUSTOM_AI_MODEL || 'default',
+      });
+    }
     case 'openai':
       if (!process.env.OPENAI_API_KEY) {
         if (requested) {
@@ -1032,6 +1162,7 @@ export function getAvailableProviders(): ProviderInfoEntry[] {
   const apiKey = zaiApiKey();
   const sandboxCfg = findSandboxZaiConfig();
   const zaiMode: 'api-key' | 'sandbox' | 'unconfigured' = apiKey ? 'api-key' : sandboxCfg ? 'sandbox' : 'unconfigured';
+  const customConfigured = !!(process.env.CUSTOM_AI_BASE_URL || '').trim();
   return [
     {
       name: 'zai',
@@ -1057,6 +1188,17 @@ export function getAvailableProviders(): ProviderInfoEntry[] {
       requiresKey: 'ANTHROPIC_API_KEY',
       model: process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-20241022',
       models: AVAILABLE_MODELS.anthropic,
+    },
+    {
+      name: 'custom',
+      label: 'Custom endpoint',
+      // Always selectable — the user configures URL/key/model in the panel.
+      // `available` reflects whether a server-side default exists; the client
+      // sends per-request credentials anyway.
+      available: true,
+      requiresKey: customConfigured ? null : 'CUSTOM_AI_BASE_URL',
+      model: process.env.CUSTOM_AI_MODEL || 'default',
+      models: AVAILABLE_MODELS.custom,
     },
   ];
 }

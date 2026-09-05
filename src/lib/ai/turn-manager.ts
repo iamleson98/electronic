@@ -32,7 +32,7 @@
 // Concurrency: single-threaded Node — emit()/attach() are synchronous, so an
 // attach can never miss an event (the snapshot + live subscription are atomic).
 
-import { getProvider, AIProviderConfigError, RATE_LIMIT_ERROR_MARKER, type ChatMessage, type ProviderName } from './provider';
+import { getProvider, AIProviderConfigError, RATE_LIMIT_ERROR_MARKER, type ChatMessage, type ProviderName, type CustomProviderConfig } from './provider';
 import { TOOLS_BY_NAME, getToolDefinitions, type ToolContext } from './tools';
 import type { CircuitDocument } from '@/lib/circuit/types';
 import { getPlugin } from '@/lib/circuit/registry';
@@ -74,6 +74,87 @@ function snapshotPcb(pcb: NonNullable<ToolContext['pcb']>): any {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Token-saving helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Trim conversation history so old tool-result payloads don't compound.
+ * Keeps the last 20 messages; beyond the most recent 6 tool exchanges, tool
+ * outputs are replaced with a one-line pointer ("see current circuit state").
+ * Old sim dumps / netlists are the #1 silent token sink in long sessions —
+ * the live netlist preamble already carries current state, so re-sending
+ * stale dumps each iteration is pure waste.
+ */
+function trimHistoryForTokens(messages: ChatMessage[]): ChatMessage[] {
+  const recent = messages.slice(-20);
+  let toolResultsSeen = 0;
+  const out: ChatMessage[] = [];
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const m = recent[i];
+    if (m.role === 'tool') {
+      toolResultsSeen++;
+      if (toolResultsSeen > 6) {
+        const content = typeof m.content === 'string' ? m.content : '';
+        // Keep tiny results verbatim; summarize only the big dumps.
+        if (content.length > 600) {
+          out.unshift({
+            ...m,
+            content: `(${m.name || 'tool'} result omitted — ${content.length} chars, superseded by current circuit state)`,
+          });
+          continue;
+        }
+      }
+    }
+    out.unshift(m);
+  }
+  return out;
+}
+
+/**
+ * Compact a tool result before it enters the message history: round floats,
+ * cap arrays, drop verbose echoes. The live SSE event still carries the full
+ * result for the UI — only the MODEL's copy is trimmed.
+ */
+function compactToolResultForHistory(result: unknown): unknown {
+  try {
+    const json = JSON.stringify(result);
+    if (!json || json.length <= 2000) return result;
+    const roundNums = (v: unknown): unknown => {
+      if (typeof v === 'number') {
+        if (!isFinite(v)) return 0;
+        return Math.round(v * 1e4) / 1e4;
+      }
+      if (Array.isArray(v)) return v.slice(0, 60).map(roundNums);
+      if (v && typeof v === 'object') {
+        const o: Record<string, unknown> = {};
+        for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+          // Drop the noisiest echo fields the model never needs back.
+          if (k === 'wireCurrents' && Array.isArray(val)) {
+            o[k] = (val as unknown[]).slice(0, 20).map(roundNums);
+            continue;
+          }
+          if (k === 'nodeVoltages' && val && typeof val === 'object') {
+            const entries = Object.entries(val as Record<string, unknown>).slice(0, 80);
+            o[k] = Object.fromEntries(entries.map(([ek, ev]) => [ek, roundNums(ev)]));
+            continue;
+          }
+          o[k] = roundNums(val);
+        }
+        return o;
+      }
+      return v;
+    };
+    const compacted = roundNums(result);
+    const out = JSON.stringify(compacted);
+    // Still huge (e.g. a full netlist dump) — truncate with a pointer.
+    if (out.length > 4000) return `${out.slice(0, 4000)}…(truncated ${out.length - 4000} chars — call the tool again for specifics)`;
+    return compacted;
+  } catch {
+    return result;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -92,6 +173,8 @@ export interface TurnParams {
   selectedComponentId?: string | null;
   provider?: ProviderName;
   model?: string;
+  /** User-configured OpenAI-compatible endpoint (provider === 'custom'). */
+  custom?: CustomProviderConfig | null;
   /** Identifies the browser tab — starting a new turn cancels this client's
    *  other running turns (prevents zombie duplicates after auto-restart). */
   clientId?: string | null;
@@ -446,7 +529,7 @@ export class TurnManager {
 
       let provider;
       try {
-        provider = getProvider(body.provider, body.model);
+        provider = getProvider(body.provider, body.model, body.custom ?? undefined);
       } catch (e) {
         if (e instanceof AIProviderConfigError) {
           this.finalize(turn, 'error', { code: 'AI_NOT_CONFIGURED', message: e.message });
@@ -468,7 +551,11 @@ export class TurnManager {
       const messages: ChatMessage[] = [
         { role: 'system', content: buildSystemPrompt() },
         ...(contextPreamble ? [{ role: 'system' as const, content: contextPreamble }] : []),
-        ...body.messages.slice(-60),
+        // Token-frugal history: keep the last 20 messages, but drop stale
+        // tool-result payloads beyond the most recent 6 tool exchanges —
+        // old sim dumps / netlists stay in context forever otherwise and
+        // each iteration re-pays their tokens.
+        ...trimHistoryForTokens(body.messages.slice(-60)),
       ];
 
       let circuitModified = false;
@@ -476,7 +563,6 @@ export class TurnManager {
       let autoVerifyCount = 0;
       /** Missing component types already announced via events (dedupe). */
       const announcedMissing = new Set<string>();
-
       for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
         if (turn.abort.signal.aborted) throw abortError();
 
@@ -502,7 +588,10 @@ export class TurnManager {
               toolDefs,
               {
                 temperature: 0.4,
-                max_tokens: 8192,
+                // Token-frugal output cap: 4096 is plenty for tool-call turns
+                // (tool args are short) and halves worst-case completion cost
+                // vs the old 8192. Long final explanations still fit.
+                max_tokens: 4096,
                 signal: turn.abort.signal,
                 onRetry: (info) => {
                   // Provider-level retry about to sleep — tell the client NOW
@@ -618,7 +707,9 @@ export class TurnManager {
                 role: 'tool',
                 tool_call_id: tc.id,
                 name: tc.function.name,
-                content: JSON.stringify(toolResult.ok ? toolResult.result : { error: toolResult.error }),
+                // Full result goes to the SSE event (UI); the model's history
+                // copy is compacted so context doesn't balloon.
+                content: JSON.stringify(toolResult.ok ? compactToolResultForHistory(toolResult.result) : { error: toolResult.error }),
               });
             } catch (e) {
               const errMsg = `Tool execution error: ${(e as Error).message}`;
@@ -712,12 +803,20 @@ export class TurnManager {
           this.finalize(turn, 'cancelled', { reason: 'user' });
         }
       } else {
-        console.error('[turn-manager] AI turn error:', e);
+        // Expected user-actionable failures (missing key, bad credentials)
+        // are routine — log at warn level without a stack trace. Genuine
+        // bugs keep the full error + stack.
         const msg = String((e as Error).message || e);
-        this.finalize(turn, 'error', {
-          code: isRateLimitExhaustion(e) ? 'AI_RATE_LIMITED' : undefined,
-          message: `AI chat failed: ${msg}`,
-        });
+        if (e instanceof AIProviderConfigError || isAuthOrConfigError(e)) {
+          console.warn('[turn-manager] AI turn not configured:', msg);
+          this.finalize(turn, 'error', { code: 'AI_NOT_CONFIGURED', message: msg });
+        } else {
+          console.error('[turn-manager] AI turn error:', e);
+          this.finalize(turn, 'error', {
+            code: isRateLimitExhaustion(e) ? 'AI_RATE_LIMITED' : undefined,
+            message: `AI chat failed: ${msg}`,
+          });
+        }
       }
     }
   }
