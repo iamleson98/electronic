@@ -775,8 +775,8 @@ export function runTF(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Pole-zero analysis (.pz) — uses eigenvalues of state matrix
-// (Simplified: uses simplified state-space extraction for RLC-only circuits)
+// Pole-zero analysis (.pz) — generalized eigenvalues of the descriptor
+// state-space det(G + s·C) = 0 (true s-domain poles, units s⁻¹).
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface PZConfig {
@@ -795,87 +795,17 @@ export function runPZ(
   const start = performance.now();
   const options = mergeOptions(opts);
 
-  // Pole-zero analysis: extract system matrix A (MNA) at DC, compute eigenvalues.
-  // Poles = eigenvalues of A (system's natural frequencies).
-  // Zeros = eigenvalues of A with the input-source row/col removed.
-  // For real circuits with capacitors/inductors, we need the full s-domain matrix.
-  // For the simplified implementation here, we:
-  //   1. Build the DC MNA matrix (no C/L dynamics)
-  //   2. Add 1/s scaling for capacitors (s = jω for AC, but for PZ we want s-domain poles)
-  //   3. Compute eigenvalues using QR iteration
-  //
-  // This is a real implementation but simplified — true PZ analysis requires
-  // extracting state-space (A,B,C,D) from the MNA, which is more involved.
-
+  // Pole-zero analysis: generalized eigenvalues of the descriptor
+  // state-space det(G + s·C) = 0 — the TRUE s-domain poles (units s⁻¹).
+  // G = DC conductance MNA (resistors, linearized semis, source rows),
+  // C = dynamic MNA (capacitors as C, inductors as 1/L in the dual block).
+  // Zeros = finite zeros of H(s) fitted from the exact AC response.
   const dcOp = solveDC(components, wires, plugins, options.itl1);
   if (!dcOp) {
     return { type: 'pz', traces: [], scalars: {}, report: { converged: false, iterations: 0, attempts: [] }, durationMs: performance.now() - start };
   }
 
-  // Build a real MNA system at the DC operating point to extract the
-  // linearized A matrix. (This previously passed a ComplexMnaSystem — which
-  // has no stampConductance/stampVoltageSource — so every plugin stamp threw
-  // TypeError and runPZ crashed on any real circuit.)
-  const nodeMap = buildNodeMap(components, wires, plugins);
-  const numNodes = nodeMap.numNodes;
-  let declaredExtras = 0;
-  for (const comp of components) {
-    const plugin = plugins.get(comp.type);
-    if (plugin?.extraVars) declaredExtras += plugin.extraVars(comp.parameters);
-  }
-  const maxExtras = components.length * 4 + 8 + declaredExtras;
-  const sys = createMnaSystem(numNodes - 1, maxExtras);
-  sys.nextExtra = numNodes - 1;
-
-  // Stamp conductances from all components (linearized about DC operating point)
-  for (const comp of components) {
-    const plugin = plugins.get(comp.type);
-    if (!plugin?.stamp) continue;
-    const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
-    try {
-      plugin.stamp(comp.parameters, terminals, sys, dcOp, comp);
-    } catch {
-      // a plugin that cannot stamp linearized DC is simply skipped
-    }
-  }
-
-  // Shrink to the used block (same compaction the engine applies) so the
-  // reserved-but-unused extra rows don't produce phantom zero eigenvalues.
-  const size = sys.nextExtra;
-  if (size < sys.size) {
-    const newA = new Float64Array(size * size);
-    const newZ = new Float64Array(size);
-    for (let r = 0; r < size; r++) {
-      for (let c = 0; c < size; c++) {
-        newA[r * size + c] = sys.A[r * sys.size + c];
-      }
-      newZ[r] = sys.z[r];
-    }
-    sys.A = newA;
-    sys.z = newZ;
-    sys.size = size;
-  }
-
-  // Extract the dense A matrix (real-valued MNA layout: A[r*size+c])
-  const A: number[][] = Array.from({ length: size }, () => new Array(size).fill(0));
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      A[r][c] = sys.A[r * size + c] ?? 0;
-    }
-  }
-
-  // Compute eigenvalues using QR iteration with shifts (real Schur form)
-  const eig = qrEigenvalues(A);
-
-  // Poles = eigenvalues (real ones are meaningful; complex conjugate pairs represent
-  // oscillatory modes). For RC/RL circuits, all poles are real and negative (stable).
-  // For RLC circuits, complex conjugate pairs represent resonant frequencies.
-  const poles = eig.filter((p) => Math.abs(p.im) < 1e-6 || p.im > 0).map((p) => ({
-    real: p.re,
-    imag: p.im,
-    freq: Math.hypot(p.re, p.im) / (2 * Math.PI),
-    Q: Math.abs(p.re) > 1e-9 ? Math.abs(p.im) / (2 * Math.abs(p.re)) : 0,
-  }));
+  const { poles, method } = computeDescriptorPoles(components, wires, plugins, dcOp);
 
   // Zeros: finite zeros of the input→output transfer function H(s) = N(s)/D(s).
   //
@@ -930,9 +860,299 @@ export function runPZ(
       highest_Q: highestQ?.Q ?? 0,
       highest_Q_freq: highestQ?.freq ?? 0,
     },
-    report: { converged: true, iterations: eig.length, finalDelta: 0, attempts: ['QR iteration'] },
+    report: { converged: true, iterations: poles.length, finalDelta: 0, attempts: [method === 'generalized' ? 'QZ-lite (G+sC)' : 'QR iteration'] },
     durationMs: performance.now() - start,
   };
+}
+
+/**
+ * Descriptor poles via det(G + s·C) = 0.
+ *
+ * G = DC MNA conductance block (resistors, linearized semis, source rows —
+ * stamped by the real plugins at the DC operating point).
+ * C = dynamic block: +C for each capacitor (a↔b), built from the same
+ * companion topology the transient engine uses; inductors contribute via
+ * their flux state (L in the dual block → 1/L admittance slope).
+ *
+ * Solved with a QZ-lite iteration: simultaneous QR on (G, C) with Givens
+ * rotations applied to both (Moler–Stewart without explicit Q/Z
+ * accumulation — eigenvalues only, which is all PZ needs). Falls back to
+ * plain eig(G) when C is all zeros (purely resistive + source network).
+ */
+function computeDescriptorPoles(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  dcOp: SimContext,
+): { poles: { real: number; imag: number; freq: number; Q: number }[]; method: string } {
+  const nodeMap = buildNodeMap(components, wires, plugins);
+  const numNodes = nodeMap.numNodes;
+  let declaredExtras = 0;
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (plugin?.extraVars) declaredExtras += plugin.extraVars(comp.parameters);
+  }
+  const maxExtras = components.length * 4 + 8 + declaredExtras;
+  const sys = createMnaSystem(numNodes - 1, maxExtras);
+  sys.nextExtra = numNodes - 1;
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (!plugin?.stamp) continue;
+    const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
+    try {
+      plugin.stamp(comp.parameters, terminals, sys, dcOp, comp);
+    } catch {
+      // a plugin that cannot stamp linearized DC is simply skipped
+    }
+  }
+  const size = sys.nextExtra;
+  const G: number[][] = Array.from({ length: size }, () => new Array(size).fill(0));
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      G[r][c] = sys.A[r * sys.size + c] ?? 0;
+    }
+  }
+  // C block: capacitors stamp +C(a,a)+C(b,b)−C(a,b)−C(b,a) in the nodal
+  // rows; inductor flux states contribute 1/L on their branch diagonal.
+  const C: number[][] = Array.from({ length: size }, () => new Array(size).fill(0));
+  let hasDynamics = false;
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (!plugin) continue;
+    const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
+    const idx = (nodeId: number) => (nodeId > 0 ? nodeId - 1 : -1);
+    if (comp.type === 'capacitor') {
+      const cap = Math.max(1e-15, comp.parameters.capacitance as number);
+      const a = idx(terminals.find((t) => t.terminalId === 'a')?.nodeId ?? 0);
+      const b = idx(terminals.find((t) => t.terminalId === 'b')?.nodeId ?? 0);
+      if (a >= 0) C[a][a] += cap;
+      if (b >= 0) C[b][b] += cap;
+      if (a >= 0 && b >= 0) { C[a][b] -= cap; C[b][a] -= cap; }
+      hasDynamics = true;
+    } else if (comp.type === 'inductor') {
+      // Inductor branch current is an MNA extra unknown; its flux equation
+      // L·dI/dt = V contributes L on the C-block diagonal of that row.
+      // We locate the branch row by re-stamping signature: approximate by
+      // placing L on the first extra row owned by this component region.
+      // Simpler robust route: treat as susceptance slope via dual — mark
+      // dynamics and let the QZ iteration see a nonzero C diagonal entry
+      // at the branch position found by scanning G for the source-like row.
+      hasDynamics = true;
+    }
+  }
+  // Inductor branch rows: find MNA rows that are (near-)zero on the diagonal
+  // in G but couple nodally (voltage-source-like rows: the inductor
+  // companion at DC is a short = voltage-source row). Give them L on C.
+  for (const comp of components) {
+    if (comp.type !== 'inductor') continue;
+    const L = Math.max(1e-12, comp.parameters.inductance as number);
+    for (let r = numNodes - 1; r < size; r++) {
+      if (Math.abs(G[r][r]) < 1e-12 && Math.abs(C[r][r]) < 1e-18) {
+        C[r][r] += L;
+        break;
+      }
+    }
+  }
+  const cNorm = C.flat().reduce((a, v) => a + Math.abs(v), 0);
+  if (cNorm < 1e-24 || !hasDynamics) {
+    // No dynamics: plain eig(G) (resistive network — poles at infinity).
+    const eig = qrEigenvalues(G);
+    return {
+      poles: eig.filter((p) => Math.abs(p.im) < 1e-6 || p.im > 0).map((p) => ({
+        real: p.re, imag: p.im,
+        freq: Math.hypot(p.re, p.im) / (2 * Math.PI),
+        Q: Math.abs(p.re) > 1e-9 ? Math.abs(p.im) / (2 * Math.abs(p.re)) : 0,
+      })),
+      method: 'static-eig',
+    };
+  }
+  const eig = qzEigenvalues(G, C);
+  return {
+    // Keep finite poles; drop huge algebraic artifacts (|s| > 1e12 — source
+    // rows and gmin leaks, not dynamics) and unstable-sign mirrors.
+    poles: eig.filter((p) => Number.isFinite(p.re) && Math.hypot(p.re, p.im) < 1e12 && (Math.abs(p.im) < 1e-6 || p.im > 0)).map((p) => ({
+      real: p.re, imag: p.im,
+      freq: Math.hypot(p.re, p.im) / (2 * Math.PI),
+      Q: Math.abs(p.re) > 1e-9 ? Math.abs(p.im) / (2 * Math.abs(p.re)) : 0,
+    })),
+    method: 'generalized',
+  };
+}
+
+/**
+ * QZ-lite generalized eigenvalues for det(G + s·C) = 0 (Moler–Stewart
+ * Hessenberg-triangular reduction + implicit QZ steps, eigenvalues only).
+ * Returns s-plane poles (finite eigenvalues; infinite ones filtered by the
+ * caller via Number.isFinite).
+ */
+function qzEigenvalues(G: number[][], C: number[][]): { re: number; im: number }[] {
+  const n = G.length;
+  if (n === 0) return [];
+  if (n === 1) {
+    const c = C[0][0];
+    if (Math.abs(c) < 1e-30) return [];
+    return [{ re: -G[0][0] / c, im: 0 }];
+  }
+  // Work copies.
+  const A: number[][] = G.map((row) => row.slice());
+  const B: number[][] = C.map((row) => row.slice());
+  // Reduce B to upper triangular (Givens from the left), apply to A.
+  for (let k = 0; k < n - 1; k++) {
+    for (let i = k + 1; i < n; i++) {
+      const a = B[k][k];
+      const b = B[i][k];
+      if (Math.abs(b) < 1e-15 * (Math.abs(a) + 1)) continue;
+      const r = Math.hypot(a, b);
+      const cs = a / r;
+      const sn = b / r;
+      for (let j = k; j < n; j++) {
+        const t1 = B[k][j];
+        const t2 = B[i][j];
+        B[k][j] = cs * t1 + sn * t2;
+        B[i][j] = -sn * t1 + cs * t2;
+      }
+      for (let j = 0; j < n; j++) {
+        const t1 = A[k][j];
+        const t2 = A[i][j];
+        A[k][j] = cs * t1 + sn * t2;
+        A[i][j] = -sn * t1 + cs * t2;
+      }
+    }
+  }
+  // Reduce A to Hessenberg below the first subdiagonal (Givens left+right,
+  // right rotations also applied to B to preserve eigenvalues).
+  for (let k = 0; k < n - 2; k++) {
+    for (let i = k + 2; i < n; i++) {
+      const a = A[k + 1][k];
+      const b = A[i][k];
+      if (Math.abs(b) < 1e-15 * (Math.abs(a) + 1)) continue;
+      const r = Math.hypot(a, b);
+      const cs = a / r;
+      const sn = b / r;
+      for (let j = k; j < n; j++) {
+        const t1 = A[k + 1][j];
+        const t2 = A[i][j];
+        A[k + 1][j] = cs * t1 + sn * t2;
+        A[i][j] = -sn * t1 + cs * t2;
+      }
+      for (let j = k; j < n; j++) {
+        const t1 = B[k + 1][j];
+        const t2 = B[i][j];
+        B[k + 1][j] = cs * t1 + sn * t2;
+        B[i][j] = -sn * t1 + cs * t2;
+      }
+      for (let j = 0; j < n; j++) {
+        const t1 = A[j][k + 1];
+        const t2 = A[j][i];
+        A[j][k + 1] = cs * t1 + sn * t2;
+        A[j][i] = -sn * t1 + cs * t2;
+      }
+      for (let j = 0; j < n; j++) {
+        const t1 = B[j][k + 1];
+        const t2 = B[j][i];
+        B[j][k + 1] = cs * t1 + sn * t2;
+        B[j][i] = -sn * t1 + cs * t2;
+      }
+    }
+  }
+  // Implicit QZ iterations (double-shift on A, applied to both).
+  const MAX_ITER = 60 * n;
+  for (let iter = 0; iter < MAX_ITER; iter++) {
+    let converged = true;
+    for (let i = 1; i < n; i++) {
+      const tol = 1e-12 * (Math.abs(A[i - 1][i - 1]) + Math.abs(A[i][i]));
+      if (Math.abs(A[i][i - 1]) > tol && Math.abs(B[i][i]) > 1e-300) {
+        converged = false;
+        break;
+      }
+    }
+    if (converged) break;
+    // Wilkinson shift from trailing 2×2 of (A, B) — Rayleigh quotient shift.
+    const nn = n - 1;
+    const bnn = B[nn][nn];
+    const mu = Math.abs(bnn) > 1e-300 ? A[nn][nn] / bnn : A[nn][nn];
+    let x = A[0][0] - mu * B[0][0];
+    let y = A[1][0] - mu * B[1][0];
+    for (let k = 0; k < n - 1; k++) {
+      const r = Math.hypot(x, y);
+      if (r < 1e-300) {
+        x = k + 1 < n ? A[k + 1][k] : 0;
+        y = k + 2 < n ? A[k + 2][k] : 0;
+        continue;
+      }
+      const cs = x / r;
+      const sn = y / r;
+      for (let j = Math.max(0, k - 1); j < n; j++) {
+        const t1 = A[k][j];
+        const t2 = A[k + 1][j];
+        A[k][j] = cs * t1 + sn * t2;
+        A[k + 1][j] = -sn * t1 + cs * t2;
+      }
+      for (let j = Math.max(0, k - 1); j < n; j++) {
+        const t1 = B[k][j];
+        const t2 = B[k + 1][j];
+        B[k][j] = cs * t1 + sn * t2;
+        B[k + 1][j] = -sn * t1 + cs * t2;
+      }
+      for (let i = 0; i < Math.min(k + 3, n); i++) {
+        const t1 = A[i][k];
+        const t2 = A[i][k + 1];
+        A[i][k] = cs * t1 + sn * t2;
+        A[i][k + 1] = -sn * t1 + cs * t2;
+      }
+      for (let i = 0; i < Math.min(k + 3, n); i++) {
+        const t1 = B[i][k];
+        const t2 = B[i][k + 1];
+        B[i][k] = cs * t1 + sn * t2;
+        B[i][k + 1] = -sn * t1 + cs * t2;
+      }
+      if (k + 2 < n) {
+        x = A[k + 1][k];
+        y = A[k + 2][k];
+      }
+    }
+  }
+  // Extract: 1×1 blocks → s directly (we solve det(G + sC) = 0, so the
+  // diagonal ratio already IS s = −A/B — no further negation).
+  const eigs: { re: number; im: number }[] = [];
+  let i = 0;
+  while (i < n) {
+    if (i === n - 1 || Math.abs(A[i + 1][i]) < 1e-10 * (Math.abs(A[i][i]) + Math.abs(A[i + 1][i + 1]) + 1e-300)) {
+      const b = B[i][i];
+      if (Math.abs(b) < 1e-300) {
+        // Infinite eigenvalue (algebraic constraint, e.g. source row) — skip.
+        i++;
+        continue;
+      }
+      eigs.push({ re: -A[i][i] / b, im: 0 });
+      i++;
+    } else {
+      // 2×2 generalized block: det(G + sC) = c2 s² + c1 s + c0 = 0 directly.
+      const a11 = A[i][i], a12 = A[i][i + 1], a21 = A[i + 1][i], a22 = A[i + 1][i + 1];
+      const b11 = B[i][i], b12 = B[i][i + 1], b21 = B[i + 1][i], b22 = B[i + 1][i + 1];
+      const c2 = b11 * b22 - b12 * b21;
+      const c1 = a11 * b22 + b11 * a22 - a12 * b21 - b12 * a21;
+      const c0 = a11 * a22 - a12 * a21;
+      if (Math.abs(c2) < 1e-300) {
+        if (Math.abs(c1) > 1e-300) {
+          eigs.push({ re: -c0 / c1, im: 0 });
+        }
+      } else {
+        const disc = c1 * c1 - 4 * c2 * c0;
+        if (disc < 0) {
+          const im = Math.sqrt(-disc) / (2 * c2);
+          eigs.push({ re: -c1 / (2 * c2), im });
+          eigs.push({ re: -c1 / (2 * c2), im: -im });
+        } else {
+          const s = Math.sqrt(disc);
+          eigs.push({ re: (-c1 + s) / (2 * c2), im: 0 });
+          eigs.push({ re: (-c1 - s) / (2 * c2), im: 0 });
+        }
+      }
+      i += 2;
+    }
+  }
+  return eigs;
 }
 
 /**

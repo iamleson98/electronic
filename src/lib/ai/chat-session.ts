@@ -38,6 +38,8 @@ export interface ToolCallEntry {
   ok: boolean;
   /** True while this call is in flight (last call of the ACTIVE turn only). */
   pending?: boolean;
+  /** wall-clock duration in ms (filled when the call completes) */
+  durationMs?: number;
 }
 
 export interface ChatMessage {
@@ -84,6 +86,34 @@ export interface ChatMessage {
     completion_tokens: number;
     total_tokens: number;
   };
+  /** Normalized per-turn usage for the cost readout (ChatPanel). */
+  turnUsage?: TurnUsage;
+}
+
+/** Normalized per-turn usage for the cost readout (ChatPanel). */
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** estimated cost in USD, when the model price is known */
+  costUsd?: number;
+}
+
+/** Rough per-1M-token prices (USD) for known models — estimates only. */
+const MODEL_PRICES: { match: RegExp; input: number; output: number }[] = [
+  { match: /gpt-4o-mini/i, input: 0.15, output: 0.6 },
+  { match: /gpt-4o\b/i, input: 2.5, output: 10 },
+  { match: /gpt-4\.1-mini/i, input: 0.4, output: 1.6 },
+  { match: /gpt-4\.1\b/i, input: 2, output: 8 },
+  { match: /claude.*haiku/i, input: 0.25, output: 1.25 },
+  { match: /claude.*sonnet/i, input: 3, output: 15 },
+  { match: /claude.*opus/i, input: 15, output: 75 },
+  { match: /glm/i, input: 0.5, output: 1.5 },
+];
+
+export function estimateCost(model: string, inputTokens: number, outputTokens: number): number | undefined {
+  const p = MODEL_PRICES.find((q) => q.match.test(model));
+  if (!p) return undefined;
+  return (inputTokens / 1e6) * p.input + (outputTokens / 1e6) * p.output;
 }
 
 export type ActivePhase =
@@ -142,9 +172,12 @@ interface ChatSessionState {
   setProvider(name: 'zai' | 'openai' | 'anthropic' | 'custom'): void;
   setModel(model: string): void;
   setAutoApply(v: boolean): void;
+  /** Explanation skill level (persisted): beginner / practitioner / engineer */
+  skillLevel: 'beginner' | 'practitioner' | 'engineer';
+  setSkillLevel(v: 'beginner' | 'practitioner' | 'engineer'): void;
   resetTokens(): void;
 
-  send(text: string): void;
+  send(text: string, images?: string[]): void;
   stop(): void;
   /** Re-send a user message. With `failedMsgId` (the assistant message whose
    *  Retry button was clicked) it re-sends THAT turn's user message; without
@@ -163,6 +196,7 @@ interface ChatSessionState {
 const PROVIDER_STORAGE_KEY = 'circuit-lab.ai-provider';
 const MODEL_STORAGE_KEY = 'circuit-lab.ai-model';
 const AUTO_APPLY_STORAGE_KEY = 'circuit-lab.ai-auto-apply';
+const SKILL_STORAGE_KEY = 'circuit-lab.ai-skill';
 const ACTIVE_TURN_STORAGE_KEY = 'circuit-lab.ai.active-turn';
 const CLIENT_ID_STORAGE_KEY = 'circuit-lab.ai.client-id';
 const CUSTOM_URL_STORAGE_KEY = 'circuit-lab.ai-custom-url';
@@ -722,6 +756,16 @@ function finalizeDone(rt: TurnRuntime, data: any): void {
         },
       }));
     }
+    // Normalized per-turn usage + cost estimate for the ChatPanel readout.
+    const inputTokens = usage?.prompt_tokens ?? 0;
+    const outputTokens = usage?.completion_tokens ?? 0;
+    const turnUsage = (inputTokens > 0 || outputTokens > 0)
+      ? {
+          inputTokens,
+          outputTokens,
+          costUsd: estimateCost(useChatSession.getState().selectedModel, inputTokens, outputTokens),
+        }
+      : undefined;
 
     patchAssistantMessage(rt.assistantMsgId, {
       content: response,
@@ -735,6 +779,7 @@ function finalizeDone(rt: TurnRuntime, data: any): void {
       ...(missingList && missingList.length > 0 ? { missingComponents: missingList } : {}),
       ...(pcbUpdated ? { pcbUpdated: true } : {}),
       usage,
+      ...(turnUsage ? { turnUsage } : {}),
     });
   } catch (e) {
     // The final circuit apply (loadDocument/pushHistory on a possibly
@@ -1169,10 +1214,16 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
     set({ autoApply: v });
   },
 
+  skillLevel: (localStorageGet(SKILL_STORAGE_KEY) as 'beginner' | 'practitioner' | 'engineer') || 'practitioner',
+  setSkillLevel: (v) => {
+    localStorageSet(SKILL_STORAGE_KEY, v);
+    set({ skillLevel: v });
+  },
+
   resetTokens: () => set({ totalTokens: { prompt: 0, completion: 0, total: 0 } }),
 
-  send: (text) => {
-    if (!text.trim() || get().active || runtime) return;
+  send: (text, images?) => {
+    if ((!text.trim() && (!images || images.length === 0)) || get().active || runtime) return;
 
     // Fail fast for a keyless hosted custom endpoint (e.g. Groq picked but
     // no key pasted): don't burn a server turn that can only come back as an
@@ -1211,11 +1262,11 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
         role: m.role,
         content: m.content,
       })),
-      { role: 'user' as const, content: text },
+      { role: 'user' as const, content: text, ...(images && images.length > 0 ? { images } : {}) },
     ];
 
     const assistantMsgId = `a_${Date.now()}`;
-    const userMsg: ChatMessage = { id: `u_${Date.now()}`, role: 'user', content: text, timestamp: Date.now() };
+    const userMsg: ChatMessage = { id: `u_${Date.now()}`, role: 'user', content: text || (images?.length ? '[image attached]' : ''), timestamp: Date.now() };
     const assistantMsg: ChatMessage = { id: assistantMsgId, role: 'assistant', content: '', timestamp: Date.now(), loading: true, toolCalls: [] };
 
     const isCustom = get().selectedProvider === 'custom';

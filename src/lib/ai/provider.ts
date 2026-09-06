@@ -109,6 +109,25 @@ const SANDBOX_NETWORK_HINT =
   'this deployment is running elsewhere. To use the AI assistant here, set the ZAI_API_KEY environment variable ' +
   '(create a key at https://z.ai → API Keys) and restart. Server-to-server API calls work from any domain.';
 
+/**
+ * Map ChatMessages to OpenAI-compatible payloads, expanding `images` into
+ * image_url content parts for vision-capable models. Text-only callers are
+ * unaffected (no images → plain string content as before).
+ */
+function withImageParts(messages: ChatMessage[]): unknown[] {
+  return messages.map((m) => {
+    const images = (m as ChatMessage & { images?: string[] }).images;
+    if (!images || images.length === 0 || m.role !== 'user') return m;
+    return {
+      ...m,
+      content: [
+        ...(m.content ? [{ type: 'text', text: m.content }] : []),
+        ...images.slice(0, 3).map((url) => ({ type: 'image_url', image_url: { url } })),
+      ],
+    };
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Z.ai configuration detection (shared by the factory + providers route)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -466,7 +485,7 @@ class ZaiPublicProvider implements AIProvider {
   async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions): Promise<ChatResult> {
     const body: any = {
       model: this.model,
-      messages,
+      messages: withImageParts(messages),
       temperature: options?.temperature ?? 0.4,
       max_tokens: options?.max_tokens ?? 16384,
     };
@@ -496,7 +515,7 @@ class ZaiPublicProvider implements AIProvider {
   async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions, onTextDelta?: (text: string) => void): Promise<ChatResult> {
     const body: any = {
       model: this.model,
-      messages,
+      messages: withImageParts(messages),
       temperature: options?.temperature ?? 0.4,
       max_tokens: options?.max_tokens ?? 16384,
       stream: true,
@@ -589,7 +608,7 @@ class ZaiSandboxProvider implements AIProvider {
   async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions): Promise<ChatResult> {
     const body: any = {
       model: this.model,
-      messages,
+      messages: withImageParts(messages),
       temperature: options?.temperature ?? 0.4,
       max_tokens: options?.max_tokens ?? 16384,
     };
@@ -624,7 +643,7 @@ class ZaiSandboxProvider implements AIProvider {
   async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions, onTextDelta?: (text: string) => void): Promise<ChatResult> {
     const body: any = {
       model: this.model,
-      messages,
+      messages: withImageParts(messages),
       temperature: options?.temperature ?? 0.4,
       max_tokens: options?.max_tokens ?? 16384,
       stream: true,
@@ -703,7 +722,7 @@ class OpenAIProvider implements AIProvider {
   private buildBody(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions, stream = false): any {
     const body: any = {
       model: this.model,
-      messages,
+      messages: withImageParts(messages),
       temperature: options?.temperature ?? 0.4,
       max_tokens: options?.max_tokens ?? 16384,
     };
@@ -825,10 +844,23 @@ class AnthropicProvider implements AIProvider {
         }
         anthropicMessages.push({ role: 'assistant', content });
       } else {
-        anthropicMessages.push({
-          role: msg.role,
-          content: msg.content,
-        });
+        const images = (msg as ChatMessage & { images?: string[] }).images;
+        if (msg.role === 'user' && images && images.length > 0) {
+          // Anthropic image blocks (base64 data URLs).
+          const content: unknown[] = msg.content ? [{ type: 'text', text: msg.content }] : [];
+          for (const url of images.slice(0, 3)) {
+            const m = url.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+            if (m) {
+              content.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } });
+            }
+          }
+          anthropicMessages.push({ role: msg.role, content });
+        } else {
+          anthropicMessages.push({
+            role: msg.role,
+            content: msg.content,
+          });
+        }
       }
     }
 
@@ -964,7 +996,7 @@ class CustomProvider implements AIProvider {
   async chat(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions): Promise<ChatResult> {
     const body: Record<string, unknown> = {
       model: this.model,
-      messages,
+      messages: withImageParts(messages),
       temperature: options?.temperature ?? 0.4,
       max_tokens: options?.max_tokens ?? 16384,
     };
@@ -993,7 +1025,7 @@ class CustomProvider implements AIProvider {
   async chatStream(messages: ChatMessage[], tools?: ToolDefinition[], options?: ProviderCallOptions, onTextDelta?: (text: string) => void): Promise<ChatResult> {
     const body: Record<string, unknown> = {
       model: this.model,
-      messages,
+      messages: withImageParts(messages),
       temperature: options?.temperature ?? 0.4,
       max_tokens: options?.max_tokens ?? 16384,
       stream: true,

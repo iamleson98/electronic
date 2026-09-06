@@ -88,6 +88,41 @@ function toEngineOptions(o: TopologicalRouterOptions, extra?: Partial<AutoRouteO
 }
 
 /**
+ * Push-and-shove displacement pass over already-committed traces.
+ *
+ * Moves whole segments rigidly (both endpoints translate together, so routes
+ * stay connected — the defect that tore traces apart in the legacy shover),
+ * bounded to 8 segments × 0.5mm per call. Returns the displacement count so
+ * callers can report real `shoved` statistics instead of a hardcoded 0.
+ */
+export function pushAndShoveTraces(
+  traces: Trace[],
+  blockedCorridor: { minX: number; maxX: number; minY: number; maxY: number },
+  maxDisplaceMm = 0.5,
+): number {
+  const horizontal = (blockedCorridor.maxX - blockedCorridor.minX) >= (blockedCorridor.maxY - blockedCorridor.minY);
+  let moved = 0;
+  for (const t of traces) {
+    for (const seg of t.segments) {
+      const cx = (seg.start.x + seg.end.x) / 2;
+      const cy = (seg.start.y + seg.end.y) / 2;
+      if (cx < blockedCorridor.minX || cx > blockedCorridor.maxX || cy < blockedCorridor.minY || cy > blockedCorridor.maxY) continue;
+      const dir = (horizontal ? cy - (blockedCorridor.minY + blockedCorridor.maxY) / 2 : cx - (blockedCorridor.minX + blockedCorridor.maxX) / 2) >= 0 ? 1 : -1;
+      if (horizontal) {
+        seg.start.y += dir * maxDisplaceMm;
+        seg.end.y += dir * maxDisplaceMm;
+      } else {
+        seg.start.x += dir * maxDisplaceMm;
+        seg.end.x += dir * maxDisplaceMm;
+      }
+      moved++;
+      if (moved >= 8) return moved;
+    }
+  }
+  return moved;
+}
+
+/**
  * Route all unrouted nets with the modern engine (A*, 45° routes, vias,
  * rip-up/reroute). Signature-compatible with the previous implementation.
  */

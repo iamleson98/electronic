@@ -9,6 +9,9 @@ export interface ChatMessage {
   tool_calls?: ToolCall[];
   tool_call_id?: string;  // for role: 'tool' messages
   name?: string;           // tool name (for role: 'tool')
+  /** Attached images (data URLs) — vision-capable providers receive them as
+   *  image_url parts; text-only providers get a "[image attached]" note. */
+  images?: string[];
 }
 
 export interface ToolCall {

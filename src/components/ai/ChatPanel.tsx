@@ -19,16 +19,37 @@ import {
 } from 'lucide-react';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Suggested prompts (welcome screen)
+// Suggested prompts (welcome screen) — gallery grouped by task
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SUGGESTED_PROMPTS = [
-  'Build a 555 LED blinker at 2 Hz with 60% duty cycle',
-  'Build a 5V power supply with transformer, bridge rectifier and regulator',
-  'Design an inverting amplifier with a gain of 10 and verify it',
-  'Why doesn\'t my circuit work? Diagnose it',
-  'What if I changed R1 to 10k? Compare the results',
+const PROMPT_GALLERY: { group: string; prompts: string[] }[] = [
+  {
+    group: 'Build',
+    prompts: [
+      'Build a 555 LED blinker at 2 Hz with 60% duty cycle',
+      'Build a 5V power supply with transformer, bridge rectifier and regulator',
+      'Design an inverting amplifier with a gain of 10 and verify it',
+    ],
+  },
+  {
+    group: 'Debug',
+    prompts: [
+      "Why doesn't my circuit work? Diagnose it",
+      'What if I changed R1 to 10k? Compare the results',
+      'Run a production review (derating + checklist) on my circuit',
+    ],
+  },
+  {
+    group: 'Analyze',
+    prompts: [
+      'Will my circuit still work with 5% parts? Run Monte-Carlo',
+      'Which part dominates variation? Run sensitivity',
+      'Generate a Markdown design report for this circuit',
+    ],
+  },
 ];
+
+const SUGGESTED_PROMPTS = PROMPT_GALLERY.flatMap((g) => g.prompts).slice(0, 5);
 
 /** Tools that mutate the circuit — used to decide whether to offer Undo. */
 const MUTATING_TOOLS = new Set([
@@ -133,18 +154,40 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (!isLoading && input.trim()) {
-        send(input);
+      if (!isLoading && (input.trim() || attachedImages.length > 0)) {
+        send(input, attachedImages.length > 0 ? attachedImages : undefined);
         setInput('');
+        setAttachedImages([]);
       }
     }
   };
 
   const handleSendClick = () => {
     if (isLoading) { stop(); return; }
-    if (!input.trim()) return;
-    send(input);
+    if (!input.trim() && attachedImages.length === 0) return;
+    send(input, attachedImages.length > 0 ? attachedImages : undefined);
     setInput('');
+    setAttachedImages([]);
+  };
+
+  // Attached images (multimodal input): PNG/JPEG schematics, scope photos,
+  // datasheet snippets. Sent as image_url parts to vision providers.
+  const [attachedImages, setAttachedImages] = useState<string[]>([]);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const attachFiles = (files: FileList | null) => {
+    if (!files) return;
+    for (const f of Array.from(files).slice(0, 3 - attachedImages.length)) {
+      if (!f.type.startsWith('image/')) continue;
+      if (f.size > 4 * 1024 * 1024) continue; // 4MB cap per image
+      const reader = new FileReader();
+      reader.onload = () => {
+        const url = String(reader.result ?? '');
+        if (url.startsWith('data:image/')) {
+          setAttachedImages((prev) => [...prev.slice(0, 2), url]);
+        }
+      };
+      reader.readAsDataURL(f);
+    }
   };
 
   return (
@@ -347,15 +390,36 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
                   simulation. One <kbd className="rounded bg-slate-900 px-1 text-[10px] text-cyan-300">Ctrl+Z</kbd> undoes everything I did.
                 </p>
               </div>
-              {SUGGESTED_PROMPTS.map(prompt => (
-                <button
-                  key={prompt}
-                  onClick={() => send(prompt)}
-                  className="block w-full rounded-lg border border-slate-800 bg-slate-900 p-3 text-left text-sm text-slate-300 transition-colors hover:border-purple-700 hover:bg-slate-800"
-                >
-                  {prompt}
-                </button>
+              {PROMPT_GALLERY.map((group) => (
+                <div key={group.group}>
+                  <p className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">{group.group}</p>
+                  {group.prompts.map((prompt) => (
+                    <button
+                      key={prompt}
+                      onClick={() => send(prompt)}
+                      className="mb-1 block w-full rounded-lg border border-slate-800 bg-slate-900 p-3 text-left text-sm text-slate-300 transition-colors hover:border-purple-700 hover:bg-slate-800"
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
               ))}
+              <button
+                onClick={() => {
+                  const lines = messages.map((m) => `## ${m.role}\n${m.content}`);
+                  const blob = new Blob([lines.join('\n\n')], { type: 'text/markdown' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = 'circuit-chat-transcript.md';
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+                className="block w-full rounded-lg border border-slate-800 bg-slate-900 p-2 text-center text-xs text-slate-500 hover:text-slate-300"
+                title="Download conversation transcript as Markdown"
+              >
+                Download transcript (.md)
+              </button>
             </div>
           )}
 
@@ -367,18 +431,52 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
 
       {/* Input */}
       <div className="border-t border-slate-800 p-3">
+        {attachedImages.length > 0 && (
+          <div className="mb-2 flex gap-2">
+            {attachedImages.map((url, i) => (
+              <div key={i} className="relative">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={url} alt={`attachment ${i + 1}`} className="h-14 w-14 rounded border border-slate-700 object-cover" />
+                <button
+                  onClick={() => setAttachedImages((prev) => prev.filter((_, j) => j !== i))}
+                  className="absolute -right-1 -top-1 rounded-full bg-slate-800 px-1 text-[10px] text-slate-300 hover:text-rose-300"
+                  title="Remove image"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="relative">
           <Textarea
             ref={textareaRef}
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={isLoading ? 'AI is working — press Stop to interrupt…' : 'Ask me to build, analyze, or debug a circuit…'}
-            className="min-h-15 max-h-50 resize-none bg-slate-900 pr-12 text-sm text-slate-100 placeholder:text-slate-500"
+            placeholder={isLoading ? 'AI is working — press Stop to interrupt…' : 'Ask me to build, analyze, or debug a circuit… (attach a schematic photo with 📎)'}
+            className="min-h-15 max-h-50 resize-none bg-slate-900 pr-20 text-sm text-slate-100 placeholder:text-slate-500"
+          />
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            multiple
+            className="hidden"
+            onChange={(e) => { attachFiles(e.target.files); e.target.value = ''; }}
           />
           <Button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isLoading}
+            size="icon"
+            title="Attach schematic / scope / datasheet image (max 3, 4MB each)"
+            className="absolute bottom-2 right-11 h-8 w-8 bg-slate-800 hover:bg-slate-700"
+          >
+            📎
+          </Button>
+          <Button
             onClick={handleSendClick}
-            disabled={!isLoading && !input.trim()}
+            disabled={!isLoading && !input.trim() && attachedImages.length === 0}
             size="icon"
             title={isLoading ? 'Stop the AI' : 'Send'}
             className={`absolute bottom-2 right-2 h-8 w-8 ${isLoading ? 'bg-rose-600 hover:bg-rose-500' : ''}`}
@@ -778,6 +876,11 @@ function StepRow({ step }: { step: ToolCallEntry & { live?: string } }) {
         {!live && (
           <span className="hidden font-mono text-[9px] text-slate-600 sm:inline">{step.name}</span>
         )}
+        {!live && step.durationMs !== undefined && (
+          <span className="shrink-0 font-mono text-[9px] text-slate-500" title="Tool execution time">
+            {step.durationMs < 1000 ? `${Math.round(step.durationMs)}ms` : `${(step.durationMs / 1000).toFixed(1)}s`}
+          </span>
+        )}
       </div>
       <CollapsibleContent>
         <div className="mb-1 ml-6 space-y-1 rounded border border-slate-800/50 bg-slate-950/50 p-2 text-xs">
@@ -994,6 +1097,36 @@ function MissingComponentsCard({ types }: { types: string[] }) {
 // Message bubbles
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Render assistant text with clickable KB citations: [kb:article-id] becomes
+ * a button that asks the AI to explain that article.
+ */
+function MessageContent({ text }: { text: string }) {
+  const parts = text.split(/(\[kb:[a-z0-9-]+\])/gi);
+  if (parts.length === 1) {
+    return <div className="whitespace-pre-wrap wrap-break-word">{text}</div>;
+  }
+  return (
+    <div className="whitespace-pre-wrap wrap-break-word">
+      {parts.map((part, i) => {
+        const m = part.match(/^\[kb:([a-z0-9-]+)\]$/i);
+        if (!m) return <span key={i}>{part}</span>;
+        const id = m[1];
+        return (
+          <button
+            key={i}
+            onClick={() => window.dispatchEvent(new CustomEvent('circuitlab:ask-ai', { detail: `Explain the knowledge-base article "${id}" and how it applies to my circuit` }))}
+            className="cursor-pointer rounded bg-cyan-950/60 px-1 font-mono text-[11px] text-cyan-300 hover:bg-cyan-900/60 hover:underline"
+            title={`Knowledge-base article: ${id} (click to explain)`}
+          >
+            📖 {id}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: boolean }) {
   const applyPendingDiff = useChatSession(s => s.applyPendingDiff);
   const dismissPendingDiff = useChatSession(s => s.dismissPendingDiff);
@@ -1043,7 +1176,15 @@ function MessageBubble({ message, isActive }: { message: ChatMessage; isActive: 
             ) : null}
 
             {hasContent && (
-              <div className="whitespace-pre-wrap wrap-break-word">{message.content}</div>
+              <MessageContent text={message.content} />
+            )}
+            {message.turnUsage && (message.turnUsage.inputTokens > 0 || message.turnUsage.outputTokens > 0) && (
+              <div className="font-mono text-[10px] text-slate-500" title="Tokens used by this turn">
+                ↑{message.turnUsage.inputTokens.toLocaleString()} ↓{message.turnUsage.outputTokens.toLocaleString()}
+                {message.turnUsage.costUsd != null && message.turnUsage.costUsd > 0 && (
+                  <span> · ${message.turnUsage.costUsd.toFixed(4)}</span>
+                )}
+              </div>
             )}
 
             {message.stopped && (

@@ -23,6 +23,20 @@ import {
   escalateGmin,
   junctionCapacitance,
 } from '../nonlinear';
+import type { SimContext, CircuitComponent } from '../types';
+
+/**
+ * Effective device temperature in °C: per-component `temp` override wins,
+ * else the sim-global temp, else 27. Wires the PropertyPanel Production
+ * temp field into every temperature-dependent stamp in this file.
+ */
+export function deviceTemp(sim: SimContext, comp?: CircuitComponent): number {
+  const compTemp = comp?.temp;
+  if (typeof compTemp === 'number' && Number.isFinite(compTemp)) return compTemp;
+  const simTemp = (sim as unknown as { temp?: number }).temp;
+  if (typeof simTemp === 'number' && Number.isFinite(simTemp)) return simTemp;
+  return 27;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shockley diode — full model
@@ -87,9 +101,9 @@ export const diodeShockley: ComponentPlugin = {
     const Vj = params.Vj as number;
     const M = params.M as number;
     const Tt = params.Tt as number;
-    // Thermal voltage tracks the sim temperature (kT/q) so .temp sweeps
-    // actually move the Shockley curve; tempScaleIs scales Is with T.
-    const simTemp = (sim as unknown as { temp?: number }).temp ?? 27;
+    // Thermal voltage tracks the device temperature (per-part override,
+    // else sim temp) so .temp sweeps move the Shockley curve.
+    const simTemp = deviceTemp(sim, comp);
     const Vt = thermalVoltage(simTemp);
     const IsT = tempScaleIs(Is, 27, simTemp);
     const vscale = N * Vt;
@@ -149,13 +163,13 @@ export const diodeShockley: ComponentPlugin = {
     st[stateKey('dio', instance, a, k)] = sim.nodeVoltage[a] - sim.nodeVoltage[k];
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
-  measure(params, terminals, sim) {
+  measure(params, terminals, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
     const Is = params.Is as number;
     const N = params.N as number;
-    const Vt = thermalVoltage(27);
+    const Vt = thermalVoltage(deviceTemp(sim, comp));
     const i = Is * (Math.exp(Math.min(v / (N * Vt), 30)) - 1);
     return [
       { label: 'V', value: v.toFixed(4), unit: 'V' },
@@ -235,7 +249,7 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       const Bf = params.Bf as number;
       const Br = params.Br as number;
       const Vaf = params.Vaf as number;
-      const Vt = thermalVoltage(27);
+      const Vt = thermalVoltage(deviceTemp(sim, comp));
       // Get previous voltages
       const st = sim.state.__global ?? (sim.state.__global = {});
       const key = stateKey('bjt', comp, c, b, e);
@@ -295,7 +309,7 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       st[key + '_vce'] = sim.nodeVoltage[c] - sim.nodeVoltage[e];
     },
     getFlowPath() { return [{ x: 4, y: 1 }, { x: 2, y: 3 }, { x: 4, y: 3 }]; },
-    measure(params, terminals, sim) {
+    measure(params, terminals, sim, comp) {
       const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
       const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
       const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
@@ -304,7 +318,7 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       const Is = params.Is as number;
       const Bf = params.Bf as number;
       const Vaf = params.Vaf as number;
-      const Vt = thermalVoltage(27);
+      const Vt = thermalVoltage(deviceTemp(sim, comp));
       // Use |vBE| magnitude — a PNP's vBE is negative in normal operation and
       // exp(negative) → 0 made every PNP read Ic ≈ 0.
       const Ic = Is * Math.exp(Math.min(Math.abs(vBE) / Vt, 30)) * (1 + Math.abs(vCE) / Vaf);

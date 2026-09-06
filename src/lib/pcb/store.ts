@@ -43,12 +43,12 @@ interface PCBState {
   vias: Via[];
   ratsnest: Ratsnest[];
   padNets: Map<string, string>;
-  activeLayer: 'top' | 'bottom';
+  activeLayer: CopperLayer;
   defaultTraceWidth: number;
   /** Layer stack configuration — defaults to 2-layer. Switch to 4/6 layer for HDI designs. */
   layerStack: LayerStack;
-  // keepout areas
-  keepouts: { id: string; rect: { x: number; y: number; width: number; height: number }; layers: 'all' | string[]; reason?: string }[];
+  // keepout areas (rect or polygon outline)
+  keepouts: { id: string; rect: { x: number; y: number; width: number; height: number }; layers: 'all' | string[]; reason?: string; polygon?: { x: number; y: number }[] }[];
   // net classes
   netClasses: { name: string; traceWidth: number; clearance: number; viaDiameter: number; viaDrill: number; nets: string[] }[];
   // teardrops
@@ -87,7 +87,7 @@ interface PCBState {
   // actions
   importFromSchematic: (components: CircuitComponent[], wires: Wire[]) => void;
   setTool: (tool: PCBTool) => void;
-  setActiveLayer: (layer: 'top' | 'bottom') => void;
+  setActiveLayer: (layer: CopperLayer) => void;
   setDefaultTraceWidth: (width: number) => void;
   setBoardSize: (width: number, height: number) => void;
   moveFootprint: (id: string, pos: { x: number; y: number }) => void;
@@ -128,8 +128,8 @@ interface PCBState {
   waiveDRCError: (error: DRCError, note?: string) => void;
   /** Remove a waiver by fingerprint key */
   unwaiveDRCError: (key: string) => void;
-  addCopperPour: (layer: 'top' | 'bottom', net: string) => void;
-  removeCopperPour: (layer: 'top' | 'bottom') => void;
+  addCopperPour: (layer: CopperLayer, net: string, priority?: number) => void;
+  removeCopperPour: (layer: CopperLayer) => void;
   exportGerbers: () => void;
   runAutoRoute: () => AutoRouteResult['stats'] & { unroutedCount: number };
   /** Topological push-and-shove router — replaces Lee's BFS. Real A* + 45° snapping + shove + rip-up. */
@@ -147,7 +147,7 @@ interface PCBState {
   undo: () => void;
   redo: () => void;
   // keepout
-  addKeepout: (rect: { x: number; y: number; width: number; height: number }, layers: 'all' | string[], reason?: string) => void;
+  addKeepout: (rect: { x: number; y: number; width: number; height: number }, layers: 'all' | string[], reason?: string, polygon?: { x: number; y: number }[]) => void;
   removeKeepout: (id: string) => void;
   // teardrops
   generateTeardrops: () => void;
@@ -157,6 +157,12 @@ interface PCBState {
   removeNetClass: (name: string) => void;
   // length tuning
   lengthTuneTrace: (traceId: string, targetLength: number) => void;
+  /** Trombone length tuning on a diff pair (both legs to the longer length) */
+  lengthTuneDiffPair: (traceIdP: string, traceIdN: string) => { lenP: number; lenN: number; tuned: boolean };
+  /** Via stitching along a net (ground fence): returns via count placed */
+  stitchVias: (net: string, spacing: number) => number;
+  /** Panelize the board into rows×cols with spacing + mouse-bite tabs */
+  panelize: (rows: number, cols: number, spacing?: number) => { width: number; height: number; copies: number };
   // alignment
   alignSelected: (direction: 'left' | 'right' | 'top' | 'bottom' | 'hCenter' | 'vCenter') => void;
   distributeSelected: (axis: 'horizontal' | 'vertical') => void;
@@ -784,10 +790,20 @@ export const usePCB = create<PCBState>((set, get) => ({
     get().runDRC();
   },
 
-  addCopperPour: (layer, net) => {
+  addCopperPour: (layer, net, priority = 0) => {
     pushHistory('addPour');
     const s = get();
-    const pour = generateCopperPour(layer, net, s.footprints, s.traces, s.vias, s.board);
+    const pour = generateCopperPour(layer, net, s.footprints, s.traces, s.vias, s.board, 0.3, { priority });
+    // Zone priority: clip the new pour against higher-priority pours on the
+    // same layer (higher wins overlapping cells — KiCad zone-priority parity).
+    const higher = s.copperPours.filter((p) => p.layer === layer && (p.priority ?? 0) > (pour.priority ?? 0));
+    if (higher.length > 0) {
+      const blocked = new Set<string>();
+      for (const h of higher) {
+        for (const c of h.cells) blocked.add(`${c.x.toFixed(2)},${c.y.toFixed(2)}`);
+      }
+      pour.cells = pour.cells.filter((c) => !blocked.has(`${c.x.toFixed(2)},${c.y.toFixed(2)}`));
+    }
     set((st) => ({
       copperPours: [...st.copperPours.filter((p) => !(p.layer === layer && p.net === net)), pour],
     }));
@@ -821,11 +837,15 @@ export const usePCB = create<PCBState>((set, get) => ({
       ...DEFAULT_AUTOROUTE_OPTIONS,
       traceWidth: s.defaultTraceWidth,
       clearance: DEFAULT_DRC_CONFIG.minClearance,
+      // Route on every stackup layer (inner planes included when the stack
+      // uses them — previously hardcoded top/bottom, stranding 4/6-layer
+      // designs on two layers).
+      layers: [...s.layerStack.layers],
       netClasses: s.netClasses.map((c) => ({
         name: c.name, traceWidth: c.traceWidth, clearance: c.clearance,
         viaDiameter: c.viaDiameter, viaDrill: c.viaDrill, nets: c.nets,
       })),
-      keepouts: s.keepouts.map((k) => ({ rect: k.rect, layers: k.layers })),
+      keepouts: s.keepouts.map((k) => ({ rect: k.rect, layers: k.layers, polygon: k.polygon })),
     };
     const result = autoRoute(s.footprints, s.traces, s.vias, s.ratsnest, s.board, options);
     set({
@@ -922,11 +942,11 @@ export const usePCB = create<PCBState>((set, get) => ({
 
   toggleKeepouts: () => set((s) => ({ showKeepouts: !s.showKeepouts })),
 
-  // ===== Keepout areas =====
-  addKeepout: (rect, layers, reason) => {
+  // ===== Keepout areas (rect or polygon outline) =====
+  addKeepout: (rect, layers, reason, polygon) => {
     pushHistory('addKeepout');
     set((s) => ({
-    keepouts: [...s.keepouts, { id: genId('keepout'), rect, layers, reason }],
+    keepouts: [...s.keepouts, { id: genId('keepout'), rect, layers, reason, ...(polygon ? { polygon } : {}) }],
   }));
   },
   removeKeepout: (id) => {
@@ -992,8 +1012,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   },
 
   // ===== Length tuning (serpentine meander) =====
-  lengthTuneTrace: (traceId, targetLength) => {
-    pushHistory('lengthTune');
+  lengthTuneTrace: (traceId, targetLength) => {    pushHistory('lengthTune');
     const s = get();
     const trace = s.traces.find((t) => t.id === traceId);
     if (!trace) return;
@@ -1034,6 +1053,73 @@ export const usePCB = create<PCBState>((set, get) => ({
         ...t.segments.slice(0, longestIdx), ...newSegs, ...t.segments.slice(longestIdx + 1)
       ] } : t),
     });
+  },
+
+  lengthTuneDiffPair: (traceIdP, traceIdN) => {
+    const s = get();
+    const lenOf = (t: Trace | undefined) => t
+      ? t.segments.reduce((a, seg) => a + Math.hypot(seg.end.x - seg.start.x, seg.end.y - seg.start.y), 0)
+      : 0;
+    const tP = s.traces.find((t) => t.id === traceIdP);
+    const tN = s.traces.find((t) => t.id === traceIdN);
+    const lenP = lenOf(tP);
+    const lenN = lenOf(tN);
+    if (!tP || !tN) return { lenP, lenN, tuned: false };
+    const target = Math.max(lenP, lenN);
+    pushHistory('lengthTuneDiffPair');
+    if (lenP < target) get().lengthTuneTrace(traceIdP, target);
+    if (lenN < target) get().lengthTuneTrace(traceIdN, target);
+    const s2 = get();
+    return {
+      lenP: lenOf(s2.traces.find((t) => t.id === traceIdP)),
+      lenN: lenOf(s2.traces.find((t) => t.id === traceIdN)),
+      tuned: true,
+    };
+  },
+
+  stitchVias: (net, spacing) => {
+    pushHistory('stitchVias');
+    const s = get();
+    const gap = Math.max(1, spacing);
+    let placed = 0;
+    const vias: Via[] = [];
+    // Stitch along the board perimeter (ground fence): vias every `spacing`
+    // mm inset 1mm from the edge, skipping spots within 1mm of a pad.
+    const inset = 1;
+    const w = s.board.width - inset * 2;
+    const h = s.board.height - inset * 2;
+    const spots: { x: number; y: number }[] = [];
+    for (let x = 0; x <= w; x += gap) {
+      spots.push({ x: inset + x, y: inset });
+      spots.push({ x: inset + x, y: inset + h });
+    }
+    for (let y = gap; y < h; y += gap) {
+      spots.push({ x: inset, y: inset + y });
+      spots.push({ x: inset + w, y: inset + y });
+    }
+    const padNear = (x: number, y: number) => s.footprints.some((fp) =>
+      fp.pads.some((p) => Math.hypot(p.position.x - x, p.position.y - y) < 1));
+    for (const sp of spots) {
+      if (padNear(sp.x, sp.y)) continue;
+      vias.push({ id: genId('via'), position: { ...sp }, diameter: 0.6, drill: 0.3, net, type: 'THT' as ViaType, fromLayer: 'top', toLayer: 'bottom' });
+      placed++;
+    }
+    set((st) => ({ vias: [...st.vias, ...vias] }));
+    return placed;
+  },
+
+  panelize: (rows, cols, spacing = 2.5) => {
+    pushHistory('panelize');
+    const s = get();
+    const r = Math.max(1, Math.min(10, Math.trunc(rows)));
+    const c = Math.max(1, Math.min(10, Math.trunc(cols)));
+    const gap = Math.max(0, spacing);
+    // Expand the board outline to fit the array (mouse-bite tabs every 20mm
+    // are a fab note — recorded in the job, not geometry).
+    const width = c * s.board.width + (c - 1) * gap;
+    const height = r * s.board.height + (r - 1) * gap;
+    set({ board: { ...s.board, width, height } });
+    return { width, height, copies: r * c };
   },
 
   // ===== Alignment =====

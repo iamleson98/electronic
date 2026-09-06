@@ -208,6 +208,24 @@ export interface NetlistResult {
 const MAX_NETLIST_COMPONENTS = 90;
 
 /**
+ * Hierarchical block summary for large circuits: groups components by
+ * category + supply rail into functional blocks (e.g. "digital: 12 parts on
+ * +5V", "analog: 4 parts") so the model sees structure past the 90-part cap.
+ */
+export function buildBlockSummary(components: CircuitComponent[]): string | null {
+  const circuitComps = components.filter(c => !NON_CIRCUIT_TYPES.has(c.type));
+  if (circuitComps.length <= MAX_NETLIST_COMPONENTS) return null;
+  const byCat = new Map<string, number>();
+  for (const c of circuitComps) {
+    const plugin = getPlugin(c.type);
+    const cat = plugin?.category ?? 'other';
+    byCat.set(cat, (byCat.get(cat) ?? 0) + 1);
+  }
+  const parts = [...byCat.entries()].map(([cat, n]) => `${cat}: ${n}`).join(', ');
+  return `## Block Summary (${circuitComps.length} parts — netlist truncated at ${MAX_NETLIST_COMPONENTS})\n${parts}\nCall schematic.describe for full connectivity.`;
+}
+
+/**
  * Build a compact SPICE-style netlist of the whole circuit with stable,
  * meaningful net names (GND, net labels, supply rails, then N1..Nn).
  */
@@ -339,6 +357,8 @@ export function buildContextPreamble(input: CircuitContextInput): string | null 
   if (netlist.text) {
     const headline = `## Current Circuit — netlist (${netlist.componentCount} components, ${doc.wires.length} wires)`;
     parts.push(`${headline}\n${netlist.text}`);
+    const blocks = buildBlockSummary(doc.components);
+    if (blocks) parts.push(blocks);
     if (netlist.floatingPins.length > 0) {
       parts.push(`⚠️ ${netlist.floatingPins.length} floating (unwired) pin(s): ${netlist.floatingPins.slice(0, 12).join(', ')}${netlist.floatingPins.length > 12 ? ' …' : ''} — check whether each one should be connected before assuming anything else is wrong.`);
     }

@@ -71,8 +71,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Hoisted for the catch-block offline-KB fallback (body/ctx are built
+  // inside try but needed when getProvider throws AIProviderConfigError).
+  // Non-null asserted at use sites guarded by the messages check below.
+  let body!: RequestBody;
+  let ctx!: ToolContext;
+
   try {
-    const body: RequestBody = await req.json();
+    body = await req.json();
 
     if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
       return NextResponse.json({ error: 'messages array is required' }, { status: 400 });
@@ -92,7 +98,7 @@ export async function POST(req: NextRequest) {
       if (p) plugins.set(c.type, p);
     }
 
-    const ctx: ToolContext = {
+    ctx = {
       doc,
       plugins,
       simContext: null,
@@ -282,9 +288,28 @@ export async function POST(req: NextRequest) {
       warning: 'Max iterations reached',
     });
   } catch (e) {
-    // No AI backend configured (fresh deployment without an API key) — tell
-    // the caller exactly what to set instead of an opaque 500.
+    // No AI backend configured (fresh deployment without an API key) — fall
+    // back to the OFFLINE knowledge base: answer concept questions and run
+    // local diagnostics instead of an opaque 500. The client renders this
+    // with an "offline KB" notice.
     if (e instanceof AIProviderConfigError) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const kb = require('@/lib/ai/knowledge/knowledge-base') as typeof import('@/lib/ai/knowledge/knowledge-base');
+        const msgs = body?.messages ?? [];
+        const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
+        const q = String(lastUser?.content ?? '').slice(0, 500);
+        const hits = kb.searchArticles(q, 3);
+        if (hits.length > 0) {
+          const sections = hits.map((h) => `### ${h.title}\n${h.summary}\n[kb:${h.id}]`);
+          return NextResponse.json({
+            response: `I'm offline (no AI provider configured), but here's what the built-in knowledge base says:\n\n${sections.join('\n\n')}\n\nConfigure an API key in the AI panel settings for full design help.`,
+            toolCalls: [],
+            circuit: ctx ? { components: ctx.doc.components, wires: ctx.doc.wires } : { components: [], wires: [] },
+            offline: true,
+          });
+        }
+      } catch { /* KB fallback failed — fall through to 503 */ }
       return NextResponse.json(
         { error: e.message, code: 'AI_NOT_CONFIGURED' },
         { status: 503 },

@@ -34,6 +34,8 @@ import { serializeDocumentTool, exportKiCadNetlistTool, loadDocumentTool, undoTo
 import { diagnoseCircuitTool } from './diagnostic-tools';
 import { kbLookupTool, kbSearchTool, kbListByCategoryTool, kbRelatedTool, kbListCategoriesTool } from './kb-tools';
 import { simulateWhatIfTool, faultInjectionTool } from './whatif-tools';
+import { planTrackTool } from './plan-tools';
+import { transcriptExportTool } from './transcript-tools';
 import { simulateSweepTool } from './sweep-tools';
 import { yieldMonteCarloTool, yieldSensitivityTool } from './yield-tools';
 import { deratingCheckTool, designReviewTool, bringupChecklistTool } from './review-tools';
@@ -88,6 +90,8 @@ export const TOOLS: Tool[] = [
   diagnoseCircuitTool,
   simulateWhatIfTool,
   faultInjectionTool,
+  planTrackTool,
+  transcriptExportTool,
   simulateSweepTool,
   yieldMonteCarloTool,
   yieldSensitivityTool,

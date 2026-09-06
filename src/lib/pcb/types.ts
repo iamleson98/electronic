@@ -206,12 +206,14 @@ export interface PCBDocument {
   teardrops?: PCBTeardrop[];
 }
 
-/** A routing keepout zone */
+/** A routing keepout zone (rect or polygon outline) */
 export interface PCBKeepout {
   id: string;
   rect: { x: number; y: number; width: number; height: number };
   layers: 'all' | string[];
   reason?: string;
+  /** optional polygon outline (board mm) — replaces the rect when present */
+  polygon?: { x: number; y: number }[];
 }
 
 /** A per-net routing rule */

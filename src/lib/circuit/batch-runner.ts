@@ -144,16 +144,19 @@ function generateSweepValues(config: BatchConfig, components: CircuitComponent[]
       }
     }
   } else if (config.type === 'mc') {
-    // Use the real Monte Carlo implementation from monte-carlo.ts
+    // Use the real Monte Carlo implementation from monte-carlo.ts.
+    // Empty tolerances → per-part mode (component `tolerance` fields).
     const mcConfig = {
       runs: config.runs ?? 100,
       seed: 42,
-      tolerances: [{
-        componentId: config.componentId,
-        param: config.param,
-        tolerance: config.tolerance ?? 0.05,
-        distribution: (config.distribution === 'gaussian' ? 'gauss' : 'uniform') as 'uniform' | 'gauss',
-      }],
+      tolerances: config.componentId
+        ? [{
+            componentId: config.componentId,
+            param: config.param,
+            tolerance: config.tolerance ?? 0.05,
+            distribution: (config.distribution === 'gaussian' ? 'gauss' : 'uniform') as 'uniform' | 'gauss',
+          }]
+        : [],
       measurement: { type: 'voltage' as const, node: config.outputNode ?? '' },
       nBins: 20,
     };

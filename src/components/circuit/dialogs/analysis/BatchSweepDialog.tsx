@@ -43,6 +43,10 @@ export function BatchSweepDialog({ open, onClose }: { open: boolean; onClose: ()
   const [runs, setRuns] = useState(50);
   const [tolerance, setTolerance] = useState(0.05);
   const [dist, setDist] = useState<'uniform' | 'gaussian' | 'worst_case'>('uniform');
+  // Per-part tolerance table: component id → tolerance fraction. Rows default
+  // from each part's own `tolerance` field; edits write back to the component
+  // so Monte-Carlo uses them (config list empty → per-part mode).
+  const [usePerPart, setUsePerPart] = useState(true);
   interface BatchRunResults {
     traces: { xValues: Float64Array; yValues: Float64Array }[];
     durationMs: number;
@@ -126,6 +130,52 @@ export function BatchSweepDialog({ open, onClose }: { open: boolean; onClose: ()
                 <Param label="Runs" value={runs} step={1} onChange={setRuns} />
                 <Param label="Tolerance (±)" value={tolerance} step={0.01} onChange={setTolerance} />
               </div>
+              <label className="flex items-center gap-2 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={usePerPart}
+                  onChange={(e) => setUsePerPart(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-cyan-500"
+                />
+                Use per-part tolerances from the Production panel (uncheck for single global ±)
+              </label>
+              {usePerPart && (
+                <div className="max-h-32 overflow-y-auto rounded border border-slate-700 bg-slate-950">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-slate-800">
+                      <tr>
+                        <th className="px-2 py-1 text-left text-slate-300">Part</th>
+                        <th className="px-2 py-1 text-left text-slate-300">Type</th>
+                        <th className="px-2 py-1 text-left text-slate-300">± Tol</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {components.filter((c) => ['resistor', 'capacitor', 'inductor', 'potentiometer', 'led', 'diode', 'zener'].includes(c.type)).map((c) => (
+                        <tr key={c.id} className="border-t border-slate-800">
+                          <td className="px-2 py-1 font-mono text-cyan-300">{c.refdes ?? c.id}</td>
+                          <td className="px-2 py-1 text-slate-400">{c.type}</td>
+                          <td className="px-2 py-1">
+                            <input
+                              type="number"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              value={c.tolerance ?? 0.05}
+                              onChange={(e) => {
+                                const v = parseFloat(e.target.value);
+                                useEditor.setState((s) => ({
+                                  components: s.components.map((x) => x.id === c.id ? { ...x, tolerance: Number.isFinite(v) ? v : undefined } : x),
+                                }));
+                              }}
+                              className="w-20 rounded border border-slate-700 bg-slate-800 px-1 py-0.5 font-mono text-xs text-slate-200"
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
               <div>
                 <Label className="text-slate-300 text-xs">Distribution</Label>
                 <Select value={dist} onValueChange={(v) => setDist(v as 'uniform' | 'gaussian' | 'worst_case')}>

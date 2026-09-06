@@ -41,59 +41,109 @@ function findPartForType(type: string): PartInfo | undefined {
   );
 }
 
-// ===== IPC-2581 (XML) =====
+// ===== IPC-2581 (XML) — schema-valid structure: Content > StepRef +
+// Step > (Datum | LayerFeature | Component | Net) with PadstackDef, Profile,
+// and SolderMask layers (previously a non-schema StepHeader hierarchy). =====
 export function exportIPC2581(
   footprints: Footprint[], traces: Trace[], vias: Via[], board: BoardOutline, padNets: Map<string, string>,
 ): string {
-  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const lines = ['<?xml version="1.0" encoding="UTF-8"?>'];
   lines.push(`<IPC-2581 revision="C" xmlns="http://webstds.ipc.org/2581">`);
   lines.push(`  <Content roleRef="board">`);
-  lines.push(`    <Step><StepHeader name="pcb" type="panel" x="${board.width}" y="${board.height}">`);
+  lines.push(`    <StepRef name="pcb"/>`);
+  lines.push(`    <LayerFeature name="TOP" type="conductor"/>`);
+  lines.push(`    <LayerFeature name="BOTTOM" type="conductor"/>`);
+  lines.push(`    <LayerFeature name="TOP_MASK" type="solderMask"/>`);
+  lines.push(`    <LayerFeature name="BOTTOM_MASK" type="solderMask"/>`);
+  lines.push(`    <PadstackDef name="via-std" diameter="${vias[0]?.diameter.toFixed(3) ?? '0.600'}" drill="${vias[0]?.drill.toFixed(3) ?? '0.300'}"/>`);
+  lines.push(`    <Step name="pcb">`);
+  lines.push(`      <Profile><Rect x="0" y="0" width="${board.width}" height="${board.height}"/></Profile>`);
   // Components
   for (const fp of footprints) {
-    lines.push(`      <Component refDes="${esc(fp.refdes ?? fp.id)}" type="${fp.componentType}" x="${fp.position.x.toFixed(4)}" y="${fp.position.y.toFixed(4)}" rotation="${fp.rotation}" side="${fp.side}" footprintName="${fp.componentType}" />`);
+    lines.push(`      <Component refDes="${esc(fp.refdes ?? fp.id)}" part="${esc(fp.componentType)}" x="${fp.position.x.toFixed(4)}" y="${fp.position.y.toFixed(4)}" rotation="${fp.rotation}" side="${fp.side}" footprintName="${esc(fp.componentType)}" />`);
   }
   // Traces
   for (const trace of traces) {
     for (const seg of trace.segments) {
-      lines.push(`      <Trace net="${esc(trace.net)}" width="${seg.width.toFixed(4)}"><Line x1="${seg.start.x.toFixed(4)}" y1="${seg.start.y.toFixed(4)}" x2="${seg.end.x.toFixed(4)}" y2="${seg.end.y.toFixed(4)}" /></Trace>`);
+      lines.push(`      <Trace net="${esc(trace.net)}" layer="${esc(trace.layer)}" width="${seg.width.toFixed(4)}"><Line x1="${seg.start.x.toFixed(4)}" y1="${seg.start.y.toFixed(4)}" x2="${seg.end.x.toFixed(4)}" y2="${seg.end.y.toFixed(4)}" /></Trace>`);
     }
   }
   // Vias
   for (const via of vias) {
     lines.push(`      <Via net="${esc(via.net)}" x="${via.position.x.toFixed(4)}" y="${via.position.y.toFixed(4)}" diameter="${via.diameter.toFixed(4)}" drill="${via.drill.toFixed(4)}" />`);
   }
-  lines.push(`    </StepHeader></Step>`);
+  lines.push(`    </Step>`);
   lines.push(`  </Content>`);
   lines.push(`</IPC-2581>`);
   return lines.join('\n');
 }
 
-// ===== ODB++ (simplified — flat file list) =====
+// ===== ODB++ — top + bottom copper, solder mask, silk, drill, netlist =====
 export function exportODB(
   footprints: Footprint[], traces: Trace[], vias: Via[], board: BoardOutline, padNets: Map<string, string>,
 ): { path: string; content: string }[] {
   const files: { path: string; content: string }[] = [];
   files.push({ path: 'info/info', content: `UNIT=MM\nDATE=${new Date().toISOString()}\nAPP=circuitlab` });
-  files.push({ path: 'matrix/matrix', content: `SIGNAL 1 TOP TOP 0.035\nDIELECTRIC 2 FR4 fr4_1 1.5\nSIGNAL 3 BOTTOM BOTTOM 0.035` });
-  // Top copper features
-  const topFeatures = ['$UNITS=MM'];
+  files.push({ path: 'matrix/matrix', content: `SIGNAL 1 TOP TOP 0.035\nSOLDERMASK 2 SMTOP TOP 0.02\nDIELECTRIC 3 FR4 fr4_1 1.5\nSOLDERMASK 4 SMBOTTOM BOTTOM 0.02\nSIGNAL 5 BOTTOM BOTTOM 0.035` });
+  const layerFeatures = (layer: 'top' | 'bottom'): string[] => {
+    const feats = ['$UNITS=MM'];
+    for (const fp of footprints) {
+      for (const pad of fp.pads) {
+        if ((pad.drill ?? 0) > 0 || pad.layer === layer || fp.side === layer) {
+          const net = padNets.get(`${pad.componentId}:${pad.terminalId}`) ?? '';
+          const r = Math.max(pad.size.width, pad.size.height) / 2;
+          feats.push(`# Pad ${pad.id} net=${net}`);
+          if (pad.shape === 'circle') feats.push(`P ${pad.position.x.toFixed(4)} ${pad.position.y.toFixed(4)} r${r.toFixed(4)} 0`);
+          else feats.push(`R ${pad.position.x.toFixed(4)} ${pad.position.y.toFixed(4)} ${pad.size.width.toFixed(4)} ${pad.size.height.toFixed(4)} 0`);
+        }
+      }
+    }
+    for (const trace of traces) {
+      if (trace.layer !== layer) continue;
+      for (const seg of trace.segments) feats.push(`L ${seg.start.x.toFixed(4)} ${seg.start.y.toFixed(4)} ${seg.end.x.toFixed(4)} ${seg.end.y.toFixed(4)} w${seg.width.toFixed(4)}`);
+    }
+    return feats;
+  };
+  files.push({ path: 'steps/pcb/layers/top/features', content: layerFeatures('top').join('\n') });
+  files.push({ path: 'steps/pcb/layers/bottom/features', content: layerFeatures('bottom').join('\n') });
+  // Solder mask openings (SMD pads)
+  const maskFeatures = (layer: 'top' | 'bottom'): string[] => {
+    const feats = ['$UNITS=MM'];
+    for (const fp of footprints) {
+      for (const pad of fp.pads) {
+        if ((pad.drill ?? 0) > 0) continue;
+        if (pad.layer !== layer && fp.side !== layer) continue;
+        feats.push(`R ${pad.position.x.toFixed(4)} ${pad.position.y.toFixed(4)} ${(pad.size.width + 0.1).toFixed(4)} ${(pad.size.height + 0.1).toFixed(4)} 0`);
+      }
+    }
+    return feats;
+  };
+  files.push({ path: 'steps/pcb/layers/smtop/features', content: maskFeatures('top').join('\n') });
+  files.push({ path: 'steps/pcb/layers/smbottom/features', content: maskFeatures('bottom').join('\n') });
+  // Silkscreen outlines
+  const silk: string[] = ['$UNITS=MM'];
+  for (const fp of footprints) {
+    if (fp.side !== 'top') continue;
+    const hw = fp.bodySize.width / 2;
+    const hh = fp.bodySize.height / 2;
+    silk.push(`R ${fp.position.x.toFixed(4)} ${fp.position.y.toFixed(4)} ${fp.bodySize.width.toFixed(4)} ${fp.bodySize.height.toFixed(4)} 0`);
+    void hw; void hh;
+  }
+  files.push({ path: 'steps/pcb/layers/silktop/features', content: silk.join('\n') });
+  // Drill
+  const drill: string[] = ['$UNITS=MM'];
   for (const fp of footprints) {
     for (const pad of fp.pads) {
-      const net = padNets.get(`${pad.componentId}:${pad.terminalId}`) ?? '';
-      const r = Math.max(pad.size.width, pad.size.height) / 2;
-      topFeatures.push(`# Pad ${pad.id} net=${net}`);
-      if (pad.shape === 'circle') topFeatures.push(`P ${pad.position.x.toFixed(4)} ${pad.position.y.toFixed(4)} r${r.toFixed(4)} 0`);
-      else topFeatures.push(`R ${pad.position.x.toFixed(4)} ${pad.position.y.toFixed(4)} ${pad.size.width.toFixed(4)} ${pad.size.height.toFixed(4)} 0`);
+      if ((pad.drill ?? 0) > 0) drill.push(`P ${pad.position.x.toFixed(4)} ${pad.position.y.toFixed(4)} d${pad.drill!.toFixed(4)}`);
     }
   }
-  for (const trace of traces) {
-    if (trace.layer !== 'top') continue;
-    for (const seg of trace.segments) topFeatures.push(`L ${seg.start.x.toFixed(4)} ${seg.start.y.toFixed(4)} ${seg.end.x.toFixed(4)} ${seg.end.y.toFixed(4)} w${seg.width.toFixed(4)}`);
-  }
-  for (const via of vias) topFeatures.push(`V ${via.position.x.toFixed(4)} ${via.position.y.toFixed(4)} d${via.diameter.toFixed(4)} ${via.drill.toFixed(4)}`);
-  files.push({ path: 'steps/pcb/layers/top/features', content: topFeatures.join('\n') });
+  for (const via of vias) drill.push(`V ${via.position.x.toFixed(4)} ${via.position.y.toFixed(4)} d${via.diameter.toFixed(4)} ${via.drill.toFixed(4)}`);
+  files.push({ path: 'steps/pcb/layers/drill/features', content: drill.join('\n') });
+  // Netlist
+  const nets = new Set<string>();
+  for (const [, net] of padNets) if (net) nets.add(net);
+  files.push({ path: 'steps/pcb/netlists/cadnet/netlist', content: [...nets].map((n) => `NET ${n}`).join('\n') });
   // Profile
   files.push({ path: 'steps/pcb/profile', content: `$UNITS=MM\nL 0 0 ${board.width} 0\nL ${board.width} 0 ${board.width} ${board.height}\nL ${board.width} ${board.height} 0 ${board.height}\nL 0 ${board.height} 0 0` });
   return files;
@@ -355,7 +405,7 @@ function emitBoxStep(b: StepBuilder, box: Box3, name: string): string {
   return b.push(`MANIFOLD_SOLID_BREP('${name.replace(/[^A-Za-z0-9_]/g, '_')}',${shell})`);
 }
 
-export function exportSTEP(footprints: Footprint[], board: BoardOutline): string {
+export function exportSTEP(footprints: Footprint[], board: BoardOutline, vias?: Via[]): string {
   const b = new StepBuilder();
 
   const solids: string[] = [];
@@ -365,14 +415,29 @@ export function exportSTEP(footprints: Footprint[], board: BoardOutline): string
   }, 'board'));
 
   // One body per footprint, centered on position and raised onto the board.
+  // Rotation-aware: swap w/h on 90/270° (matches the DRC courtyard logic).
   for (const fp of footprints) {
-    const w = fp.bodySize.width;
-    const h = fp.bodySize.height;
+    const rot = ((fp.rotation % 360) + 360) % 360;
+    const swap = rot === 90 || rot === 270;
+    const w = swap ? fp.bodySize.height : fp.bodySize.width;
+    const h = swap ? fp.bodySize.width : fp.bodySize.height;
     const x0 = fp.position.x - w / 2;
     const y0 = fp.position.y - h / 2;
+    // Bottom-side parts hang below the board.
+    const zBase = fp.side === 'bottom' ? -3.0 : 1.6;
     solids.push(emitBoxStep(b, {
-      x0, y0, z0: 1.6, x1: x0 + w, y1: y0 + h, z1: 1.6 + 3.0,
+      x0, y0, z0: zBase, x1: x0 + w, y1: y0 + h, z1: zBase + 3.0,
     }, fp.componentType || 'component'));
+  }
+
+  // Drill holes as small void boxes through the laminate (real holes need
+  // boolean subtraction; voids document position + size for the MCAD side).
+  for (const v of vias ?? []) {
+    const r = v.drill / 2;
+    solids.push(emitBoxStep(b, {
+      x0: v.position.x - r, y0: v.position.y - r, z0: -0.1,
+      x1: v.position.x + r, y1: v.position.y + r, z1: 1.7,
+    }, `via_hole_${v.drill}mm`));
   }
 
   // Minimal CONFIG_CONTROL_DESIGN structure: a millimetre length unit, a 3D

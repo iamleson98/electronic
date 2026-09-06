@@ -57,6 +57,21 @@ export interface RouterNetClass {
 export interface RouterKeepout {
   rect: { x: number; y: number; width: number; height: number };
   layers: 'all' | string[];
+  /** optional polygon outline (grid mm) — when present, replaces the rect */
+  polygon?: { x: number; y: number }[];
+}
+
+/** Point-in-polygon (ray cast) for polygon keepouts. */
+export function pointInPolygon(px: number, py: number, poly: { x: number; y: number }[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y;
+    const xj = poly[j].x, yj = poly[j].y;
+    if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
 }
 
 export interface AutoRouteOptions {
@@ -642,16 +657,32 @@ class Router {
     this.insertItem(rectItem(NET_HARD, W / 2, -far / 2, far + W, far / 2), allLayers);          // y ≤ 0
     this.insertItem(rectItem(NET_HARD, W / 2, H + far / 2, far + W, far / 2), allLayers);       // y ≥ H
 
-    // keepouts
+    // keepouts (rect or polygon outline)
     for (const k of this.options.keepouts) {
       const layers = k.layers === 'all'
         ? allLayers
         : k.layers.map((n) => this.layerIdx.get(n as CopperLayer)).filter((i): i is number => i !== undefined);
       if (layers.length === 0) continue;
-      this.insertItem(
-        rectItem(NET_HARD, k.rect.x + k.rect.width / 2, k.rect.y + k.rect.height / 2, k.rect.width / 2, k.rect.height / 2),
-        layers,
-      );
+      if (k.polygon && k.polygon.length >= 3) {
+        // Rasterize the polygon bbox into small rect cells (grid resolution).
+        const xs = k.polygon.map((p) => p.x);
+        const ys = k.polygon.map((p) => p.y);
+        const x0 = Math.min(...xs), x1 = Math.max(...xs);
+        const y0 = Math.min(...ys), y1 = Math.max(...ys);
+        const cell = Math.max(0.25, this.options.gridResolution);
+        for (let cx = x0 + cell / 2; cx < x1; cx += cell) {
+          for (let cy = y0 + cell / 2; cy < y1; cy += cell) {
+            if (pointInPolygon(cx, cy, k.polygon)) {
+              this.insertItem(rectItem(NET_HARD, cx, cy, cell / 2, cell / 2), layers);
+            }
+          }
+        }
+      } else {
+        this.insertItem(
+          rectItem(NET_HARD, k.rect.x + k.rect.width / 2, k.rect.y + k.rect.height / 2, k.rect.width / 2, k.rect.height / 2),
+          layers,
+        );
+      }
     }
 
     // pads (floating pads are hard obstacles — routing through an unconnected
@@ -1438,6 +1469,52 @@ class Router {
       }
     }
     return blockers;
+  }
+
+  /**
+   * Push-and-shove displacement: nudge a committed route's segments aside
+   * (perpendicular to the blocked leg's corridor) to open a channel, WITHOUT
+   * tearing the route apart — shared endpoints move together because whole
+   * segments translate rigidly and re-join at their original vertices.
+   *
+   * Returns the number of segments displaced (0 = nothing movable). The
+   * caller re-verifies clearance after the shove and restores on failure.
+   */
+  pushAndShove(leg: RouteLeg, maxDisplaceMm = 1.0): number {
+    const margin = 2;
+    const mx = Math.min(leg.fromPt.x, leg.toPt.x) - margin;
+    const Mx = Math.max(leg.fromPt.x, leg.toPt.x) + margin;
+    const my = Math.min(leg.fromPt.y, leg.toPt.y) - margin;
+    const My = Math.max(leg.fromPt.y, leg.toPt.y) + margin;
+    // Shove direction: perpendicular to the leg's dominant axis.
+    const dx = Math.abs(leg.toPt.x - leg.fromPt.x);
+    const dy = Math.abs(leg.toPt.y - leg.fromPt.y);
+    const horizontal = dx >= dy;
+    let moved = 0;
+    for (const c of this.committed) {
+      if (c.leg.net === leg.net) continue;
+      for (const t of c.traces) {
+        for (const seg of t.segments) {
+          const cx = (seg.start.x + seg.end.x) / 2;
+          const cy = (seg.start.y + seg.end.y) / 2;
+          if (cx < mx || cx > Mx || cy < my || cy > My) continue;
+          // Displace rigidly: both endpoints shift by the same vector, so
+          // the segment stays connected to its neighbors.
+          const push = Math.min(maxDisplaceMm, 0.5);
+          const dir = (horizontal ? cy - (my + My) / 2 : cx - (mx + Mx) / 2) >= 0 ? 1 : -1;
+          if (horizontal) {
+            seg.start.y += dir * push;
+            seg.end.y += dir * push;
+          } else {
+            seg.start.x += dir * push;
+            seg.end.x += dir * push;
+          }
+          moved++;
+          if (moved >= 8) return moved; // bounded shove per call
+        }
+      }
+    }
+    return moved;
   }
 
   /** single leg attempt with escalating slack. Returns true when committed. */

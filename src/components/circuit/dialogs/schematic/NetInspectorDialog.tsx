@@ -32,10 +32,13 @@ interface NetInfo {
 }
 
 export function NetInspectorDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const components = useEditor((s) => s.components);
   const wires = useEditor((s) => s.wires);
   const netClasses = useEditor((s) => s.netClasses);
+  const setSelection = useEditor((s) => s.setSelection);
   const [nets, setNets] = useState<NetInfo[]>([]);
   const [filter, setFilter] = useState('');
+  const [highlighted, setHighlighted] = useState<number | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -104,8 +107,24 @@ export function NetInspectorDialog({ open, onClose }: { open: boolean; onClose: 
             <tbody>
               {filtered.map((n) => {
                 const nc = netClasses.find((c) => c.nets.includes(n.name));
+                const isHi = highlighted === n.id;
                 return (
-                  <tr key={n.id} className="border-t border-slate-800 hover:bg-slate-800">
+                  <tr
+                    key={n.id}
+                    className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800 ${isHi ? 'bg-cyan-950/40' : ''}`}
+                    onClick={() => {
+                      // Highlight: select the first component on the net and
+                      // zoom the canvas to it (canvas listens to selection).
+                      setHighlighted(n.id);
+                      const first = n.components[0];
+                      if (first) {
+                        const target = components.find((c) => c.id === first || c.refdes === first);
+                        setSelection({ type: 'component', id: target?.id ?? first });
+                        window.dispatchEvent(new CustomEvent('circuitlab:zoom-to-component', { detail: { id: target?.id ?? first } }));
+                      }
+                    }}
+                    title="Click to highlight + zoom to this net"
+                  >
                     <td className="px-2 py-1 font-mono text-cyan-400">{n.name}</td>
                     <td className="px-2 py-1">{n.pins}</td>
                     <td className="px-2 py-1 text-slate-400">{n.components.join(', ')}</td>

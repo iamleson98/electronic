@@ -681,9 +681,11 @@ export class TurnManager {
                 );
                 ctx.history.redoStack.length = 0; // new mutation invalidates redo
               }
+              const toolStart = performance.now();
               const toolResult = await tool.execute(args, ctx);
-              executedToolCalls.push({ name: tc.function.name, args, result: toolResult.result, error: toolResult.error, ok: toolResult.ok });
-              this.emit(turn, 'tool_call', { name: tc.function.name, args, result: toolResult.result, error: toolResult.error, ok: toolResult.ok });
+              const durationMs = performance.now() - toolStart;
+              executedToolCalls.push({ name: tc.function.name, args, result: toolResult.result, error: toolResult.error, ok: toolResult.ok, durationMs });
+              this.emit(turn, 'tool_call', { name: tc.function.name, args, result: toolResult.result, error: toolResult.error, ok: toolResult.ok, durationMs });
               if (mutating) {
                 circuitModified = true;
                 ensurePlugins(ctx);

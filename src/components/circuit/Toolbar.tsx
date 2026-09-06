@@ -456,6 +456,17 @@ export function Toolbar() {
                 onClick={() => setShowOptions(true)}>
                 <Sliders size={14} className="mr-2" /> Simulation Options
               </DropdownMenuItem>
+              <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+                onClick={() => {
+                  const { sim, report } = useEditor.getState().solveDCRobust();
+                  if (sim) {
+                    toast.success(`Robust DC solve converged (${report.attempts.join(' → ') || 'direct'})`);
+                  } else {
+                    toast.error(report.message ?? 'Robust DC solve failed — see convergence report');
+                  }
+                }}>
+                <ShieldCheck size={14} className="mr-2" /> Robust DC Solve (gmin → source → pseudo-tran)
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
 

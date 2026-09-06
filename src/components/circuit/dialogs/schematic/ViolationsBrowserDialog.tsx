@@ -30,6 +30,9 @@ export function ViolationsBrowserDialog({ open, onClose }: { open: boolean; onCl
   const [filter, setFilter] = useState<'all' | 'error' | 'warning' | 'info'>('all');
   const runFullERCCheck = useEditor((s) => s.runFullERCCheck);
   const setSelection = useEditor((s) => s.setSelection);
+  const ercWaivers = useEditor((s) => s.ercWaivers);
+  const waiveERCError = useEditor((s) => s.waiveERCError);
+  const unwaiveERCError = useEditor((s) => s.unwaiveERCError);
 
   const refresh = useCallback(() => {
     const r = runFullERCCheck();
@@ -94,6 +97,17 @@ export function ViolationsBrowserDialog({ open, onClose }: { open: boolean; onCl
                     </Badge>
                     <Badge variant="outline">{err.type}</Badge>
                     <div className="flex-1 text-sm text-slate-200">{err.message}</div>
+                    {err.exclusionKey && (
+                      ercWaivers.includes(err.exclusionKey) ? (
+                        <Button size="sm" variant="ghost" className="h-6 shrink-0 px-2 text-[10px] text-amber-300" onClick={(e) => { e.stopPropagation(); unwaiveERCError(err.exclusionKey!); refresh(); }} title="Remove waiver">
+                          Unwaive
+                        </Button>
+                      ) : (
+                        <Button size="sm" variant="ghost" className="h-6 shrink-0 px-2 text-[10px] text-slate-400" onClick={(e) => { e.stopPropagation(); waiveERCError(err.exclusionKey!); refresh(); }} title="Waive this violation (persisted with the document)">
+                          Waive
+                        </Button>
+                      )
+                    )}
                   </div>
                 </li>
               ))}

@@ -32,7 +32,7 @@ import { planWireRoute, type WireRoutePlan } from './wire-overlap';
 import { rerouteAttachedWires, orthogonalizeDocumentWires } from './wire-reroute';
 import { toast } from 'sonner';
 import { validatePhysics, type PhysicsViolation } from './physics-validator';
-import { runFullERC } from './erc';
+import { runFullERC, applyERCExclusions } from './erc';
 import { snapshotSheet, flattenHierarchy } from './hierarchy';
 import { runAnalysis as runAnalysisEngine, type AnalysisConfig, type AnalysisResult } from './analysis';
 import { runBatch as runBatchEngine, type BatchConfig, type BatchResult } from './batch-runner';
@@ -181,6 +181,12 @@ interface EditorState {
   // ERC
   runERC: () => ERCResult;
   runFullERCCheck: () => ERCResult;
+  /** Waived ERC exclusion keys (persisted with the document) */
+  ercWaivers: string[];
+  /** Waive an ERC violation by exclusion key */
+  waiveERCError: (key: string) => void;
+  /** Remove an ERC waiver */
+  unwaiveERCError: (key: string) => void;
   // annotation
   reannotate: () => void;
   reannotateByPosition: () => void;
@@ -317,6 +323,14 @@ interface EditorState {
   setSimOptions: (patch: Partial<SimOptions>) => void;
   /** robust DC operating point using convergence aids */
   solveDCRobust: () => { sim: SimContext | null; report: ConvergenceReport };
+  /** named simulation profiles (analysis config + sim options + probes) */
+  simProfiles: { id: string; name: string; analysis: AnalysisConfig; simOptions: SimOptions; probes: string[] }[];
+  /** save the current analysis setup as a named profile */
+  saveSimProfile: (name: string, analysis: AnalysisConfig, probes?: string[]) => string;
+  /** apply a profile (sets sim options; returns its analysis config) */
+  applySimProfile: (id: string) => AnalysisConfig | null;
+  /** delete a profile */
+  removeSimProfile: (id: string) => void;
 }
 
 let idCounter = 0;
@@ -445,6 +459,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   multiSelection: { components: new Set(), wires: new Set() },
   clipboard: null,
   ercErrors: [],
+  ercWaivers: [],
   running: false,
   speed: 1,
   dt: 1e-4,
@@ -886,8 +901,19 @@ export const useEditor = create<EditorState>((set, get) => ({
       ercWires = flat.wires;
     }
     const result = runFullERC(ercComponents, ercWires, s.noConnects);
-    set({ ercErrors: result.errors });
-    return result;
+    const filtered = applyERCExclusions(result, s.ercWaivers);
+    set({ ercErrors: filtered.errors });
+    return filtered;
+  },
+
+  waiveERCError: (key: string) => {
+    set((s) => ({ ercWaivers: s.ercWaivers.includes(key) ? s.ercWaivers : [...s.ercWaivers, key] }));
+    get().runFullERCCheck();
+  },
+
+  unwaiveERCError: (key: string) => {
+    set((s) => ({ ercWaivers: s.ercWaivers.filter((k) => k !== key) }));
+    get().runFullERCCheck();
   },
 
   reannotate: () => {
@@ -2085,5 +2111,39 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (p) plugins.set(c.type, p);
     }
     return solveDCRobustEngine(s.components, s.wires, plugins, s.simOptions);
+  },
+
+  simProfiles: (() => {
+    try {
+      const raw = typeof window !== 'undefined' ? window.localStorage.getItem('sim-profiles-v1') : null;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch { /* corrupted prefs — start empty */ }
+    return [];
+  })(),
+  saveSimProfile: (name, analysis, probes = []) => {
+    const id = genId('profile');
+    const s = get();
+    set((st) => ({
+      simProfiles: [...st.simProfiles, { id, name, analysis, simOptions: { ...s.simOptions }, probes }],
+    }));
+    try {
+      window.localStorage.setItem('sim-profiles-v1', JSON.stringify(get().simProfiles));
+    } catch { /* storage unavailable — profiles stay session-local */ }
+    return id;
+  },
+  applySimProfile: (id) => {
+    const p = get().simProfiles.find((x) => x.id === id);
+    if (!p) return null;
+    set({ simOptions: { ...p.simOptions } });
+    return p.analysis;
+  },
+  removeSimProfile: (id) => {
+    set((s) => ({ simProfiles: s.simProfiles.filter((x) => x.id !== id) }));
+    try {
+      window.localStorage.setItem('sim-profiles-v1', JSON.stringify(get().simProfiles));
+    } catch { /* ignore */ }
   },
 }));

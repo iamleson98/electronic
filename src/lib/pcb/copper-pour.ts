@@ -2,10 +2,10 @@
 // Creates a filled copper area on a layer with clearance around pads and traces.
 // Uses a grid-based fill approach — simple but effective for visualization.
 
-import type { Footprint, Trace, Via, Pad, BoardOutline } from './types';
+import type { Footprint, Trace, Via, Pad, BoardOutline, CopperLayer } from './types';
 
 export interface CopperPour {
-  layer: 'top' | 'bottom';
+  layer: CopperLayer;
   net: string;
   /** grid cells that are filled (x, y in 0.5mm grid) */
   cells: { x: number; y: number }[];
@@ -39,7 +39,7 @@ export interface CopperPour {
  * @param options.thermalRelief When true, same-net pads get a 4-spoke thermal relief pattern
  */
 export function generateCopperPour(
-  layer: 'top' | 'bottom',
+  layer: CopperLayer,
   net: string,
   footprints: Footprint[],
   traces: Trace[],

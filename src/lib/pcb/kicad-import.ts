@@ -20,10 +20,25 @@ export interface ParsedKiCadFootprint {
     position: { x: number; y: number };
     shape: 'circle' | 'rect' | 'oval';
     size: { width: number; height: number };
+    /** drill diameter (0 = SMD) */
+    drill?: number;
+    /** copper layer */
+    layer?: 'top' | 'bottom';
+    /** paste/mask coverage flags from the layers list */
+    paste?: boolean;
+    mask?: boolean;
   }[];
   // Additional KiCad lines for drawing
-  lines: { start: { x: number; y: number }; end: { x: number; y: number }; width: number }[];
-  circles: { center: { x: number; y: number }; end: { x: number; y: number }; width: number }[];
+  lines: { start: { x: number; y: number }; end: { x: number; y: number }; width: number; layer: string }[];
+  circles: { center: { x: number; y: number }; end: { x: number; y: number }; width: number; layer: string }[];
+  /** silk outline segments (F.SilkS / B.SilkS layers) */
+  silk: { start: { x: number; y: number }; end: { x: number; y: number }; width: number }[];
+  /** courtyard bbox (F.CrtYd) */
+  courtyard: { x: number; y: number }[];
+  /** 3D model path (first `model` entry) */
+  model3d?: string;
+  /** footprint description / tags */
+  description?: string;
 }
 
 /**
@@ -39,9 +54,21 @@ export function parseKiCadFootprint(content: string): ParsedKiCadFootprint | nul
     const pads: ParsedKiCadFootprint['pads'] = [];
     const lines: ParsedKiCadFootprint['lines'] = [];
     const circles: ParsedKiCadFootprint['circles'] = [];
+    const silk: ParsedKiCadFootprint['silk'] = [];
+    const courtyard: ParsedKiCadFootprint['courtyard'] = [];
+    let model3d: string | undefined;
+    let description: string | undefined;
 
-    // Parse pads: (pad N smd/through_hole rect/circle/oval (at X Y) (size W H) ...)
-    const padRegex = /\(pad\s+(\S+)\s+(smd|through_hole|np_thru_hole)\s+(rect|circle|oval|roundrect)\s+\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)\s+\(size\s+([-\d.]+)\s+([-\d.]+)\)/g;
+    // Description + tags: (descr "...") (tags "...")
+    const descrM = content.match(/\(descr\s+"([^"]*)"\)/);
+    if (descrM) description = descrM[1];
+
+    // 3D model: (model "path/to/model.step" ...)
+    const modelM = content.match(/\(model\s+"([^"]+)"\)/);
+    if (modelM) model3d = modelM[1];
+
+    // Parse pads: (pad N smd/through_hole rect/circle/oval (at X Y) (size W H) (drill D)? (layers ...))
+    const padRegex = /\(pad\s+(\S+)\s+(smd|through_hole|np_thru_hole)\s+(rect|circle|oval|roundrect|custom)\s+\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)\s+\(size\s+([-\d.]+)\s+([-\d.]+)\)([^)]*\(layers\s+([^)]*)\)[^)]*)?/g;
     let padMatch;
     while ((padMatch = padRegex.exec(content)) !== null) {
       const padNum = padMatch[1];
@@ -51,42 +78,71 @@ export function parseKiCadFootprint(content: string): ParsedKiCadFootprint | nul
       const y = parseFloat(padMatch[5]);
       const w = parseFloat(padMatch[7]);
       const h = parseFloat(padMatch[8]);
+      const layersStr = padMatch[10] ?? '';
+      // Drill: (drill D) or (drill oval W H)
+      const drillM = padMatch[0].match(/\(drill\s+([-\d.]+)/);
+      const drill = drillM ? parseFloat(drillM[1]) : (padType === 'through_hole' ? Math.min(w, h) * 0.5 : 0);
 
       // Map shape
       let shape: 'circle' | 'rect' | 'oval' = 'rect';
       if (padShape === 'circle') shape = 'circle';
       else if (padShape === 'oval') shape = 'oval';
-      // roundrect and any other shape → rect
+      // roundrect/custom → rect
 
       pads.push({
         terminalId: padNum,
         position: { x, y },
         shape,
         size: { width: w, height: h },
+        drill,
+        layer: /B\.Cu/.test(layersStr) && !/F\.Cu/.test(layersStr) ? 'bottom' : 'top',
+        paste: /Paste/.test(layersStr),
+        mask: /Mask/.test(layersStr),
       });
       void padType;
     }
 
-    // Parse fp_line: (fp_line (start X1 Y1) (end X2 Y2) (layer ...) (width W))
-    const lineRegex = /\(fp_line\s+\(start\s+([-\d.]+)\s+([-\d.]+)\)\s+\(end\s+([-\d.]+)\s+([-\d.]+)\)(?:.*?\(width\s+([-\d.]+)\))?/g;
+    // Parse fp_line with layer: (fp_line (start X1 Y1) (end X2 Y2) (layer L) (width W))
+    const lineRegex = /\(fp_line\s+\(start\s+([-\d.]+)\s+([-\d.]+)\)\s+\(end\s+([-\d.]+)\s+([-\d.]+)\)(?:.*?\(layer\s+(\S+?)\))?(?:.*?\(width\s+([-\d.]+)\))?/g;
     let lineMatch;
     while ((lineMatch = lineRegex.exec(content)) !== null) {
-      lines.push({
+      const layer = (lineMatch[5] ?? '').replace(/\)$/, '');
+      const entry = {
         start: { x: parseFloat(lineMatch[1]), y: parseFloat(lineMatch[2]) },
         end: { x: parseFloat(lineMatch[3]), y: parseFloat(lineMatch[4]) },
-        width: lineMatch[5] ? parseFloat(lineMatch[5]) : 0.15,
-      });
+        width: lineMatch[6] ? parseFloat(lineMatch[6]) : 0.15,
+        layer,
+      };
+      lines.push(entry);
+      if (/SilkS/.test(layer)) silk.push({ start: entry.start, end: entry.end, width: entry.width });
     }
 
-    // Parse fp_circle: (fp_circle (center X1 Y1) (end X2 Y2) (layer ...) (width W))
-    const circleRegex = /\(fp_circle\s+\(center\s+([-\d.]+)\s+([-\d.]+)\)\s+\(end\s+([-\d.]+)\s+([-\d.]+)\)(?:.*?\(width\s+([-\d.]+)\))?/g;
+    // Parse fp_circle with layer
+    const circleRegex = /\(fp_circle\s+\(center\s+([-\d.]+)\s+([-\d.]+)\)\s+\(end\s+([-\d.]+)\s+([-\d.]+)\)(?:.*?\(layer\s+(\S+?)\))?(?:.*?\(width\s+([-\d.]+)\))?/g;
     let circleMatch;
     while ((circleMatch = circleRegex.exec(content)) !== null) {
       circles.push({
         center: { x: parseFloat(circleMatch[1]), y: parseFloat(circleMatch[2]) },
         end: { x: parseFloat(circleMatch[3]), y: parseFloat(circleMatch[4]) },
-        width: circleMatch[5] ? parseFloat(circleMatch[5]) : 0.15,
+        width: circleMatch[6] ? parseFloat(circleMatch[6]) : 0.15,
+        layer: (circleMatch[5] ?? '').replace(/\)$/, ''),
       });
+    }
+
+    // Courtyard: (fp_poly (pts (xy x y) ...) (layer F.CrtYd) ...)
+    const polyRegex = /\(fp_poly\s+\(pts\s+((?:\(xy\s+[-\d.]+\s+[-\d.]+\)\s*)+)\)\s*\(layer\s+(\S+?)[)\s]/g;
+    let polyMatch;
+    while ((polyMatch = polyRegex.exec(content)) !== null) {
+      const layer = polyMatch[2];
+      const pts: { x: number; y: number }[] = [];
+      const ptRegex = /\(xy\s+([-\d.]+)\s+([-\d.]+)\)/g;
+      let ptM;
+      while ((ptM = ptRegex.exec(polyMatch[1])) !== null) {
+        pts.push({ x: parseFloat(ptM[1]), y: parseFloat(ptM[2]) });
+      }
+      if (/CrtYd/.test(layer) && pts.length >= 3 && courtyard.length === 0) {
+        courtyard.push(...pts);
+      }
     }
 
     // Calculate body size from line bounding box
@@ -106,7 +162,7 @@ export function parseKiCadFootprint(content: string): ParsedKiCadFootprint | nul
       height: maxY === -Infinity ? 5 : Math.max(2, maxY - minY + 1),
     };
 
-    return { name, bodySize, pads, lines, circles };
+    return { name, bodySize, pads, lines, circles, silk, courtyard, model3d, description };
   } catch (err) {
     console.error('KiCad footprint parse error:', err);
     return null;
@@ -114,7 +170,8 @@ export function parseKiCadFootprint(content: string): ParsedKiCadFootprint | nul
 }
 
 /**
- * Convert a parsed KiCad footprint to our FootprintDef format.
+ * Convert a parsed KiCad footprint to our FootprintDef format — lossless:
+ * drill, layer, paste/mask flags, silk, courtyard, and 3D model survive.
  */
 export function kicadToFootprintDef(parsed: ParsedKiCadFootprint): FootprintDef {
   return {
@@ -124,8 +181,14 @@ export function kicadToFootprintDef(parsed: ParsedKiCadFootprint): FootprintDef 
       position: p.position,
       shape: p.shape,
       size: p.size,
+      ...(p.drill ? { drill: p.drill } : {}),
+      ...(p.layer ? { layer: p.layer } : {}),
     })),
-  };
+    ...(parsed.silk.length > 0 ? { silkOutline: parsed.silk } : {}),
+    ...(parsed.courtyard.length > 0 ? { courtyard: parsed.courtyard } : {}),
+    ...(parsed.model3d ? { model3d: parsed.model3d } : {}),
+    ...(parsed.description ? { description: parsed.description } : {}),
+  } as FootprintDef;
 }
 
 /**

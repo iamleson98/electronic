@@ -1186,7 +1186,7 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
           const nodeId = nodeMap.terminalNode.get(`${comp.id}:${t.id}`);
           if (nodeId === undefined) continue;
           const v = simContext.nodeVoltage[nodeId] ?? 0;
-          const pos = terminalPos(comp, t.id, plugin);
+          const pos = terminalPos(comp, t, plugin);
           if (!pos) continue;
           annotations.push({ at: pos, text: formatBiasVoltage(v) });
         }
