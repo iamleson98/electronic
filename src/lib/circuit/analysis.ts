@@ -1256,6 +1256,8 @@ export function runNoise(
   const freqs = generateSweepFrequencies(config.sweep, config.nPoints, config.fStart, config.fStop);
   const xValues = new Float64Array(freqs.length);
   const yValues = new Float64Array(freqs.length);
+  const inoiseValues = new Float64Array(freqs.length);
+  const nfValues = new Float64Array(freqs.length);
 
   // A config whose no source carries AC excitation → the small-signal network
   // has zero independent stimulus, which is exactly what .noise wants (noise
@@ -1307,10 +1309,59 @@ export function runNoise(
     yValues[i] = Math.sqrt(totalPowerV2Hz);
   }
 
+  // Input-referred noise + noise figure: divide the output noise by the
+  // small-signal gain |H| from the input source to the output at each
+  // frequency (NF = 10·log10(1 + Vn,in²/Vn,source²), source = 50Ω thermal).
+  {
+    const gainConfig = {
+      type: 'ac' as const,
+      sweep: config.sweep,
+      nPoints: config.nPoints,
+      fStart: config.fStart,
+      fStop: config.fStop,
+      sourceId: config.inputSourceId,
+      acMag: 1,
+      acPhase: 0,
+    };
+    const kB = 1.380649e-23;
+    const T = toKelvin(options.temp);
+    const rSrc = 50;
+    const vnSrc2 = 4 * kB * T * rSrc; // V²/Hz of a 50Ω source
+    for (let i = 0; i < freqs.length; i++) {
+      const f = freqs[i];
+      const omega = 2 * Math.PI * Math.max(f, 1e-12);
+      const built = buildACSystemAtFrequency(components, wires, plugins, dcOp, omega, gainConfig, options.gmin, options.temp);
+      if (!built) { inoiseValues[i] = 0; nfValues[i] = 0; continue; }
+      const x = solveComplexMna(built.sys);
+      if (!x) { inoiseValues[i] = 0; nfValues[i] = 0; continue; }
+      const vOut = vAt(x, vOutNode);
+      const vRef = vAt(x, vRefNode);
+      const gainMag = Math.hypot(vOut.re - vRef.re, vOut.im - vRef.im);
+      const vOutNoise = yValues[i];
+      const vInNoise = gainMag > 1e-30 ? vOutNoise / gainMag : 0;
+      inoiseValues[i] = vInNoise;
+      nfValues[i] = vInNoise > 0 ? 10 * Math.log10(1 + (vInNoise * vInNoise) / vnSrc2) : 0;
+    }
+  }
+  function vAt(x: Complex[], nodeId: number): Complex {
+    return nodeId > 0 ? (x[nodeId - 1] ?? { re: 0, im: 0 }) : { re: 0, im: 0 };
+  }
+
+  // Integrated output noise over the sweep band (trapezoidal on V²/Hz).
+  let integratedV2 = 0;
+  for (let i = 1; i < freqs.length; i++) {
+    const df = freqs[i] - freqs[i - 1];
+    integratedV2 += 0.5 * (yValues[i] * yValues[i] + yValues[i - 1] * yValues[i - 1]) * df;
+  }
+
   return {
     type: 'noise',
-    traces: [{ name: 'onoise', xValues, yValues, xLabel: 'Frequency (Hz)', yLabel: 'Noise (V/√Hz)' }],
-    scalars: {},
+    traces: [
+      { name: 'onoise', xValues, yValues, xLabel: 'Frequency (Hz)', yLabel: 'Noise (V/√Hz)' },
+      { name: 'inoise', xValues, yValues: inoiseValues, xLabel: 'Frequency (Hz)', yLabel: 'Noise (V/√Hz)' },
+      { name: 'nf', xValues, yValues: nfValues, xLabel: 'Frequency (Hz)', yLabel: 'NF (dB)' },
+    ],
+    scalars: { integratedNoise_Vrms: Math.sqrt(Math.max(0, integratedV2)) },
     report: { converged: true, iterations: freqs.length, finalDelta: 0, attempts: [] },
     durationMs: performance.now() - start,
   };

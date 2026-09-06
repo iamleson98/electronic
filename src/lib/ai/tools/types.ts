@@ -2,6 +2,7 @@
 
 import type { CircuitDocument, SimContext } from '@/lib/circuit/types';
 import type { BoardOutline, Footprint, Trace, Via, Ratsnest } from '@/lib/pcb/types';
+import type { CopperPour } from '@/lib/pcb/copper-pour';
 
 export interface ToolContext {
   doc: CircuitDocument;
@@ -19,6 +20,10 @@ export interface ToolContext {
     ratsnest: Ratsnest[];
     /** pad key `${componentId}:${terminalId}` → net name */
     padNets: Map<string, string>;
+    /** default trace width in mm (pcb.setDefaultTraceWidth) */
+    defaultTraceWidth?: number;
+    /** generated copper pours (pcb.addCopperPour) */
+    copperPours?: CopperPour[];
   };
   simContext?: SimContext | null;
   plugins: Map<string, any>;

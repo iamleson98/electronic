@@ -21,8 +21,9 @@ import type { CircuitComponent, Wire } from '../circuit/types';
 import { useEditor } from '../circuit/store';
 import { getFootprintDef } from './footprints';
 import { createPCBFromSchematic } from './netlist-sync';
-import { runDRC as runDRCCheck, DEFAULT_DRC_CONFIG } from './drc';
-import type { DRCError } from './drc';
+import { runDRC as runDRCCheck, DEFAULT_DRC_CONFIG, drcErrorKey } from './drc';
+import type { DRCError, DRCWaiver, DRCConfig } from './drc';
+import { getManufacturerSpec } from './manufacturer-presets';
 import { generateCopperPour } from './copper-pour';
 import type { CopperPour } from './copper-pour';
 import { exportAllGerbers } from './gerber-export';
@@ -76,6 +77,12 @@ interface PCBState {
   // DRC + copper pour
   drcErrors: DRCError[];
   copperPours: CopperPour[];
+  /** Reviewed DRC waivers (persisted with the document) */
+  drcWaivers: DRCWaiver[];
+  /** Active fab preset name ('' = custom DEFAULT_DRC_CONFIG) */
+  fabPreset: string;
+  /** Effective DRC config (preset or custom) */
+  drcConfig: DRCConfig;
 
   // actions
   importFromSchematic: (components: CircuitComponent[], wires: Wire[]) => void;
@@ -115,6 +122,12 @@ interface PCBState {
   loadDocument: (doc: PCBDocument) => void;
   runDRC: () => void;
   clearDRC: () => void;
+  /** Apply a manufacturer preset as the active DRC rule deck */
+  applyFabPreset: (name: string) => boolean;
+  /** Waive a DRC error (reviewed, excluded from sign-off) */
+  waiveDRCError: (error: DRCError, note?: string) => void;
+  /** Remove a waiver by fingerprint key */
+  unwaiveDRCError: (key: string) => void;
   addCopperPour: (layer: 'top' | 'bottom', net: string) => void;
   removeCopperPour: (layer: 'top' | 'bottom') => void;
   exportGerbers: () => void;
@@ -290,6 +303,9 @@ export const usePCB = create<PCBState>((set, get) => ({
   showKeepouts: true,
   drcErrors: [],
   copperPours: [],
+  drcWaivers: [],
+  fabPreset: '',
+  drcConfig: { ...DEFAULT_DRC_CONFIG },
 
   importFromSchematic: (components, wires) => {
     pushHistory('import');
@@ -690,6 +706,9 @@ export const usePCB = create<PCBState>((set, get) => ({
       // silently reverted 4/6-layer stacks and dropped every pour.
       layerStack: s.layerStack,
       copperPours: s.copperPours,
+      drcWaivers: s.drcWaivers,
+      fabPreset: s.fabPreset,
+      drcConfig: s.drcConfig,
     };
   },
 
@@ -719,6 +738,9 @@ export const usePCB = create<PCBState>((set, get) => ({
       // fall back to the defaults (2-layer stack, no pours).
       layerStack: doc.layerStack ?? DEFAULT_LAYER_STACK,
       copperPours: doc.copperPours ?? [],
+      drcWaivers: (doc as unknown as { drcWaivers?: DRCWaiver[] }).drcWaivers ?? [],
+      fabPreset: (doc as unknown as { fabPreset?: string }).fabPreset ?? '',
+      drcConfig: (doc as unknown as { drcConfig?: DRCConfig }).drcConfig ?? { ...DEFAULT_DRC_CONFIG },
       selectedFootprintId: null,
       selectedTraceId: null,
       selectedFootprintIds: new Set(),
@@ -733,11 +755,34 @@ export const usePCB = create<PCBState>((set, get) => ({
     // Pass the PCB net classes so per-net clearance/width rules are enforced
     // (previously the classes were silently ignored by the DRC run).
     const netClasses = s.netClasses.map((c) => ({ id: c.name, ...c }));
-    const errors = runDRCCheck(s.footprints, s.traces, s.vias, s.ratsnest, s.board, DEFAULT_DRC_CONFIG, netClasses);
+    const errors = runDRCCheck(s.footprints, s.traces, s.vias, s.ratsnest, s.board, s.drcConfig, netClasses, s.drcWaivers);
     set({ drcErrors: errors });
   },
 
   clearDRC: () => set({ drcErrors: [] }),
+
+  applyFabPreset: (name: string) => {
+    const spec = getManufacturerSpec(name);
+    if (!spec) return false;
+    set({ fabPreset: spec.name, drcConfig: { ...spec.config } });
+    get().runDRC();
+    return true;
+  },
+
+  waiveDRCError: (error: DRCError, note = '') => {
+    const key = drcErrorKey(error);
+    set((s) => ({
+      drcWaivers: s.drcWaivers.some((w) => w.key === key)
+        ? s.drcWaivers
+        : [...s.drcWaivers, { key, note, date: new Date().toISOString().slice(0, 10) }],
+    }));
+    get().runDRC();
+  },
+
+  unwaiveDRCError: (key: string) => {
+    set((s) => ({ drcWaivers: s.drcWaivers.filter((w) => w.key !== key) }));
+    get().runDRC();
+  },
 
   addCopperPour: (layer, net) => {
     pushHistory('addPour');

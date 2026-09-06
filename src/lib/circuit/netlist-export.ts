@@ -238,10 +238,53 @@ function formatSpiceValue(v: number, unit: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// KiCad PCB netlist export (.net XML format — KiCad 6+ uses .kicad_netlist)
+// KiCad PCB netlist export — modern S-expression (.kicad_netlist, KiCad 6/7/8)
+// with legacy XML fallback. DNP parts are excluded unless includeDnp.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function exportKiCadNetlist(doc: CircuitDocument, title: string = 'Circuit'): string {
+function isDnp(comp: CircuitComponent): boolean {
+  if (comp.variant === 'dnp') return true;
+  return comp.fields?.find((f) => f.key === 'DNP')?.value === 'true';
+}
+
+export function exportKiCadNetlist(
+  doc: CircuitDocument,
+  title: string = 'Circuit',
+  opts?: { format?: 'sexpr' | 'xml'; includeDnp?: boolean },
+): string {
+  if (opts?.format === 'xml') return exportKiCadNetlistXml(doc, title);
+  const nets = buildNets(doc);
+  const plugins = new Map<string, ComponentPlugin>();
+  for (const c of doc.components) {
+    const p = getPlugin(c.type);
+    if (p) plugins.set(c.type, p);
+  }
+  const fitted = doc.components.filter((c) => opts?.includeDnp || !isDnp(c));
+  const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const compNodes = fitted.map((comp) => {
+    const plugin = plugins.get(comp.type);
+    const refdes = comp.refdes ?? comp.id;
+    const footprint = comp.fields?.find((f) => f.key === 'Footprint')?.value ?? plugin?.defaultFootprint ?? '';
+    const value = comp.parameters.resistance ?? comp.parameters.voltage ?? comp.parameters.capacitance ?? comp.parameters.inductance ?? comp.type;
+    const datasheet = comp.fields?.find((f) => f.key === 'Datasheet')?.value ?? plugin?.datasheet ?? '';
+    const extraFields = (comp.fields ?? [])
+      .filter((f) => f.key !== 'Footprint' && f.key !== 'Datasheet')
+      .map((f) => `      (field (name "${esc(f.name)}") "${esc(f.value)}")`)
+      .join('\n');
+    return `  (comp (ref "${esc(refdes)}")\n    (value "${esc(String(value))}")\n    (footprint "${esc(footprint)}")\n    (datasheet "${esc(datasheet)}")${extraFields ? `\n${extraFields}` : ''})`;
+  }).join('\n');
+  const fittedRefs = new Set(fitted.map((c) => c.refdes ?? c.id));
+  const netNodes = nets.map((n, i) => {
+    const pinNodes = n.pins
+      .filter((p) => fittedRefs.has(p.refdes))
+      .map((p) => `      (node (ref "${esc(p.refdes)}") (pin "${esc(p.pinNumber ?? p.termId)}"))`)
+      .join('\n');
+    return `  (net (code "${i + 1}") (name "${esc(n.name)}")\n${pinNodes})`;
+  }).join('\n');
+  return `(export (version "E")\n  (design (source "${esc(title)}") (date "${new Date().toISOString()}") (tool "CircuitLab Web EDA"))\n  (components\n${compNodes})\n  (nets\n${netNodes})\n)\n`;
+}
+
+export function exportKiCadNetlistXml(doc: CircuitDocument, title: string = 'Circuit'): string {
   const nets = buildNets(doc);
   const plugins = new Map<string, ComponentPlugin>();
   for (const c of doc.components) {
@@ -320,7 +363,7 @@ export function buildBOMRows(doc: CircuitDocument): BOMRow[] {
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
     const refdes = comp.refdes ?? comp.id;
-    const dnp = comp.fields?.find((f) => f.key === 'DNP')?.value === 'true';
+    const dnp = isDnp(comp);
     const footprint = comp.fields?.find((f) => f.key === 'Footprint')?.value ?? plugin.defaultFootprint ?? 'Unknown';
     const mpn = comp.fields?.find((f) => f.key === 'MPN')?.value;
     const manufacturer = comp.fields?.find((f) => f.key === 'Manufacturer')?.value;

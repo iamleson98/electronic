@@ -22,9 +22,13 @@ export interface FootprintParams {
   bodyLength: number;
   padWidth: number;
   padHeight: number;
-  type: 'soic' | 'tssop' | 'qfp' | 'qfn' | 'dip' | 'sot23' | 'chip';
+  type: 'soic' | 'tssop' | 'qfp' | 'qfn' | 'dip' | 'sot23' | 'chip' | 'bga';
   pinsPerSide?: number;
   padSpacing?: number;
+  /** BGA: balls per row (= balls per column for square arrays) */
+  bgaBalls?: number;
+  /** BGA: ball diameter in mm (default 0.45) */
+  bgaBallDia?: number;
 }
 
 export function generateFootprintDef(name: string, params: FootprintParams): FootprintDef {
@@ -131,6 +135,27 @@ export function generateFootprintDef(name: string, params: FootprintParams): Foo
       size: { width: padWidth, height: padHeight },
       layer: 'top',
     });
+  } else if (type === 'bga') {
+    // Ball grid array: square N×N grid, A1 at top-left, NSMD pads
+    // (pad dia ≈ 80% of ball dia per IPC-7351).
+    const n = params.bgaBalls ?? Math.round(Math.sqrt(pinCount));
+    const ballDia = params.bgaBallDia ?? 0.45;
+    const padDia = ballDia * 0.8;
+    let pinNum = 1;
+    for (let row = 0; row < n && pinNum <= pinCount; row++) {
+      for (let col = 0; col < n && pinNum <= pinCount; col++) {
+        const x = (col - (n - 1) / 2) * pitch;
+        const y = (row - (n - 1) / 2) * pitch;
+        pads.push({
+          terminalId: `${String.fromCharCode(65 + row)}${col + 1}`,
+          position: { x, y },
+          shape: 'circle',
+          size: { width: padDia, height: padDia },
+          layer: 'top',
+        });
+        pinNum++;
+      }
+    }
   }
 
   return {
@@ -179,6 +204,22 @@ export function generateQFN(pinCount: number, pitch = 0.5): FootprintDef {
   return generateFootprintDef(`QFN-${pinCount}`, {
     type: 'qfn', pinCount, pitch, bodyWidth, bodyLength: bodyWidth,
     padWidth: 0.25, padHeight: 0.5, pinsPerSide,
+  });
+}
+
+/**
+ * BGA footprint: square N×N ball grid (A1 top-left), NSMD pads at 80% of
+ * ball diameter. Thermal vias should be added under the center on the PCB
+ * (via-in-pad plugged) — flagged in the footprint description.
+ */
+export function generateBGA(ballsPerSide: number, pitch = 0.8, ballDia = 0.45): FootprintDef {
+  const pinCount = ballsPerSide * ballsPerSide;
+  const span = (ballsPerSide - 1) * pitch;
+  return generateFootprintDef(`BGA-${pinCount}`, {
+    type: 'bga', pinCount, pitch,
+    bodyWidth: span + 2.0, bodyLength: span + 2.0,
+    padWidth: ballDia * 0.8, padHeight: ballDia * 0.8,
+    bgaBalls: ballsPerSide, bgaBallDia: ballDia,
   });
 }
 

@@ -179,6 +179,15 @@ export interface CircuitComponent {
   fields?: ComponentField[];
   /** net class assigned to this component's primary net (schematic-side) */
   netClassId?: string;
+  // ── Production fields (tolerance / temperature / variants) ──────────────
+  /** per-part tolerance fraction for Monte-Carlo, e.g. 0.05 = ±5% (default per type) */
+  tolerance?: number;
+  /** tolerance distribution: 'gauss' (default, σ=tol/3) or 'uniform' */
+  toleranceDist?: 'gauss' | 'uniform';
+  /** per-component temperature override in °C (default: global sim temp) */
+  temp?: number;
+  /** assembly variant: 'fitted' (default) or 'dnp' (do-not-populate — excluded from BOM/netlist) */
+  variant?: 'fitted' | 'dnp';
 }
 
 export interface Wire {

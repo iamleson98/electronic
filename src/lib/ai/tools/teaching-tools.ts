@@ -410,6 +410,12 @@ export interface Recommendation {
   name: string;
   why: string;
   keyParameters: { label: string; value: string }[];
+  /** footprint/package for PCB planning */
+  footprint?: string;
+  /** distributor info for ordering (best-effort from the part database) */
+  mpn?: string;
+  unitPrice?: number;
+  datasheet?: string;
 }
 
 const RECOMMENDATION_RULES: Array<{
@@ -484,6 +490,12 @@ export function recommendComponents(useCase: string): Recommendation[] {
     return [];
   }
   const plugins = new Map(getAllPlugins().map((p) => [p.type, p]));
+  // Best-effort part-database join for footprint/price/datasheet.
+  let partDb: Array<{ mpn: string; manufacturer: string; description: string; package: string; category: string; digikeyPN?: string; mouserPN?: string; lcscPN?: string; datasheet?: string; unitPrice?: number }> = [];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    partDb = (require('@/lib/pcb/part-database') as typeof import('@/lib/pcb/part-database')).partDatabase;
+  } catch { /* part db unavailable — recommendations still work without it */ }
   const out: Recommendation[] = [];
   for (const type of rule.want) {
     const p = plugins.get(type);
@@ -496,7 +508,16 @@ export function recommendComponents(useCase: string): Recommendation[] {
         keyParameters.push({ label: def.label || def.key, value: def.options.slice(0, 4).join(' / ') });
       }
     }
-    out.push({ type, name: p.name, why: rule.why(type), keyParameters });
+    const part = partDb.find((q) =>
+      q.description.toLowerCase().includes(p.name.toLowerCase().split(' ')[0]) ||
+      p.name.toLowerCase().includes(q.mpn.toLowerCase().split('-')[0]));
+    out.push({
+      type, name: p.name, why: rule.why(type), keyParameters,
+      footprint: p.defaultFootprint ?? part?.package,
+      mpn: part?.mpn,
+      unitPrice: part?.unitPrice,
+      datasheet: p.datasheet ?? part?.datasheet,
+    });
   }
   return out;
 }

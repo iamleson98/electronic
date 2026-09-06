@@ -1554,12 +1554,19 @@ export function simulateStep(
 /**
  * Solve a pure DC operating point (no time stepping).
  * Iterates a few times to handle non-linear components (diodes, transistors).
+ *
+ * When plain Newton fails (singular matrix at some iteration), falls back to
+ * the robust convergence aids (gmin stepping → source stepping →
+ * pseudo-transient) when `robust` is true and the convergence module is
+ * available. The fallback is lazy-imported so engine.ts keeps zero
+ * dependency cycles (convergence.ts imports from engine.ts).
  */
 export function solveDC(
   components: CircuitComponent[],
   wires: Wire[],
   plugins: Map<string, ComponentPlugin>,
   maxIter: number = 50,
+  opts?: { robust?: boolean; simOptions?: { initialConditions?: Record<string, number>; nodeSets?: Record<string, number>; method?: 'euler' | 'trap' | 'gear' } },
 ): SimContext | null {
   // initialize simState
   for (const comp of components) {
@@ -1576,6 +1583,7 @@ export function solveDC(
 
   let prev: PrevState | undefined;
   let result: SimContext | null = null;
+  let failed = false;
   for (let iter = 0; iter < maxIter; iter++) {
     // fixedTime: hold every time-dependent source at its t=0 value for the
     // whole solve (ngspice .OP semantics). Previously sim.time advanced by
@@ -1583,8 +1591,8 @@ export function solveDC(
     // random phase per round: the convergence test could never settle (always
     // 50 iterations), and the returned operating point — which runTran uses
     // to seed the transient — carried an arbitrary source phase.
-    const r = simulateStep(components, wires, plugins, prev, DC_DT, { fixedTime: 0 });
-    if (!r) return null;
+    const r = simulateStep(components, wires, plugins, prev, DC_DT, { fixedTime: 0, ...opts?.simOptions });
+    if (!r) { failed = true; break; }
     result = r.sim;
     // check convergence
     if (prev) {
@@ -1609,5 +1617,19 @@ export function solveDC(
       };
     }
   }
-  return result;
+  if (!failed) return result;
+  // Plain Newton failed — escalate to the robust aids (gmin → source →
+  // pseudo-transient) when requested. Lazy require avoids the engine ↔
+  // convergence import cycle; if the module is unavailable, return null.
+  if (opts?.robust) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const conv = require('./convergence') as typeof import('./convergence');
+      const out = conv.solveDCRobust(components, wires, plugins, { itl1: maxIter });
+      return out.sim;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }

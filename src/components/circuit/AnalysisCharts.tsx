@@ -164,3 +164,75 @@ export function FamilyPlot({ traces, sweepValues, width = 600, height = 250 }: F
     </svg>
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PoleZeroPlot — S-plane scatter: poles × (cyan), zeros ○ (amber). The jω
+// axis is vertical center; left half-plane = stable. RHP markers get a red
+// halo so instability is visible at a glance.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PoleZeroPoint {
+  real: number;
+  imag: number;
+  /** frequency in Hz (|p|/2π) for the tooltip */
+  freq?: number;
+}
+
+interface PoleZeroPlotProps {
+  poles: PoleZeroPoint[];
+  zeros: PoleZeroPoint[];
+  width?: number;
+  height?: number;
+}
+
+export function PoleZeroPlot({ poles, zeros, width = 600, height = 300 }: PoleZeroPlotProps) {
+  const pad = { l: 50, r: 20, t: 20, b: 30 };
+  const plotW = width - pad.l - pad.r;
+  const plotH = height - pad.t - pad.b;
+  const all = [...poles, ...zeros];
+  let reMin = -1, reMax = 1, imMax = 1;
+  for (const p of all) {
+    if (p.real < reMin) reMin = p.real;
+    if (p.real > reMax) reMax = p.real;
+    if (Math.abs(p.imag) > imMax) imMax = Math.abs(p.imag);
+  }
+  // symmetric imaginary axis, small padding on real
+  const rePad = Math.max(1, (reMax - reMin) * 0.1);
+  reMin -= rePad;
+  reMax += rePad;
+  const xScale = (re: number) => pad.l + ((re - reMin) / Math.max(1e-12, reMax - reMin)) * plotW;
+  const yScale = (im: number) => pad.t + (1 - (im + imMax) / (2 * imMax)) * plotH;
+  const xZero = xScale(0);
+  const yZero = yScale(0);
+  return (
+    <svg width={width} height={height} className="rounded border border-slate-800 bg-[#0a0f1c]" role="img" aria-label="Pole-zero plot">
+      {/* axes: jω vertical at σ=0, σ horizontal at ω=0 */}
+      <line x1={xZero} y1={pad.t} x2={xZero} y2={pad.t + plotH} stroke="#475569" strokeWidth={1.5} />
+      <line x1={pad.l} y1={yZero} x2={pad.l + plotW} y2={yZero} stroke="#475569" strokeWidth={1} />
+      <text x={xZero + 4} y={pad.t + 10} fill="#64748b" fontSize="9" fontFamily="monospace">jω</text>
+      <text x={pad.l + plotW - 14} y={yZero - 4} fill="#64748b" fontSize="9" fontFamily="monospace">σ</text>
+      {/* RHP shading (unstable region) */}
+      <rect x={xZero} y={pad.t} width={pad.l + plotW - xZero} height={plotH} fill="rgba(239,68,68,0.07)" />
+      {/* zeros: amber circles */}
+      {zeros.map((z, i) => (
+        <g key={`z-${i}`}>
+          {z.real > 0 && <circle cx={xScale(z.real)} cy={yScale(z.imag)} r={8} fill="none" stroke="rgba(239,68,68,0.5)" strokeWidth={1.5} />}
+          <circle cx={xScale(z.real)} cy={yScale(z.imag)} r={5} fill="none" stroke="#f59e0b" strokeWidth={2} />
+        </g>
+      ))}
+      {/* poles: cyan crosses */}
+      {poles.map((p, i) => (
+        <g key={`p-${i}`}>
+          {p.real > 0 && <circle cx={xScale(p.real)} cy={yScale(p.imag)} r={8} fill="none" stroke="rgba(239,68,68,0.5)" strokeWidth={1.5} />}
+          <line x1={xScale(p.real) - 5} y1={yScale(p.imag) - 5} x2={xScale(p.real) + 5} y2={yScale(p.imag) + 5} stroke="#22d3ee" strokeWidth={2} />
+          <line x1={xScale(p.real) - 5} y1={yScale(p.imag) + 5} x2={xScale(p.real) + 5} y2={yScale(p.imag) - 5} stroke="#22d3ee" strokeWidth={2} />
+        </g>
+      ))}
+      {/* scale labels */}
+      <text x={pad.l} y={height - 8} fill="#64748b" fontSize="9" fontFamily="monospace">{reMin.toExponential(1)}</text>
+      <text x={pad.l + plotW - 40} y={height - 8} fill="#64748b" fontSize="9" fontFamily="monospace">{reMax.toExponential(1)}</text>
+      <text x={4} y={pad.t + 8} fill="#64748b" fontSize="9" fontFamily="monospace">+j{imMax.toExponential(0)}</text>
+      <text x={4} y={pad.t + plotH} fill="#64748b" fontSize="9" fontFamily="monospace">−j{imMax.toExponential(0)}</text>
+    </svg>
+  );
+}

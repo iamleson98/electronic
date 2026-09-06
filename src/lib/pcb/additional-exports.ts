@@ -1,8 +1,11 @@
 // Additional manufacturing output formats: BOM, IPC-2581, ODB++, DXF, SVG, PDF, STEP, VRML
 
 import type { Footprint, Trace, Via, BoardOutline } from './types';
+import type { PartInfo } from './part-database';
 
 // ===== BOM (CSV) =====
+// Joins the part database for MPN/manufacturer/distributor/price columns so
+// the BOM is order-ready (JLC/LCSC + DigiKey/Mouser), not just refdes+type.
 export function exportBOM(footprints: Footprint[]): string {
   const groups = new Map<string, { refdes: string[]; type: string }>();
   for (const fp of footprints) {
@@ -10,12 +13,32 @@ export function exportBOM(footprints: Footprint[]): string {
     if (!groups.has(key)) groups.set(key, { refdes: [], type: fp.componentType });
     groups.get(key)!.refdes.push(fp.refdes ?? fp.id);
   }
-  const lines = ['Designator,Quantity,Footprint,Description'];
+  const lines = ['Designator,Quantity,Footprint,Description,MPN,Manufacturer,LCSC,DigiKey,Mouser,UnitPrice,ExtPrice,DNP'];
   for (const [, g] of groups) {
+    const part = findPartForType(g.type);
+    const unit = part?.unitPrice ?? 0;
+    const ext = unit * g.refdes.length;
     const refdes = `"${g.refdes.join(',')}"`;
-    lines.push([refdes, g.refdes.length.toString(), g.type, g.type].join(','));
+    lines.push([
+      refdes, g.refdes.length.toString(), g.type, `"${part?.description ?? g.type}"`,
+      part?.mpn ?? '', part?.manufacturer ?? '', part?.lcscPN ?? '',
+      part?.digikeyPN ?? '', part?.mouserPN ?? '',
+      unit.toFixed(2), ext.toFixed(2), '',
+    ].join(','));
   }
   return lines.join('\n');
+}
+
+function findPartForType(type: string): PartInfo | undefined {
+  // Lazy import avoids a hard dependency cycle (part-database is leaf data).
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const db = require('./part-database') as typeof import('./part-database');
+  const lower = type.toLowerCase();
+  return db.partDatabase.find((p) =>
+    p.mpn.toLowerCase().includes(lower) ||
+    p.description.toLowerCase().includes(lower) ||
+    p.category === lower,
+  );
 }
 
 // ===== IPC-2581 (XML) =====

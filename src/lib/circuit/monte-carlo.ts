@@ -36,8 +36,11 @@ export interface MonteCarloConfig {
   runs?: number;
   /** Random seed for reproducibility (default 1) */
   seed?: number;
-  /** Tolerances per component */
-  tolerances: MonteCarloTolerance[];
+  /** Tolerances per component. When empty, per-part `tolerance` fields on the
+   *  components themselves are used (with DEFAULT_TOLERANCES fallback). */
+  tolerances?: MonteCarloTolerance[];
+  /** Default tolerance fraction when neither config nor part specifies one */
+  defaultTolerance?: number;
   /** Measurement: what to extract from each run */
   measurement: {
     /** Type: 'voltage' (node voltage) or 'current' (component current) */
@@ -125,6 +128,26 @@ export function runMonteCarlo(
   const nBins = Math.max(1, config.nBins ?? 20);
   const rng = new LCG(seed);
 
+  // Tolerance source: explicit config list, else per-part `tolerance` fields
+  // (with type defaults: R/C/L 5%, semiconductors 10%), else defaultTolerance.
+  const DEFAULT_TOL: Record<string, number> = {
+    resistor: 0.05, capacitor: 0.05, inductor: 0.05, potentiometer: 0.1,
+    led: 0.1, diode: 0.1, zener: 0.05,
+  };
+  const PARAM_BY_TYPE: Record<string, string> = {
+    resistor: 'resistance', capacitor: 'capacitance', inductor: 'inductance',
+    potentiometer: 'resistance', dcVoltage: 'voltage', acVoltage: 'amplitude',
+    currentSource: 'current', led: 'seriesR', diode: 'onR', zener: 'zenerV',
+  };
+  const tolerances: MonteCarloTolerance[] = (config.tolerances && config.tolerances.length > 0)
+    ? config.tolerances
+    : doc.components.flatMap((c) => {
+        const param = PARAM_BY_TYPE[c.type];
+        if (!param || typeof c.parameters[param] !== 'number') return [];
+        const tol = c.tolerance ?? DEFAULT_TOL[c.type] ?? config.defaultTolerance ?? 0.05;
+        return [{ componentId: c.id, param, tolerance: tol, distribution: c.toleranceDist ?? 'gauss' as const }];
+      });
+
   const runs: MonteCarloRun[] = [];
   const values: number[] = [];
 
@@ -132,7 +155,7 @@ export function runMonteCarlo(
     // Clone the circuit and apply perturbations
     const clonedComponents: CircuitComponent[] = JSON.parse(JSON.stringify(doc.components));
     const perturbations: MonteCarloRun['perturbations'] = [];
-    for (const tol of config.tolerances) {
+    for (const tol of tolerances) {
       const comp = clonedComponents.find(c => c.id === tol.componentId);
       if (!comp) continue;
       const orig = Number(comp.parameters[tol.param]);

@@ -415,16 +415,28 @@ export function exportExcellonDrill(
  * degrees about the footprint origin); Side distinguishes top/bottom
  * placement. The Footprint column carries the real footprint name when the
  * caller provides one via `footprintName` metadata, else the component type.
+ *
+ * JLC rotation corrections: certain packages need a fixed offset between the
+ * CAD zero and the feeder zero (diodes/SOT-23 180°, SOT-223 180°, tantalum
+ * 180°). The correction table below applies the standard JLC offsets by
+ * footprint-name pattern so boards assemble correctly first time.
  */
 export function exportPickAndPlace(
   footprints: (Footprint & { footprintName?: string })[],
 ): string {
   const lines: string[] = [];
-  lines.push('Designator,Footprint,PosX,PosY,Rotation,Side,Comment');
+  lines.push('Designator,Footprint,PosX,PosY,Rotation,Side,Comment,LCSC Part #');
 
   for (const fp of footprints) {
     // Rotation is CCW degrees about the footprint origin (KiCad convention).
-    const rot = ((fp.rotation % 360) + 360) % 360;
+    const baseRot = ((fp.rotation % 360) + 360) % 360;
+    const name = (fp.footprintName ?? fp.componentType).toUpperCase();
+    let correction = 0;
+    if (/SOT-23|SOT23|DIODE|SOD-|SMA|SMB|SMC/.test(name)) correction = 180;
+    else if (/SOT-223/.test(name)) correction = 180;
+    else if (/TANTALUM|CASE-A|CASE-B|CASE-C/.test(name)) correction = 180;
+    else if (/QFN|QFP|BGA/.test(name)) correction = 0;
+    const rot = (baseRot + correction) % 360;
     lines.push([
       fp.refdes,
       fp.footprintName ?? fp.componentType,
@@ -433,6 +445,7 @@ export function exportPickAndPlace(
       rot.toString(),
       fp.side === 'bottom' ? 'Bottom' : 'Top',
       fp.componentType,
+      '',
     ].join(','));
   }
 
@@ -448,28 +461,92 @@ export function exportAllGerbers(
   vias: Via[],
   board: BoardOutline,
   pours?: CopperPour[],
+  opts?: { layers?: ('top' | 'bottom' | 'inner1' | 'inner2' | 'inner3' | 'inner4')[] },
 ): { filename: string; content: string }[] {
   const files: { filename: string; content: string }[] = [];
+  const layers = opts?.layers ?? ['top', 'bottom'];
 
-  // Copper layers (pours render into their layer's copper)
-  files.push({ filename: 'top_copper.gbr', content: exportGerberCopper('top', footprints, traces, vias, board, pours) });
-  files.push({ filename: 'bottom_copper.gbr', content: exportGerberCopper('bottom', footprints, traces, vias, board, pours) });
+  // Copper layers (pours render into their layer's copper) — inner layers
+  // included when the stackup uses them (previously always dropped).
+  for (const layer of layers) {
+    files.push({ filename: `${layer}_copper.gbr`, content: exportGerberCopper(layer, footprints, traces, vias, board, pours) });
+  }
 
   // Solder masks
   files.push({ filename: 'top_soldermask.gbr', content: exportGerberSolderMask('top', footprints, board) });
   files.push({ filename: 'bottom_soldermask.gbr', content: exportGerberSolderMask('bottom', footprints, board) });
 
+  // Solder paste (SMD stencil)
+  files.push({ filename: 'top_paste.gbr', content: exportGerberPaste('top', footprints, board) });
+  files.push({ filename: 'bottom_paste.gbr', content: exportGerberPaste('bottom', footprints, board) });
+
   // Silkscreen
   files.push({ filename: 'top_silkscreen.gbr', content: exportGerberSilkscreen('top', footprints, board) });
   files.push({ filename: 'bottom_silkscreen.gbr', content: exportGerberSilkscreen('bottom', footprints, board) });
 
+  // Board outline (Edge.Cuts) — the layer fabs actually route from
+  files.push({ filename: 'edge_cuts.gbr', content: exportGerberEdgeCuts(board) });
+
   // Drill file
   files.push({ filename: 'drill.drl', content: exportExcellonDrill(footprints, vias) });
+
+  // Drill map (human-readable hole table for the fab drawing)
+  files.push({ filename: 'drill_map.txt', content: exportDrillMap(footprints, vias) });
 
   // Pick and place
   files.push({ filename: 'pick_and_place.csv', content: exportPickAndPlace(footprints) });
 
+  // Gerber job file — tells the CAM station what each file is
+  files.push({ filename: 'job.gbrjob', content: exportGerberJobFile(layers, board) });
+
   return files;
+}
+
+/**
+ * Human-readable drill map: hole count by size + plated status.
+ */
+export function exportDrillMap(footprints: Footprint[], vias: Via[]): string {
+  const sizes = new Map<string, { size: number; count: number; plated: boolean }>();
+  const add = (size: number, plated: boolean) => {
+    const key = `${size.toFixed(3)}:${plated ? 'PTH' : 'NPTH'}`;
+    const e = sizes.get(key) ?? { size, count: 0, plated };
+    e.count++;
+    sizes.set(key, e);
+  };
+  for (const fp of footprints) {
+    for (const pad of fp.pads) {
+      if ((pad.drill ?? 0) > 0) add(pad.drill!, true);
+    }
+  }
+  for (const v of vias) add(v.drill, true);
+  const lines = ['Drill map (mm)', '================', ''];
+  for (const e of [...sizes.values()].sort((a, b) => a.size - b.size)) {
+    lines.push(`${e.size.toFixed(3)}mm  x${e.count}  ${e.plated ? 'PTH' : 'NPTH'}`);
+  }
+  lines.push('', `Total holes: ${[...sizes.values()].reduce((a, e) => a + e.count, 0)}`);
+  return lines.join('\n');
+}
+
+/**
+ * Minimal Gerber job file (X3-style JSON is overkill here): maps each
+ * exported filename to its layer function so CAM auto-import works.
+ */
+export function exportGerberJobFile(
+  layers: string[],
+  board: BoardOutline,
+): string {
+  const entries = [
+    ...layers.map((l) => `  "${l}_copper.gbr": "copper:${l}"`),
+    '  "top_soldermask.gbr": "mask:top"',
+    '  "bottom_soldermask.gbr": "mask:bottom"',
+    '  "top_paste.gbr": "paste:top"',
+    '  "bottom_paste.gbr": "paste:bottom"',
+    '  "top_silkscreen.gbr": "silk:top"',
+    '  "bottom_silkscreen.gbr": "silk:bottom"',
+    '  "edge_cuts.gbr": "outline"',
+    '  "drill.drl": "drill:pth"',
+  ];
+  return `{\n  "board": { "width_mm": ${board.width}, "height_mm": ${board.height} },\n  "files": {\n${entries.join(',\n')}\n  }\n}\n`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

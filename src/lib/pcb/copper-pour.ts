@@ -13,6 +13,14 @@ export interface CopperPour {
   cellSize: number;
   /** thermal relief pads (same-net pads that need spoke connections) */
   thermalPads?: { pos: { x: number; y: number }; spokeWidth: number; padRadius: number }[];
+  /** zone priority — higher wins where pours overlap (default 0) */
+  priority?: number;
+  /** thermal spoke width in mm (default 0.3) */
+  spokeWidth?: number;
+  /** clearance to foreign copper in mm (default 0.3) */
+  clearance?: number;
+  /** remove isolated islands with no same-net connection (default true) */
+  removeIslands?: boolean;
 }
 
 /**
@@ -38,7 +46,7 @@ export function generateCopperPour(
   vias: Via[],
   board: BoardOutline,
   clearance: number = 0.3,
-  options: { thermalRelief?: boolean } = {},
+  options: { thermalRelief?: boolean; priority?: number; spokeWidth?: number; removeIslands?: boolean } = {},
 ): CopperPour {
   const cellSize = 0.5; // mm per cell
   const cols = Math.ceil(board.width / cellSize);
@@ -243,7 +251,13 @@ export function generateCopperPour(
 
   const cells = keptCells.map((c) => ({ x: (c.col + 0.5) * cellSize, y: (c.row + 0.5) * cellSize }));
 
-  return { layer, net, cells, cellSize, thermalPads };
+  return {
+    layer, net, cells, cellSize, thermalPads,
+    priority: options.priority ?? 0,
+    spokeWidth: 0.3,
+    clearance,
+    removeIslands: true,
+  };
 }
 
 function pointToSegDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {

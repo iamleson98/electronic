@@ -8,14 +8,80 @@ export interface ScopeSample { time: number; voltage: number; }
 export interface ScopeChannel { id: string; label: string; color: string; samples: ScopeSample[]; visible: boolean; voltageScale: number; voltageOffset: number; coupling: 'DC' | 'AC'; }
 export interface ScopeCursor { enabled: boolean; time: number; channel: number; }
 
-/** Trigger configuration. Display-only for now: traces stream continuously,
- *  so `armed` reflects the user's armed state rather than a real acquisition. */
+/** Trigger configuration. Modes:
+ *  - auto: free-running (traces stream continuously, marker shows level)
+ *  - normal: the visible window re-anchors on every qualifying edge
+ *  - single: captures ONE qualifying edge then disarms (one-shot/glitch) */
 export interface ScopeTrigger {
   mode: 'auto' | 'normal' | 'single';
   source: number;          // index into the channel list
   edge: 'rising' | 'falling';
   level: number;           // threshold in volts at the source channel input
   armed: boolean;
+  /** holdoff in seconds — edges within this window after a trigger are ignored */
+  holdoff?: number;
+}
+
+/** A detected trigger event (edge crossing of the source channel). */
+export interface TriggerEvent {
+  time: number;
+  edge: 'rising' | 'falling';
+  /** sample index of the crossing */
+  index: number;
+}
+
+/**
+ * Scan samples for threshold crossings on the trigger source (real
+ * acquisition: normal/single modes re-anchor the display window here).
+ * Coupling-adjusted samples should be passed (AC mean already removed).
+ * Returns crossing events in time order; holdoff suppresses re-triggers.
+ */
+export function findTriggerEvents(
+  samples: ScopeSample[],
+  level: number,
+  edge: 'rising' | 'falling',
+  holdoff = 0,
+): TriggerEvent[] {
+  const events: TriggerEvent[] = [];
+  let lastT = -Infinity;
+  for (let i = 1; i < samples.length; i++) {
+    const v0 = samples[i - 1].voltage;
+    const v1 = samples[i].voltage;
+    const rising = v0 < level && v1 >= level;
+    const falling = v0 > level && v1 <= level;
+    const hit = edge === 'rising' ? rising : falling;
+    if (!hit) continue;
+    const t0 = samples[i - 1].time;
+    const t1 = samples[i].time;
+    const frac = (level - v0) / (v1 - v0);
+    const t = t0 + frac * (t1 - t0);
+    if (t - lastT < holdoff) continue;
+    lastT = t;
+    events.push({ time: t, edge, index: i });
+  }
+  return events;
+}
+
+/**
+ * Resolve the display anchor for normal/single trigger modes: the latest
+ * qualifying edge at or before `now` (single mode additionally requires
+ * `armed` — disarmed single shows the frozen capture time).
+ */
+export function resolveTriggerAnchor(
+  samples: ScopeSample[],
+  trigger: ScopeTrigger,
+  now: number,
+  frozenAt?: number,
+): number {
+  if (trigger.mode === 'auto') return now;
+  if (trigger.mode === 'single' && !trigger.armed) return frozenAt ?? now;
+  const coupled = samples; // caller passes coupling-adjusted samples
+  const events = findTriggerEvents(coupled, trigger.level, trigger.edge, trigger.holdoff ?? 0);
+  let anchor = frozenAt ?? -Infinity;
+  for (const e of events) {
+    if (e.time <= now && e.time > anchor) anchor = e.time;
+  }
+  return anchor === -Infinity ? now : anchor;
 }
 
 export interface ScopeMeasurement { name: string; value: number; unit: string; formatted: string; }

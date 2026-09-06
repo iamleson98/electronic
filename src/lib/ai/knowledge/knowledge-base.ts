@@ -1958,6 +1958,143 @@ const integrationMethods: KBArticle = {
   seeAlso: ['convergence-issues'],
 };
 
+const smpsLayout: KBArticle = {
+  id: 'smps-layout',
+  title: 'SMPS Layout (Buck/Boost Switching Regulators)',
+  category: 'pcb',
+  tags: ['smps', 'buck', 'boost', 'switching', 'layout', 'emi', 'inductor', 'loop'],
+  summary: 'Keep the hot switching loop (input cap → switch → inductor → output cap) as small as possible; ground the quiet analog section at one star point.',
+  body: body([
+    "# SMPS Layout",
+    "",
+    "## The Hot Loop",
+    "",
+    "Every switching cycle slams current through input-cap → high-side switch → inductor → output-cap. That loop radiates EMI proportional to its AREA — keep it under ~1 cm²: input ceramic within 2mm of the switch node, inductor adjacent, output ceramic at the inductor's far end.",
+    "",
+    "## Grounding",
+    "",
+    "One star point: power ground (switch + caps) meets analog ground (feedback divider) at exactly one via under the IC. Never route the feedback trace across the switch node.",
+    "",
+    "## Feedback",
+    "",
+    "Route FB as a short quiet pair from the output cap terminals (Kelvin), away from the inductor. Add 10–100pF feedforward across the upper divider resistor for phase margin.",
+    "",
+    "## Thermal",
+    "",
+    "Copper pours on the switch tab + thermal vias to inner planes. Size the inductor for <30% ripple at full load; check review.derating on the switch current.",
+  ]),
+  related: ['pcb-layout-basics', 'ground-plane', 'decoupling'],
+  seeAlso: ['convergence-issues'],
+};
+
+const mcuFirmware: KBArticle = {
+  id: 'mcu-firmware',
+  title: 'MCU Firmware Bring-Up (Arduino/ESP32/Pi)',
+  category: 'ic',
+  tags: ['mcu', 'arduino', 'esp32', 'firmware', 'gpio', 'adc', 'pullup', 'decoupling'],
+  summary: 'Decouple every supply pin (100nF), never float inputs, respect GPIO current limits (20mA AVR / 12mA ESP32), and bring up clock → GPIO → ADC → comms in that order.',
+  body: body([
+    "# MCU Firmware Bring-Up",
+    "",
+    "## Power First",
+    "",
+    "100nF ceramic on EVERY supply pin plus 10µF bulk nearby. Measure rails before inserting the MCU. Brown-out fuses on (AVR BOD 4.3V, ESP32 default).",
+    "",
+    "## GPIO Rules",
+    "",
+    "AVR: 20mA recommended / 40mA absolute per pin, 200mA total. ESP32: ~12mA per pin. Never drive a floating CMOS input — enable internal pull-ups or add 10k externals.",
+    "",
+    "## Bring-Up Order",
+    "",
+    "1. Clock (scope the crystal — sine ~1Vpp at rated freq). 2. Blink (GPIO toggle proves flash+clock). 3. UART hello. 4. ADC against known voltage. 5. Peripherals (I²C/SPI with pull-ups 2.2–4.7k).",
+    "",
+    "## Reset + Boot",
+    "",
+    "10k pull-up on RESET, 100nF to ground. ESP32: strapping pins (GPIO0/2/12/15) must be correct at reset or it won't boot — check review.checklist floating-inputs.",
+  ]),
+  related: ['555-timer', 'decoupling'],
+  seeAlso: ['floating-node'],
+};
+
+const rfBasics: KBArticle = {
+  id: 'rf-basics',
+  title: 'RF Basics (Impedance, Transmission Lines, Antennas)',
+  category: 'pcb',
+  tags: ['rf', 'impedance', 'microstrip', 'antenna', 'matching', 's11', 'coplanar'],
+  summary: 'Route RF as controlled-impedance (usually 50Ω) microstrip over unbroken ground; match source–line–load or power reflects (S11).',
+  body: body([
+    "# RF Basics",
+    "",
+    "## 50Ω Everywhere",
+    "",
+    "Antenna, feedline, and PA/LNA ports all want the same impedance (usually 50Ω). On 1.6mm FR4, 50Ω microstrip is ~2.9mm wide over full ground — use the stackup calculator, don't guess.",
+    "",
+    "## No Slots Under RF",
+    "",
+    "The return current flows directly under the trace. A slot or split forces a detour → inductance → ringing and radiation. See ground-plane.",
+    "",
+    "## Matching",
+    "",
+    "Measure S11 (return loss); add L-network (series L, shunt C) to pull the Smith-chart point to center. Simulate the match with acAnalysis before cutting copper.",
+    "",
+    "## Keep-Outs",
+    "",
+    "No copper, pour, or components under chip antennas (datasheet keep-out, typically 5×3mm+). Enclosure metal detunes — test in situ.",
+  ]),
+  related: ['pcb-layout-basics', 'ground-plane', 'ac-analysis'],
+  seeAlso: ['decoupling'],
+};
+
+const esdSafety: KBArticle = {
+  id: 'esd-safety',
+  title: 'ESD + Electrical Safety (TVS, Creepage, Fusing)',
+  category: 'troubleshooting',
+  tags: ['esd', 'tvs', 'safety', 'creepage', 'fuse', 'iec', 'mains', 'protection'],
+  summary: 'TVS diodes on every exposed connector (8kV contact per IEC 61000-4-2); mains needs fuse + MOV + ≥3mm creepage.',
+  body: body([
+    "# ESD + Electrical Safety",
+    "",
+    "## Exposed Interfaces",
+    "",
+    "USB/UART/buttons/antennas: unidirectional TVS to ground, <1pF for high-speed lines. Series 22–100Ω + TVS beats TVS alone (limits peak current).",
+    "",
+    "## Mains",
+    "",
+    "Fuse (slow-blow, rated 1.5× load) + MOV across L–N + Y-caps (Y1/Y2 rated) to PE. Creepage ≥3mm L–N, ≥6mm to touchable SELV. Double-check with review.checklist mains-fuse + esd-creepage.",
+    "",
+    "## Layout",
+    "",
+    "TVS ground via directly to chassis/ground pour (<2mm trace). No vias between connector pin and TVS — the strike must meet protection first.",
+  ]),
+  related: ['pcb-layout-basics'],
+  seeAlso: ['parallel-voltage-sources'],
+};
+
+const jlcOrdering: KBArticle = {
+  id: 'jlc-ordering',
+  title: 'Ordering from JLCPCB / PCBWay (Gerbers, Assembly, PnP)',
+  category: 'pcb',
+  tags: ['jlc', 'pcbway', 'order', 'gerber', 'assembly', 'stencil', 'pnp', 'fab'],
+  summary: 'Export the full fab bundle (copper + mask + paste + silk + Edge.Cuts + drill + PnP + BOM), pick the fab preset in DRC, and check rotation corrections before submitting.',
+  body: body([
+    "# Ordering from JLCPCB / PCBWay",
+    "",
+    "## What to Upload",
+    "",
+    "The fab bundle: top/bottom copper, solder mask, paste (stencil), silkscreen, Edge.Cuts outline, Excellon drill, pick-and-place CSV, and the BOM with LCSC numbers. This app's exportAllGerbers emits all of them plus a job file.",
+    "",
+    "## Before You Click Order",
+    "",
+    "1. DRC with the fab preset (JLCPCB 0.127mm / PCBWay 0.1524mm). 2. Waive reviewed items only. 3. Check PnP rotations (SOT-23/diodes need 180° — applied automatically here). 4. Confirm every BOM line has an LCSC number for assembly.",
+    "",
+    "## Stencil",
+    "",
+    "Order the paste stencil with the boards for SMD — 0.12mm stainless covers 0603+ fine. QFN/BGA wants 0.1mm + stepped apertures.",
+  ]),
+  related: ['pcb-layout-basics', 'ground-plane'],
+  seeAlso: ['decoupling'],
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ALL ARTICLES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1989,12 +2126,19 @@ export const KB_ARTICLES: KBArticle[] = [
   // PCB
   pcbLayoutBasics,
   groundPlane,
+  smpsLayout,
+  rfBasics,
+  jlcOrdering,
   // Analysis
   dcOperatingPoint,
   acAnalysisArticle,
   transientAnalysis,
   behavioralSources,
   integrationMethods,
+  // ICs (firmware)
+  mcuFirmware,
+  // Safety
+  esdSafety,
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────

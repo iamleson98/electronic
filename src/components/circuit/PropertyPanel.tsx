@@ -502,6 +502,9 @@ export function PropertyPanel() {
           </div>
         )}
 
+        {/* Production: tolerance / temperature / variant / datasheet */}
+        <ProductionSection compId={comp.id} compType={comp.type} />
+
         {/* Position info */}
         <div className="p-3">
           <div className="rounded-lg border border-slate-800 bg-slate-950/50 p-2">
@@ -512,6 +515,107 @@ export function PropertyPanel() {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Production section — tolerance / temperature / variant / datasheet
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ProductionSection({ compId, compType }: { compId: string; compType: string }) {
+  const comp = useEditor((s) => s.components.find((c) => c.id === compId));
+  const setField = useEditor((s) => s.setField);
+  const plugin = getPlugin(compType);
+  if (!comp) return null;
+  const datasheet = comp.fields?.find((f) => f.key === 'Datasheet')?.value ?? plugin?.datasheet ?? '';
+  const footprint = comp.fields?.find((f) => f.key === 'Footprint')?.value ?? plugin?.defaultFootprint ?? '';
+  return (
+    <div className="border-b border-slate-800 p-3">
+      <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+        <Info size={11} className="text-slate-500" />
+        Production
+      </div>
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Label className="w-20 shrink-0 text-xs text-slate-300" title="Per-part tolerance for Monte-Carlo (fraction, e.g. 0.05 = ±5%)">Tolerance</Label>
+          <Input
+            type="number"
+            min={0}
+            max={1}
+            step={0.01}
+            value={comp.tolerance ?? ''}
+            placeholder="default"
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              useEditor.setState((s) => ({
+                components: s.components.map((c) => c.id === compId ? { ...c, tolerance: Number.isFinite(v) ? v : undefined } : c),
+              }));
+            }}
+            className="h-8 border-slate-700 bg-slate-800 font-mono text-xs text-slate-200"
+          />
+          <select
+            value={comp.toleranceDist ?? 'gauss'}
+            onChange={(e) => {
+              const v = e.target.value as 'gauss' | 'uniform';
+              useEditor.setState((s) => ({
+                components: s.components.map((c) => c.id === compId ? { ...c, toleranceDist: v } : c),
+              }));
+            }}
+            aria-label="Tolerance distribution"
+            className="h-8 cursor-pointer rounded border border-slate-700 bg-slate-800 text-xs text-slate-200"
+          >
+            <option value="gauss">gauss</option>
+            <option value="uniform">uniform</option>
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
+          <Label className="w-20 shrink-0 text-xs text-slate-300" title="Per-component temperature override (°C). Empty = global sim temp.">Temp °C</Label>
+          <Input
+            type="number"
+            value={comp.temp ?? ''}
+            placeholder="global"
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              useEditor.setState((s) => ({
+                components: s.components.map((c) => c.id === compId ? { ...c, temp: Number.isFinite(v) ? v : undefined } : c),
+              }));
+            }}
+            className="h-8 border-slate-700 bg-slate-800 font-mono text-xs text-slate-200"
+          />
+          <Label className="flex shrink-0 items-center gap-1 text-xs text-slate-300" title="Do-not-populate: excluded from BOM and netlist">
+            <input
+              type="checkbox"
+              checked={comp.variant === 'dnp'}
+              onChange={(e) => {
+                const v = e.target.checked ? 'dnp' as const : undefined;
+                useEditor.setState((s) => ({
+                  components: s.components.map((c) => c.id === compId ? { ...c, variant: v } : c),
+                }));
+              }}
+              className="h-3.5 w-3.5 accent-amber-500"
+            />
+            DNP
+          </Label>
+        </div>
+        <div className="flex items-center gap-2">
+          <Label className="w-20 shrink-0 text-xs text-slate-300">Datasheet</Label>
+          <Input
+            value={datasheet}
+            placeholder="https://…"
+            onChange={(e) => setField(compId, 'Datasheet', 'Datasheet', e.target.value, false)}
+            className="h-8 border-slate-700 bg-slate-800 font-mono text-xs text-slate-200"
+          />
+          {datasheet.startsWith('http') && (
+            <a href={datasheet} target="_blank" rel="noreferrer" className="shrink-0 text-xs text-cyan-300 hover:underline" title="Open datasheet">
+              Open
+            </a>
+          )}
+        </div>
+        {footprint !== '' && (
+          <p className="font-mono text-[10px] text-slate-500">Footprint: {footprint}</p>
+        )}
       </div>
     </div>
   );

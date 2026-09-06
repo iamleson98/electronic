@@ -240,6 +240,36 @@ export const designReviewTool: Tool = {
         status: !hasAc ? 'na' : hasFuse ? 'pass' : 'fail',
         detail: !hasAc ? 'No AC mains source.' : hasFuse ? 'Fuse present on mains path.' : 'AC mains source with no fuse — add one for safety.',
       });
+      // 8. High-speed SI: crystal within 20mm of MCU + load caps present
+      const hasCrystal = byType('crystal').length + byType('crystalOscillator').length > 0;
+      items.push({
+        id: 'crystal-layout',
+        area: 'signal',
+        check: 'Crystal close to MCU with load caps',
+        status: !hasCrystal ? 'na' : caps.length >= 2 ? 'pass' : 'warn',
+        detail: !hasCrystal ? 'No crystal.' : 'Keep the crystal < 20mm from the MCU, guard-ring ground, two matched load caps to ground.',
+      });
+      // 9. Return path: every IC power pin should see a nearby ground
+      const hasGroundSym = doc.components.some((c) => c.type === 'powerGND' || c.type === 'ground');
+      items.push({
+        id: 'return-path',
+        area: 'grounding',
+        check: 'Continuous ground return path',
+        status: hasGroundSym ? 'pass' : 'fail',
+        detail: hasGroundSym
+          ? 'Ground symbol present. On the PCB: unbroken ground pour under every high-speed / switching loop, no slots under crystal or SMPS inductor.'
+          : 'No ground — add one and keep an unbroken pour under switching loops.',
+      });
+      // 10. ESD/creepage: mains nets need clearance + MOV/fuse note
+      items.push({
+        id: 'esd-creepage',
+        area: 'safety',
+        check: 'ESD + creepage for exposed/mains nets',
+        status: !hasAc ? 'pass' : hasFuse ? 'warn' : 'fail',
+        detail: !hasAc
+          ? 'Low-voltage only. Still: TVS on exposed connectors, 8kV contact ESD per IEC 61000-4-2.'
+          : 'Mains: ≥3mm creepage L–N/PE, MOV + fuse at inlet, Y-caps rated Y1/Y2. Verify in the PCB DRC.',
+      });
       const fails = items.filter((i) => i.status === 'fail').length;
       const warns = items.filter((i) => i.status === 'warn').length;
       return {

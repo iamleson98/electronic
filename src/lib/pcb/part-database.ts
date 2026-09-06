@@ -10,6 +10,8 @@ export interface PartInfo {
   category: 'resistor' | 'capacitor' | 'inductor' | 'diode' | 'transistor' | 'ic' | 'connector' | 'led' | 'misc';
   digikeyPN?: string;
   mouserPN?: string;
+  /** LCSC part number for JLCPCB assembly ordering */
+  lcscPN?: string;
   datasheet?: string;
   unitPrice?: number;
   moq?: number;

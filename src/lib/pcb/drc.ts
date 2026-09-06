@@ -502,12 +502,13 @@ export function runDRC(
 
   // 9. Check annular ring on THT pads. Uses the pad's real drill diameter
   //    when defined; falls back to the historical 60%-of-pad estimate for
-  //    legacy pads that carry no drill info.
+  //    legacy pads that carry no drill info. Rect/oval THT pads use their
+  //    minimum dimension (previously circle-only, rect THT skipped).
   for (const fp of footprints) {
     for (const pad of fp.pads) {
-      if (pad.shape !== 'circle') continue;
-      const padDiameter = Math.max(pad.size.width, pad.size.height);
-      const drillDiameter = pad.drill && pad.drill > 0 ? pad.drill : padDiameter * 0.6;
+      const drillDiameter = pad.drill && pad.drill > 0 ? pad.drill : 0;
+      if (drillDiameter <= 0) continue;
+      const padDiameter = Math.min(pad.size.width, pad.size.height);
       const ring = (padDiameter - drillDiameter) / 2;
       if (ring < config.minAnnularRing) {
         errors.push({
@@ -517,6 +518,65 @@ export function runDRC(
           position: pad.position,
           layer: pad.layer,
         });
+      }
+    }
+  }
+
+  // 9b. Acute-angle / acid-trap check: consecutive trace segments meeting at
+  // < 90° trap etchant and are a classic DFM flag.
+  for (const trace of traces) {
+    for (let i = 1; i < trace.segments.length; i++) {
+      const a = trace.segments[i - 1];
+      const b = trace.segments[i];
+      const v1 = { x: a.start.x - a.end.x, y: a.start.y - a.end.y };
+      const v2 = { x: b.end.x - b.start.x, y: b.end.y - b.start.y };
+      const l1 = Math.hypot(v1.x, v1.y);
+      const l2 = Math.hypot(v2.x, v2.y);
+      if (l1 < 1e-9 || l2 < 1e-9) continue;
+      const cos = (v1.x * v2.x + v1.y * v2.y) / (l1 * l2);
+      const angleDeg = Math.acos(Math.max(-1, Math.min(1, cos))) * 180 / Math.PI;
+      if (angleDeg < 90) {
+        errors.push({
+          type: 'clearance',
+          severity: 'warning',
+          message: `Acute angle ${angleDeg.toFixed(0)}° on net "${trace.net}" (acid trap — use 45°)`,
+          position: a.end,
+          layer: trace.layer,
+        });
+        break; // one flag per trace
+      }
+    }
+  }
+
+  // 9c. Soldermask sliver: adjacent SMD mask openings whose web is thinner
+  // than minSilkClearance will lift during reflow.
+  {
+    const openings: { x: number; y: number; r: number }[] = [];
+    for (const fp of footprints) {
+      for (const pad of fp.pads) {
+        if ((pad.drill ?? 0) > 0) continue;
+        openings.push({
+          x: pad.position.x,
+          y: pad.position.y,
+          r: Math.max(pad.size.width, pad.size.height) / 2 + 0.05,
+        });
+      }
+    }
+    for (let i = 0; i < openings.length; i++) {
+      for (let j = i + 1; j < openings.length; j++) {
+        const a = openings[i];
+        const b = openings[j];
+        const web = Math.hypot(a.x - b.x, a.y - b.y) - a.r - b.r;
+        if (web >= 0 && web < config.minSilkClearance) {
+          errors.push({
+            type: 'silk_over_pad',
+            severity: 'warning',
+            message: `Soldermask web ${web.toFixed(3)}mm < ${config.minSilkClearance}mm (mask sliver risk)`,
+            position: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+            layer: 'both',
+          });
+          break;
+        }
       }
     }
   }

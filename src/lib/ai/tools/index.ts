@@ -25,7 +25,7 @@ import { listComponentsTool, listWiresTool, listComponentTypesTool, getComponent
 import { runSimulationTool, getVoltageTool, getCurrentTool, validatePhysicsTool, solveDCTool, autoCheckTool } from './simulation-tools';
 import { startSimulationTool, pauseSimulationTool, resetSimulationTool, setSimulationSpeedTool } from './simulation-control-tools';
 import { listExamplesTool, loadExampleTool } from './examples-tools';
-import { exportSPICENetlistTool, exportBOMTool } from './export-tools';
+import { exportSPICENetlistTool, exportBOMTool, designReportTool } from './export-tools';
 import { importToPCBTool, runAutoRouteTool, runDRCTool, runTopoRouteTool, verifyNetlistTool } from './pcb-tools';
 import { setBoardSizeTool, setDefaultTraceWidthTool, setActiveLayerTool, addCopperPourTool, generateTeardropsTool } from './pcb-board-setup-tools';
 import { runERCTool, reannotateTool } from './erc-annotation-tools';
@@ -113,6 +113,7 @@ export const TOOLS: Tool[] = [
   loadExampleTool,
   exportSPICENetlistTool,
   exportBOMTool,
+  designReportTool,
   exportKiCadNetlistTool,
 
   // PCB

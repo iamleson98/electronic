@@ -26,6 +26,9 @@ import {
   drawERCMarkers,
   drawAutoJunctions,
   drawWireLengthLabel,
+  drawBiasAnnotations,
+  formatBiasVoltage,
+  type BiasAnnotation,
 } from '@/lib/circuit/schematic-overlays';
 import { drawSheetBox } from '@/lib/circuit/sheet-render';
 import { computeWireCrossingMarks } from '@/lib/circuit/wire-crossings';
@@ -1162,6 +1165,37 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
   // ---- ERC error markers (drawn last so they're on top of everything) ----
   if (!running && ercErrors.length > 0) {
     drawERCMarkers(ercErrors, ctx, gridToScreen, view.hoveredERC);
+  }
+
+  // ---- DC bias annotations (node voltages at each terminal) ----
+  // Shown when the sim has run and the scene requests them (bias overlay
+  // toggle). Built from the node map + solved voltages — pure overlay.
+  if (simContext && (scene as { showBiasOverlay?: boolean }).showBiasOverlay) {
+    try {
+      const plugins = new Map();
+      for (const c of components) {
+        const p = getPlugin(c.type);
+        if (p) plugins.set(c.type, p);
+      }
+      const nodeMap = buildNodeMap(components, wires, plugins as never);
+      const annotations: BiasAnnotation[] = [];
+      for (const comp of components) {
+        const plugin = getPlugin(comp.type);
+        if (!plugin) continue;
+        for (const t of plugin.terminals) {
+          const nodeId = nodeMap.terminalNode.get(`${comp.id}:${t.id}`);
+          if (nodeId === undefined) continue;
+          const v = simContext.nodeVoltage[nodeId] ?? 0;
+          const pos = terminalPos(comp, t.id, plugin);
+          if (!pos) continue;
+          annotations.push({ at: pos, text: formatBiasVoltage(v) });
+        }
+      }
+      // Cap label count so dense boards stay readable.
+      drawBiasAnnotations(ctx, annotations.slice(0, 400), gridToScreen);
+    } catch {
+      // overlay must never break the render loop
+    }
   }
 
   // Reset transform so external code sees a pristine context.

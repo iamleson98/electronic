@@ -8,9 +8,9 @@ import { parseMeasLine, execMeas, computeFFT, type MeasCommand, type MeasResult 
 import { computeTHD, downsampleSpectrum, type THDResult } from '@/lib/circuit/fourier';
 import {
   applyCoupling, computeCursorDeltas, computeMeasurements, computeTimeWindow, computeVoltageWindow,
-  createDefaultScopeConfig, formatDuration, formatFrequency, formatTimebase, formatVoltage,
+  createDefaultScopeConfig, cursorIntervalStats, formatDuration, formatFrequency, formatTimebase, formatVoltage,
   formatVoltageScale, getVoltageAtTime, mapTimeToX, mapVoltageToY, mapXToTime, meanVoltage,
-  pickDefaultVoltageScale, refitVoltageScale, stepPreset, SCOPE_H_DIVS, SCOPE_V_DIVS,
+  pickDefaultVoltageScale, PROBE_MODELS, refitVoltageScale, resolveTriggerAnchor, stepPreset, SCOPE_H_DIVS, SCOPE_V_DIVS,
   TIMEBASE_PRESETS, VOLTAGE_SCALE_PRESETS, type ScopeChannel, type ScopeConfig,
 } from '@/lib/circuit/scope-viewer';
 import { Activity, BarChart3, AlertCircle, Crosshair, Waves, Sparkles, Zap } from 'lucide-react';
@@ -43,10 +43,34 @@ export function ProbePanel() {
   // Deliberately panel-local React state (NOT the editor store): scope view
   // settings must never mark the document dirty, enter undo/redo history or
   // autosave. ProbePanel stays mounted, so this survives tab switches.
-  const [scopeConfig, setScopeConfig] = useState<ScopeConfig>(() => createDefaultScopeConfig());
+  // Persisted to localStorage so timebase/trigger/cursors survive reloads.
+  const [scopeConfig, setScopeConfig] = useState<ScopeConfig>(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? window.localStorage.getItem('scope-config-v1') : null;
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<ScopeConfig>;
+        return { ...createDefaultScopeConfig(), ...parsed, cursorA: { ...createDefaultScopeConfig().cursorA, ...(parsed.cursorA ?? {}) }, cursorB: { ...createDefaultScopeConfig().cursorB, ...(parsed.cursorB ?? {}) }, trigger: { ...createDefaultScopeConfig().trigger, ...(parsed.trigger ?? {}) } };
+      }
+    } catch { /* corrupted prefs — fall through to defaults */ }
+    return createDefaultScopeConfig();
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('scope-config-v1', JSON.stringify({
+        timebase: scopeConfig.timebase,
+        cursorA: scopeConfig.cursorA,
+        cursorB: scopeConfig.cursorB,
+        trigger: scopeConfig.trigger,
+        showGrid: scopeConfig.showGrid,
+        showMeasurements: scopeConfig.showMeasurements,
+      }));
+    } catch { /* storage full/blocked — scope still works */ }
+  }, [scopeConfig.timebase, scopeConfig.cursorA, scopeConfig.cursorB, scopeConfig.trigger, scopeConfig.showGrid, scopeConfig.showMeasurements]);
   const [channelSettings, setChannelSettings] = useState<Record<string, ScopeChannelSettings>>({});
   const [selectedChannel, setSelectedChannel] = useState(0);
   const [activeTab, setActiveTab] = useState<'scope' | 'measurements' | 'meas' | 'spectrum'>('scope');
+  const [xyMode, setXyMode] = useState(false);
+  const [probeModel, setProbeModel] = useState(0);
 
   // ─── .meas commands ───────────────────────────────────────────────────
   const [measCommands, setMeasCommands] = useState<MeasCommand[]>([]);
@@ -254,6 +278,10 @@ export function ProbePanel() {
               selectedChannel={selectedChannel}
               setSelectedChannel={setSelectedChannel}
               canvasRef={canvasRef}
+              xyMode={xyMode}
+              setXyMode={setXyMode}
+              probeModel={probeModel}
+              setProbeModel={setProbeModel}
             />
 
             {/* Parameter sweep slider */}
@@ -454,9 +482,13 @@ interface ScopeTabProps {
   selectedChannel: number;
   setSelectedChannel: React.Dispatch<React.SetStateAction<number>>;
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
+  xyMode: boolean;
+  setXyMode: React.Dispatch<React.SetStateAction<boolean>>;
+  probeModel: number;
+  setProbeModel: React.Dispatch<React.SetStateAction<number>>;
 }
 
-function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, updateChannelSetting, selectedChannel, setSelectedChannel, canvasRef }: ScopeTabProps) {
+function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, updateChannelSetting, selectedChannel, setSelectedChannel, canvasRef, xyMode, setXyMode, probeModel, setProbeModel }: ScopeTabProps) {
   const a = scopeConfig.cursorA;
   const b = scopeConfig.cursorB;
   const trig = scopeConfig.trigger;
@@ -479,16 +511,23 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
   const traceIdx = traces.length > 0 ? Math.min(selectedChannel, traces.length - 1) : 0;
   const selected = channels[traceIdx];
 
-  // Center the newest sample mid-screen (scope convention: trigger point at
-  // the center of the graticule), then span ±5 divisions of timebase.
+  // Display anchor: auto = free-running newest sample; normal/single =
+  // re-anchor on the latest qualifying trigger edge (real acquisition).
+  // Single mode freezes at the captured edge once disarmed.
+  const frozenRef = useRef<number | undefined>(undefined);
   const centerTime = useMemo(() => {
     let latest = 0;
     for (const t of traces) {
       const s = t.samples;
       if (s.length > 0) latest = Math.max(latest, s[s.length - 1].time);
     }
-    return latest;
-  }, [traces]);
+    if (scopeConfig.trigger.mode === 'auto') return latest;
+    const src = channels[scopeConfig.trigger.source];
+    if (!src || src.samples.length < 2) return latest;
+    const coupled = applyCoupling(src.samples, src.coupling);
+    const anchor = resolveTriggerAnchor(coupled, scopeConfig.trigger, latest, frozenRef.current);
+    return anchor;
+  }, [traces, channels, scopeConfig.trigger]);
 
   const timeWindow = useMemo(
     () => computeTimeWindow(scopeConfig.timebase, centerTime),
@@ -564,9 +603,45 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
       ctx.fillText('Probes measure voltage across their + and - terminals', W / 2, H / 2 + 10);
     }
 
+    // XY mode: plot CH2 vs CH1 (Lissajous / curve-tracer). Needs two
+    // visible channels; X = first, Y = second.
+    const xyPair = xyMode ? [channels.find((c) => c.visible), channels.filter((c) => c.visible)[1]] : null;
+    if (xyMode && xyPair && xyPair[0] && xyPair[1]) {
+      const xCh = xyPair[0];
+      const yCh = xyPair[1];
+      const xs = applyCoupling(xCh.samples.slice(-maxSamples), xCh.coupling);
+      const ys = applyCoupling(yCh.samples.slice(-maxSamples), yCh.coupling);
+      const n = Math.min(xs.length, ys.length);
+      const xWin = computeVoltageWindow(xCh.voltageScale, xCh.voltageOffset);
+      const yWin = computeVoltageWindow(yCh.voltageScale, yCh.voltageOffset);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, W, H);
+      ctx.clip();
+      ctx.strokeStyle = '#e2e8f0';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      for (let i = 0; i < n; i++) {
+        // X maps through the voltage window (vBottom→left, vTop→right)
+        const x = ((xs[i].voltage - xWin.vBottom) / Math.max(1e-12, xWin.vTop - xWin.vBottom)) * W;
+        const y = mapVoltageToY(ys[i].voltage, yWin, 0, H);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = '#64748b';
+      ctx.font = '10px ui-monospace, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(`X: ${xCh.label}  Y: ${yCh.label}`, 6, 4);
+    }
+
     // Traces: shared X mapping (time window), per-channel Y mapping
     // (V/div + offset); AC coupling removes the channel mean first.
+    // Skipped in XY mode (the Lissajous view above replaces them).
     for (const ch of channels) {
+      if (xyMode) break;
       if (!ch.visible || ch.samples.length < 2) continue;
       const samples = ch.samples.length > maxSamples ? ch.samples.slice(-maxSamples) : ch.samples;
       const coupled = applyCoupling(samples, ch.coupling);
@@ -589,8 +664,8 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
     }
 
     // Trigger level marker: drawn through the source channel's Y mapping so it
-    // tracks that channel's V/div / offset / coupling. Display only — traces
-    // keep streaming continuously regardless of the trigger state.
+    // tracks that channel's V/div / offset / coupling. In normal/single modes
+    // the window re-anchors on this edge (real acquisition); auto streams.
     const trigCh = channels[trigger.source];
     if (trigCh) {
       const vWin = computeVoltageWindow(trigCh.voltageScale, trigCh.voltageOffset);
@@ -767,14 +842,18 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
 
   // ─── Readouts ──────────────────────────────────────────────────────────
   // Cursor readouts: Δt, 1/Δt and the (coupling-adjusted) voltage of the
-  // selected channel at each cursor position.
+  // selected channel at each cursor position, plus A–B interval stats
+  // (AVG/RMS/PP/integral/mean-slope over the selected channel).
   const cursorData = useMemo(() => {
     if (!a.enabled && !b.enabled) return null;
     const samples = selected ? applyCoupling(selected.samples, selected.coupling) : [];
     const vA = a.enabled ? getVoltageAtTime(samples, a.time) : null;
     const vB = b.enabled ? getVoltageAtTime(samples, b.time) : null;
     const deltas = a.enabled && b.enabled ? computeCursorDeltas(a.time, b.time) : null;
-    return { vA, vB, deltas };
+    const interval = a.enabled && b.enabled
+      ? cursorIntervalStats(samples, a.time, b.time)
+      : null;
+    return { vA, vB, deltas, interval };
   }, [a.enabled, a.time, b.enabled, b.time, selected]);
 
   // Live measurements for the selected channel (coupling applied, so AC shows
@@ -802,7 +881,24 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
           <ToolBtn label="Decrease timebase (finer)" onClick={() => stepTimebase(-1)}>−</ToolBtn>
           <span className="w-21 text-center font-mono text-[10px] text-slate-200" aria-live="polite">{formatTimebase(scopeConfig.timebase)}</span>
           <ToolBtn label="Increase timebase (coarser)" onClick={() => stepTimebase(1)}>+</ToolBtn>
-          <span className="ml-auto flex items-center gap-1 font-mono text-[10px]" title="Trigger — display only; traces stream continuously">
+          <ToolBtn
+            label="Cycle trigger mode (auto → normal → single)"
+            onClick={() => setScopeConfig((s) => {
+              const next = s.trigger.mode === 'auto' ? 'normal' : s.trigger.mode === 'normal' ? 'single' : 'auto';
+              return { ...s, trigger: { ...s.trigger, mode: next, armed: true } };
+            })}
+            active={trig.mode !== 'auto'}
+          >
+            {trig.mode.toUpperCase()}
+          </ToolBtn>
+          <ToolBtn
+            label="Re-arm single trigger"
+            onClick={() => { frozenRef.current = undefined; setScopeConfig((s) => ({ ...s, trigger: { ...s.trigger, armed: true } })); }}
+            disabled={trig.mode !== 'single'}
+          >
+            ARM
+          </ToolBtn>
+          <span className="ml-auto flex items-center gap-1 font-mono text-[10px]" title={trig.mode === 'auto' ? 'Trigger marker (auto: free-running)' : `Trigger ${trig.mode}: window re-anchors on CH${trig.source + 1} ${trig.edge} edge at ${formatVoltage(trig.level)}`}>
             <Zap size={10} className={trig.armed ? 'text-orange-400' : 'text-slate-600'} aria-hidden="true" />
             <span className={trig.armed ? 'text-orange-400' : 'text-slate-500'}>{trig.armed ? 'ARMED' : 'IDLE'}</span>
             <span className="text-slate-600">·</span>
@@ -848,7 +944,7 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
           <ToolBtn label="Increase vertical offset" onClick={() => stepOffset(1)} disabled={!selected}>+</ToolBtn>
         </div>
 
-        {/* Row 3: A/B cursors */}
+        {/* Row 3: A/B cursors + XY + probe */}
         <div className="flex flex-wrap items-center gap-1">
           <span className="text-[9px] uppercase tracking-wider text-slate-500">Cursors</span>
           <ToolBtn label="Toggle cursor A" onClick={() => toggleCursor('A')} active={a.enabled}>A</ToolBtn>
@@ -857,6 +953,18 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
           <ToolBtn label="Toggle cursor B" onClick={() => toggleCursor('B')} active={b.enabled}>B</ToolBtn>
           <ToolBtn label="Move cursor B left (0.1 div)" onClick={() => nudgeCursor('B', -1)} disabled={!b.enabled}>◀</ToolBtn>
           <ToolBtn label="Move cursor B right (0.1 div)" onClick={() => nudgeCursor('B', 1)} disabled={!b.enabled}>▶</ToolBtn>
+          <ToolBtn label="Toggle XY mode (CH2 vs CH1 Lissajous)" onClick={() => setXyMode((v) => !v)} active={xyMode}>XY</ToolBtn>
+          <select
+            value={probeModel}
+            onChange={(e) => setProbeModel(parseInt(e.target.value, 10))}
+            aria-label="Probe model"
+            title="Probe loading model (what a real probe would read)"
+            className="cursor-pointer rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-200"
+          >
+            {PROBE_MODELS.map((p, i) => (
+              <option key={p.label} value={i}>{p.label}</option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -884,6 +992,11 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
             {cursorData.vB !== null && <span className="text-slate-200">VB={formatVoltage(cursorData.vB)}</span>}
             {cursorData.deltas && <span className="text-slate-300">Δt={formatDuration(cursorData.deltas.dt)}</span>}
             {cursorData.deltas?.freq != null && <span className="text-cyan-300">1/Δt={formatFrequency(cursorData.deltas.freq)}</span>}
+            {cursorData.interval && (
+              <span className="text-slate-400" title="A–B interval: average / RMS / peak-peak / integral / mean slope">
+                AVG={formatVoltage(cursorData.interval.vAvg)} RMS={formatVoltage(cursorData.interval.vRms)} PP={formatVoltage(cursorData.interval.vPp)}
+              </span>
+            )}
           </div>
         ) : (
           <span className="text-slate-500">Enable cursor A/B to measure Δt, 1/Δt and voltages</span>
@@ -942,6 +1055,7 @@ interface SpectrumTabProps {
 function SpectrumTab({ traces, canvasRef }: SpectrumTabProps) {
   const [selectedTrace, setSelectedTrace] = useState(0);
   const [maxHarmonics, setMaxHarmonics] = useState(10);
+  const [fftWindow, setFftWindow] = useState<'hann' | 'rect' | 'hamming' | 'blackman' | 'kaiser'>('hann');
 
   // Pick the active trace
   const traceIdx = Math.min(selectedTrace, Math.max(0, traces.length - 1));
@@ -1006,7 +1120,7 @@ function SpectrumTab({ traces, canvasRef }: SpectrumTabProps) {
     // Re-derive the spectrum via computeFFT (kept separate from thdResult for chart)
     // thdResult.harmonics holds the discrete peaks; for a continuous bar chart
     // we downsample the raw spectrum.
-    const fullSpectrum = computeFFT(realTrace);
+    const fullSpectrum = computeFFT(realTrace, fftWindow);
     const downsampled = downsampleSpectrum(fullSpectrum.yValues, fullSpectrum.xValues, 48);
 
     const padding = 8;
@@ -1106,6 +1220,20 @@ function SpectrumTab({ traces, canvasRef }: SpectrumTabProps) {
               onChange={(e) => setMaxHarmonics(Math.min(50, Math.max(2, parseInt(e.target.value) || 10)))}
               className="w-12 rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-xs text-slate-200"
             />
+          </label>
+          <label className="flex items-center gap-1 text-[10px] text-slate-400" title="FFT window function">
+            Win
+            <select
+              value={fftWindow}
+              onChange={(e) => setFftWindow(e.target.value as typeof fftWindow)}
+              className="cursor-pointer rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-xs text-slate-200"
+            >
+              <option value="hann">Hann</option>
+              <option value="rect">Rect</option>
+              <option value="hamming">Hamming</option>
+              <option value="blackman">Blackman</option>
+              <option value="kaiser">Kaiser</option>
+            </select>
           </label>
         </div>
       </div>

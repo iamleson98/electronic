@@ -252,6 +252,14 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
   const netMembers = new Map<number, NetMember[]>();
   let groundId: string | null = null;
   let inSubckt = false;
+  // Preserved control cards (.tran/.ac/.dc/.op/.options/.temp/.step/.mc /
+  // .worst/.ic/.nodeset/.save/.print/.meas/...) for the directive editor +
+  // simOptions round-trip (previously dropped silently).
+  const directiveCards: string[] = [];
+  const directiveOptions: Record<string, number | string | boolean> = {};
+  let directiveTemp: number | undefined;
+  const initialConditions: Record<string, number> = {};
+  const nodeSets: Record<string, number> = {};
 
   // ── Pre-scan: collect .model definitions (for LTRA lossy lines) ────────
   // SPICE allows forward references (an O card may appear before its .model),
@@ -327,10 +335,47 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
     }
 
     // ── Dot commands ────────────────────────────────────────────────────
-    if (first === '.SUBCKT') { inSubckt = true; continue; }
-    if (first === '.ENDS' || first === '.ENDSUB') { inSubckt = false; continue; }
+    if (first === '.SUBCKT') { inSubckt = true; directiveCards.push(line); continue; }
+    if (first === '.ENDS' || first === '.ENDSUB') { inSubckt = false; directiveCards.push(line); continue; }
     if (first === '.END') break;  // end of netlist
-    if (first.startsWith('.')) continue;  // .model, .tran, .ac, .dc, .op, etc.
+    if (first === '.OPTIONS') {
+      for (const tok of tokens.slice(1)) {
+        const kv = tok.match(/^(\w+)\s*=\s*(.+)$/);
+        if (kv) {
+          const num = parseSpiceValue(kv[2]);
+          directiveOptions[kv[1].toLowerCase()] = Number.isFinite(num) ? num : kv[2];
+          if (kv[1].toLowerCase() === 'temp' && Number.isFinite(num)) directiveTemp = num;
+        }
+      }
+      directiveCards.push(line);
+      continue;
+    }
+    if (first === '.TEMP') {
+      const num = tokens.length > 1 ? parseSpiceValue(tokens[1]) : NaN;
+      if (Number.isFinite(num)) directiveTemp = num;
+      directiveCards.push(line);
+      continue;
+    }
+    if (first === '.IC' || first === '.NODESET') {
+      for (const tok of tokens.slice(1)) {
+        const m = tok.match(/^v\(([^)]+)\)\s*=\s*(.+)$/i);
+        if (m) {
+          const target = first === '.IC' ? initialConditions : nodeSets;
+          target[m[1]] = parseSpiceValue(m[2]);
+        }
+      }
+      directiveCards.push(line);
+      continue;
+    }
+    if (first === '.TRAN' || first === '.AC' || first === '.DC' || first === '.OP' ||
+        first === '.STEP' || first === '.MC' || first === '.WORST' || first === '.PROBE' ||
+        first === '.SAVE' || first === '.PRINT' || first === '.MEAS' || first === '.FOUR' ||
+        first === '.TF' || first === '.PZ' || first === '.NOISE' || first === '.DISTO' ||
+        first === '.SENS' || first === '.MODEL') {
+      directiveCards.push(line);
+      continue;  // control/model cards preserved, not instantiated
+    }
+    if (first.startsWith('.')) continue;  // any other dot command
 
     // Inside a subckt definition, we still want to parse the elements so the
     // netlist round-trips — but in practice the simulator treats them as a
@@ -738,6 +783,17 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
     version: 1,
     components,
     wires,
+  };
+  // Attach preserved control cards so the directive editor + sim options
+  // round-trip imported netlists (previously dropped on the floor).
+  (doc as unknown as { simOptions: unknown }).simOptions = {
+    initialConditions,
+    nodeSets,
+    saveNodes: [],
+    printNodes: [],
+    directives: directiveOptions,
+    temp: directiveTemp,
+    cards: directiveCards,
   };
 
   return { doc, errors, warnings };
