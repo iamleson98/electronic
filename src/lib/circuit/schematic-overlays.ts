@@ -4,6 +4,7 @@
 //   - ERC error markers (red/yellow circles + tooltip)
 //   - Auto-junction dots (where ≥3 wires meet at the same grid point)
 //   - Wire length labels (mm/in on hovered or selected wire)
+//   - DC bias-point annotations (node voltages + branch currents)
 //
 // All coordinates are pre-transformed to screen space by the caller —
 // these helpers only do canvas drawing, never state mutation.
@@ -278,4 +279,72 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   ctx.lineTo(x, y + r);
   ctx.arcTo(x, y, x + r, y, r);
   ctx.closePath();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. DC bias-point annotations — KiCad/LTspice-style node voltage + branch
+//    current labels drawn next to each component terminal. The caller passes
+//    the solved operating point (nodeVoltage indexed by node id, 0 = ground)
+//    plus per-component currents; labels are small pills so dense schematics
+//    stay readable. Pure drawing — never mutates state.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface BiasAnnotation {
+  /** grid position of the terminal */
+  at: Vec2;
+  /** label text, e.g. "3.30V" or "12.4mA" */
+  text: string;
+  /** screen position (filled by the draw call) */
+  sx?: number;
+  sy?: number;
+}
+
+export function formatBiasVoltage(v: number): string {
+  if (!Number.isFinite(v)) return '—';
+  const a = Math.abs(v);
+  if (a !== 0 && a < 0.001) return `${(v * 1e6).toFixed(1)}µV`;
+  if (a !== 0 && a < 1) return `${(v * 1000).toFixed(1)}mV`;
+  if (a >= 100) return `${v.toFixed(1)}V`;
+  return `${v.toFixed(2)}V`;
+}
+
+export function formatBiasCurrent(i: number): string {
+  if (!Number.isFinite(i)) return '—';
+  const a = Math.abs(i);
+  if (a !== 0 && a < 1e-6) return `${(i * 1e9).toFixed(1)}nA`;
+  if (a !== 0 && a < 1e-3) return `${(i * 1e6).toFixed(1)}µA`;
+  if (a !== 0 && a < 1) return `${(i * 1000).toFixed(2)}mA`;
+  return `${i.toFixed(3)}A`;
+}
+
+/**
+ * Draw per-terminal voltage pills. `terminalVoltages` maps
+ * `${componentId}:${terminalId}` → volts (built by the caller from the node
+ * map + sim.nodeVoltage). Returns hit info for tooltips.
+ */
+export function drawBiasAnnotations(
+  ctx: CanvasRenderingContext2D,
+  annotations: BiasAnnotation[],
+  gridToScreen: (gx: number, gy: number) => Vec2,
+): BiasAnnotation[] {
+  ctx.save();
+  ctx.font = '9px ui-monospace, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const ann of annotations) {
+    const sp = gridToScreen(ann.at.x, ann.at.y + 0.55);
+    ann.sx = sp.x;
+    ann.sy = sp.y;
+    const w = ctx.measureText(ann.text).width + 8;
+    ctx.fillStyle = 'rgba(8, 47, 73, 0.92)';
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 1;
+    roundRect(ctx, sp.x - w / 2, sp.y - 7, w, 14, 3);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#bae6fd';
+    ctx.fillText(ann.text, sp.x, sp.y);
+  }
+  ctx.restore();
+  return annotations;
 }

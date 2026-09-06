@@ -171,8 +171,10 @@ registerPlugin({
     }
     st[`${key}_clk`] = clkNow;
     const qVal = st[key] ?? false;
-    sys.stampVoltageSource(q, 0, qVal ? vccV : 0);
-    sys.stampVoltageSource(qbar, 0, !qVal ? vccV : 0);
+    // Skip unwired outputs (node 0): stamping a voltage source to ground's
+    // own row is an all-zero equation and makes the matrix singular.
+    if (q !== 0) sys.stampVoltageSource(q, 0, qVal ? vccV : 0);
+    if (qbar !== 0) sys.stampVoltageSource(qbar, 0, !qVal ? vccV : 0);
   },
 });
 

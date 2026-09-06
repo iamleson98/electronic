@@ -10,11 +10,13 @@ import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
 
 // ----- Voltmeter -----
+// Ideal 1 TΩ input (a real DMM is ~10 MΩ) — documented so users probing
+// high-impedance nodes know the meter loads them less than hardware would.
 const voltmeter: ComponentPlugin = {
   type: 'voltmeter',
   name: 'Voltmeter',
   category: 'meter',
-  description: 'Measures voltage difference between + and - terminals. Infinite impedance.',
+  description: 'Measures voltage difference between + and - terminals. Ideal 1 TΩ input (a real DMM is ~10 MΩ) — negligible loading.',
   symbol: 'V',
   boundingBox: { width: 2, height: 3 },
   terminals: [
@@ -109,11 +111,14 @@ const ammeter: ComponentPlugin = {
 };
 
 // ----- Oscilloscope Probe -----
+// Ideal 1 TΩ input: loads the circuit with ~nothing (a real 1× probe is
+// 1 MΩ ‖ ~100 pF, 10× is 10 MΩ ‖ ~15 pF — this probe deliberately omits
+// that loading so probing never changes the circuit under test).
 const oscilloscope: ComponentPlugin = {
   type: 'oscilloscope',
   name: 'Oscilloscope',
   category: 'meter',
-  description: 'Records voltage over time. Click the scope panel to view the waveform.',
+  description: 'Records voltage over time. Ideal 1 TΩ input — loads the circuit negligibly (a real 1× probe is 1 MΩ‖~100pF). Click the scope panel to view the waveform.',
   symbol: '~',
   boundingBox: { width: 2, height: 2 },
   terminals: [

@@ -236,33 +236,21 @@ export function execMeas(
       return { name: cmd.name, value: 0, unit: 's' };
     }
     case 'DELAY': {
-      // Time between the TRIG crossing and the TARG crossing (both evaluated
-      // on this trace — the single-trace API limitation). Previously a stub
-      // that always returned 0.
-      const findCrossing = (target: number | undefined): number | null => {
-        if (target === undefined || !Number.isFinite(target)) return null;
-        for (let i = 1; i < trace.yValues.length; i++) {
-          if ((trace.yValues[i - 1] < target && trace.yValues[i] >= target) ||
-              (trace.yValues[i - 1] > target && trace.yValues[i] <= target)) {
-            const t0 = trace.xValues[i - 1];
-            const t1 = trace.xValues[i];
-            const v0 = trace.yValues[i - 1];
-            const v1 = trace.yValues[i];
-            const frac = (target - v0) / (v1 - v0);
-            return t0 + frac * (t1 - t0);
-          }
-        }
-        return null;
-      };
-      const tTrig = findCrossing(cmd.trigVal);
-      const tTarg = findCrossing(cmd.targVal);
+      // Time between the TRIG crossing and the TARG crossing with SPICE
+      // CROSS/RISE/FALL/TD filtering (previously a stub that always
+      // returned 0, then a first-crossing-only version). Note: the
+      // single-trace API evaluates both on this trace — use measureDelay()
+      // for the true two-trace TRIG/TARG form.
+      const tTrig = findTraceCrossing(trace, cmd.trigVal ?? NaN, { cross: cmd.cross, rise: cmd.rise, fall: cmd.fall });
+      const tTarg = findTraceCrossing(trace, cmd.targVal ?? NaN, { cross: cmd.cross, rise: cmd.rise, fall: cmd.fall });
       if (tTrig === null || tTarg === null) return { name: cmd.name, value: 0, unit: 's' };
       return { name: cmd.name, value: tTarg - tTrig, unit: 's' };
     }
     case 'PARAM': {
-      // Evaluate a parameter expression (e.g., 2*gain)
-      const v = parseFloat(cmd.expr);
-      return { name: cmd.name, value: isNaN(v) ? 0 : v };
+      // Evaluate an arithmetic expression over previously measured values
+      // (e.g. `2*gain`, `V(out)*I(R1)`). Bare numbers still work.
+      const v = evaluateMeasExpression(cmd.expr, (cmd as unknown as { scope?: Record<string, number> }).scope);
+      return { name: cmd.name, value: v };
     }
     case 'TRIG':
     default: {
@@ -284,6 +272,138 @@ function sliceTrace(trace: RealTrace, from?: number, to?: number): [number[], nu
     }
   }
   return [ys, xs];
+}
+
+/**
+ * Evaluate a .meas PARAM arithmetic expression over a scope of previously
+ * measured values, e.g. `2*gain`, `V(out)*I(R1)`, `(vmax-vmin)/2`.
+ * Safe recursive-descent evaluator: numbers, identifiers (letters, digits,
+ * `_`, `.`, `(`, `)`), +, -, *, /, parentheses. Unknown identifiers read 0.
+ */
+export function evaluateMeasExpression(expr: string, scope?: Record<string, number>): number {
+  const s = expr.trim();
+  if (s === '') return 0;
+  const direct = Number(s);
+  if (Number.isFinite(direct)) return direct;
+  let pos = 0;
+  const peek = () => s[pos];
+  const skipWs = () => { while (pos < s.length && /\s/.test(s[pos])) pos++; };
+  function parseExpr(): number {
+    let v = parseTerm();
+    for (;;) {
+      skipWs();
+      const c = peek();
+      if (c === '+' || c === '-') {
+        pos++;
+        const rhs = parseTerm();
+        v = c === '+' ? v + rhs : v - rhs;
+      } else return v;
+    }
+  }
+  function parseTerm(): number {
+    let v = parseFactor();
+    for (;;) {
+      skipWs();
+      const c = peek();
+      if (c === '*' || c === '/') {
+        pos++;
+        const rhs = parseFactor();
+        v = c === '*' ? v * rhs : v / rhs;
+      } else return v;
+    }
+  }
+  function parseFactor(): number {
+    skipWs();
+    const c = peek();
+    if (c === '(') {
+      pos++;
+      const v = parseExpr();
+      skipWs();
+      if (peek() === ')') pos++;
+      return v;
+    }
+    if (c === '+' || c === '-') {
+      pos++;
+      const v = parseFactor();
+      return c === '+' ? v : -v;
+    }
+    const numM = s.slice(pos).match(/^[+-]?[\d.]+(?:[eE][+-]?\d+)?/);
+    if (numM) {
+      pos += numM[0].length;
+      return parseFloat(numM[0]);
+    }
+    const idM = s.slice(pos).match(/^[A-Za-z_][A-Za-z0-9_.]*(\([A-Za-z0-9_.]+\))?(\[[^\]]*\])?/);
+    if (idM) {
+      pos += idM[0].length;
+      const key = idM[0];
+      if (scope && key in scope) return scope[key] ?? 0;
+      // bare identifiers like V(out) with no scope entry read 0 (documented)
+      return 0;
+    }
+    pos++;
+    return NaN;
+  }
+  try {
+    const v = parseExpr();
+    return Number.isFinite(v) ? v : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Find the n-th crossing (1-based) of `target` on a trace with edge and
+ * delay filtering (SPICE CROSS=/RISE=/FALL=/TD= semantics). Returns the
+ * interpolated time, or null when the crossing never happens.
+ */
+export function findTraceCrossing(
+  trace: RealTrace,
+  target: number,
+  opts?: { cross?: number; rise?: number; fall?: number; td?: number },
+): number | null {
+  const cross = Math.max(1, Math.trunc(opts?.cross ?? opts?.rise ?? opts?.fall ?? 1));
+  const wantRise = opts?.rise !== undefined;
+  const wantFall = opts?.fall !== undefined;
+  const td = opts?.td ?? -Infinity;
+  let count = 0;
+  for (let i = 1; i < trace.yValues.length; i++) {
+    const v0 = trace.yValues[i - 1];
+    const v1 = trace.yValues[i];
+    const rising = v0 < target && v1 >= target;
+    const falling = v0 > target && v1 <= target;
+    if (!rising && !falling) continue;
+    if (wantRise && !rising) continue;
+    if (wantFall && !falling) continue;
+    const t0 = trace.xValues[i - 1];
+    const t1 = trace.xValues[i];
+    const frac = (target - v0) / (v1 - v0);
+    const t = t0 + frac * (t1 - t0);
+    if (t < td) continue;
+    count++;
+    if (count >= cross) return t;
+  }
+  return null;
+}
+
+/**
+ * Two-trace propagation delay: TRIG crossing on `trigTrace` → TARG crossing
+ * on `targTrace`, each with its own CROSS/RISE/FALL/TD filtering. This is
+ * the real SPICE `.meas ... TRIG ... TARG ...` form — the single-trace
+ * execMeas DELAY path evaluates both on one trace.
+ */
+export function measureDelay(
+  name: string,
+  trigTrace: RealTrace,
+  trigVal: number,
+  targTrace: RealTrace,
+  targVal: number,
+  trigOpts?: { cross?: number; rise?: number; fall?: number; td?: number },
+  targOpts?: { cross?: number; rise?: number; fall?: number; td?: number },
+): MeasResult {
+  const tTrig = findTraceCrossing(trigTrace, trigVal, trigOpts);
+  const tTarg = findTraceCrossing(targTrace, targVal, targOpts);
+  if (tTrig === null || tTarg === null) return { name, value: 0, unit: 's' };
+  return { name, value: tTarg - tTrig, unit: 's' };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -368,15 +488,54 @@ export class TraceMath {
 // FFT — Fourier transform of a real-valued trace
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function computeFFT(trace: RealTrace): RealTrace {
+export type FFTWindow = 'hann' | 'rect' | 'hamming' | 'blackman' | 'kaiser';
+
+/** Window weight w(i), N samples. Kaiser uses beta=8.6 (≈60dB sidelobes). */
+export function fftWindowWeight(window: FFTWindow, i: number, N: number, beta = 8.6): number {
+  if (N <= 1) return 1;
+  switch (window) {
+    case 'rect': return 1;
+    case 'hamming': return 0.54 - 0.46 * Math.cos(2 * Math.PI * i / (N - 1));
+    case 'blackman': {
+      const a0 = 0.42, a1 = 0.5, a2 = 0.08;
+      const t = 2 * Math.PI * i / (N - 1);
+      return a0 - a1 * Math.cos(t) + a2 * Math.cos(2 * t);
+    }
+    case 'kaiser': {
+      // I0 via series (12 terms is plenty for beta ≤ 10)
+      const besselI0 = (x: number): number => {
+        let sum = 1, term = 1;
+        for (let k = 1; k <= 12; k++) {
+          term *= (x * x) / (4 * k * k);
+          sum += term;
+        }
+        return sum;
+      };
+      const r = (2 * i) / (N - 1) - 1;
+      // Clamp tiny negative round-off to exactly 0 (edge samples).
+      const v = Math.max(0, besselI0(beta * Math.sqrt(Math.max(0, 1 - r * r))) / besselI0(beta));
+      return v < 1e-15 ? 0 : v;
+    }
+    case 'hann':
+    default: return 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
+  }
+}
+
+/** Coherent gain Σw of a window over N samples (amplitude normalization). */
+export function fftWindowGain(window: FFTWindow, N: number): number {
+  let sum = 0;
+  for (let i = 0; i < N; i++) sum += fftWindowWeight(window, i, N);
+  return sum > 0 ? sum : N;
+}
+
+export function computeFFT(trace: RealTrace, window: FFTWindow = 'hann'): RealTrace {
   const N = trace.yValues.length;
   if (N < 2) return { name: 'FFT', xValues: new Float64Array(0), yValues: new Float64Array(0) };
 
-  // Apply Hann window
+  // Apply the selected window (default Hann — the historical behavior)
   const windowed = new Float64Array(N);
   for (let i = 0; i < N; i++) {
-    const w = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
-    windowed[i] = trace.yValues[i] * w;
+    windowed[i] = trace.yValues[i] * fftWindowWeight(window, i, N);
   }
 
   // Zero-pad to next power of 2
@@ -387,9 +546,9 @@ export function computeFFT(trace: RealTrace): RealTrace {
   fft(re, im);
 
   // Compute magnitude spectrum (one-sided).
-  // Normalization: the Hann window's coherent gain is Σw = (N−1)/2, so a
-  // bin-centered sinusoid of amplitude A gives |X[k]| = A·Σw/2. Dividing by
-  // N/2 (rectangular-window convention) read amplitudes ~2× (6 dB) low.
+  // Normalization: the window's coherent gain is Σw, so a bin-centered
+  // sinusoid of amplitude A gives |X[k]| = A·Σw/2. Dividing by N/2
+  // (rectangular-window convention) read amplitudes ~2× (6 dB) low.
   // DC bin (and Nyquist, if present) must NOT be doubled: they have no
   // negative-frequency mirror. The old 2× on bin 0 read a 5 V DC trace as
   // 10 V at 0 Hz.
@@ -398,7 +557,7 @@ export function computeFFT(trace: RealTrace): RealTrace {
   const yValues = new Float64Array(halfSize);
   const dt = trace.xValues[1] - trace.xValues[0];
   const fs = 1 / dt;
-  const wsum = (N - 1) / 2; // Hann window sum over the N samples
+  const wsum = fftWindowGain(window, N); // window sum over the N samples
   for (let i = 0; i < halfSize; i++) {
     xValues[i] = i * fs / fftSize;
     const mirrorless = i === 0; // DC has no negative-frequency mirror

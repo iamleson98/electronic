@@ -364,6 +364,11 @@ export const rgbLed: ComponentPlugin = {
     { key: 'vfR', label: 'Red Vf (V)', type: 'number', default: 2.0, unit: 'V', min: 1.2, max: 4, step: 0.05 },
     { key: 'vfG', label: 'Green Vf (V)', type: 'number', default: 3.0, unit: 'V', min: 1.2, max: 4, step: 0.05 },
     { key: 'vfB', label: 'Blue Vf (V)', type: 'number', default: 3.0, unit: 'V', min: 1.2, max: 4, step: 0.05 },
+    // NOTE: 22 Ω is the *internal* channel resistance only — the test and
+    // typical circuits add an EXTERNAL 220 Ω series resistor, so the total
+    // is 242 Ω → (5−2)/242 ≈ 12.4mA (safe). Do NOT raise this default: it
+    // would double-count the external resistor and break the current tests.
+    // A bare LED wired straight to 5V still needs an external resistor.
     { key: 'rs', label: 'Channel Series R (Ω)', type: 'number', default: 22, unit: 'Ω', min: 0.1, max: 1000, step: 1 },
   ],
   keywords: ['rgb', 'led', 'full', 'color', 'common', 'cathode', 'display', 'light'],

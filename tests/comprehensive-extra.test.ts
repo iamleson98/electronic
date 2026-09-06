@@ -307,11 +307,14 @@ describe('Reference solver', () => {
   });
   it('solve: current source drives 1k resistor', () => {
     const s = new ReferenceSolver();
-    s.stampI('a', '0', 0.001);  // 1mA into node a
+    // stampI(n1, n2, I) = I flows OUT of n1, INTO n2 (same convention as the
+    // main solver's stampCurrentSource). 1mA out of node a into ground
+    // through 1kΩ pulls a to −1V (KCL: V(a)/1k = −1mA).
+    s.stampI('a', '0', 0.001);  // 1mA out of node a into ground
     s.stampR('a', '0', 1000);   // 1kΩ to ground
     const r = s.solve();
     expect(r.ok).toBe(true);
-    expect(r.voltages.get('a')).toBe(1);
+    expect(r.voltages.get('a')).toBe(-1);
   });
   it('solve: branch current returned for V source', () => {
     // V1(5V) → R(1kΩ) → GND, expected |I| = 5mA.

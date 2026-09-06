@@ -16,7 +16,7 @@ import type { CopperPour } from './copper-pour';
  * geometry.
  */
 export function exportGerberCopper(
-  layer: 'top' | 'bottom',
+  layer: 'top' | 'bottom' | 'inner1' | 'inner2' | 'inner3' | 'inner4',
   footprints: Footprint[],
   traces: Trace[],
   vias: Via[],
@@ -69,8 +69,8 @@ export function exportGerberCopper(
   // Reserve the outline aperture up-front (D10) so the numbering is stable
   const outlineAp = getCircleAp(0.15);
 
-  /** Pad layer filter: THT pads (drill > 0) exist on BOTH copper layers. */
-  const padOnLayer = (pad: Pad, fp: Footprint, l: 'top' | 'bottom'): boolean =>
+  /** Pad layer filter: THT pads (drill > 0) exist on every copper layer. */
+  const padOnLayer = (pad: Pad, fp: Footprint, l: string): boolean =>
     (pad.drill ?? 0) > 0 || pad.layer === l || fp.side === l;
 
   // Pre-scan: allocate every aperture first so all definitions can be
@@ -210,8 +210,84 @@ export function exportGerberSolderMask(
 }
 
 /**
- * Generate a Gerber silkscreen file (component outlines + refdes).
+ * Generate a Gerber paste-mask file (solder-paste stencil openings).
+ * SMD pads only — THT pads are wave-soldered and must NOT appear on paste.
+ * Openings are shrunk ~10% (min 0.05mm per side) so paste stays on the pad.
  */
+export function exportGerberPaste(
+  layer: 'top' | 'bottom',
+  footprints: Footprint[],
+  board: BoardOutline,
+): string {
+  const lines: string[] = [];
+  const fmt = (n: number) => {
+    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(8, '0');
+    return n < 0 ? `-${mag}` : mag;
+  };
+  lines.push('%FSLAX26Y26*%');
+  lines.push('%MOMM*%');
+  lines.push('%LPD*%');
+  lines.push(`%LN${layer.toUpperCase()}_PASTE*%`);
+  let nextAp = 10;
+  const apDefs = new Map<string, number>();
+  const defs: string[] = [];
+  const flashes: string[] = [];
+  for (const fp of footprints) {
+    for (const pad of fp.pads) {
+      if ((pad.drill ?? 0) > 0) continue; // THT: no paste
+      if (pad.layer !== layer && fp.side !== layer) continue;
+      // shrink ~10% per side for stencil relief
+      const w = Math.max(0.1, pad.size.width - 0.1);
+      const h = Math.max(0.1, pad.size.height - 0.1);
+      const key = pad.shape === 'circle' ? `C${w.toFixed(3)}` : `R${w.toFixed(3)}x${h.toFixed(3)}`;
+      let ap = apDefs.get(key);
+      if (ap === undefined) {
+        ap = nextAp++;
+        apDefs.set(key, ap);
+        defs.push(pad.shape === 'circle' ? `%ADD${ap}C,${w.toFixed(3)}*%` : `%ADD${ap}R,${w.toFixed(3)}X${h.toFixed(3)}*%`);
+      }
+      flashes.push(`G54D${ap}*`);
+      flashes.push(`X${fmt(pad.position.x)}Y${fmt(pad.position.y)}D03*`);
+    }
+  }
+  lines.push(...defs);
+  lines.push(...flashes);
+  // board outline for registration
+  lines.push('%ADD900C,0.150*%');
+  lines.push('G54D900*');
+  lines.push(`X${fmt(0)}Y${fmt(0)}D02*`);
+  lines.push(`X${fmt(board.width)}Y${fmt(0)}D01*`);
+  lines.push(`X${fmt(board.width)}Y${fmt(board.height)}D01*`);
+  lines.push(`X${fmt(0)}Y${fmt(board.height)}D01*`);
+  lines.push(`X${fmt(0)}Y${fmt(0)}D01*`);
+  lines.push('M02*');
+  return lines.join('\n');
+}
+
+/**
+ * Generate the board-outline (Edge.Cuts) Gerber file. Fabs read the outline
+ * from this layer — drawing it only as a copper stroke left it ambiguous.
+ */
+export function exportGerberEdgeCuts(board: BoardOutline): string {
+  const fmt = (n: number) => {
+    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(8, '0');
+    return n < 0 ? `-${mag}` : mag;
+  };
+  return [
+    '%FSLAX26Y26*%',
+    '%MOMM*%',
+    '%LPD*%',
+    '%LNEDGE_CUTS*%',
+    '%ADD10C,0.100*%',
+    'G54D10*',
+    `X${fmt(0)}Y${fmt(0)}D02*`,
+    `X${fmt(board.width)}Y${fmt(0)}D01*`,
+    `X${fmt(board.width)}Y${fmt(board.height)}D01*`,
+    `X${fmt(0)}Y${fmt(board.height)}D01*`,
+    `X${fmt(0)}Y${fmt(0)}D01*`,
+    'M02*',
+  ].join('\n');
+}
 export function exportGerberSilkscreen(
   layer: 'top' | 'bottom',
   footprints: Footprint[],
@@ -284,16 +360,14 @@ export function exportExcellonDrill(
   const drillSizes = new Map<number, { size: number; count: number }>();
   const drillEntries: { x: number; y: number; size: number }[] = [];
 
-  // THT pads — any pad with drill > 0 needs a hole (rect/oval THT pads
-  // included; previously only circle pads were drilled). Pads without a
-  // drill field fall back to the historical ~60%-of-pad estimate.
+  // THT pads — ONLY pads with an explicit drill > 0 get a hole. SMD pads
+  // (no drill field) must NEVER be drilled: the old ~60%-of-pad estimate
+  // punched holes through every SMD landing pad and destroyed them.
   for (const fp of footprints) {
     for (const pad of fp.pads) {
       const hasDrill = pad.drill != null && pad.drill > 0;
-      if (!hasDrill && pad.shape !== 'circle') continue;
-      const drillSize = hasDrill
-        ? pad.drill!
-        : Math.min(pad.size.width, pad.size.height) * 0.6; // estimated ~60% of pad
+      if (!hasDrill) continue;
+      const drillSize = pad.drill!;
       if (drillSize <= 0) continue;
       drillEntries.push({ x: pad.position.x, y: pad.position.y, size: drillSize });
       const key = Math.round(drillSize * 100);

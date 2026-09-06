@@ -44,8 +44,11 @@ export const diodeShockley: ComponentPlugin = {
     { id: 'k', label: 'K', position: { x: 4, y: 1 }, electricalType: 'passive' },
   ],
   parameters: [
+    // Defaults give a real silicon Vf: Is=1e-14, N=1.0 ->
+    // Vf = N*Vt*ln(1mA/Is) = 25.85mV*ln(1e11) ~= 0.65V (1N4148-class).
+    // The old N=1.5 default gave ~0.98V at 1mA — far too high for Si.
     { key: 'Is', label: 'Saturation Current', type: 'number', default: 1e-14, unit: 'A', min: 1e-20, max: 1e-3, step: 1e-15 },
-    { key: 'N', label: 'Emission Coeff', type: 'number', default: 1.5, min: 0.1, max: 5, step: 0.1 },
+    { key: 'N', label: 'Emission Coeff', type: 'number', default: 1.0, min: 0.1, max: 5, step: 0.1 },
     { key: 'Rs', label: 'Series Resistance', type: 'number', default: 0.5, unit: 'Ω', min: 0, max: 1000, step: 0.1 },
     { key: 'Cjo', label: 'Junction Cap', type: 'number', default: 4e-12, unit: 'F', min: 0, max: 1e-6, step: 1e-13 },
     { key: 'M', label: 'Grading Coeff', type: 'number', default: 0.333, min: 0, max: 2, step: 0.05 },
@@ -84,7 +87,11 @@ export const diodeShockley: ComponentPlugin = {
     const Vj = params.Vj as number;
     const M = params.M as number;
     const Tt = params.Tt as number;
-    const Vt = thermalVoltage(27);   // 27°C default
+    // Thermal voltage tracks the sim temperature (kT/q) so .temp sweeps
+    // actually move the Shockley curve; tempScaleIs scales Is with T.
+    const simTemp = (sim as unknown as { temp?: number }).temp ?? 27;
+    const Vt = thermalVoltage(simTemp);
+    const IsT = tempScaleIs(Is, 27, simTemp);
     const vscale = N * Vt;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('dio', comp, a, k);
@@ -96,13 +103,13 @@ export const diodeShockley: ComponentPlugin = {
     // without this, a 0.8 V estimate on Is=1e-14 explodes to e^31 ≈ 3e13 A.
     const vPrev = (st[key + '_vl'] as number | undefined) ?? 0.7;
     const vRaw = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-    const v = limitStep(vRaw, vPrev, vscale, junctionVCrit(vscale, Is));
+    const v = limitStep(vRaw, vPrev, vscale, junctionVCrit(vscale, IsT));
     st[key + '_vl'] = v;
     // SPICE-style escalating gmin: keeps the matrix non-singular and tames
     // stubborn convergence after many Newton rounds (CircuitJS1 Diode.java).
     const gmin = escalateGmin(sim.newtonIter ?? 0);
     // Shockley companion at the (limited) operating point v.
-    const { g, iEq } = shockleyCompanion(v, Is, vscale, gmin);
+    const { g, iEq } = shockleyCompanion(v, IsT, vscale, gmin);
     // ── Series resistance via a REAL internal node ───────────────────────
     // Rs is in series with the junction; the correct MNA treatment is an
     // internal pseudo-node (like makeLevel1MOS's Rd/Rs). The old code

@@ -8,6 +8,37 @@ import { getPlugin } from '@/lib/circuit/registry';
 import { orthogonalizePath } from '@/lib/circuit/wire-geometry';
 import { simplifyPath, pathToWaypoints } from '@/lib/circuit/smart-wire-router';
 import { resolveEndpointGridPos } from '@/lib/circuit/endpoint-position';
+import { parseStrictSpiceNumber } from '@/lib/circuit/measurement';
+
+/**
+ * Coerce a model-supplied parameter value to the plugin's declared type.
+ * Numbers accept unit-suffixed strings ("4k7", "10u", "1Meg") via the SPICE
+ * parser — a raw "10k" string used to assign 10 (1000× error) or NaN.
+ */
+export function coerceParamValue(def: { type: string }, raw: unknown, fallback: unknown): unknown {
+  if (raw === null || raw === undefined) return fallback;
+  if (def.type === 'number') {
+    if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+    if (typeof raw === 'string') {
+      const parsed = parseStrictSpiceNumber(raw);
+      if (parsed !== null) return parsed;
+      const f = parseFloat(raw);
+      return Number.isFinite(f) ? f : fallback;
+    }
+    return fallback;
+  }
+  if (def.type === 'boolean') {
+    if (typeof raw === 'boolean') return raw;
+    if (typeof raw === 'string') {
+      const t = raw.trim().toLowerCase();
+      if (['true', '1', 'yes', 'on', 'high'].includes(t)) return true;
+      if (['false', '0', 'no', 'off', 'low'].includes(t)) return false;
+    }
+    if (typeof raw === 'number') return raw !== 0;
+    return fallback;
+  }
+  return raw;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -43,9 +74,12 @@ const addComponentTool: Tool = {
     // Models routinely send explicit nulls for parameters they don't care
     // about (e.g. {resistance: null}) — a null would override the plugin
     // default here and later crash label rendering / the solver. Drop them.
+    // Unit-suffixed strings ("4k7", "10u") are coerced via the SPICE parser.
     const overrides: Record<string, any> = {};
     for (const [k, v] of Object.entries(args.parameters || {})) {
-      if (v !== null && v !== undefined) overrides[k] = v;
+      if (v === null || v === undefined) continue;
+      const def = plugin.parameters.find((p) => p.key === k);
+      overrides[k] = def ? coerceParamValue(def, v, defaults[k]) : v;
     }
     const comp: CircuitComponent = {
       id,
@@ -146,11 +180,16 @@ const setParameterTool: Tool = {
     if (args.value === null || args.value === undefined) {
       return { ok: false, error: `Parameter "${args.key}" value cannot be null — pass a number/string/boolean.` };
     }
-    comp.parameters[args.key] = args.value;
+    // Unit-safe: coerce "10k"/"4u7"/"1Meg" strings via the SPICE parser so a
+    // raw string can never assign 10 for "10k" (1000× error).
+    const plugin = getPlugin(comp.type);
+    const def = plugin?.parameters.find((p) => p.key === args.key);
+    const coerced = def ? coerceParamValue(def, args.value, comp.parameters[args.key]) : args.value;
+    comp.parameters[args.key] = coerced as number | string | boolean;
     // A `net` parameter change on a label/power symbol rewires connectivity —
     // and any parameter change invalidates the cached solve's physics.
     ctx.simContext = null;
-    return { ok: true, result: { id: args.id, key: args.key, value: args.value } };
+    return { ok: true, result: { id: args.id, key: args.key, value: coerced } };
   },
 };
 

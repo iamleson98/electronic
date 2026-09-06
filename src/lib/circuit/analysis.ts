@@ -260,13 +260,15 @@ function buildACSystemAtFrequency(
       const on = st[stateKey(comp.type, comp, a, k)] ?? vAK > vf;
       const g = on ? 1 / rOn : 1 / rOff;
       cStampConductance(sys, a, k, { re: g, im: 0 });
-      // Junction capacitance Cjo if present
+      // Junction capacitance Cjo if present.
+      // SPICE depletion law: Cj = Cjo / (1 - V/Vj)^M — forward bias WIDENS
+      // the capacitance (denominator shrinks). The old Cjo*denom^+M shrank it.
       const Cjo = (comp.parameters.Cjo as number) ?? 0;
       if (Cjo > 0) {
         const Vj = (comp.parameters.Vj as number) ?? 0.7;
         const M = (comp.parameters.M as number) ?? 0.5;
         const denom = Math.max(0.01, 1 - vAK / Vj);
-        const cj = Cjo * Math.pow(denom, M);
+        const cj = Cjo / Math.pow(denom, M);
         cStampConductance(sys, a, k, { re: 0, im: omega * cj });
       }
     } else if (comp.type === 'npn' || comp.type === 'pnp') {
@@ -321,11 +323,19 @@ function buildACSystemAtFrequency(
       const vthMag = Math.abs(vth);
       const vov = Math.max(0, isNmos ? vGS - vth : -vGS - vthMag);
       const vdsMag = isNmos ? vDS : -vDS;
-      const Id = (vdsMag > vov && vov > 0)
+      const inSat = vdsMag > vov && vov > 0;
+      const Id = inSat
         ? 0.5 * Kp * vov * vov * (1 + lambda * vdsMag)          // saturation
         : Kp * (vov * vdsMag - 0.5 * vdsMag * vdsMag) * (1 + lambda * vdsMag); // linear
-      const gm = vov > 0 ? Kp * vov : 0;
-      const gds = Id * lambda;
+      // Saturation: gm = dId/dVgs = Kp*vov*(1+lambda*Vds) (channel-length
+      // modulation scales the transconductance too). Triode: gm = Kp*vdsMag,
+      // gds = dId/dVds = Kp*(vov - vdsMag) (plus the lambda slope term).
+      const gm = vov > 0
+        ? (inSat ? Kp * vov * (1 + lambda * vdsMag) : Kp * vdsMag * (1 + lambda * vdsMag))
+        : 0;
+      const gds = inSat
+        ? (0.5 * Kp * vov * vov * lambda)
+        : (vov > 0 ? Kp * Math.max(0, vov - vdsMag) * (1 + lambda * vdsMag) + Id * lambda / Math.max(1e-12, 1 + lambda * vdsMag) : 0);
       // Polarity-symmetric Jacobian: +gm/+gds for BOTH N and P channels.
       if (gm > 0) cStampVCCS(sys, d, s, g, s, { re: gm, im: 0 });
       cStampConductance(sys, d, s, { re: gds, im: 0 });
@@ -623,45 +633,58 @@ export function runTF(
   const start = performance.now();
   const options = mergeOptions(opts);
 
-  // 1. Find DC operating point with input source = 1V or 1A
-  const modifiedComponents = components.map((c) => {
-    if (c.id === config.inputSourceId) {
-      // set input to 1 (V or A)
-      if (c.type === 'dcVoltage' || c.type === 'acVoltage') {
-        return { ...c, parameters: { ...c.parameters, voltage: 1 } };
-      }
-      if (c.type === 'currentSource') {
-        return { ...c, parameters: { ...c.parameters, current: 1 } };
-      }
-    }
-    return c;
-  });
-  const dcOp = solveDC(modifiedComponents, wires, plugins, options.itl1);
+  // 1. Find DC operating point at the circuit's NATURAL bias (SPICE .tf is a
+  // small-signal analysis: gain = dVout/dVin linearized at the OP, not the
+  // large-signal Vout(1V)/1V. Forcing the input to 1V re-biased every diode /
+  // BJT / MOS stage and gave wrong gain on any nonlinear circuit).
+  const dcOp = solveDC(components, wires, plugins, options.itl1);
   if (!dcOp) {
     return { type: 'tf', traces: [], scalars: {}, report: { converged: false, iterations: 0, attempts: [] }, durationMs: performance.now() - start };
   }
 
-  // 2. Find output voltage at output node
-  const nodeMap = buildNodeMap(modifiedComponents, wires, plugins);
+  // 2. Small-signal gain from the complex AC system at ~0 Hz (capacitors
+  // open, inductors short): drive the input source with a 1V/1A phasor and
+  // read the complex output — exact dVout/dVin at the operating point.
+  const nodeMap = buildNodeMap(components, wires, plugins);
   let vOutNode = 0;
   let vRefNode = 0;
   for (const [key, nodeId] of nodeMap.terminalNode) {
     if (key.endsWith(`:${config.outputNode}`) || key === config.outputNode) vOutNode = nodeId;
     if (config.outputRef && (key.endsWith(`:${config.outputRef}`) || key === config.outputRef)) vRefNode = nodeId;
   }
-  const vOut = dcOp.nodeVoltage[vOutNode] - dcOp.nodeVoltage[vRefNode];
-  // gain = V_out / V_in (since V_in = 1)
-  const gain = vOut;
+  // Near-DC phasor solve: f = 1e-12 Hz keeps every reactive admittance finite
+  // (Yc = jwC -> 0, Yl = 1/jwL -> large = short) while exercising the exact
+  // same small-signal linearization the Bode plot uses.
+  let gain = 0;
+  {
+    const omega = 2 * Math.PI * 1e-12;
+    const built = buildACSystemAtFrequency(
+      components, wires, plugins, dcOp, omega,
+      { type: 'ac', sweep: 'lin', nPoints: 1, fStart: 1e-12, fStop: 1e-12, sourceId: config.inputSourceId, acMag: 1, acPhase: 0 },
+      options.gmin, options.temp,
+    );
+    if (built) {
+      const x = solveComplexMna(built.sys);
+      if (x) {
+        const vOut = vOutNode > 0 ? x[vOutNode - 1] : { re: 0, im: 0 };
+        const vRef = vRefNode > 0 ? x[vRefNode - 1] : { re: 0, im: 0 };
+        gain = Math.hypot(vOut.re - vRef.re, vOut.im - vRef.im);
+        // Preserve sign for inverting stages: the near-DC imaginary part is
+        // ~0, so the real part carries the polarity.
+        if ((vOut.re - vRef.re) < 0) gain = -gain;
+      }
+    }
+  }
 
   // 3. Compute input resistance: Rin = V_in / I_in where I_in is the current
-  //    drawn from the input source. Since we set V_in = 1V above, Rin = 1 / I_in.
+  //    drawn from the input source at its natural DC bias (no more forced 1V).
   //    For a voltage source, the branch current returned by the solver is the
   //    current flowing through it — that IS I_in. We read it directly from the
   //    per-component currents (computeComponentCurrents handles every device
   //    type: resistors, semiconductors, capacitors, inductors, ...), so this
   //    is exact for any circuit — the old resistor-only KCL approximation
   //    underestimated I_in and overestimated Rin on circuits with transistors.
-  const inputComp = modifiedComponents.find((c) => c.id === config.inputSourceId);
+  const inputComp = components.find((c) => c.id === config.inputSourceId);
   let rin = Infinity;
   if (inputComp) {
     const inputPlugin = plugins.get(inputComp.type);
@@ -671,7 +694,7 @@ export function runTF(
       const nNode = inputTerms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
       const vIn = (dcOp.nodeVoltage[pNode] ?? 0) - (dcOp.nodeVoltage[nNode] ?? 0);
       if (inputComp.type === 'dcVoltage' || inputComp.type === 'acVoltage') {
-        const compCurrents = computeComponentCurrents(modifiedComponents, wires, plugins, dcOp);
+        const compCurrents = computeComponentCurrents(components, wires, plugins, dcOp);
         // Convention: current through the source from p → n (positive when the
         // source supplies power into the circuit from its + terminal).
         const iIn = compCurrents.get(inputComp.id) ?? 0;
@@ -1424,23 +1447,39 @@ export function runDisto(
     inputComp.parameters = origParams;
 
     // FFT the output samples to extract harmonic content (skip the first
-    // period, which contains the startup settling transient)
+    // period, which contains the startup settling transient). Hann window +
+    // coherent-gain normalization (same as runFour) so leakage does not
+    // inflate the harmonic bins; THD sums ALL harmonics >= 2 (SPICE .disto).
     const settleIdx = samples.findIndex(s => s.t >= period);
     const kept = settleIdx > 0 ? samples.slice(settleIdx) : samples;
     if (kept.length < 16) continue;
     const fftSize = nextPow2(kept.length);
     const re = new Float64Array(fftSize);
     const im = new Float64Array(fftSize);
-    for (let n = 0; n < kept.length; n++) re[n] = kept[n].v;
+    const wsum = (kept.length - 1) / 2; // Hann coherent gain
+    for (let n = 0; n < kept.length; n++) {
+      const w = 0.5 * (1 - Math.cos(2 * Math.PI * n / (kept.length - 1)));
+      re[n] = kept[n].v * w;
+    }
     fft(re, im);
-    // Find magnitude at f1, 2*f1, 3*f1 (bin = f·fftSize·dt)
+    // Find magnitude at f1, 2*f1, ... (bin = f·fftSize·dt)
     const binF1 = Math.round(f1 * fftSize * tStep);
-    const mag1 = binF1 < fftSize / 2 ? Math.hypot(re[binF1], im[binF1]) * 2 / fftSize : 0;
-    const mag2 = 2 * binF1 < fftSize / 2 ? Math.hypot(re[2 * binF1], im[2 * binF1]) * 2 / fftSize : 0;
-    const mag3 = 3 * binF1 < fftSize / 2 ? Math.hypot(re[3 * binF1], im[3 * binF1]) * 2 / fftSize : 0;
+    const magAt = (mult: number) => {
+      const bin = binF1 * mult;
+      return bin < fftSize / 2 ? Math.hypot(re[bin], im[bin]) * 2 / wsum : 0;
+    };
+    const mag1 = magAt(1);
+    const mag2 = magAt(2);
+    const mag3 = magAt(3);
     hd2[i] = mag1 > 1e-9 ? mag2 / mag1 : 0;
     hd3[i] = mag1 > 1e-9 ? mag3 / mag1 : 0;
-    thd[i] = Math.sqrt(hd2[i] * hd2[i] + hd3[i] * hd3[i]);
+    // Full THD over every harmonic bin that fits below Nyquist.
+    let sumSq = 0;
+    for (let h = 2; h * binF1 < fftSize / 2; h++) {
+      const m = magAt(h);
+      sumSq += m * m;
+    }
+    thd[i] = mag1 > 1e-9 ? Math.sqrt(sumSq) / mag1 : 0;
   }
 
   const xValues = new Float64Array(freqs.length);

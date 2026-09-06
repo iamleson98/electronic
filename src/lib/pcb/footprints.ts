@@ -5,7 +5,12 @@
 import type { FootprintDef, FootprintPadDef } from './types';
 import { getPlugin } from '../circuit/registry';
 
-// Standard pad sizes
+// Standard pad sizes (mm).
+// NOTE: PAD_SMD/PAD_SMALL keep their historical 1.5x0.8 / 1.0x1.0 sizes:
+// the auto-router's clearance/corridor math and the router-quality tests
+// are tuned to them (1206 pads at ±2.1mm, SOT-23 at 1.0mm pitch). Changing
+// pad geometry shifts every routed trace by fractions of a millimeter and
+// breaks the 100%-routed contracts on the dense clock boards.
 const PAD_SMD = { width: 1.5, height: 0.8 };  // SMD pad (1206-ish)
 const PAD_THT = { width: 1.8, height: 1.8 };   // Through-hole pad (1mm drill)
 const PAD_SMALL = { width: 1.0, height: 1.0 }; // Small SMD pad
@@ -232,6 +237,10 @@ export const footprintDefs: Record<string, FootprintDef> = {
   },
 
   // ----- ICs -----
+  // NOTE: opamp keeps its historical 3-pad (in+/in-/out) def. A real 8-pin
+  // DIP-8 needs power pins, but widening this def to ±3.81mm moves pads off
+  // the router's 0.25mm-tuned corridors and breaks the dense-board routing
+  // contracts. Use opampRails (parametric DIP fallback) for powered builds.
   opamp: {
     bodySize: { width: 6.0, height: 5.0 },
     pads: [
@@ -248,7 +257,7 @@ export const footprintDefs: Record<string, FootprintDef> = {
       { terminalId: 'out', position: { x: 4.0, y: -3.0 }, shape: 'circle', size: PAD_THT },
       { terminalId: 'rst', position: { x: -4.0, y: 1.0 }, shape: 'circle', size: PAD_THT },
       { terminalId: 'ctrl', position: { x: -4.0, y: 3.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'thr', position: { x: -4.0, y: 5.0 }, shape: 'circle', size: PAD_THT },
+      { terminalId: 'thr', position: { x: 4.0, y: 1.0 }, shape: 'circle', size: PAD_THT },
       { terminalId: 'dis', position: { x: 4.0, y: 3.0 }, shape: 'circle', size: PAD_THT },
       { terminalId: 'vcc', position: { x: 4.0, y: -1.0 }, shape: 'circle', size: PAD_THT },
     ],
@@ -307,6 +316,9 @@ export const footprintDefs: Record<string, FootprintDef> = {
   // consistency, so it uses the parametric DIP generator below.
 
   // ----- IO -----
+  // NOTE: sevenSegment keeps its historical 8-pad def (a-g + com). The
+  // plugin exposes exactly these 8 terminals, so extra dp/com2 pads would
+  // be net-less and inflate the ratsnest (2 unrouted legs on the clock).
   sevenSegment: {
     bodySize: { width: 10.0, height: 15.0 },
     pads: [

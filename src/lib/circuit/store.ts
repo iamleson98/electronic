@@ -1956,7 +1956,9 @@ export const useEditor = create<EditorState>((set, get) => ({
         for (const termKey of s.simOptions.printNodes) {
           const nodeId = result.nodeMap.terminalNode.get(termKey);
           if (nodeId != null && nodeId > 0) {
-            const nodeV = result.sim.nodeVoltage[nodeId - 1] ?? 0;
+            // nodeVoltage is node-id indexed (index 0 = ground) — the old
+            // nodeId - 1 read the WRONG node on every .PRINT.
+            const nodeV = result.sim.nodeVoltage[nodeId] ?? 0;
             // eslint-disable-next-line no-console
             console.log(`[.PRINT t=${result.sim.time.toFixed(6)}] V(${termKey}) = ${nodeV.toFixed(6)} V`);
           }

@@ -82,8 +82,10 @@ export class ReferenceSolver {
         if (i1 > 0) { A[i1-1][i1-1] += g; if (i2 > 0) A[i1-1][i2-1] -= g; }
         if (i2 > 0) { A[i2-1][i2-1] += g; if (i1 > 0) A[i2-1][i1-1] -= g; }
       } else if (s.type === 'I') {
-        if (i1 > 0) z[i1-1] += s.value;
-        if (i2 > 0) z[i2-1] -= s.value;
+        // Same convention as solver.ts stampCurrentSource: current flows OUT
+        // of n1 and INTO n2 (KCL: z[n1] -= I, z[n2] += I).
+        if (i1 > 0) z[i1-1] -= s.value;
+        if (i2 > 0) z[i2-1] += s.value;
       } else if (s.type === 'V') {
         const bIdx = branchIndices.get(s.name)!;
         const col = n + bIdx;

@@ -210,3 +210,162 @@ function simulateCircuit(
   }
   return results;
 }
+
+export const faultInjectionTool: Tool = {
+  name: 'simulate.fault',
+  category: 'AI Diagnosis & Teaching',
+  description: 'Inject a fault into a CLONE and simulate: short a component (0.01Ω), open it, add leakage, or stick a logic output high/low. Answers "what if C1 shorts?" for failure analysis. Non-mutating — the real circuit is untouched.',
+  parameters: {
+    type: 'object',
+    properties: {
+      componentId: {
+        type: 'string',
+        description: 'Component to fault (e.g. "c1").',
+      },
+      fault: {
+        type: 'string',
+        description: '"short" (0.01Ω across it), "open" (1TΩ), "leak" (10kΩ across it), "stuckHigh" (output forced to VCC), "stuckLow" (output forced to 0).',
+      },
+      steps: { type: 'number', description: 'Transient steps (default 100).' },
+      dt: { type: 'number', description: 'Timestep in seconds (default 1e-4).' },
+      probes: {
+        type: 'array',
+        description: 'Terminal keys to measure (e.g. ["r1:b"]).',
+        items: { type: 'string' },
+      },
+    },
+    required: ['componentId', 'fault'],
+  },
+  execute(args: {
+    componentId: string;
+    fault: string;
+    steps?: number;
+    dt?: number;
+    probes?: string[];
+  }, ctx: ToolContext) {
+    ensurePlugins(ctx);
+    const plugins = ctx.plugins;
+    const src = ctx.doc.components.find((c) => c.id === args.componentId);
+    if (!src) return { ok: false, error: `Component "${args.componentId}" not found.` };
+    const cloned: CircuitComponent[] = ctx.doc.components.map((c) => ({
+      ...c,
+      parameters: { ...c.parameters },
+      position: { ...c.position },
+      simState: undefined,
+    }));
+    const target = cloned.find((c) => c.id === args.componentId)!;
+    const fault = args.fault.toLowerCase();
+    let applied = '';
+    if (fault === 'short') {
+      // Bridge the first two terminals with a 10mΩ resistor clone.
+      const plugin = plugins.get(target.type);
+      const terms = plugin?.terminals.slice(0, 2) ?? [];
+      if (terms.length < 2) return { ok: false, error: 'Component has fewer than 2 terminals — cannot short.' };
+      cloned.push({
+        id: `__fault_${Date.now().toString(36)}`,
+        type: 'resistor',
+        position: { ...target.position },
+        rotation: 0,
+        parameters: { resistance: 0.01 },
+      });
+      const bridge = cloned[cloned.length - 1];
+      const wires: Wire[] = ctx.doc.wires.map((w) => ({ ...w, from: { ...w.from }, to: { ...w.to } }));
+      wires.push(
+        { id: `__fw1_${bridge.id}`, from: { componentId: target.id, terminalId: terms[0].id }, to: { componentId: bridge.id, terminalId: 'a' } },
+        { id: `__fw2_${bridge.id}`, from: { componentId: target.id, terminalId: terms[1].id }, to: { componentId: bridge.id, terminalId: 'b' } },
+      );
+      applied = `shorted ${target.id} with 10mΩ`;
+      return runFaultSim(cloned, wires, plugins, applied, args, ctx);
+    }
+    if (fault === 'open') {
+      // Remove all wires touching the component (leaves it unconnected).
+      const wires: Wire[] = ctx.doc.wires
+        .filter((w) => w.from.componentId !== target.id && w.to.componentId !== target.id)
+        .map((w) => ({ ...w, from: { ...w.from }, to: { ...w.to } }));
+      applied = `opened ${target.id} (all wires lifted)`;
+      return runFaultSim(cloned, wires, plugins, applied, args, ctx);
+    }
+    if (fault === 'leak') {
+      cloned.push({
+        id: `__fault_${Date.now().toString(36)}`,
+        type: 'resistor',
+        position: { ...target.position },
+        rotation: 0,
+        parameters: { resistance: 10000 },
+      });
+      const bridge = cloned[cloned.length - 1];
+      const plugin = plugins.get(target.type);
+      const terms = plugin?.terminals.slice(0, 2) ?? [];
+      if (terms.length < 2) return { ok: false, error: 'Component has fewer than 2 terminals — cannot add leakage.' };
+      const wires: Wire[] = ctx.doc.wires.map((w) => ({ ...w, from: { ...w.from }, to: { ...w.to } }));
+      wires.push(
+        { id: `__fw1_${bridge.id}`, from: { componentId: target.id, terminalId: terms[0].id }, to: { componentId: bridge.id, terminalId: 'a' } },
+        { id: `__fw2_${bridge.id}`, from: { componentId: target.id, terminalId: terms[1].id }, to: { componentId: bridge.id, terminalId: 'b' } },
+      );
+      applied = `10kΩ leakage across ${target.id}`;
+      return runFaultSim(cloned, wires, plugins, applied, args, ctx);
+    }
+    if (fault === 'stuckhigh' || fault === 'stucklow') {
+      const plugin = plugins.get(target.type);
+      const outTerm = plugin?.terminals.find((t) => t.id === 'y' || t.id === 'out' || t.id === 'q');
+      if (!outTerm) return { ok: false, error: 'Component has no logic output terminal (y/out/q) to stick.' };
+      // Force via a 1Ω Thevenin: add a dcVoltage source wired onto the node.
+      const vccGuess = 5;
+      cloned.push({
+        id: `__fault_${Date.now().toString(36)}`,
+        type: 'dcVoltage',
+        position: { ...target.position },
+        rotation: 0,
+        parameters: { voltage: fault === 'stuckhigh' ? vccGuess : 0 },
+      });
+      const srcComp = cloned[cloned.length - 1];
+      const wires: Wire[] = ctx.doc.wires.map((w) => ({ ...w, from: { ...w.from }, to: { ...w.to } }));
+      // Tie source n to ground net: reuse any ground component, else node 0 via target's gnd pin if present.
+      const gnd = cloned.find((c) => c.type === 'ground');
+      if (gnd) {
+        wires.push({ id: `__fwg_${srcComp.id}`, from: { componentId: srcComp.id, terminalId: 'n' }, to: { componentId: gnd.id, terminalId: 'g' } });
+      }
+      wires.push({ id: `__fw1_${srcComp.id}`, from: { componentId: srcComp.id, terminalId: 'p' }, to: { componentId: target.id, terminalId: outTerm.id } });
+      applied = `${target.id}.${outTerm.id} stuck ${fault === 'stuckhigh' ? 'HIGH' : 'LOW'}`;
+      return runFaultSim(cloned, wires, plugins, applied, args, ctx);
+    }
+    return { ok: false, error: `Unknown fault "${args.fault}" — use short, open, leak, stuckHigh, or stuckLow.` };
+  },
+};
+
+function runFaultSim(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, any>,
+  applied: string,
+  args: { steps?: number; dt?: number; probes?: string[] },
+  _ctx: ToolContext,
+) {
+  const steps = Math.min(Math.max(Math.floor(args.steps ?? 100) || 1, 1), 2000);
+  const dt = args.dt ?? 1e-4;
+  try {
+    const sim = simulateCircuit(components, wires, plugins, steps, dt);
+    const dcSim = solveDC(components, wires, plugins as never);
+    const probeResults: Record<string, { finalVoltage: number; dcVoltage: number }> = {};
+    if (args.probes) {
+      const nodeMap = buildNodeMap(components, wires, plugins as never);
+      for (const probe of args.probes) {
+        const nodeId = nodeMap.terminalNode.get(probe);
+        if (nodeId === undefined) continue;
+        const finalV = sim.length > 0 ? sim[sim.length - 1].nodeVoltage[nodeId] ?? 0 : 0;
+        probeResults[probe] = { finalVoltage: finalV, dcVoltage: dcSim ? dcSim.nodeVoltage[nodeId] ?? 0 : finalV };
+      }
+    }
+    return {
+      ok: true,
+      result: {
+        fault: applied,
+        stepsCompleted: sim.length,
+        probes: probeResults,
+        note: 'Non-mutating fault simulation on a clone. The actual circuit is unchanged.',
+      },
+    };
+  } catch (err) {
+    return { ok: false, error: `Fault simulation failed: ${(err as Error).message}`, result: { fault: applied } };
+  }
+}

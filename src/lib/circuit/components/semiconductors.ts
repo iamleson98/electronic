@@ -220,14 +220,16 @@ const npn: ComponentPlugin = {
     sys.stampCCCS(c, e, ibBranch, hfe);
     st[key + '_branch'] = ibBranch;
     // Saturation clamp: only when there's actual collector current to
-    // saturate. Without this guard, the 100S clamp would provide a current
-    // path C→E even when I_B (and thus I_C) is zero — which is the
-    // "current flows when switch is open" bug.
+    // saturate. Without this guard, the clamp would provide a current path
+    // C→E even when I_B (and thus I_C) is zero — which is the "current flows
+    // when switch is open" bug. The clamp is a Thevenin to VceSat (G in
+    // parallel with Isc = VceSat*G), NOT a conductance to 0V: a bare 100S to
+    // ground forced Vce ≈ Ic/100 (≈1mV @ 100mA) instead of the real ~0.2V.
     const prevIc = hfe * prevIb;
     if (prevIc > 1e-9 && vce < vceSat) {
-      // Clamp Vce ≈ vceSat using a parallel conductance (not a second voltage
-      // source — that would create a singular matrix with the CCCS).
-      sys.stampConductance(c, e, 100);
+      const gSat = 100;
+      sys.stampConductance(c, e, gSat);
+      sys.stampCurrentSource(e, c, vceSat * gSat);
     }
     // Reverse-Vce protection: if Vce goes negative (collector below emitter),
     // the B-C junction becomes forward-biased and the transistor enters
@@ -566,6 +568,10 @@ function makeLogicGate(type: string, name: string, symbol: string, op: (a: boole
     name,
     category: 'logic',
     description: `${name} logic gate. Drives output to VCC (logic 1) or 0 (logic 0).`,
+    // Region-switching stamp (output level follows the input threshold), so
+    // the engine must run the Newton subiteration loop — otherwise cascaded
+    // gates lag one timestep per stage and latches/loops mis-converge.
+    nonLinear: true,
     symbol,
     boundingBox: { width: 4, height: 3 },
     terminals: type === 'not'

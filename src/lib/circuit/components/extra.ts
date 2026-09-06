@@ -258,11 +258,12 @@ const nmos: ComponentPlugin = {
     // Pick based on vds.
     const vov = vgs - vth;
     if (vds > vov && vov > 0) {
-      // saturation: Id = ½·Kp·vov² (SPICE Level-1 square law — the ½ was
-      // missing, doubling every saturation current)
+      // saturation: Id = ½·Kp·vov²·(1+λ·Vds) (SPICE Level-1 square law with
+      // channel-length modulation — the ½ was missing, doubling every
+      // saturation current, and λ was dropped from Id while gds kept it).
       const kp = params.kp as number;
       const lambda = (params.lambda as number) ?? 0.02; // default 0.02 V^-1
-      const id = 0.5 * kp * vov * vov;
+      const id = 0.5 * kp * vov * vov * (1 + lambda * vds);
       sys.stampCurrentSource(d, s, id);
       // Output conductance: gds = lambda * Id (limits gain in amplifiers)
       const gds = lambda * Math.abs(id);
@@ -379,11 +380,11 @@ const pmos: ComponentPlugin = {
     }
     const vov = vsg - vthMag;
     if (vsd > vov && vov > 0) {
-      // saturation: Is = ½·Kp·vov² (current from s to d) — SPICE Level-1
-      // square law with the ½ factor (was missing, doubling the current)
+      // saturation: Is = ½·Kp·vov²·(1+λ·Vsd) (current from s to d) — SPICE
+      // Level-1 square law with the ½ factor and channel-length modulation.
       const kp = params.kp as number;
       const lambda = (params.lambda as number) ?? 0.02;
-      const id = 0.5 * kp * vov * vov;
+      const id = 0.5 * kp * vov * vov * (1 + lambda * vsd);
       sys.stampCurrentSource(s, d, id);
       // Output conductance (channel modulation / Early effect)
       const gds = lambda * Math.abs(id);
@@ -851,7 +852,10 @@ const transformer: ComponentPlugin = {
   ],
   parameters: [
     { key: 'ratio', label: 'Turns Ratio (Ns/Np)', type: 'number', default: 1, unit: '', min: 0.001, max: 100, step: 0.1 },
-    { key: 'lm', label: 'Magnetizing L', type: 'number', default: 0.01, unit: 'H', min: 1e-6, max: 100, step: 1e-3 },
+    // Default 1 H: at 50 Hz X = 2π·50·1 ≈ 314 Ω magnetizing reactance, so a
+    // mains transformer idles at ~0.7 A on 230 V. The old 10 mH default gave
+    // X ≈ 3 Ω → ~73 A magnetizing current at mains (fine only above ~10 kHz).
+    { key: 'lm', label: 'Magnetizing L', type: 'number', default: 1, unit: 'H', min: 1e-6, max: 100, step: 1e-3 },
   ],
   render(ctx, params, cellSize) {
     // leads

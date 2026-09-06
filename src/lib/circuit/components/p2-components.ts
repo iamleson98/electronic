@@ -137,9 +137,9 @@ export const lm385: ComponentPlugin = {
 
 export const adc: ComponentPlugin = {
   type: 'adc',
-  name: 'ADC (8-bit)',
+  name: 'ADC (4-bit MSBs of 8-bit)',
   category: 'mcu',
-  description: '8-bit analog-to-digital converter. Reads analog voltage on input, outputs 8-bit digital value.',
+  description: '8-bit ADC core, exposing the 4 most-significant bits (D7-D4). Reads analog voltage on VIN against VREF and outputs the top nibble of the 8-bit code.',
   symbol: 'ADC',
   boundingBox: { width: 6, height: 5 },
   terminals: [
@@ -195,9 +195,9 @@ export const adc: ComponentPlugin = {
 
 export const dac: ComponentPlugin = {
   type: 'dac',
-  name: 'DAC (8-bit)',
+  name: 'DAC (4-bit)',
   category: 'mcu',
-  description: '8-bit digital-to-analog converter. 4 digital inputs → analog output voltage.',
+  description: '4-bit digital-to-analog converter. 4 digital inputs (D3-D0) → analog output voltage (code/15 × VREF).',
   symbol: 'DAC',
   boundingBox: { width: 6, height: 5 },
   terminals: [

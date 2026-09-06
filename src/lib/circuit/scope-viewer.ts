@@ -88,6 +88,87 @@ export function meanVoltage(samples: ScopeSample[]): number {
   return sum / samples.length;
 }
 
+// ─── Probe loading ─────────────────────────────────────────────────────────
+// Real probes load the circuit: 1× = 1 MΩ ‖ ~100 pF, 10× = 10 MΩ ‖ ~15 pF.
+// The simulator's probe is ideal (1 TΩ); these helpers model what a REAL
+// probe would read so high-impedance circuits can be sanity-checked.
+
+export interface ProbeModel {
+  /** label shown in the UI */
+  label: string;
+  /** shunt resistance to ground (Ω) */
+  rIn: number;
+  /** shunt capacitance to ground (F) */
+  cIn: number;
+  /** voltage division of the probe (1 or 10) */
+  attenuation: 1 | 10;
+}
+
+export const PROBE_MODELS: ProbeModel[] = [
+  { label: 'Ideal (simulator)', rIn: 1e12, cIn: 0, attenuation: 1 },
+  { label: '1× (1 MΩ ‖ 100 pF)', rIn: 1e6, cIn: 100e-12, attenuation: 1 },
+  { label: '10× (10 MΩ ‖ 15 pF)', rIn: 10e6, cIn: 15e-12, attenuation: 10 },
+];
+
+/** -3 dB bandwidth of a probe loaded by a source resistance (Hz). */
+export function probeBandwidth(rSource: number, probe: ProbeModel): number {
+  const rEq = (rSource * probe.rIn) / Math.max(rSource + probe.rIn, 1e-12);
+  if (probe.cIn <= 0) return Infinity;
+  return 1 / (2 * Math.PI * rEq * probe.cIn);
+}
+
+/** DC loading error: fraction of the true voltage a real probe reads. */
+export function probeDcGain(rSource: number, probe: ProbeModel): number {
+  return probe.rIn / (rSource + probe.rIn);
+}
+
+// ─── Cursor-interval math ──────────────────────────────────────────────────
+// Statistics over the samples strictly between two cursor times (A–B):
+// AVG / RMS / PP / min / max plus trapezoidal integral and mean derivative.
+
+export interface CursorIntervalStats {
+  count: number;
+  vMin: number;
+  vMax: number;
+  vPp: number;
+  vAvg: number;
+  vRms: number;
+  /** trapezoidal ∫v dt over the interval (V·s) */
+  integral: number;
+  /** mean dV/dt over the interval (V/s) */
+  meanSlope: number;
+}
+
+export function cursorIntervalStats(samples: ScopeSample[], timeA: number, timeB: number): CursorIntervalStats | null {
+  const lo = Math.min(timeA, timeB);
+  const hi = Math.max(timeA, timeB);
+  const pts = samples.filter((s) => s.time >= lo && s.time <= hi);
+  if (pts.length === 0) return null;
+  let vMin = Infinity, vMax = -Infinity, sum = 0, sumSq = 0, integral = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const v = pts[i].voltage;
+    if (v < vMin) vMin = v;
+    if (v > vMax) vMax = v;
+    sum += v;
+    sumSq += v * v;
+    if (i > 0) {
+      const dt = pts[i].time - pts[i - 1].time;
+      integral += 0.5 * (v + pts[i - 1].voltage) * dt;
+    }
+  }
+  const span = pts.length > 1 ? pts[pts.length - 1].time - pts[0].time : 0;
+  return {
+    count: pts.length,
+    vMin,
+    vMax,
+    vPp: vMax - vMin,
+    vAvg: sum / pts.length,
+    vRms: Math.sqrt(sumSq / pts.length),
+    integral,
+    meanSlope: span > 0 ? (pts[pts.length - 1].voltage - pts[0].voltage) / span : 0,
+  };
+}
+
 // ─── Coupling ──────────────────────────────────────────────────────────────
 
 /** Apply input coupling. AC removes the DC component (mean) of the captured

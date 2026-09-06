@@ -180,6 +180,12 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
   const nodeSets: Record<string, number> = {};
   const saveNodes: string[] = [];
   const printNodes: string[] = [];
+  // Full simulation-control directives (previously ignored): .options fields
+  // map onto SimOptions, .temp sets temperature, .tran/.ac/.dc/.step/.mc /
+  // .worst/.probe are preserved verbatim for the directive editor + export.
+  const directiveOptions: Record<string, number | string | boolean> = {};
+  let directiveTemp: number | undefined;
+  const directiveCards: string[] = [];
 
   for (const line of lines) {
     if (!line || line.startsWith('*') || line.startsWith(';')) continue;
@@ -217,6 +223,37 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
         const m = tokens[i].match(/^v\(([^)]+)\)$/i);
         if (m) printNodes.push(m[1]);
       }
+      directiveCards.push(line);
+      continue;
+    }
+    // .OPTIONS key=value ... (RELTOL, VNTOL, ABSTOL, GMIN, ITL1, METHOD, TEMP...)
+    if (head === '.options') {
+      for (let i = 1; i < tokens.length; i++) {
+        const kv = tokens[i].match(/^(\w+)\s*=\s*(.+)$/);
+        if (kv) {
+          const key = kv[1].toLowerCase();
+          const raw = kv[2];
+          const num = parseSpiceValue(raw);
+          directiveOptions[key] = /^(uic|true)$/i.test(raw) ? true : (/^false$/i.test(raw) ? false : num);
+          if (key === 'temp' && Number.isFinite(num)) directiveTemp = num;
+        }
+      }
+      directiveCards.push(line);
+      continue;
+    }
+    // .TEMP value — simulation temperature in °C
+    if (head === '.temp') {
+      const num = tokens.length > 1 ? parseSpiceValue(tokens[1]) : NaN;
+      if (Number.isFinite(num)) directiveTemp = num;
+      directiveCards.push(line);
+      continue;
+    }
+    // Analysis + sweep cards: preserved verbatim (directive editor + export)
+    if (head === '.tran' || head === '.ac' || head === '.dc' || head === '.op' ||
+        head === '.step' || head === '.mc' || head === '.worst' || head === '.probe' ||
+        head === '.save' || head === '.meas' || head === '.four' || head === '.tf' ||
+        head === '.pz' || head === '.noise' || head === '.disto' || head === '.sens') {
+      directiveCards.push(line);
       continue;
     }
 
@@ -715,6 +752,12 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
       nodeSets,
       saveNodes,
       printNodes,
+      // Parsed control directives: method/reltol/gmin/itl*/temp/uic flow
+      // into mergeOptions via the directive editor; `cards` round-trips the
+      // verbatim analysis cards (.tran/.ac/.step/...) for export.
+      directives: directiveOptions,
+      temp: directiveTemp,
+      cards: directiveCards,
     },
   } as any;
 }

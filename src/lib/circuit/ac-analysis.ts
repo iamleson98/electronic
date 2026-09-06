@@ -49,6 +49,8 @@ export interface ACAnalysisOptions {
   outputNode: string;
   /** Reference node — defaults to ground (0) */
   outputRef?: string;
+  /** Simulation temperature in °C for V_T = kT/q (default 27) */
+  temp?: number;
 }
 
 /**
@@ -174,7 +176,7 @@ export function runACAnalysis(opts: ACAnalysisOptions): ACAnalysisResult {
     // inductor admittance −1/(ωL) = −Infinity and poison the solve with NaN
     // (the log-sweep path already clamps its start frequency the same way).
     const omega = 2 * Math.PI * Math.max(freq, 1e-12);
-    const vOut = computeOutputVoltage(components, wires, plugins, nodeMap, source, outNode, refNode, omega, acMag, dc, dcCurrents);
+    const vOut = computeOutputVoltage(components, wires, plugins, nodeMap, source, outNode, refNode, omega, acMag, dc, dcCurrents, opts.temp);
     const mag = Math.hypot(vOut.re, vOut.im);
     const phase = Math.atan2(vOut.im, vOut.re) * 180 / Math.PI;
     points.push({
@@ -221,6 +223,7 @@ function computeOutputVoltage(
   acMag: number,
   dcOp?: { nodeVoltage: Float64Array; state: any } | null,
   dcCurrents?: Map<string, number>,
+  tempC?: number,
 ): Complex {
   // Simplified approach: build a complex nodal admittance matrix Y (n x n)
   // and current source vector I (n), then solve Y * V = I.
@@ -367,7 +370,8 @@ function computeOutputVoltage(
       //   gm = I_C / V_T, r_pi = β / gm, (r_o ignored)
       // I_C comes from computeComponentCurrents at the DC solution — the old
       // code hardcoded a 1 mA bias regardless of the real operating point.
-      const V_T = 0.02585; // thermal voltage at 300K
+      // V_T tracks the temp option (kT/q), matching analysis.ts.
+      const V_T = 8.617333262e-5 * (273.15 + (tempC ?? 27));
       const beta = (c.parameters.hfe as number) ?? 100;
       const cTerm = terms.find(t => t.terminalId === 'c');
       const bTerm = terms.find(t => t.terminalId === 'b');
@@ -386,11 +390,11 @@ function computeOutputVoltage(
       const r_pi = beta / gm;
       // r_pi between base and emitter
       stampY(Yre, Yim, bNodeIdx, eNodeIdx, N, 1 / r_pi, 0);
-      // VCCS: i_c = gm * (v_b - v_e), current flows c→e (NPN) or e→c (PNP).
-      // A VCCS is NON-RECIPROCAL: only these four terms belong in the matrix.
-      // (The old stamp added transposed entries to force matrix symmetry —
-      //  a phantom reciprocal coupling with no physical meaning.)
-      const g = (c.type === 'npn' ? 1 : -1) * gm;
+      // VCCS: i_c = gm * (v_b - v_e). Polarity-symmetric Jacobian (+gm for
+      // BOTH NPN and PNP under the VCCS(c,e,b,e) convention — the PNP's
+      // reversed current direction cancels its reversed junction polarity),
+      // matching analysis.ts buildACSystemAtFrequency.
+      const g = gm;
       if (cNodeIdx >= 0 && bNodeIdx >= 0) Yre[cNodeIdx * N + bNodeIdx] += g;
       if (cNodeIdx >= 0 && eNodeIdx >= 0) Yre[cNodeIdx * N + eNodeIdx] -= g;
       if (eNodeIdx >= 0 && bNodeIdx >= 0) Yre[eNodeIdx * N + bNodeIdx] -= g;

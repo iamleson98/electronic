@@ -33,8 +33,10 @@ import { findComponentTool } from './search-tools';
 import { serializeDocumentTool, exportKiCadNetlistTool, loadDocumentTool, undoTool, redoTool } from './document-tools';
 import { diagnoseCircuitTool } from './diagnostic-tools';
 import { kbLookupTool, kbSearchTool, kbListByCategoryTool, kbRelatedTool, kbListCategoriesTool } from './kb-tools';
-import { simulateWhatIfTool } from './whatif-tools';
+import { simulateWhatIfTool, faultInjectionTool } from './whatif-tools';
 import { simulateSweepTool } from './sweep-tools';
+import { yieldMonteCarloTool, yieldSensitivityTool } from './yield-tools';
+import { deratingCheckTool, designReviewTool, bringupChecklistTool } from './review-tools';
 import { acAnalysisTool, fourierTool } from './analysis-tools';
 import { designCalculateTool } from './design-calculators';
 import { designBuildPatternTool } from './design-patterns';
@@ -85,7 +87,13 @@ export const TOOLS: Tool[] = [
   // AI-Powered Diagnosis, Teaching & Design
   diagnoseCircuitTool,
   simulateWhatIfTool,
+  faultInjectionTool,
   simulateSweepTool,
+  yieldMonteCarloTool,
+  yieldSensitivityTool,
+  deratingCheckTool,
+  designReviewTool,
+  bringupChecklistTool,
   designCalculateTool,
   designBuildPatternTool,
   circuitWalkthroughTool,

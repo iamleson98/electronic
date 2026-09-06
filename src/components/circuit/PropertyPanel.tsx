@@ -1,9 +1,10 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import { getPlugin } from '@/lib/circuit/registry';
 import { buildNodeMap, getTerminalsForComponent } from '@/lib/circuit/engine';
+import { parseStrictSpiceNumber } from '@/lib/circuit/measurement';
 import type { ComponentPlugin, ParameterDef, PinElecType, TerminalDef } from '@/lib/circuit/types';
 import { RotateCw, Trash2, X, Info, Sparkles, Pin, Cable, Activity, Pause, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -697,6 +698,7 @@ function ParameterEditor({
   onChange: (v: number | string | boolean) => void;
 }) {
   const differs = valueDiffersFromDefault(def, value);
+  const [numText, setNumText] = useState<string | null>(null);
 
   if (def.type === 'boolean') {
     return (
@@ -847,7 +849,9 @@ goto loop`,
       </div>
     );
   }
-  // number
+  // number — unit-aware text entry (KiCad/LTspice parity): "4k7", "1Meg",
+  // "10u", "2.2n" all parse via the SPICE number parser. Falls back to the
+  // raw float when no suffix is present.
   const numVal = typeof value === 'number' ? value : (def.default as number);
   const min = def.min ?? 0;
   const max = def.max ?? 100;
@@ -855,6 +859,13 @@ goto loop`,
   // use slider only for "reasonable" ranges
   const useSlider = range > 0 && range <= 100000 && (def.step ?? 1) <= 1;
   const hasRange = def.min != null && def.max != null;
+  const commitNumText = (raw: string) => {
+    const parsed = parseStrictSpiceNumber(raw);
+    if (parsed !== null && Number.isFinite(parsed)) {
+      onChange(parsed);
+      setNumText(null);
+    }
+  };
   return (
     <div className="space-y-1.5 rounded-lg border border-slate-800/60 bg-slate-800/20 px-2.5 py-2">
       <div className="flex items-center justify-between gap-1.5">
@@ -877,23 +888,27 @@ goto loop`,
             className="flex-1"
           />
           <Input
-            type="number"
-            value={numVal}
-            min={def.min}
-            max={def.max}
-            step={def.step ?? 0.01}
-            onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
-            className="h-8 w-20 border-slate-700 bg-slate-800 font-mono text-xs text-slate-200"
+            type="text"
+            inputMode="decimal"
+            value={numText ?? String(numVal)}
+            onChange={(e) => setNumText(e.target.value)}
+            onBlur={(e) => commitNumText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitNumText((e.target as HTMLInputElement).value); }}
+            placeholder="e.g. 4k7"
+            title="Unit-aware: k, Meg, m, u, n, p, mil supported"
+            className="h-8 w-24 border-slate-700 bg-slate-800 font-mono text-xs text-slate-200"
           />
         </div>
       ) : (
         <Input
-          type="number"
-          value={numVal}
-          min={def.min}
-          max={def.max}
-          step={def.step ?? 0.01}
-          onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+          type="text"
+          inputMode="decimal"
+          value={numText ?? String(numVal)}
+          onChange={(e) => setNumText(e.target.value)}
+          onBlur={(e) => commitNumText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') commitNumText((e.target as HTMLInputElement).value); }}
+          placeholder="e.g. 4k7"
+          title="Unit-aware: k, Meg, m, u, n, p, mil supported"
           className="h-8 border-slate-700 bg-slate-800 font-mono text-xs text-slate-200"
         />
       )}

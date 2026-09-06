@@ -33,7 +33,7 @@ export interface NodeMap {
  */
 export function expandBusVector(name: string): string[] {
   // Match patterns: BASE[START..END] or BASE[START:END]
-  const m = name.match(/^([A-Za-z_]\w*)\[(\d+)\.\.(\d+)\]$/);
+  const m = name.match(/^([A-Za-z_]\w*)\[(\d+)(?:\.\.|\:)(\d+)\]$/);
   if (!m) return [name];
   const [, base, startStr, endStr] = m;
   const start = parseInt(startStr, 10);
@@ -124,11 +124,14 @@ function buildNodeMapUncached(components: CircuitComponent[], wires: Wire[], plu
     return n;
   }
 
-  // First: pre-assign ground nodes from any "ground" plugin
+  // First: pre-assign ground nodes from any "ground" plugin.
+  // AGND is the same 0V reference node (star-ground separation is a layout
+  // concern, not a simulation one) — without this an AGND-only design has
+  // no node 0 and every solve falls back to gmin or goes singular.
   for (const comp of components) {
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
-    if (comp.type === 'ground' || comp.type === 'powerGND') {
+    if (comp.type === 'ground' || comp.type === 'powerGND' || comp.type === 'powerAGND') {
       for (const t of plugin.terminals) {
         const k = termKey(comp.id, t.id);
         terminalNode.set(k, 0);
@@ -153,7 +156,7 @@ function buildNodeMapUncached(components: CircuitComponent[], wires: Wire[], plu
     if (!isPowerSymbol) continue;
     const netName = (comp.parameters.net as string) || '';
     if (!netName) continue;
-    if (netName === 'GND' || netName === 'gnd' || netName === '0') {
+    if (netName === 'GND' || netName === 'gnd' || netName === '0' || netName === 'AGND' || netName === 'agnd') {
       for (const t of plugin.terminals) terminalNode.set(termKey(comp.id, t.id), 0);
       continue;
     }

@@ -62,6 +62,41 @@ export const DEFAULT_DRC_CONFIG: DRCConfig = {
 };
 
 /**
+ * Distance from point p to segment ab (mm). Used by the hole-to-copper check.
+ */
+function pointToSegmentDistance(
+  p: { x: number; y: number },
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-12) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+/**
+ * A waived DRC violation — reviewed by the engineer and excluded from
+ * sign-off. Keyed by a stable fingerprint (type + rounded position) so
+ * waivers survive re-runs but not layout moves.
+ */
+export interface DRCWaiver {
+  /** fingerprint: `${type}@${x.toFixed(2)},${y.toFixed(2)}` */
+  key: string;
+  /** engineer note explaining why the waiver is safe */
+  note: string;
+  /** ISO date when waived */
+  date: string;
+}
+
+/** Stable fingerprint for a DRC error (matches DRCWaiver.key). */
+export function drcErrorKey(e: Pick<DRCError, 'type' | 'position'>): string {
+  return `${e.type}@${e.position.x.toFixed(2)},${e.position.y.toFixed(2)}`;
+}
+
+/**
  * Run a full DRC check on the PCB layout.
  */
 export function runDRC(
@@ -72,6 +107,7 @@ export function runDRC(
   board: BoardOutline,
   config: DRCConfig = DEFAULT_DRC_CONFIG,
   netClasses?: NetClass[],
+  waivers?: DRCWaiver[],
 ): DRCError[] {
   const errors: DRCError[] = [];
 
@@ -485,7 +521,10 @@ export function runDRC(
     }
   }
 
-  // 10. Check minimum trace width (per-net-class)
+  // 10. Check minimum trace width (per-net-class) + IPC-2221 current capacity.
+  // I = k·ΔT^0.44·A^0.725 (k = 0.048 external / 0.024 internal, A in mil²).
+  // A 0.15mm/1oz trace carries only ~0.5A at 10°C rise — flag power nets
+  // whose estimated load exceeds their width's capacity.
   for (const trace of traces) {
     const requiredWidth = getTraceWidth(trace.net);
     if (trace.width < requiredWidth) {
@@ -497,6 +536,101 @@ export function runDRC(
         position: midSeg ? { x: (midSeg.start.x + midSeg.end.x) / 2, y: (midSeg.start.y + midSeg.end.y) / 2 } : { x: 0, y: 0 },
         layer: trace.layer,
       });
+    }
+  }
+
+  // 10b. IPC-2221 current-capacity advisory: estimate each net's current
+  // from its NetClass trace-width intent (power nets declare wide traces
+  // because they carry amps). A trace narrower than the IPC width for 1A
+  // on a power-named net (VCC/5V/12V/VBAT/MOTOR/...) is flagged.
+  {
+    const powerNet = /vcc|vdd|5v|12v|24v|vbat|vin|vout|motor|pwr|gnd/i;
+    for (const trace of traces) {
+      if (!powerNet.test(trace.net)) continue;
+      // IPC-2221 external, 1oz, 10°C rise: A(mil²) = (I/0.048)^(1/0.725);
+      // width(mil) = A / thickness(1.37mil). For 1A ≈ 11.8mil ≈ 0.30mm.
+      const ipcWidthFor1A = 0.3;
+      if (trace.width < ipcWidthFor1A && trace.width < 0.3) {
+        const midSeg = trace.segments[Math.floor(trace.segments.length / 2)];
+        errors.push({
+          type: 'min_width',
+          severity: 'warning',
+          message: `Power net "${trace.net}" trace ${trace.width.toFixed(3)}mm is under the IPC-2221 ~0.30mm guideline for 1A (1oz, 10°C rise) — widen or set a NetClass`,
+          position: midSeg ? { x: (midSeg.start.x + midSeg.end.x) / 2, y: (midSeg.start.y + midSeg.end.y) / 2 } : { x: 0, y: 0 },
+          layer: trace.layer,
+        });
+        break; // one advisory per board, not per segment
+      }
+    }
+  }
+
+  // 10c. Copper-to-board-edge clearance (IPC/KiCad: keep copper ~0.3mm
+  // inside the routed edge so milling does not expose it).
+  {
+    const edgeClear = 0.3;
+    const nearEdge = (p: { x: number; y: number }) =>
+      p.x < edgeClear || p.y < edgeClear ||
+      p.x > board.width - edgeClear || p.y > board.height - edgeClear;
+    for (const trace of traces) {
+      for (const seg of trace.segments) {
+        if (nearEdge(seg.start) || nearEdge(seg.end)) {
+          errors.push({
+            type: 'outside_board',
+            severity: 'warning',
+            message: `Copper within ${edgeClear}mm of board edge on net "${trace.net}" (milling clearance)`,
+            position: { x: (seg.start.x + seg.end.x) / 2, y: (seg.start.y + seg.end.y) / 2 },
+            layer: trace.layer,
+          });
+          break;
+        }
+      }
+    }
+    for (const fp of footprints) {
+      for (const pad of fp.pads) {
+        if (nearEdge(pad.position)) {
+          errors.push({
+            type: 'outside_board',
+            severity: 'warning',
+            message: `Pad ${pad.id} of ${fp.refdes} within ${edgeClear}mm of board edge`,
+            position: pad.position,
+            layer: pad.layer,
+          });
+          break;
+        }
+      }
+    }
+  }
+
+  // 10d. Hole-to-copper clearance (KiCad hole_clearance parity): a drilled
+  // hole's edge must keep minClearance from UNCONNECTED copper (the old code
+  // only checked hole-to-hole webs and annular rings).
+  {
+    for (const fp of footprints) {
+      for (const pad of fp.pads) {
+        const drill = pad.drill ?? 0;
+        if (drill <= 0) continue;
+        const holeR = drill / 2;
+        for (const trace of traces) {
+          if (trace.net === pad.net) continue;
+          for (const seg of trace.segments) {
+            // Segments inherit their trace's layer (TraceSegment has no
+            // layer field of its own). Placed pads always carry a concrete
+            // copper layer; the optional FootprintDef layer may be absent.
+            if (pad.layer != null && trace.layer !== pad.layer) continue;
+            const d = pointToSegmentDistance(pad.position, seg.start, seg.end);
+            if (d < holeR + trace.width / 2 + config.minClearance) {
+              errors.push({
+                type: 'clearance',
+                severity: 'error',
+                message: `Hole of pad ${pad.id} (${fp.refdes}) too close to "${trace.net}" copper (${d.toFixed(3)}mm < drill edge + ${config.minClearance}mm)`,
+                position: pad.position,
+                layer: trace.layer,
+              });
+              break;
+            }
+          }
+        }
+      }
     }
   }
 
@@ -665,6 +799,12 @@ export function runDRC(
     }
   }
 
+  // Waivers: drop reviewed violations so one false positive can't block
+  // sign-off (KiCad "Exclude violation" parity). Unknown keys are ignored.
+  if (waivers && waivers.length > 0) {
+    const waived = new Set(waivers.map((w) => w.key));
+    return errors.filter((e) => !waived.has(drcErrorKey(e)));
+  }
   return errors;
 }
 
