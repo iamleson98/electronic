@@ -46,7 +46,7 @@ export function generateCopperPour(
   vias: Via[],
   board: BoardOutline,
   clearance: number = 0.3,
-  options: { thermalRelief?: boolean; priority?: number; spokeWidth?: number; removeIslands?: boolean } = {},
+  options: { thermalRelief?: boolean; priority?: number; spokeWidth?: number; removeIslands?: boolean; keepouts?: { rect: { x: number; y: number; width: number; height: number }; layers: 'all' | string[]; polygon?: { x: number; y: number }[] }[] } = {},
 ): CopperPour {
   const cellSize = 0.5; // mm per cell
   const cols = Math.ceil(board.width / cellSize);
@@ -115,6 +115,30 @@ export function generateCopperPour(
       });
     }
   }
+
+  // Keepouts (rect + polygon) on this layer carve the pour.
+  const keepoutRects: { x: number; y: number; width: number; height: number }[] = [];
+  const keepoutPolys: { x: number; y: number }[][] = [];
+  for (const k of (options as { keepouts?: { rect: { x: number; y: number; width: number; height: number }; layers: 'all' | string[]; polygon?: { x: number; y: number }[] }[] }).keepouts ?? []) {
+    if (k.layers !== 'all' && !(k.layers as string[]).includes(layer)) continue;
+    if (k.polygon && k.polygon.length >= 3) keepoutPolys.push(k.polygon);
+    else keepoutRects.push(k.rect);
+  }
+  const inKeepout = (x: number, y: number): boolean => {
+    for (const r of keepoutRects) {
+      if (x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height) return true;
+    }
+    for (const poly of keepoutPolys) {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i].x, yi = poly[i].y;
+        const xj = poly[j].x, yj = poly[j].y;
+        if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+      }
+      if (inside) return true;
+    }
+    return false;
+  };
 
   // Build a set of "spoke cells" — cells that should be filled even though
   // they're inside the thermal relief gap (because they're on a spoke).
@@ -189,6 +213,9 @@ export function generateCopperPour(
         }
       }
       if (avoid) continue;
+
+      // Keepout zones carve the pour (rect + polygon).
+      if (inKeepout(cx, cy)) continue;
 
       // Cell is clear — fill it
       filledCells.push({ col, row });

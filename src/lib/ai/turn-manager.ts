@@ -175,6 +175,8 @@ export interface TurnParams {
   model?: string;
   /** User-configured OpenAI-compatible endpoint (provider === 'custom'). */
   custom?: CustomProviderConfig | null;
+  /** Explanation skill level: beginner / practitioner / engineer */
+  skillLevel?: 'beginner' | 'practitioner' | 'engineer';
   /** Identifies the browser tab — starting a new turn cancels this client's
    *  other running turns (prevents zombie duplicates after auto-restart). */
   clientId?: string | null;
@@ -549,7 +551,7 @@ export class TurnManager {
       });
 
       const messages: ChatMessage[] = [
-        { role: 'system', content: buildSystemPrompt() },
+        { role: 'system', content: buildSystemPrompt(body.skillLevel) },
         ...(contextPreamble ? [{ role: 'system' as const, content: contextPreamble }] : []),
         // Token-frugal history: keep the last 20 messages, but drop stale
         // tool-result payloads beyond the most recent 6 tool exchanges —
@@ -811,6 +813,34 @@ export class TurnManager {
         const msg = String((e as Error).message || e);
         if (e instanceof AIProviderConfigError || isAuthOrConfigError(e)) {
           console.warn('[turn-manager] AI turn not configured:', msg);
+          // Explicit credential REJECTION (401/403 from a configured
+          // provider) must surface as an error — the user set a key but it's
+          // wrong, and masking it with KB content hides the actionable fix.
+          // The offline KB fallback is only for UNCONFIGURED deployments
+          // (no key at all), where concept help beats a bare error.
+          const isExplicitRejection = /HTTP 40[13]|rejected the credentials/i.test(msg);
+          if (!isExplicitRejection) {
+            // Offline KB fallback: answer from the built-in knowledge base so
+            // unconfigured deployments still get concept help (mirrors the
+            // non-stream route's offline:true response).
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const kb = require('./knowledge/knowledge-base') as typeof import('./knowledge/knowledge-base');
+              const lastUser = [...turn.params.messages].reverse().find((m) => m.role === 'user');
+              const q = String(lastUser?.content ?? '').slice(0, 500);
+              const hits = kb.searchArticles(q, 3);
+              if (hits.length > 0) {
+                const sections = hits.map((h) => `### ${h.title}\n${h.summary}\n[kb:${h.id}]`);
+                this.finalize(turn, 'done', {
+                  response: `I'm offline (no AI provider configured), but here's what the built-in knowledge base says:\n\n${sections.join('\n\n')}\n\nConfigure an API key in the AI panel settings for full design help.`,
+                  toolCalls: [],
+                  circuit: ctxRef?.doc ?? { components: [], wires: [] },
+                  offline: true,
+                });
+                return;
+              }
+            } catch { /* KB fallback failed — fall through to error */ }
+          }
           this.finalize(turn, 'error', { code: 'AI_NOT_CONFIGURED', message: msg });
         } else {
           console.error('[turn-manager] AI turn error:', e);

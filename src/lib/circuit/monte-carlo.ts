@@ -160,7 +160,10 @@ export function runMonteCarlo(
       if (!comp) continue;
       const orig = Number(comp.parameters[tol.param]);
       if (!isFinite(orig)) continue;
-      const dist = tol.distribution ?? 'gauss';
+      // Per-part distribution wins over the config default (a 1% C0G on
+      // 'uniform' must not inherit a global 'gauss').
+      const srcComp = doc.components.find((c) => c.id === tol.componentId);
+      const dist = tol.distribution ?? srcComp?.toleranceDist ?? 'gauss';
       let factor: number;
       if (dist === 'uniform') {
         // Uniform in [-tol, +tol]

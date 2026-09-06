@@ -51,6 +51,12 @@ export function AnalysisDialog({ open, onClose }: { open: boolean; onClose: () =
   const [tStop, setTStop] = useState(0.01);
   const [tStep, setTStep] = useState(0.0001);
   const [param, setParam] = useState('resistance');
+  const [sensMode, setSensMode] = useState<'dc' | 'ac'>('dc');
+  const [sensFreq, setSensFreq] = useState(1000);
+  const [outputRef, setOutputRef] = useState('');
+  const [acMag, setAcMag] = useState(1);
+  const [acPhase, setAcPhase] = useState(0);
+  const [probes, setProbes] = useState('');
 
   // Find available sources
   useEffect(() => {
@@ -67,22 +73,22 @@ export function AnalysisDialog({ open, onClose }: { open: boolean; onClose: () =
     let config: AnalysisConfig;
     switch (analysisType) {
       case 'ac':
-        config = { type: 'ac', sweep: sweepType, nPoints, fStart, fStop, sourceId, outputNode };
+        config = { type: 'ac', sweep: sweepType, nPoints, fStart, fStop, sourceId, outputNode, ...(outputRef ? { outputRef } : {}), acMag, acPhase };
         break;
       case 'dc':
         config = { type: 'dc', sourceId, vStart, vStop, vStep, outputNode };
         break;
       case 'tran':
-        config = { type: 'tran', tStop, tStep, probes: outputNode ? [outputNode] : [] };
+        config = { type: 'tran', tStop, tStep, probes: probes.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean).concat(outputNode && !probes.includes(outputNode) ? [outputNode] : []) };
         break;
       case 'tf':
         config = { type: 'tf', inputSourceId: sourceId, outputNode };
         break;
       case 'sens':
-        config = { type: 'sens', outputNode, mode: 'dc', parameter: param } as AnalysisConfig;
+        config = { type: 'sens', outputNode, mode: sensMode, parameter: param, ...(sensMode === 'ac' ? { freq: sensFreq } : {}) } as AnalysisConfig;
         break;
       case 'noise':
-        config = { type: 'noise', outputNode, inputSourceId: sourceId, fStart, fStop, nPoints, sweep: sweepType };
+        config = { type: 'noise', outputNode, inputSourceId: sourceId, fStart, fStop, nPoints, sweep: sweepType, ...(outputRef ? { outputRef } : {}) };
         break;
       case 'disto':
         config = { type: 'disto', inputSourceId: sourceId, fStart, fStop, nPoints, sweep: sweepType, outputNode };
@@ -194,6 +200,37 @@ export function AnalysisDialog({ open, onClose }: { open: boolean; onClose: () =
                   <Label className="text-slate-300 text-xs">tStep (s)</Label>
                   <Input type="number" value={tStep} onChange={(e) => setTStep(parseFloat(e.target.value))} className="bg-slate-800 border-slate-700 h-8" />
                 </div>
+                <div className="col-span-2">
+                  <Label className="text-slate-300 text-xs">Probes (comma/space separated node ids — multi-trace)</Label>
+                  <Input value={probes} onChange={(e) => setProbes(e.target.value)} placeholder="e.g. out, vcc, in" className="bg-slate-800 border-slate-700 h-8" />
+                </div>
+              </div>
+            )}
+
+            {analysisType === 'ac' && (
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <Label className="text-slate-300 text-xs">AC magnitude</Label>
+                  <Input type="number" value={acMag} onChange={(e) => setAcMag(parseFloat(e.target.value))} className="bg-slate-800 border-slate-700 h-8" />
+                </div>
+                <div>
+                  <Label className="text-slate-300 text-xs">AC phase (°)</Label>
+                  <Input type="number" value={acPhase} onChange={(e) => setAcPhase(parseFloat(e.target.value))} className="bg-slate-800 border-slate-700 h-8" />
+                </div>
+                <div>
+                  <Label className="text-slate-300 text-xs">Output ref (default GND)</Label>
+                  <Input value={outputRef} onChange={(e) => setOutputRef(e.target.value)} placeholder="gnd" className="bg-slate-800 border-slate-700 h-8" />
+                </div>
+              </div>
+            )}
+
+            {analysisType === 'noise' && (
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <Label className="text-slate-300 text-xs">Output ref (default GND)</Label>
+                  <Input value={outputRef} onChange={(e) => setOutputRef(e.target.value)} placeholder="gnd" className="bg-slate-800 border-slate-700 h-8" />
+                </div>
+                <div className="text-[11px] text-slate-500 self-end pb-2">inoise / NF / integrated noise are in the result branches.</div>
               </div>
             )}
 
@@ -216,9 +253,27 @@ export function AnalysisDialog({ open, onClose }: { open: boolean; onClose: () =
             </div>
 
             {analysisType === 'sens' && (
-              <div>
-                <Label className="text-slate-300 text-xs">Parameter to vary</Label>
-                <Input value={param} onChange={(e) => setParam(e.target.value)} placeholder="resistance, voltage, vth, ..." className="bg-slate-800 border-slate-700 h-8" />
+              <div className="grid grid-cols-3 gap-2">
+                <div className="col-span-1">
+                  <Label className="text-slate-300 text-xs">Parameter to vary</Label>
+                  <Input value={param} onChange={(e) => setParam(e.target.value)} placeholder="resistance, voltage, vth, ..." className="bg-slate-800 border-slate-700 h-8" />
+                </div>
+                <div>
+                  <Label className="text-slate-300 text-xs">Mode</Label>
+                  <Select value={sensMode} onValueChange={(v) => setSensMode(v as 'dc' | 'ac')}>
+                    <SelectTrigger className="bg-slate-800 border-slate-700 h-8"><SelectValue /></SelectTrigger>
+                    <SelectContent className="bg-slate-800">
+                      <SelectItem value="dc">DC</SelectItem>
+                      <SelectItem value="ac">AC</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {sensMode === 'ac' && (
+                  <div>
+                    <Label className="text-slate-300 text-xs">Freq (Hz)</Label>
+                    <Input type="number" value={sensFreq} onChange={(e) => setSensFreq(parseFloat(e.target.value))} className="bg-slate-800 border-slate-700 h-8" />
+                  </div>
+                )}
               </div>
             )}
 

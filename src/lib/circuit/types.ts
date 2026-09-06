@@ -125,6 +125,12 @@ export interface SimContext {
    */
   newtonIter?: number;
   /**
+   * Simulation temperature in °C (deviceTemp() fallback chain reads this
+   * when the component has no per-part `temp` override). Set by the engine
+   * from SimOptions on every solve; undefined = 27.
+   */
+  temp?: number;
+  /**
    * Net label name -> node id (e.g. 'VCC' -> 3). Lets behavioral sources
    * resolve V(netname) expressions. Undefined when the context was built
    * without a node map (tests, AI tools).

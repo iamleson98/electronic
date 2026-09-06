@@ -1,6 +1,5 @@
 'use client';
 
-import { useState } from 'react';
 import { usePCB } from '@/lib/pcb/store';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
@@ -27,7 +26,12 @@ export function DRCSettingsDialog({ open, onClose }: { open: boolean; onClose: (
   const unwaiveDRCError = usePCB((s) => s.unwaiveDRCError);
   const fabPreset = usePCB((s) => s.fabPreset);
   const applyFabPreset = usePCB((s) => s.applyFabPreset);
-  const [severityOverrides, setSeverityOverrides] = useState<Record<string, 'error' | 'warning' | 'info' | 'ignore'>>({});
+  const drcConfig = usePCB((s) => s.drcConfig);
+  const setDrcConfig = usePCB((s) => s.setDrcConfig);
+  // Persisted per-rule severity overrides (store) — the old local useState
+  // lost every override the moment the dialog closed.
+  const severityOverrides = usePCB((s) => s.drcSeverityOverrides);
+  const setDrcSeverityOverride = usePCB((s) => s.setDrcSeverityOverride);
 
   const waivedKeys = new Set(drcWaivers.map((w) => w.key));
 
@@ -97,12 +101,8 @@ export function DRCSettingsDialog({ open, onClose }: { open: boolean; onClose: (
                       value={severityOverrides[type] ?? 'default'}
                       onChange={(e) => {
                         const v = e.target.value as 'error' | 'warning' | 'info' | 'ignore' | 'default';
-                        setSeverityOverrides((prev) => {
-                          const next = { ...prev };
-                          if (v === 'default') delete next[type];
-                          else next[type] = v;
-                          return next;
-                        });
+                        setDrcSeverityOverride(type, v === 'default' ? null : v);
+                        if (v === 'ignore') toast.info(`${type} hidden (persisted)`);
                       }}
                       className="bg-slate-800 border border-slate-700 rounded text-xs px-1 py-0.5 text-slate-200"
                     >
@@ -117,6 +117,37 @@ export function DRCSettingsDialog({ open, onClose }: { open: boolean; onClose: (
               </div>
             </div>
           )}
+
+          {/* Rule thresholds — persisted custom deck (clears fab preset) */}
+          <div className="rounded-md border border-slate-700 bg-slate-950 p-3">
+            <Label className="text-xs text-slate-400 mb-2 block">Rule thresholds (mm{fabPreset ? ` — preset ${fabPreset}; editing switches to Custom` : ''})</Label>
+            <div className="grid grid-cols-3 gap-2">
+              {([
+                ['minClearance', 'Clearance'],
+                ['minTraceWidth', 'Trace width'],
+                ['minDrillSize', 'Drill'],
+                ['minAnnularRing', 'Annular ring'],
+                ['minCourtyard', 'Courtyard'],
+                ['minSilkClearance', 'Silk clear'],
+              ] as const).map(([key, label]) => (
+                <label key={key} className="text-xs text-slate-400">
+                  {label}
+                  <input
+                    type="number"
+                    step={key === 'minCourtyard' ? 0.1 : 0.01}
+                    min={0}
+                    value={drcConfig[key] ?? 0}
+                    onChange={(e) => {
+                      const v = parseFloat(e.target.value);
+                      if (Number.isFinite(v) && v >= 0) setDrcConfig({ [key]: v });
+                    }}
+                    aria-label={`DRC ${label} threshold in mm`}
+                    className="mt-0.5 w-full rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-xs text-slate-200"
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
 
           {/* Violations list with per-error exclusion toggle */}
           <ScrollArea className="h-64 rounded border border-slate-700 bg-slate-950">

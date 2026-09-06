@@ -663,11 +663,32 @@ export function CircuitCanvas() {
         detail: { x: view.pan.x, y: view.pan.y, zoom: view.zoom },
       }));
     };
+    // Net-inspector zoom: center the view on a component (dispatched by
+    // NetInspectorDialog + ProbePanel waveform rows).
+    const onZoomToComponent = (e: Event) => {
+      const id = (e as CustomEvent<{ id: string }>).detail?.id;
+      if (!id) return;
+      const comp = useEditor.getState().components.find((c) => c.id === id);
+      if (!comp) return;
+      const plugin = getPlugin(comp.type);
+      const bb = plugin?.boundingBox ?? { width: 4, height: 4 };
+      const cx = comp.position.x + bb.width / 2;
+      const cy = comp.position.y + bb.height / 2;
+      const view = viewRef.current;
+      const canvasW = view.width || 800;
+      const canvasH = view.height || 600;
+      view.zoom = Math.max(view.zoom, 1.2);
+      view.pan = { x: canvasW / 2 - cx * 40 * view.zoom, y: canvasH / 2 - cy * 40 * view.zoom };
+      useEditor.getState().setSelection({ type: 'component', id: comp.id });
+      markDirty();
+    };
     window.addEventListener('circuitlab:load-view', onLoadView);
     window.addEventListener('circuitlab:request-camera', onRequestCamera);
+    window.addEventListener('circuitlab:zoom-to-component', onZoomToComponent);
     return () => {
       window.removeEventListener('circuitlab:load-view', onLoadView);
       window.removeEventListener('circuitlab:request-camera', onRequestCamera);
+      window.removeEventListener('circuitlab:zoom-to-component', onZoomToComponent);
     };
   }, [markDirty, viewRef]);
   const zoomToFit = () => {

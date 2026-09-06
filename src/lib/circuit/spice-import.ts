@@ -50,36 +50,11 @@ const SPICE_SUFFIXES: Record<string, number> = {
 
 export function parseSpiceValue(raw: string): number {
   if (typeof raw !== 'string') return Number(raw) || 0;
-  const s = raw.trim().toLowerCase();
-  if (s === '') return 0;
-
-  // Plain scientific notation: 1e3, 4.7e3, 1.5e-9
-  if (/^[+-]?[\d.]+(?:e[+-]?\d+)?$/.test(s)) return parseFloat(s);
-
-  // Engineering suffix (longest match first: "meg" before "m")
-  // Match pattern: number + optional suffix + optional trailing junk
-  const m = s.match(/^([+-]?[\d.]+(?:e[+-]?\d+)?)([a-zµ%]*)/);
-  if (!m) return parseFloat(s) || 0;
-  const num = parseFloat(m[1]);
-  let suffix = m[2];
-
-  // Special case: "Hz" suffix in frequencies — strip
-  if (suffix.endsWith('hz')) suffix = suffix.slice(0, -2);
-  // Strip "ohm" / "ohms"
-  if (suffix.endsWith('ohms')) suffix = suffix.slice(0, -4);
-  else if (suffix.endsWith('ohm')) suffix = suffix.slice(0, -3);
-  // Strip "f" / "h" / "r" unit letters when value is clearly numeric (e.g., "1uf" → 1u)
-  // But "f" alone is femto, so handle order matters: try longest first.
-
-  if (suffix === '') return num;
-  // Try multi-char suffixes first (meg, mil)
-  if (suffix.startsWith('meg')) return num * SPICE_SUFFIXES['meg'];
-  if (suffix.startsWith('mil')) return num * SPICE_SUFFIXES['mil'];
-  // Single char suffix
-  const firstChar = suffix[0];
-  if (SPICE_SUFFIXES[firstChar] !== undefined) return num * SPICE_SUFFIXES[firstChar];
-  // Unknown suffix — strip and return the numeric part
-  return num;
+  // Single canonical parser lives in spice.ts (compound suffixes, µ, mil,
+  // meg-vs-m). This wrapper keeps the old import path working.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const canonical = require('./spice') as typeof import('./spice');
+  return canonical.parseSpiceValue(raw);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1280,6 +1280,7 @@ export const useChatSession = create<ChatSessionState>((set, get) => ({
       selectedComponentId: editorState.selection?.type === 'component' ? editorState.selection.id : null,
       provider: get().selectedProvider,
       model: isCustom ? (custom.model.trim() || 'default') : get().selectedModel,
+      skillLevel: get().skillLevel,
       // Custom endpoint credentials travel per-request (localStorage-sourced,
       // never env). The server uses them only for the outbound API call.
       ...(isCustom ? { custom: { baseUrl: custom.baseUrl.trim(), apiKey: custom.apiKey, model: custom.model.trim() || 'default' } } : {}),

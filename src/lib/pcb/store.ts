@@ -124,6 +124,12 @@ interface PCBState {
   clearDRC: () => void;
   /** Apply a manufacturer preset as the active DRC rule deck */
   applyFabPreset: (name: string) => boolean;
+  /** Override DRC thresholds (partial merge into drcConfig, clears fabPreset to Custom, persists) */
+  setDrcConfig: (patch: Partial<DRCConfig>) => void;
+  /** Per-rule severity overrides (persisted with the document; 'ignore' hides the rule) */
+  drcSeverityOverrides: Record<string, 'error' | 'warning' | 'info' | 'ignore'>;
+  /** Set/clear one rule's severity override (persists) */
+  setDrcSeverityOverride: (rule: string, level: 'error' | 'warning' | 'info' | 'ignore' | null) => void;
   /** Waive a DRC error (reviewed, excluded from sign-off) */
   waiveDRCError: (error: DRCError, note?: string) => void;
   /** Remove a waiver by fingerprint key */
@@ -312,6 +318,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   drcWaivers: [],
   fabPreset: '',
   drcConfig: { ...DEFAULT_DRC_CONFIG },
+  drcSeverityOverrides: {},
 
   importFromSchematic: (components, wires) => {
     pushHistory('import');
@@ -715,6 +722,7 @@ export const usePCB = create<PCBState>((set, get) => ({
       drcWaivers: s.drcWaivers,
       fabPreset: s.fabPreset,
       drcConfig: s.drcConfig,
+      drcSeverityOverrides: s.drcSeverityOverrides,
     };
   },
 
@@ -747,6 +755,7 @@ export const usePCB = create<PCBState>((set, get) => ({
       drcWaivers: (doc as unknown as { drcWaivers?: DRCWaiver[] }).drcWaivers ?? [],
       fabPreset: (doc as unknown as { fabPreset?: string }).fabPreset ?? '',
       drcConfig: (doc as unknown as { drcConfig?: DRCConfig }).drcConfig ?? { ...DEFAULT_DRC_CONFIG },
+      drcSeverityOverrides: (doc as unknown as { drcSeverityOverrides?: Record<string, 'error' | 'warning' | 'info' | 'ignore'> }).drcSeverityOverrides ?? {},
       selectedFootprintId: null,
       selectedTraceId: null,
       selectedFootprintIds: new Set(),
@@ -775,6 +784,21 @@ export const usePCB = create<PCBState>((set, get) => ({
     return true;
   },
 
+  setDrcConfig: (patch: Partial<DRCConfig>) => {
+    // Custom threshold edit — the deck is no longer a pristine fab preset.
+    set((s) => ({ drcConfig: { ...s.drcConfig, ...patch }, fabPreset: '' }));
+    get().runDRC();
+  },
+
+  setDrcSeverityOverride: (rule: string, level: 'error' | 'warning' | 'info' | 'ignore' | null) => {
+    set((s) => {
+      const next = { ...s.drcSeverityOverrides };
+      if (level === null) delete next[rule];
+      else next[rule] = level;
+      return { drcSeverityOverrides: next };
+    });
+  },
+
   waiveDRCError: (error: DRCError, note = '') => {
     const key = drcErrorKey(error);
     set((s) => ({
@@ -793,7 +817,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   addCopperPour: (layer, net, priority = 0) => {
     pushHistory('addPour');
     const s = get();
-    const pour = generateCopperPour(layer, net, s.footprints, s.traces, s.vias, s.board, 0.3, { priority });
+    const pour = generateCopperPour(layer, net, s.footprints, s.traces, s.vias, s.board, 0.3, { priority, keepouts: s.keepouts });
     // Zone priority: clip the new pour against higher-priority pours on the
     // same layer (higher wins overlapping cells — KiCad zone-priority parity).
     const higher = s.copperPours.filter((p) => p.layer === layer && (p.priority ?? 0) > (pour.priority ?? 0));
@@ -818,7 +842,11 @@ export const usePCB = create<PCBState>((set, get) => ({
     const s = get();
     // Pours are part of the fab data — a pour visible on the canvas but
     // missing from the Gerbers used to manufacture an un-planned board.
-    const files = exportAllGerbers(s.footprints, s.traces, s.vias, s.board, s.copperPours);
+    // Inner stackup layers + teardrops ride along (previously dropped).
+    const files = exportAllGerbers(s.footprints, s.traces, s.vias, s.board, s.copperPours, {
+      layers: [...s.layerStack.layers],
+      teardrops: s.teardrops,
+    });
     for (const file of files) {
       const blob = new Blob([file.content], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);

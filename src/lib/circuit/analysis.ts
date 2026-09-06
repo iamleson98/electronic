@@ -885,6 +885,17 @@ function computeDescriptorPoles(
   plugins: Map<string, ComponentPlugin>,
   dcOp: SimContext,
 ): { poles: { real: number; imag: number; freq: number; Q: number }[]; method: string } {
+  // Descriptor det(G + s·C) = 0 built from FIRST PRINCIPLES (not by
+  // re-stamping the transient companions — those carry dt-dependent
+  // conductances G=C/dt and G=dt/L that corrupt the DC block):
+  //   G = DC MNA: resistors as 1/R, capacitors OPEN, inductors SHORT
+  //       (voltage-source branch rows), linearized semis at the DC op point.
+  //   C = dynamic block: +C(a,a)+C(b,b)−C(a,b)−C(b,a) per capacitor;
+  //       +L on the diagonal of each inductor's OWN branch row.
+  // Inductor branch rows are tracked exactly: each inductor allocates one
+  // extra unknown via sys.addExtra() (its branch current), so the row index
+  // is known — no scanning G for "source-like" rows (the old scan matched
+  // the VOLTAGE SOURCE row first and put L there, giving garbage poles).
   const nodeMap = buildNodeMap(components, wires, plugins);
   const numNodes = nodeMap.numNodes;
   let declaredExtras = 0;
@@ -895,12 +906,28 @@ function computeDescriptorPoles(
   const maxExtras = components.length * 4 + 8 + declaredExtras;
   const sys = createMnaSystem(numNodes - 1, maxExtras);
   sys.nextExtra = numNodes - 1;
+  // Inductor branch rows, in stamp order (parallel with the G stamp loop).
+  const inductorBranchRows: number[] = [];
+  const inductorLs: number[] = [];
   for (const comp of components) {
     const plugin = plugins.get(comp.type);
     if (!plugin?.stamp) continue;
     const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
     try {
-      plugin.stamp(comp.parameters, terminals, sys, dcOp, comp);
+      if (comp.type === 'inductor') {
+        // DC steady state: inductor = SHORT = voltage source with V = 0.
+        // Its branch row is the flux state: L·dI/dt = Va − Vb.
+        const a = terminals.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
+        const b = terminals.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
+        const row = sys.stampVoltageSource(a, b, 0);
+        inductorBranchRows.push(row);
+        inductorLs.push(Math.max(1e-12, comp.parameters.inductance as number));
+      } else if (comp.type === 'capacitor') {
+        // DC steady state: capacitor = OPEN — stamp nothing.
+        continue;
+      } else {
+        plugin.stamp(comp.parameters, terminals, sys, dcOp, comp);
+      }
     } catch {
       // a plugin that cannot stamp linearized DC is simply skipped
     }
@@ -912,46 +939,30 @@ function computeDescriptorPoles(
       G[r][c] = sys.A[r * sys.size + c] ?? 0;
     }
   }
-  // C block: capacitors stamp +C(a,a)+C(b,b)−C(a,b)−C(b,a) in the nodal
-  // rows; inductor flux states contribute 1/L on their branch diagonal.
+  // C block: capacitors in the nodal rows, inductors on their own rows.
   const C: number[][] = Array.from({ length: size }, () => new Array(size).fill(0));
-  let hasDynamics = false;
+  let hasDynamics = inductorBranchRows.length > 0;
   for (const comp of components) {
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
+    if (comp.type !== 'capacitor') continue;
     const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
     const idx = (nodeId: number) => (nodeId > 0 ? nodeId - 1 : -1);
-    if (comp.type === 'capacitor') {
-      const cap = Math.max(1e-15, comp.parameters.capacitance as number);
-      const a = idx(terminals.find((t) => t.terminalId === 'a')?.nodeId ?? 0);
-      const b = idx(terminals.find((t) => t.terminalId === 'b')?.nodeId ?? 0);
-      if (a >= 0) C[a][a] += cap;
-      if (b >= 0) C[b][b] += cap;
-      if (a >= 0 && b >= 0) { C[a][b] -= cap; C[b][a] -= cap; }
-      hasDynamics = true;
-    } else if (comp.type === 'inductor') {
-      // Inductor branch current is an MNA extra unknown; its flux equation
-      // L·dI/dt = V contributes L on the C-block diagonal of that row.
-      // We locate the branch row by re-stamping signature: approximate by
-      // placing L on the first extra row owned by this component region.
-      // Simpler robust route: treat as susceptance slope via dual — mark
-      // dynamics and let the QZ iteration see a nonzero C diagonal entry
-      // at the branch position found by scanning G for the source-like row.
-      hasDynamics = true;
-    }
+    const cap = Math.max(1e-15, comp.parameters.capacitance as number);
+    const a = idx(terminals.find((t) => t.terminalId === 'a')?.nodeId ?? 0);
+    const b = idx(terminals.find((t) => t.terminalId === 'b')?.nodeId ?? 0);
+    if (a >= 0) C[a][a] += cap;
+    if (b >= 0) C[b][b] += cap;
+    if (a >= 0 && b >= 0) { C[a][b] -= cap; C[b][a] -= cap; }
+    hasDynamics = true;
   }
-  // Inductor branch rows: find MNA rows that are (near-)zero on the diagonal
-  // in G but couple nodally (voltage-source-like rows: the inductor
-  // companion at DC is a short = voltage-source row). Give them L on C.
-  for (const comp of components) {
-    if (comp.type !== 'inductor') continue;
-    const L = Math.max(1e-12, comp.parameters.inductance as number);
-    for (let r = numNodes - 1; r < size; r++) {
-      if (Math.abs(G[r][r]) < 1e-12 && Math.abs(C[r][r]) < 1e-18) {
-        C[r][r] += L;
-        break;
-      }
-    }
+  for (let k = 0; k < inductorBranchRows.length; k++) {
+    const row = inductorBranchRows[k];
+    // SIGN: the branch row's G part is the DC short constraint Va − Vb = 0;
+    // the dynamic version is Va − Vb = s·L·I, i.e. Va − Vb − s·L·I = 0, so
+    // the C-block entry is −L. Positive L solves s²LC+sLG−1=0 (a right-half-
+    // plane pole for a passive circuit — exactly the +31k seen in testing).
+    if (row >= 0 && row < size) C[row][row] -= inductorLs[k];
   }
   const cNorm = C.flat().reduce((a, v) => a + Math.abs(v), 0);
   if (cNorm < 1e-24 || !hasDynamics) {
@@ -966,17 +977,104 @@ function computeDescriptorPoles(
       method: 'static-eig',
     };
   }
-  const eig = qzEigenvalues(G, C);
+  // Descriptor solve: our C block is DIAGONAL by construction, so when
+  // algebraic rows exist (source constraints, unconstrained nodes) the Schur
+  // reduction below is EXACT (Schur complement preserves finite eigenvalues)
+  // and runs on the proven QR solver. QZ-lite's implicit iterations mistake
+  // algebraic rows for dynamics on some topologies (series RLC returned
+  // right-half-plane garbage while parallel/RC were exact) and its
+  // determinant-based cross-check cannot discriminate (det is dominated by
+  // the large singular values — true and spurious poles differ by <100×).
+  // So: Schur whenever algebraic rows exist; QZ only for fully-dynamic
+  // descriptors (no infinite eigenvalues to deflate).
+  let hasAlgebraic = false;
+  for (let i = 0; i < size; i++) {
+    let rowNz = false;
+    for (let j = 0; j < size; j++) {
+      if (Math.abs(C[i][j]) > 1e-300) { rowNz = true; break; }
+    }
+    if (!rowNz) { hasAlgebraic = true; break; }
+  }
+  const eig = hasAlgebraic ? schurReducedPoles(G, C) : qzEigenvalues(G, C);
+  const polesRaw = eig.length > 0 ? eig : qzEigenvalues(G, C);
   return {
     // Keep finite poles; drop huge algebraic artifacts (|s| > 1e12 — source
     // rows and gmin leaks, not dynamics) and unstable-sign mirrors.
-    poles: eig.filter((p) => Number.isFinite(p.re) && Math.hypot(p.re, p.im) < 1e12 && (Math.abs(p.im) < 1e-6 || p.im > 0)).map((p) => ({
+    poles: polesRaw.filter((p) => Number.isFinite(p.re) && Math.hypot(p.re, p.im) < 1e12 && (Math.abs(p.im) < 1e-6 || p.im > 0)).map((p) => ({
       real: p.re, imag: p.im,
       freq: Math.hypot(p.re, p.im) / (2 * Math.PI),
       Q: Math.abs(p.re) > 1e-9 ? Math.abs(p.im) / (2 * Math.abs(p.re)) : 0,
     })),
     method: 'generalized',
   };
+}
+
+/**
+ * Exact finite poles via Schur reduction. Our C block is DIAGONAL by
+ * construction (capacitor shunts on nodal rows, −L on inductor branch rows),
+ * so variables split cleanly into dynamic rows (C_ii ≠ 0) and algebraic rows
+ * (C row all zero). Eliminating the algebraic variables:
+ *   G_red = G_dd − G_da·G_aa⁻¹·G_ad,   det(G_red + s·C_dd) = 0
+ * with diagonal nonsingular C_dd — a STANDARD eigenproblem
+ * s = −eig(C_dd⁻¹·G_red) solved by the proven QR solver. This preserves the
+ * finite eigenvalues exactly (Schur complement) while QZ-lite's implicit
+ * iterations can mistake algebraic rows for dynamics. Falls back to QZ-lite
+ * output when G_aa is singular.
+ */
+function schurReducedPoles(G: number[][], C: number[][]): { re: number; im: number }[] {
+  const n = G.length;
+  const dyn: number[] = [];
+  const alg: number[] = [];
+  for (let i = 0; i < n; i++) {
+    let rowNz = false;
+    for (let j = 0; j < n; j++) {
+      if (Math.abs(C[i][j]) > 1e-300) { rowNz = true; break; }
+    }
+    (rowNz ? dyn : alg).push(i);
+  }
+  if (dyn.length === 0) return [];
+  if (alg.length === 0) {
+    // No algebraic rows — plain generalized problem with nonsingular
+    // diagonal C: s = −eig(C⁻¹G) directly.
+    const M = G.map((row, i) => row.map((g, j) => (i === j ? g / C[i][i] : g / C[i][i])));
+    return qrEigenvalues(M).map((p) => ({ re: -p.re, im: -p.im }));
+  }
+  const nd = dyn.length;
+  const na = alg.length;
+  // G_aa⁻¹·G_ad and G_aa⁻¹ via Gauss-Jordan on [G_aa | G_ad | I].
+  const aug: number[][] = alg.map((r, i) => [
+    ...alg.map((c) => G[r][c]),
+    ...dyn.map((c) => G[r][c]),
+    ...alg.map((_, k) => (k === i ? 1 : 0)),
+  ]);
+  for (let k = 0; k < na; k++) {
+    let piv = k;
+    let pivMag = 0;
+    for (let i = k; i < na; i++) {
+      const m = Math.abs(aug[i][k]);
+      if (m > pivMag) { pivMag = m; piv = i; }
+    }
+    if (pivMag < 1e-14) return qzEigenvalues(G, C); // singular — QZ fallback
+    if (piv !== k) [aug[k], aug[piv]] = [aug[piv], aug[k]];
+    const d = aug[k][k];
+    for (let j = 0; j < aug[k].length; j++) aug[k][j] /= d;
+    for (let i = 0; i < na; i++) {
+      if (i === k) continue;
+      const f = aug[i][k];
+      if (f === 0) continue;
+      for (let j = 0; j < aug[i].length; j++) aug[i][j] -= f * aug[k][j];
+    }
+  }
+  // G_red = G_dd − G_da·(G_aa⁻¹·G_ad); the solved block starts at col na.
+  const Gred: number[][] = dyn.map((r, i) => dyn.map((c, j) => {
+    let v = G[r][c];
+    for (let k = 0; k < na; k++) v -= G[r][alg[k]] * aug[k][na + j];
+    return v;
+  }));
+  void nd;
+  // s = −eig(C_dd⁻¹·G_red), C_dd diagonal.
+  const M = Gred.map((row, i) => row.map((v) => v / C[dyn[i]][dyn[i]]));
+  return qrEigenvalues(M).map((p) => ({ re: -p.re, im: -p.im }));
 }
 
 /**

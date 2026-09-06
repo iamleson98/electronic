@@ -15,6 +15,7 @@ import { DEFAULT_DRC_CONFIG } from '@/lib/pcb/drc';
 import { segmentHasClearanceConflict } from '@/lib/pcb/auto-router';
 import { computeNetCompletion, flagSatisfiedRatsnestLegs } from '@/lib/pcb/netlist-verify';
 import { useAutoDRC } from '@/lib/auto-rule-hooks';
+import { useEditor } from '@/lib/circuit/store';
 import { toast } from 'sonner';
 
 const PX_PER_MM = 8;
@@ -801,6 +802,12 @@ export function PCBCanvas() {
     const fp = findFootprintAt(sx, sy);
     if (fp) {
       selectFootprint(fp.id);
+      // Cross-probe back to the schematic: selecting a footprint selects
+      // the source component on the canvas (schematic→PCB already exists).
+      // Static import (top of file) — require() is forbidden in ESM bundles.
+      try {
+        if (fp.componentId) useEditor.getState().setSelection({ type: 'component', id: fp.componentId });
+      } catch { /* circuit store unavailable — PCB-only context */ }
       const mm = screenToMm(sx, sy);
       dragRef.current = { footprintId: fp.id, offset: { x: mm.x - fp.position.x, y: mm.y - fp.position.y } };
     } else {

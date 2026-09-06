@@ -163,6 +163,8 @@ interface EditorState {
   deleteComponent: (id: string) => void;
   deleteWire: (id: string) => void;
   setParameter: (id: string, key: string, value: number | string | boolean) => void;
+  /** production-field edit (tolerance / toleranceDist / temp / variant) with undo */
+  setProductionField: (id: string, patch: { tolerance?: number; toleranceDist?: 'gauss' | 'uniform'; temp?: number; variant?: 'fitted' | 'dnp' }) => void;
   setSelection: (sel: Selection) => void;
   // multi-selection
   toggleMultiSelect: (type: 'component' | 'wire', id: string) => void;
@@ -683,6 +685,16 @@ export const useEditor = create<EditorState>((set, get) => ({
     set((s) => ({
       components: s.components.map((c) =>
         c.id === id ? { ...c, parameters: { ...c.parameters, [key]: value } } : c,
+      ),
+    }));
+  },
+
+  /** Production-field edit (tolerance / temp / variant) with undo support. */
+  setProductionField: (id, patch) => {
+    get().pushHistory();
+    set((s) => ({
+      components: s.components.map((c) =>
+        c.id === id ? { ...c, ...patch } : c,
       ),
     }));
   },
@@ -1868,11 +1880,13 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     const dt = s.dt;
     // Build simOptions from the editor's settings (temperature, .IC, .NODESET,
-    // and the integration method selected in the Options dialog).
+    // integration method, UIC flag). Previously temp/uic were dropped here so
+    // the live sim always ran at 27°C without initial conditions.
     const simOpts = {
       initialConditions: s.simOptions?.initialConditions,
       nodeSets: s.simOptions?.nodeSets,
       method: s.simOptions?.method ?? 'euler',
+      temp: s.simOptions?.temp ?? 27,
     };
     let result: { sim: SimContext; branchCurrentSize: number; nodeMap: any } | null = null;
     for (let i = 0; i < subSteps; i++) {

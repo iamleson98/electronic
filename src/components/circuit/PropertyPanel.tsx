@@ -527,6 +527,7 @@ export function PropertyPanel() {
 function ProductionSection({ compId, compType }: { compId: string; compType: string }) {
   const comp = useEditor((s) => s.components.find((c) => c.id === compId));
   const setField = useEditor((s) => s.setField);
+  const setProductionField = useEditor((s) => s.setProductionField);
   const plugin = getPlugin(compType);
   if (!comp) return null;
   const datasheet = comp.fields?.find((f) => f.key === 'Datasheet')?.value ?? plugin?.datasheet ?? '';
@@ -549,19 +550,14 @@ function ProductionSection({ compId, compType }: { compId: string; compType: str
             placeholder="default"
             onChange={(e) => {
               const v = parseFloat(e.target.value);
-              useEditor.setState((s) => ({
-                components: s.components.map((c) => c.id === compId ? { ...c, tolerance: Number.isFinite(v) ? v : undefined } : c),
-              }));
+              setProductionField(compId, { tolerance: Number.isFinite(v) ? v : undefined as unknown as number });
             }}
             className="h-8 border-slate-700 bg-slate-800 font-mono text-xs text-slate-200"
           />
           <select
             value={comp.toleranceDist ?? 'gauss'}
             onChange={(e) => {
-              const v = e.target.value as 'gauss' | 'uniform';
-              useEditor.setState((s) => ({
-                components: s.components.map((c) => c.id === compId ? { ...c, toleranceDist: v } : c),
-              }));
+              setProductionField(compId, { toleranceDist: e.target.value as 'gauss' | 'uniform' });
             }}
             aria-label="Tolerance distribution"
             className="h-8 cursor-pointer rounded border border-slate-700 bg-slate-800 text-xs text-slate-200"
@@ -578,9 +574,7 @@ function ProductionSection({ compId, compType }: { compId: string; compType: str
             placeholder="global"
             onChange={(e) => {
               const v = parseFloat(e.target.value);
-              useEditor.setState((s) => ({
-                components: s.components.map((c) => c.id === compId ? { ...c, temp: Number.isFinite(v) ? v : undefined } : c),
-              }));
+              setProductionField(compId, { temp: Number.isFinite(v) ? v : undefined as unknown as number });
             }}
             className="h-8 border-slate-700 bg-slate-800 font-mono text-xs text-slate-200"
           />
@@ -589,10 +583,7 @@ function ProductionSection({ compId, compType }: { compId: string; compType: str
               type="checkbox"
               checked={comp.variant === 'dnp'}
               onChange={(e) => {
-                const v = e.target.checked ? 'dnp' as const : undefined;
-                useEditor.setState((s) => ({
-                  components: s.components.map((c) => c.id === compId ? { ...c, variant: v } : c),
-                }));
+                setProductionField(compId, { variant: e.target.checked ? 'dnp' : 'fitted' });
               }}
               className="h-3.5 w-3.5 accent-amber-500"
             />

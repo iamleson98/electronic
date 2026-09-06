@@ -513,8 +513,10 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
 
   // Display anchor: auto = free-running newest sample; normal/single =
   // re-anchor on the latest qualifying trigger edge (real acquisition).
-  // Single mode freezes at the captured edge once disarmed.
-  const frozenRef = useRef<number | undefined>(undefined);
+  // Single mode freezes at the captured edge once disarmed; the freeze time
+  // lives in trigger state (frozenAt) — read here as plain state (no refs
+  // during render) and written via a deferred microtask (no setState in
+  // render or in an effect — both are lint errors).
   const centerTime = useMemo(() => {
     let latest = 0;
     for (const t of traces) {
@@ -525,9 +527,22 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
     const src = channels[scopeConfig.trigger.source];
     if (!src || src.samples.length < 2) return latest;
     const coupled = applyCoupling(src.samples, src.coupling);
-    const anchor = resolveTriggerAnchor(coupled, scopeConfig.trigger, latest, frozenRef.current);
+    const anchor = resolveTriggerAnchor(coupled, scopeConfig.trigger, latest, scopeConfig.trigger.frozenAt);
+    // Single-shot capture: once a qualifying edge exists and we are armed,
+    // freeze at it + disarm atomically. Deferred to a microtask so the memo
+    // stays side-effect-free.
+    if (scopeConfig.trigger.mode === 'single' && scopeConfig.trigger.armed && anchor !== latest) {
+      const captured = anchor;
+      const freeze = () => setScopeConfig((s) =>
+        s.trigger.mode === 'single' && s.trigger.armed
+          ? { ...s, trigger: { ...s.trigger, armed: false, frozenAt: captured } }
+          : s);
+      if (typeof queueMicrotask === 'function') queueMicrotask(freeze);
+      else setTimeout(freeze, 0);
+      return anchor;
+    }
     return anchor;
-  }, [traces, channels, scopeConfig.trigger]);
+  }, [traces, channels, scopeConfig.trigger, setScopeConfig]);
 
   const timeWindow = useMemo(
     () => computeTimeWindow(scopeConfig.timebase, centerTime),
@@ -740,7 +755,7 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
     if (cursorB.enabled) drawCursorLine(cursorB.time, '#22d3ee', true, 'B');
 
     ctx.restore();
-  }, [channels, scopeConfig, timeWindow, canvasRef]);
+  }, [channels, scopeConfig, timeWindow, canvasRef, xyMode]);
 
   useEffect(() => { draw(); }, [draw]);
   // Redraw when the canvas (re)mounts or resizes — covers tab switches, which
@@ -893,7 +908,7 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
           </ToolBtn>
           <ToolBtn
             label="Re-arm single trigger"
-            onClick={() => { frozenRef.current = undefined; setScopeConfig((s) => ({ ...s, trigger: { ...s.trigger, armed: true } })); }}
+            onClick={() => { setScopeConfig((s) => ({ ...s, trigger: { ...s.trigger, frozenAt: undefined, armed: true } })); }}
             disabled={trig.mode !== 'single'}
           >
             ARM

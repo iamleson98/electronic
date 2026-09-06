@@ -1165,6 +1165,8 @@ export function simulateStep(
     nodeSets?: Record<string, number>;
     /** integration method for reactive companion models (default 'euler') */
     method?: 'euler' | 'trap' | 'gear';
+    /** simulation temperature in °C (default 27) — lands on sim.temp */
+    temp?: number;
     /**
      * Freeze sim.time at this value for every stamp/solve of this step
      * (solveDC passes 0). Omit for normal transient stepping.
@@ -1264,6 +1266,8 @@ export function simulateStep(
     // to backward Euler so every existing caller keeps its historical
     // behavior unless it explicitly opts into trap/gear.
     method: simOptions?.method ?? 'euler',
+    // Simulation temperature for deviceTemp() (per-part override wins).
+    temp: simOptions?.temp ?? 27,
     // Net-name resolution for behavioral sources (V(netname) expressions).
     netNames: nodeMap.netNames,
   };
@@ -1566,7 +1570,7 @@ export function solveDC(
   wires: Wire[],
   plugins: Map<string, ComponentPlugin>,
   maxIter: number = 50,
-  opts?: { robust?: boolean; simOptions?: { initialConditions?: Record<string, number>; nodeSets?: Record<string, number>; method?: 'euler' | 'trap' | 'gear' } },
+  opts?: { robust?: boolean; simOptions?: { initialConditions?: Record<string, number>; nodeSets?: Record<string, number>; method?: 'euler' | 'trap' | 'gear'; temp?: number } },
 ): SimContext | null {
   // initialize simState
   for (const comp of components) {
@@ -1618,18 +1622,104 @@ export function solveDC(
     }
   }
   if (!failed) return result;
-  // Plain Newton failed — escalate to the robust aids (gmin → source →
-  // pseudo-transient) when requested. Lazy require avoids the engine ↔
-  // convergence import cycle; if the module is unavailable, return null.
+  // Plain Newton failed — escalate to inline robust aids (gmin stepping →
+  // source stepping) when requested. Implemented HERE (not via require() of
+  // ./convergence, which is dead code in browser ESM bundles AND a circular
+  // import — convergence.ts imports solveDC from this file).
   if (opts?.robust) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const conv = require('./convergence') as typeof import('./convergence');
-      const out = conv.solveDCRobust(components, wires, plugins, { itl1: maxIter });
-      return out.sim;
-    } catch {
-      return null;
+    return solveDCWithFallbacks(components, wires, plugins, maxIter, opts);
+  }
+  return null;
+}
+
+/**
+ * Inline robust fallbacks for solveDC: gmin stepping (shunt every node to
+ * ground, decaying 1e-2 → gmin target) then source stepping (scale all
+ * independent sources 0 → 100%). Returns the first converged operating
+ * point, or null. No imports — safe from engine↔convergence cycles.
+ */
+function solveDCWithFallbacks(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  maxIter: number,
+  opts?: { simOptions?: { initialConditions?: Record<string, number>; nodeSets?: Record<string, number>; method?: 'euler' | 'trap' | 'gear'; temp?: number } },
+): SimContext | null {
+  // 1. Gmin stepping: shunt every non-ground node to ground, decay the shunt.
+  try {
+    const nodeMap = buildNodeMap(components, wires, plugins);
+    const nodeTerminal = new Map<number, { componentId: string; terminalId: string }>();
+    for (const [key, nodeId] of nodeMap.terminalNode) {
+      if (nodeId > 0 && !nodeTerminal.has(nodeId)) {
+        const [componentId, terminalId] = key.split(':');
+        nodeTerminal.set(nodeId, { componentId, terminalId });
+      }
     }
+    const ground = components.find((c) => c.type === 'ground' || c.type === 'powerGND');
+    if (ground) {
+      let lastGood: SimContext | null = null;
+      for (let gmin = 1e-2; gmin >= 1e-12 * 0.999; gmin *= 0.1) {
+        const shunts: CircuitComponent[] = [];
+        const shuntWires: Wire[] = [];
+        let idx = 0;
+        for (const [nodeId, term] of nodeTerminal) {
+          const shuntId = `__gmin_shunt_${nodeId}__`;
+          shunts.push({
+            id: shuntId, type: 'resistor', position: { x: 0, y: 0 }, rotation: 0,
+            parameters: { resistance: 1 / gmin },
+          });
+          shuntWires.push(
+            { id: `__gmin_wa_${idx}__`, from: { componentId: shuntId, terminalId: 'a' }, to: { componentId: term.componentId, terminalId: term.terminalId } },
+            { id: `__gmin_wb_${idx}__`, from: { componentId: shuntId, terminalId: 'b' }, to: { componentId: ground.id, terminalId: 'g' } },
+          );
+          idx++;
+        }
+        const r = solveDC(
+          [...components, ...shunts], [...wires, ...shuntWires], plugins, maxIter,
+          { simOptions: opts?.simOptions },
+        );
+        if (r) lastGood = r;
+      }
+      // Final clean solve at full source values.
+      const clean = solveDC(components, wires, plugins, maxIter, { simOptions: opts?.simOptions });
+      if (clean) return clean;
+      if (lastGood) return lastGood;
+    }
+  } catch {
+    // fall through to source stepping
+  }
+  // 2. Source stepping: ramp independent sources 0% → 100% in 5 steps,
+  // seeding each step from the previous solution via nodeSets.
+  try {
+    const sources = components.filter((c) =>
+      c.type === 'dcVoltage' || c.type === 'acVoltage' || c.type === 'currentSource' || c.type === 'pulseSource');
+    if (sources.length === 0) return null;
+    let seed: Record<string, number> | undefined;
+    for (const frac of [0.1, 0.3, 0.6, 1.0]) {
+      const scaled = components.map((c) => {
+        if (c.type === 'dcVoltage' || c.type === 'acVoltage' || c.type === 'pulseSource') {
+          const v = c.parameters.voltage;
+          if (typeof v === 'number') return { ...c, parameters: { ...c.parameters, voltage: v * frac } };
+        }
+        if (c.type === 'currentSource') {
+          const i = c.parameters.current;
+          if (typeof i === 'number') return { ...c, parameters: { ...c.parameters, current: i * frac } };
+        }
+        return c;
+      });
+      const r = solveDC(scaled, wires, plugins, maxIter, {
+        simOptions: { ...opts?.simOptions, ...(seed ? { nodeSets: seed } : {}) },
+      });
+      if (!r) return null;
+      seed = {};
+      const nm = buildNodeMap(scaled, wires, plugins);
+      for (const [key, nodeId] of nm.terminalNode) {
+        if (nodeId > 0) seed[key] = r.nodeVoltage[nodeId] ?? 0;
+      }
+      if (frac === 1.0) return r;
+    }
+  } catch {
+    return null;
   }
   return null;
 }

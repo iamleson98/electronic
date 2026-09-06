@@ -6,6 +6,7 @@
 import { useState } from 'react';
 import type { AnalysisResult } from '@/lib/circuit/analysis';
 import { complexToPhase, complexToDb, complexToMagnitude, computeFFT, exportRawFile } from '@/lib/circuit/measurement';
+import { useEditor } from '@/lib/circuit/store';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,7 +14,7 @@ import { Label } from '@/components/ui/label';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { toast } from 'sonner';
-import { CheckCircle, AlertTriangle, Save } from 'lucide-react';
+import { CheckCircle, AlertTriangle, Save, Crosshair } from 'lucide-react';
 import { BodePlot, PoleZeroPlot } from '@/components/circuit/AnalysisCharts';
 
 export type AnalysisType = 'ac' | 'dc' | 'tran' | 'tf' | 'sens' | 'noise' | 'disto' | 'pz' | 'four';
@@ -47,6 +48,48 @@ export function Stat({ label, value }: { label: string; value: number }) {
       <div className="text-slate-400 text-xs">{label}</div>
       <div className="font-mono text-cyan-400">{value.toFixed(4)}</div>
     </div>
+  );
+}
+
+/**
+ * Waveform→schematic link: jump from a result trace back to the probed
+ * component on the canvas. Trace names encode the probe as `V(node)` where
+ * node is `compId:terminalId`, a net name, or a refdes — resolve in that
+ * order, then select + zoom (same event NetInspectorDialog uses).
+ */
+export function TraceLocateButton({ traceName }: { traceName: string }) {
+  const locate = () => {
+    const m = traceName.match(/^V\(([^)]+)\)/);
+    if (!m) return;
+    const node = m[1].split('@')[0].trim().split(' ')[0];
+    const st = useEditor.getState();
+    const comps = st.components;
+    let target: string | null = null;
+    if (node.includes(':')) {
+      const [cid] = node.split(':');
+      if (comps.some((c) => c.id === cid)) target = cid;
+    }
+    if (!target) {
+      const byNet = comps.find((c) => (c.parameters.net as string) === node);
+      if (byNet) target = byNet.id;
+    }
+    if (!target) {
+      const byRef = comps.find((c) => c.refdes === node || c.id === node);
+      if (byRef) target = byRef.id;
+    }
+    if (!target) { toast.info(`No schematic component matches probe "${node}"`); return; }
+    st.setSelection({ type: 'component', id: target });
+    window.dispatchEvent(new CustomEvent('circuitlab:zoom-to-component', { detail: { id: target } }));
+  };
+  if (!/^V\(/.test(traceName)) return null;
+  return (
+    <button
+      onClick={locate}
+      title="Locate probed component on the schematic"
+      className="p-0.5 rounded text-slate-500 hover:text-cyan-400"
+    >
+      <Crosshair size={12} />
+    </button>
   );
 }
 
@@ -134,7 +177,10 @@ export function ResultDisplay({ result }: { result: AnalysisResult }) {
               <div key={idx} className="mb-2">
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-mono text-cyan-400">{(tr as AnalysisTraceValues).name}</span>
-                  <span className="text-slate-500">{displayValues.length} pts</span>
+                  <span className="flex items-center gap-2">
+                    <TraceLocateButton traceName={(tr as AnalysisTraceValues).name} />
+                    <span className="text-slate-500">{displayValues.length} pts</span>
+                  </span>
                 </div>
                 {/* If complex trace (AC analysis) and showing magnitude/dB, render Bode plot */}
                 {'yValues' in tr && tr.yValues instanceof Float64Array && tr.yValues.length === 2 * tr.xValues.length ? (

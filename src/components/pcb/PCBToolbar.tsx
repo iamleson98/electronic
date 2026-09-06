@@ -196,7 +196,10 @@ export function PCBToolbar() {
 
   const handleGerberX2Export = () => {
     const s = usePCB.getState();
-    const files = exportAllGerbersX2(s.footprints, s.traces, s.vias, s.board, s.copperPours);
+    const files = exportAllGerbersX2(s.footprints, s.traces, s.vias, s.board, s.copperPours, {
+      layers: [...s.layerStack.layers],
+      teardrops: s.teardrops,
+    });
     for (const file of files) {
       const blob = new Blob([file.content], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);

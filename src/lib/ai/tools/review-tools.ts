@@ -37,6 +37,10 @@ export const deratingCheckTool: Tool = {
         type: 'number',
         description: 'Max allowed power fraction, e.g. 0.5 = 50% derating rule (default 0.6).',
       },
+      ambientTemp: {
+        type: 'number',
+        description: 'Ambient temperature in °C for the derating curves (resistor 70→155 °C, MLCC 85→125 °C, silicon 25→150 °C). Default 25.',
+      },
       voltageDerate: {
         type: 'number',
         description: 'Max allowed voltage fraction (default 0.8).',
@@ -48,7 +52,7 @@ export const deratingCheckTool: Tool = {
     },
     required: [],
   },
-  execute(args: { powerDerate?: number; voltageDerate?: number; currentDerate?: number }, ctx: ToolContext) {
+  execute(args: { powerDerate?: number; voltageDerate?: number; currentDerate?: number; ambientTemp?: number }, ctx: ToolContext) {
     try {
       ensurePlugins(ctx);
       const { doc, plugins, simContext } = ctx;
@@ -60,6 +64,15 @@ export const deratingCheckTool: Tool = {
       const pLim = args.powerDerate ?? 0.6;
       const vLim = args.voltageDerate ?? 0.8;
       const iLim = args.currentDerate ?? 0.8;
+      // Ambient-temperature derating curves (standard manufacturer practice):
+      //   resistors (thick film): 100% to 70 °C, linear to 0% at 155 °C.
+      //   MLCC voltage: 100% to 85 °C, 60% at 125 °C (X7R-class rule).
+      //   silicon current/power: 100% to 25 °C, linear to 0% at 150 °C (Tj).
+      // Without this a 25 °C pass silently becomes a field failure at 85 °C.
+      const tAmb = args.ambientTemp ?? 25;
+      const resistorTempFactor = tAmb <= 70 ? 1 : Math.max(0, 1 - (tAmb - 70) / (155 - 70));
+      const mlccTempFactor = tAmb <= 85 ? 1 : Math.max(0.5, 1 - 0.4 * (tAmb - 85) / (125 - 85));
+      const siliconTempFactor = tAmb <= 25 ? 1 : Math.max(0, 1 - (tAmb - 25) / (150 - 25));
       const rows: DeratingRow[] = [];
       const push = (component: string, type: string, check: string, actual: number, rating: number, unit: string, lim: number) => {
         const frac = rating > 0 ? actual / rating : Infinity;
@@ -81,12 +94,12 @@ export const deratingCheckTool: Tool = {
         if (comp.type === 'resistor') {
           const v = Math.abs(vOf('a') - vOf('b'));
           const p = v * i;
-          const pRated = (comp.parameters.powerRating as number) ?? GENERIC_RATINGS.resistorPower;
-          push(label, comp.type, 'power', p, pRated, 'W', pLim);
+          const pRated = ((comp.parameters.powerRating as number) ?? GENERIC_RATINGS.resistorPower) * resistorTempFactor;
+          push(label, comp.type, `power@${tAmb}°C`, p, pRated, 'W', pLim);
         } else if (comp.type === 'capacitor') {
           const v = Math.abs(vOf('a') - vOf('b'));
-          const vRated = (comp.parameters.voltageRating as number) ?? GENERIC_RATINGS.capacitorVoltage;
-          push(label, comp.type, 'voltage', v, vRated, 'V', vLim);
+          const vRated = ((comp.parameters.voltageRating as number) ?? GENERIC_RATINGS.capacitorVoltage) * mlccTempFactor;
+          push(label, comp.type, `voltage@${tAmb}°C`, v, vRated, 'V', vLim);
         } else if (comp.type === 'led') {
           push(label, comp.type, 'current', i, GENERIC_RATINGS.ledCurrent, 'A', iLim);
         } else if (comp.type === 'diode' || comp.type === 'zener' || comp.type === 'schottky') {
@@ -96,12 +109,12 @@ export const deratingCheckTool: Tool = {
           const cOrD = comp.type === 'npn' ? 'c' : comp.type === 'pnp' ? 'c' : 'd';
           const eOrS = comp.type === 'npn' ? 'e' : comp.type === 'pnp' ? 'e' : 's';
           const v = Math.abs(vOf(cOrD) - vOf(eOrS));
-          const vRated = (comp.parameters.vceMax as number) ?? (comp.parameters.vdsMax as number) ?? 40;
+          const vRated = ((comp.parameters.vceMax as number) ?? (comp.parameters.vdsMax as number) ?? 40);
           push(label, comp.type, 'voltage', v, vRated, 'V', vLim);
-          const iRated = (comp.parameters.icMax as number) ?? (comp.parameters.idMax as number) ?? 0.5;
-          push(label, comp.type, 'current', i, iRated, 'A', iLim);
-          const pRated = (comp.parameters.powerMax as number) ?? 0.5;
-          push(label, comp.type, 'power', v * i, pRated, 'W', pLim);
+          const iRated = (((comp.parameters.icMax as number) ?? (comp.parameters.idMax as number) ?? 0.5)) * siliconTempFactor;
+          push(label, comp.type, `current@${tAmb}°C`, i, iRated, 'A', iLim);
+          const pRated = (((comp.parameters.powerMax as number) ?? 0.5)) * siliconTempFactor;
+          push(label, comp.type, `power@${tAmb}°C`, v * i, pRated, 'W', pLim);
         } else if (comp.type === 'fuse') {
           const iRated = (comp.parameters.current as number) ?? 1;
           push(label, comp.type, 'current', i, iRated, 'A', 1);
@@ -113,6 +126,8 @@ export const deratingCheckTool: Tool = {
         ok: true,
         result: {
           rows,
+          ambientTemp: tAmb,
+          tempFactors: { resistor: +resistorTempFactor.toFixed(3), mlcc: +mlccTempFactor.toFixed(3), silicon: +siliconTempFactor.toFixed(3) },
           summary: fails > 0 ? `${fails} over-stressed, ${warns} marginal` : warns > 0 ? `${warns} marginal, none over-stressed` : 'All parts within derating limits',
           overall: fails > 0 ? 'fail' : warns > 0 ? 'warn' : 'pass',
         },

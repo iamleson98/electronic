@@ -22,6 +22,7 @@ export function exportGerberCopper(
   vias: Via[],
   board: BoardOutline,
   pours?: CopperPour[],
+  teardrops?: { position: { x: number; y: number }; points: { x: number; y: number }[] }[],
 ): string {
   const lines: string[] = [];
   const fmt = (n: number) => {
@@ -148,6 +149,16 @@ export function exportGerberCopper(
       lines.push(`G54D${ap}*`);
       lines.push(`X${fmt(run.cx)}Y${fmt(run.cy)}D03*`);
     }
+  }
+
+  // Teardrops — polygon flashes (G36 region) on this layer.
+  for (const td of teardrops ?? []) {
+    if (!td.points || td.points.length < 3) continue;
+    lines.push('G36*');
+    td.points.forEach((p, i) => {
+      lines.push(`X${fmt(p.x)}Y${fmt(p.y)}D0${i === 0 ? 2 : 1}*`);
+    });
+    lines.push('G37*');
   }
 
   // End
@@ -461,15 +472,17 @@ export function exportAllGerbers(
   vias: Via[],
   board: BoardOutline,
   pours?: CopperPour[],
-  opts?: { layers?: ('top' | 'bottom' | 'inner1' | 'inner2' | 'inner3' | 'inner4')[] },
+  opts?: { layers?: ('top' | 'bottom' | 'inner1' | 'inner2' | 'inner3' | 'inner4')[]; teardrops?: { position: { x: number; y: number }; padId: string; points: { x: number; y: number }[]; layer: string }[] },
 ): { filename: string; content: string }[] {
   const files: { filename: string; content: string }[] = [];
   const layers = opts?.layers ?? ['top', 'bottom'];
 
   // Copper layers (pours render into their layer's copper) — inner layers
   // included when the stackup uses them (previously always dropped).
+  // Teardrops render as copper flashes on their layer (previously dropped).
+  const teardropFlashes = (opts?.teardrops ?? []).filter((t) => layers.includes(t.layer as (typeof layers)[number]));
   for (const layer of layers) {
-    files.push({ filename: `${layer}_copper.gbr`, content: exportGerberCopper(layer, footprints, traces, vias, board, pours) });
+    files.push({ filename: `${layer}_copper.gbr`, content: exportGerberCopper(layer, footprints, traces, vias, board, pours, teardropFlashes.filter((t) => t.layer === layer)) });
   }
 
   // Solder masks
@@ -563,12 +576,13 @@ export function exportGerberJobFile(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function exportGerberX2Copper(
-  layer: 'top' | 'bottom',
+  layer: 'top' | 'bottom' | 'inner1' | 'inner2' | 'inner3' | 'inner4',
   footprints: Footprint[],
   traces: Trace[],
   vias: Via[],
   board: BoardOutline,
   pours?: CopperPour[],
+  teardrops?: { position: { x: number; y: number }; points: { x: number; y: number }[] }[],
 ): string {
   const lines: string[] = [];
   const fmt = (n: number) => {
@@ -583,7 +597,8 @@ export function exportGerberX2Copper(
   lines.push('%TF.GenerationSoftware,CircuitLab,v1.0*%');
   lines.push(`%TF.CreationDate,${new Date().toISOString()}*%`);
   lines.push(`%TF.ProjectId,CircuitLab-PCB,rev1,*%`);
-  lines.push(`%TF.FileFunction,Copper,${layer === 'top' ? 'L1' : 'L2'}*%`);
+  const layerNum = layer === 'top' ? 'L1' : layer === 'bottom' ? 'L2' : layer.replace('inner', 'L');
+  lines.push(`%TF.FileFunction,Copper,${layerNum}*%`);
   lines.push('%TF.FilePolarity,Positive*%');
   lines.push('%TF.SameCoordinates*%');
   lines.push('%MOMM*%');
@@ -707,13 +722,27 @@ export function exportGerberX2Copper(
   }
   lines.push('%TD*%');
 
+  // Teardrops — G36 polygon regions (same as the X1 writer).
+  for (const td of teardrops ?? []) {
+    if (!td.points || td.points.length < 3) continue;
+    lines.push('G36*');
+    td.points.forEach((p, i) => {
+      lines.push(`X${fmt(p.x)}Y${fmt(p.y)}D0${i === 0 ? 2 : 1}*`);
+    });
+    lines.push('G37*');
+  }
+
   lines.push('M02*');
 
   return lines.join('\n');
 }
 
 /**
- * Export all Gerber X2 files (copper top + bottom + masks + silk + drill).
+ * Export all Gerber X2 files — FULL parity with the X1 bundle (copper incl.
+ * inner layers + teardrops, masks, paste, silk, edge-cuts, drill, drill map,
+ * PnP, job file). Previously X2 shipped only top/bottom copper + masks +
+ * silk + drill + PnP, so choosing X2 silently dropped the stencil, the
+ * outline, inner layers, and the job file fabs need.
  */
 export function exportAllGerbersX2(
   footprints: Footprint[],
@@ -721,16 +750,28 @@ export function exportAllGerbersX2(
   vias: Via[],
   board: BoardOutline,
   pours?: CopperPour[],
+  opts?: { layers?: ('top' | 'bottom' | 'inner1' | 'inner2' | 'inner3' | 'inner4')[]; teardrops?: { position: { x: number; y: number }; padId: string; points: { x: number; y: number }[]; layer: string }[] },
 ): { filename: string; content: string }[] {
   const files: { filename: string; content: string }[] = [];
-  files.push({ filename: 'top_copper.gbr', content: exportGerberX2Copper('top', footprints, traces, vias, board, pours) });
-  files.push({ filename: 'bottom_copper.gbr', content: exportGerberX2Copper('bottom', footprints, traces, vias, board, pours) });
+  const layers = opts?.layers ?? ['top', 'bottom'];
+  const teardropFlashes = (opts?.teardrops ?? []).filter((t) => (layers as string[]).includes(t.layer));
+  for (const layer of layers) {
+    files.push({
+      filename: `${layer}_copper.gbr`,
+      content: exportGerberX2Copper(layer, footprints, traces, vias, board, pours, teardropFlashes.filter((t) => t.layer === layer)),
+    });
+  }
   files.push({ filename: 'top_soldermask.gbr', content: exportGerberSolderMask('top', footprints, board) });
   files.push({ filename: 'bottom_soldermask.gbr', content: exportGerberSolderMask('bottom', footprints, board) });
+  files.push({ filename: 'top_paste.gbr', content: exportGerberPaste('top', footprints, board) });
+  files.push({ filename: 'bottom_paste.gbr', content: exportGerberPaste('bottom', footprints, board) });
   files.push({ filename: 'top_silkscreen.gbr', content: exportGerberSilkscreen('top', footprints, board) });
   files.push({ filename: 'bottom_silkscreen.gbr', content: exportGerberSilkscreen('bottom', footprints, board) });
+  files.push({ filename: 'edge_cuts.gbr', content: exportGerberEdgeCuts(board) });
   files.push({ filename: 'drill.drl', content: exportExcellonDrill(footprints, vias) });
+  files.push({ filename: 'drill_map.txt', content: exportDrillMap(footprints, vias) });
   files.push({ filename: 'pick_and_place.csv', content: exportPickAndPlace(footprints) });
+  files.push({ filename: 'job.gbrjob', content: exportGerberJobFile(layers, board) });
   return files;
 }
 

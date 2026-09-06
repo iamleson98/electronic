@@ -694,15 +694,24 @@ export function runDRC(
     }
   }
 
-  // 11. Check courtyard overlap (components too close)
+  // 11. Check courtyard overlap (components too close). Rotation-aware:
+  // 90/270° parts swap w/h (previously axis-aligned, false +/- on rotated).
+  const courtyardSize = (fp: { bodySize: { width: number; height: number }; rotation: number }) => {
+    const rot = ((fp.rotation % 360) + 360) % 360;
+    return rot === 90 || rot === 270
+      ? { w: fp.bodySize.height, h: fp.bodySize.width }
+      : { w: fp.bodySize.width, h: fp.bodySize.height };
+  };
   for (let i = 0; i < footprints.length; i++) {
     for (let j = i + 1; j < footprints.length; j++) {
       const a = footprints[i];
       const b = footprints[j];
       const dx = Math.abs(a.position.x - b.position.x);
       const dy = Math.abs(a.position.y - b.position.y);
-      const minDx = (a.bodySize.width + b.bodySize.width) / 2 + config.minCourtyard;
-      const minDy = (a.bodySize.height + b.bodySize.height) / 2 + config.minCourtyard;
+      const sa = courtyardSize(a);
+      const sb = courtyardSize(b);
+      const minDx = (sa.w + sb.w) / 2 + config.minCourtyard;
+      const minDy = (sa.h + sb.h) / 2 + config.minCourtyard;
       if (dx < minDx && dy < minDy) {
         errors.push({
           type: 'courtyard',

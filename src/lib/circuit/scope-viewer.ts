@@ -20,6 +20,10 @@ export interface ScopeTrigger {
   armed: boolean;
   /** holdoff in seconds — edges within this window after a trigger are ignored */
   holdoff?: number;
+  /** single-shot capture time: set when single mode fires + disarms; the
+   * disarmed display re-anchors here (persisted in scope-config so the
+   * freeze survives re-renders without ref-reads during render). */
+  frozenAt?: number;
 }
 
 /** A detected trigger event (edge crossing of the source channel). */

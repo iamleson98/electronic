@@ -48,14 +48,17 @@ function defaultsFor(type: string): Record<string, number | string | boolean> {
   return defaults;
 }
 
-/** Parse a SPICE value string like "1k", "10u", "2.2Meg", "100n" into a number. */
+/** Parse a SPICE value string like "1k", "10u", "2.2Meg", "100n" into a number.
+ * Single canonical parser (spice-import.ts re-exports this): handles compound
+ * unit suffixes ("1uF", "10nF", "2.2mH"), µ, mil, meg-vs-m, Hz/ohm stripping.
+ */
 export function parseSpiceValue(s: string): number {
   const str = s.trim().replace(/,/g, '');
-  // Use a regex to split number from suffix
-  const m = str.match(/^([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)([a-zA-Z]*)$/);
+  // Use a regex to split number from suffix (µ included)
+  const m = str.match(/^([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)([a-zA-Zµ]*)$/);
   if (!m) return parseFloat(str) || 0;
   const num = parseFloat(m[1]);
-  const suffix = m[2];
+  let suffix = m[2];
   if (!suffix) return num;
   // SPICE suffixes (case-insensitive, but Meg vs m distinction)
   const lower = suffix.toLowerCase();
@@ -66,8 +69,12 @@ export function parseSpiceValue(s: string): number {
     'n': 1e-9, 'p': 1e-12,
     'hz': 1, 's': 1, 'v': 1, 'a': 1, 'ohm': 1, 'ohms': 1, 'f': 1e-15, 'h': 1,
   };
-  // meg first (3-letter) to avoid falling into 'm'
-  if (suffix.toLowerCase() === 'meg') return num * 1e6;
+  // meg/mil first (multi-letter) to avoid falling into 'm'
+  if (lower.startsWith('meg')) return num * 1e6;
+  if (lower.startsWith('mil')) return num * 25.4e-6;
+  // compound unit suffixes: leading scale letter + trailing unit (uF, nF, mH, kHz, ohms)
+  const first = lower[0];
+  if (multMap[first] !== undefined) return num * multMap[first];
   if (multMap[lower] !== undefined) return num * multMap[lower];
   // strip trailing unit suffixes (Hz, V, A, F, H, Ohms, S)
   const stripped = lower.replace(/(ohms?|hz|volts?|amps?|farads?|henries|henrys?|seconds?|sec|meters?|metres?)$/, '');

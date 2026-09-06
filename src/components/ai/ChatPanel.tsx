@@ -318,6 +318,20 @@ export function ChatPanel({ onClose }: { onClose: () => void }) {
             <GitBranch className={`h-3.5 w-3.5 ${autoApply ? 'text-emerald-400' : 'text-amber-400'}`} />
             <span className="ml-1 hidden sm:inline">{autoApply ? 'Auto' : 'Review'}</span>
           </Button>
+          {/* Skill level selector */}
+          <Select
+            value={useChatSession(s => s.skillLevel)}
+            onValueChange={(v) => useChatSession.getState().setSkillLevel(v as 'beginner' | 'practitioner' | 'engineer')}
+          >
+            <SelectTrigger className="h-7 w-28 gap-1 border-slate-700 bg-slate-800 px-2 text-xs text-slate-200" title="Explanation depth for AI answers">
+              <SelectValue placeholder="Skill…" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="beginner">Beginner</SelectItem>
+              <SelectItem value="practitioner">Practitioner</SelectItem>
+              <SelectItem value="engineer">Engineer</SelectItem>
+            </SelectContent>
+          </Select>
           <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8 cursor-pointer hover:bg-slate-800" title="Close (AI keeps working in the background)">
             <X className="h-4 w-4" />
           </Button>

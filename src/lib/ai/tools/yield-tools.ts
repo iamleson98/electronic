@@ -35,11 +35,11 @@ export const yieldMonteCarloTool: Tool = {
       },
       tolerance: {
         type: 'number',
-        description: 'Fractional part tolerance, e.g. 0.05 for ±5% (default 0.05).',
+        description: 'Global fractional part tolerance, e.g. 0.05 for ±5% (default 0.05). Per-part ProductionSection tolerances override this per component.',
       },
       distribution: {
         type: 'string',
-        description: '"gauss" (default, sigma = tol/3) or "uniform".',
+        description: '"gauss" (default, sigma = tol/3) or "uniform". Per-part toleranceDist overrides this per component.',
       },
       outputNode: {
         type: 'string',
@@ -73,12 +73,20 @@ export const yieldMonteCarloTool: Tool = {
       ensurePlugins(ctx);
       const tol = args.tolerance ?? 0.05;
       const dist = args.distribution === 'uniform' ? 'uniform' : 'gauss';
-      // Vary every numeric sweepable parameter on every component.
-      const tolerances = ctx.doc.components.flatMap((c) =>
-        (TOL_PARAMS[c.type] ?? [])
+      // Per-part merge: a component's own ProductionSection tolerance +
+      // distribution WIN when set (1% reference vs 5% jellybeans); the
+      // global args are the fallback for parts without explicit values.
+      const tolerances = ctx.doc.components.flatMap((c) => {
+        const perPartTol = typeof c.parameters.tolerance === 'number' && c.parameters.tolerance > 0
+          ? c.parameters.tolerance
+          : tol;
+        const perPartDist = c.parameters.toleranceDist === 'uniform' || c.parameters.toleranceDist === 'gauss'
+          ? c.parameters.toleranceDist
+          : dist;
+        return (TOL_PARAMS[c.type] ?? [])
           .filter((p) => typeof c.parameters[p] === 'number')
-          .map((p) => ({ componentId: c.id, param: p, tolerance: tol, distribution: dist as 'gauss' | 'uniform' })),
-      );
+          .map((p) => ({ componentId: c.id, param: p, tolerance: perPartTol, distribution: perPartDist as 'gauss' | 'uniform' }));
+      });
       if (tolerances.length === 0) {
         return { ok: false, error: 'No toleranced numeric parameters found on this circuit.' };
       }
