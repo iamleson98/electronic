@@ -45,6 +45,7 @@ import {
 } from './system-prompt';
 import { buildContextPreamble } from './netlist-summary';
 import { ensurePlugins } from './tools/helpers';
+import { searchArticles } from './knowledge/knowledge-base';
 
 /** Mutating tools that manage the history stacks THEMSELVES (no auto-snapshot). */
 const HISTORY_SELF_MANAGED = new Set(['schematic.undo', 'schematic.redo']);
@@ -508,9 +509,23 @@ export class TurnManager {
         const p = getPlugin(c.type);
         if (p) plugins.set(c.type, p);
       }
+      // Conversation snapshot for transcript.export: the client's prior
+      // user/assistant turns (the request body already carries them), plus a
+      // synthetic in-progress assistant turn whose toolCalls array is synced
+      // before every tool execution so mid-turn transcript exports see the
+      // work done so far in the current turn.
+      const transcriptTurns: NonNullable<ToolContext['messages']> =
+        (Array.isArray(body.messages) ? body.messages : [])
+          .filter((m: { role?: string }) => m?.role === 'user' || m?.role === 'assistant')
+          .map((m: { role: string; content?: unknown }) => ({
+            role: (m.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
+            content: typeof m.content === 'string' ? m.content : '',
+          }));
+      transcriptTurns.push({ role: 'assistant', content: '', toolCalls: [] });
       const ctx: ToolContext = {
         doc,
         plugins,
+        messages: transcriptTurns,
         simContext: body.simContext ? {
           nodeVoltage: Float64Array.from(body.simContext.nodeVoltage),
           branchCurrent: Float64Array.from(body.simContext.branchCurrent),
@@ -654,6 +669,12 @@ export class TurnManager {
 
           for (const tc of result.tool_calls) {
             if (turn.abort.signal.aborted) throw abortError();
+            // Sync the in-progress transcript entry so transcript.export (or
+            // any other tool) sees the current turn's tool calls so far.
+            const cur = ctx.messages?.[ctx.messages.length - 1];
+            if (cur && cur.role === 'assistant' && cur.toolCalls) {
+              cur.toolCalls = executedToolCalls.map((c: { name: string; ok?: boolean }) => ({ name: c.name, ok: !!c.ok }));
+            }
             const tool = TOOLS_BY_NAME.get(tc.function.name);
             if (!tool) {
               const errMsg = `Unknown tool: ${tc.function.name}`;
@@ -824,11 +845,11 @@ export class TurnManager {
             // unconfigured deployments still get concept help (mirrors the
             // non-stream route's offline:true response).
             try {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const kb = require('./knowledge/knowledge-base') as typeof import('./knowledge/knowledge-base');
+              // Static ESM import — knowledge-base is leaf data; the old lazy
+              // require() broke under ESM test runners.
               const lastUser = [...turn.params.messages].reverse().find((m) => m.role === 'user');
               const q = String(lastUser?.content ?? '').slice(0, 500);
-              const hits = kb.searchArticles(q, 3);
+              const hits = searchArticles(q, 3);
               if (hits.length > 0) {
                 const sections = hits.map((h) => `### ${h.title}\n${h.summary}\n[kb:${h.id}]`);
                 this.finalize(turn, 'done', {

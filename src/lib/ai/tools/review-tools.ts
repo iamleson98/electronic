@@ -16,6 +16,10 @@ interface DeratingRow {
   rating: string;
   marginPct: number | null;
   status: 'pass' | 'warn' | 'fail';
+  /** 'part' = rating came from the component's own parameter; 'generic' =
+   *  a conservative default (the library has no datasheet ratings, so the
+   *  row must not read as a verified part limit). */
+  ratingSource: 'part' | 'generic';
 }
 
 /** Conservative generic ratings used when the part carries no explicit one. */
@@ -74,7 +78,7 @@ export const deratingCheckTool: Tool = {
       const mlccTempFactor = tAmb <= 85 ? 1 : Math.max(0.5, 1 - 0.4 * (tAmb - 85) / (125 - 85));
       const siliconTempFactor = tAmb <= 25 ? 1 : Math.max(0, 1 - (tAmb - 25) / (150 - 25));
       const rows: DeratingRow[] = [];
-      const push = (component: string, type: string, check: string, actual: number, rating: number, unit: string, lim: number) => {
+      const push = (component: string, type: string, check: string, actual: number, rating: number, unit: string, lim: number, source: 'part' | 'generic') => {
         const frac = rating > 0 ? actual / rating : Infinity;
         rows.push({
           component, type, check,
@@ -82,6 +86,7 @@ export const deratingCheckTool: Tool = {
           rating: `${rating} ${unit}`,
           marginPct: Number.isFinite(frac) ? Math.round((1 - frac) * 100) : null,
           status: frac <= lim ? 'pass' : frac <= 1 ? 'warn' : 'fail',
+          ratingSource: source,
         });
       };
       for (const comp of doc.components) {
@@ -94,41 +99,48 @@ export const deratingCheckTool: Tool = {
         if (comp.type === 'resistor') {
           const v = Math.abs(vOf('a') - vOf('b'));
           const p = v * i;
-          const pRated = ((comp.parameters.powerRating as number) ?? GENERIC_RATINGS.resistorPower) * resistorTempFactor;
-          push(label, comp.type, `power@${tAmb}°C`, p, pRated, 'W', pLim);
+          const partRating = comp.parameters.powerRating as number | undefined;
+          const pRated = (partRating ?? GENERIC_RATINGS.resistorPower) * resistorTempFactor;
+          push(label, comp.type, `power@${tAmb}°C`, p, pRated, 'W', pLim, partRating != null ? 'part' : 'generic');
         } else if (comp.type === 'capacitor') {
           const v = Math.abs(vOf('a') - vOf('b'));
-          const vRated = ((comp.parameters.voltageRating as number) ?? GENERIC_RATINGS.capacitorVoltage) * mlccTempFactor;
-          push(label, comp.type, `voltage@${tAmb}°C`, v, vRated, 'V', vLim);
+          const partRating = comp.parameters.voltageRating as number | undefined;
+          const vRated = (partRating ?? GENERIC_RATINGS.capacitorVoltage) * mlccTempFactor;
+          push(label, comp.type, `voltage@${tAmb}°C`, v, vRated, 'V', vLim, partRating != null ? 'part' : 'generic');
         } else if (comp.type === 'led') {
-          push(label, comp.type, 'current', i, GENERIC_RATINGS.ledCurrent, 'A', iLim);
+          const partRating = comp.parameters.maxCurrent as number | undefined;
+          push(label, comp.type, 'current', i, partRating ?? GENERIC_RATINGS.ledCurrent, 'A', iLim, partRating != null ? 'part' : 'generic');
         } else if (comp.type === 'diode' || comp.type === 'zener' || comp.type === 'schottky') {
-          const iRated = (comp.parameters.currentRating as number) ?? GENERIC_RATINGS.diodeCurrent;
-          push(label, comp.type, 'current', i, iRated, 'A', iLim);
+          const partRating = comp.parameters.currentRating as number | undefined;
+          push(label, comp.type, 'current', i, partRating ?? GENERIC_RATINGS.diodeCurrent, 'A', iLim, partRating != null ? 'part' : 'generic');
         } else if (comp.type === 'npn' || comp.type === 'pnp' || comp.type === 'nmos' || comp.type === 'pmos') {
           const cOrD = comp.type === 'npn' ? 'c' : comp.type === 'pnp' ? 'c' : 'd';
           const eOrS = comp.type === 'npn' ? 'e' : comp.type === 'pnp' ? 'e' : 's';
           const v = Math.abs(vOf(cOrD) - vOf(eOrS));
-          const vRated = ((comp.parameters.vceMax as number) ?? (comp.parameters.vdsMax as number) ?? 40);
-          push(label, comp.type, 'voltage', v, vRated, 'V', vLim);
-          const iRated = (((comp.parameters.icMax as number) ?? (comp.parameters.idMax as number) ?? 0.5)) * siliconTempFactor;
-          push(label, comp.type, `current@${tAmb}°C`, i, iRated, 'A', iLim);
-          const pRated = (((comp.parameters.powerMax as number) ?? 0.5)) * siliconTempFactor;
-          push(label, comp.type, `power@${tAmb}°C`, v * i, pRated, 'W', pLim);
+          const vPart = (comp.parameters.vceMax as number | undefined) ?? (comp.parameters.vdsMax as number | undefined);
+          push(label, comp.type, 'voltage', v, vPart ?? 40, 'V', vLim, vPart != null ? 'part' : 'generic');
+          const iPart = (comp.parameters.icMax as number | undefined) ?? (comp.parameters.idMax as number | undefined);
+          push(label, comp.type, `current@${tAmb}°C`, i, (iPart ?? 0.5) * siliconTempFactor, 'A', iLim, iPart != null ? 'part' : 'generic');
+          const pPart = comp.parameters.powerMax as number | undefined;
+          push(label, comp.type, `power@${tAmb}°C`, v * i, (pPart ?? 0.5) * siliconTempFactor, 'W', pLim, pPart != null ? 'part' : 'generic');
         } else if (comp.type === 'fuse') {
           const iRated = (comp.parameters.current as number) ?? 1;
-          push(label, comp.type, 'current', i, iRated, 'A', 1);
+          push(label, comp.type, 'current', i, iRated, 'A', 1, 'part');
         }
       }
       const fails = rows.filter((r) => r.status === 'fail').length;
       const warns = rows.filter((r) => r.status === 'warn').length;
+      const genericRated = rows.filter((r) => r.ratingSource === 'generic').length;
+      const caveat = genericRated > 0
+        ? ` — ${genericRated} check(s) used GENERIC default ratings (no part-specific rating in this library); verify against the datasheet before production`
+        : '';
       return {
         ok: true,
         result: {
           rows,
           ambientTemp: tAmb,
           tempFactors: { resistor: +resistorTempFactor.toFixed(3), mlcc: +mlccTempFactor.toFixed(3), silicon: +siliconTempFactor.toFixed(3) },
-          summary: fails > 0 ? `${fails} over-stressed, ${warns} marginal` : warns > 0 ? `${warns} marginal, none over-stressed` : 'All parts within derating limits',
+          summary: (fails > 0 ? `${fails} over-stressed, ${warns} marginal` : warns > 0 ? `${warns} marginal, none over-stressed` : 'All parts within derating limits') + caveat,
           overall: fails > 0 ? 'fail' : warns > 0 ? 'warn' : 'pass',
         },
       };

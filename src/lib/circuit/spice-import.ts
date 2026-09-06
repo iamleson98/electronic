@@ -27,6 +27,7 @@
 import type { CircuitComponent, Wire, CircuitDocument } from './types';
 import { getPlugin } from './registry';
 import './components'; // register all built-in plugins (idempotent)
+import { parseSpiceValue as canonicalParseSpiceValue } from './spice';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Value parsing — handles SPICE engineering suffixes (case-insensitive)
@@ -52,9 +53,10 @@ export function parseSpiceValue(raw: string): number {
   if (typeof raw !== 'string') return Number(raw) || 0;
   // Single canonical parser lives in spice.ts (compound suffixes, µ, mil,
   // meg-vs-m). This wrapper keeps the old import path working.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const canonical = require('./spice') as typeof import('./spice');
-  return canonical.parseSpiceValue(raw);
+  // Static ESM import: the lazy require() below broke under ESM test runners
+  // (vitest: "require is not defined") — spice.ts does not import this file,
+  // so there is no cycle to avoid.
+  return canonicalParseSpiceValue(raw);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

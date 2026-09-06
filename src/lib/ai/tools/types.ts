@@ -43,6 +43,15 @@ export interface ToolContext {
    * library to unblock the AI.
    */
   missingComponents?: Set<string>;
+  /**
+   * Conversation snapshot for transcript.export: the client's prior
+   * user/assistant turns (role + content) plus, as the turn progresses,
+   * tool-call summaries appended by the turn runner. Populated by the turn
+   * runner from the request body — the tool itself must NOT reach into a
+   * client-side store (the server has its own empty module instance, so
+   * that path always read an empty conversation).
+   */
+  messages?: { role: 'user' | 'assistant'; content: string; toolCalls?: { name: string; ok: boolean }[] }[];
 }
 
 export interface ToolResult {

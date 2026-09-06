@@ -1146,7 +1146,73 @@ export const usePCB = create<PCBState>((set, get) => ({
     // are a fab note — recorded in the job, not geometry).
     const width = c * s.board.width + (c - 1) * gap;
     const height = r * s.board.height + (r - 1) * gap;
-    set({ board: { ...s.board, width, height } });
+    // REAL replication: every copy gets cloned footprints/traces/vias/pours/
+    // keepouts + padNets, offset by (col·(w+gap), row·(h+gap)). The old
+    // implementation only enlarged the outline — Gerbers showed one lonely
+    // circuit on a big blank panel.
+    if (r * c > 1) {
+      const bw = s.board.width;
+      const bh = s.board.height;
+      const footprints = [...s.footprints];
+      const traces = [...s.traces];
+      const vias = [...s.vias];
+      const copperPours = [...s.copperPours];
+      const keepouts = [...s.keepouts];
+      const padNets = new Map(s.padNets);
+      for (let row = 0; row < r; row++) {
+        for (let col = 0; col < c; col++) {
+          if (row === 0 && col === 0) continue; // the original board stays
+          const dx = col * (bw + gap);
+          const dy = row * (bh + gap);
+          const sfx = `#p${row}.${col}`;
+          for (const fp of s.footprints) {
+            footprints.push({
+              ...fp,
+              id: `${fp.id}${sfx}`,
+              componentId: `${fp.componentId}${sfx}`,
+              position: { x: fp.position.x + dx, y: fp.position.y + dy },
+              pads: fp.pads.map((p) => ({
+                ...p,
+                id: `${p.id}${sfx}`,
+                componentId: `${p.componentId}${sfx}`,
+                position: { x: p.position.x + dx, y: p.position.y + dy },
+                polygon: p.polygon?.map((v) => ({ ...v })),
+              })),
+            });
+          }
+          for (const [k, v] of s.padNets) padNets.set(`${k}${sfx}`, v);
+          for (const t of s.traces) {
+            traces.push({
+              ...t,
+              id: `${t.id}${sfx}`,
+              segments: t.segments.map((g) => ({
+                start: { x: g.start.x + dx, y: g.start.y + dy },
+                end: { x: g.end.x + dx, y: g.end.y + dy },
+                width: g.width,
+              })),
+              pairedTraceId: t.pairedTraceId ? `${t.pairedTraceId}${sfx}` : undefined,
+            });
+          }
+          for (const v of s.vias) {
+            vias.push({ ...v, id: `${v.id}${sfx}`, position: { x: v.position.x + dx, y: v.position.y + dy } });
+          }
+          for (const p of s.copperPours) {
+            copperPours.push({
+              ...p,
+              cells: p.cells.map((cell) => ({ x: cell.x + dx, y: cell.y + dy })),
+              thermalPads: p.thermalPads?.map((tp) => ({ ...tp, pos: { x: tp.pos.x + dx, y: tp.pos.y + dy } })),
+            });
+          }
+          for (const k of s.keepouts) {
+            keepouts.push({ ...k, id: `${k.id}${sfx}`, rect: { ...k.rect, x: k.rect.x + dx, y: k.rect.y + dy } });
+          }
+        }
+      }
+      const ratsnest = computeRatsnestFor(footprints, padNets, traces, vias);
+      set({ board: { ...s.board, width, height }, footprints, traces, vias, copperPours, keepouts, padNets, ratsnest });
+    } else {
+      set({ board: { ...s.board, width, height } });
+    }
     return { width, height, copies: r * c };
   },
 

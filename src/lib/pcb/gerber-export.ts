@@ -575,6 +575,20 @@ export function exportGerberJobFile(
 // the need to interpret layer filenames.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Canonical physical stack positions (1-based) for the copper layers.
+ *  Used to order an enabled layer set and to number X2 FileFunction
+ *  attributes — the old hardcode (top→L1, bottom→L2, inner→replace) made
+ *  inner1 claim L1 (top's number) and bottom claim L2 even on 4-layer
+ *  boards where it is physically L4. */
+const COPPER_STACK_POS: Record<string, number> = {
+  top: 1, inner1: 2, inner2: 3, inner3: 4, inner4: 5, bottom: 6,
+};
+
+/** Sort an enabled copper layer set into physical top→bottom order. */
+export function sortCopperLayers(layers: string[]): string[] {
+  return [...layers].sort((a, b) => (COPPER_STACK_POS[a] ?? 99) - (COPPER_STACK_POS[b] ?? 99));
+}
+
 export function exportGerberX2Copper(
   layer: 'top' | 'bottom' | 'inner1' | 'inner2' | 'inner3' | 'inner4',
   footprints: Footprint[],
@@ -583,6 +597,7 @@ export function exportGerberX2Copper(
   board: BoardOutline,
   pours?: CopperPour[],
   teardrops?: { position: { x: number; y: number }; points: { x: number; y: number }[] }[],
+  layerIndex?: number,
 ): string {
   const lines: string[] = [];
   const fmt = (n: number) => {
@@ -597,7 +612,12 @@ export function exportGerberX2Copper(
   lines.push('%TF.GenerationSoftware,CircuitLab,v1.0*%');
   lines.push(`%TF.CreationDate,${new Date().toISOString()}*%`);
   lines.push(`%TF.ProjectId,CircuitLab-PCB,rev1,*%`);
-  const layerNum = layer === 'top' ? 'L1' : layer === 'bottom' ? 'L2' : layer.replace('inner', 'L');
+  // X2 layer number: position within the ENABLED stack when known (a
+  // 4-layer board's bottom is L4), else the canonical full-stack position
+  // (collision-free even without stack info).
+  const layerNum = layerIndex != null && layerIndex >= 1
+    ? `L${layerIndex}`
+    : `L${COPPER_STACK_POS[layer] ?? 1}`;
   lines.push(`%TF.FileFunction,Copper,${layerNum}*%`);
   lines.push('%TF.FilePolarity,Positive*%');
   lines.push('%TF.SameCoordinates*%');
@@ -755,10 +775,12 @@ export function exportAllGerbersX2(
   const files: { filename: string; content: string }[] = [];
   const layers = opts?.layers ?? ['top', 'bottom'];
   const teardropFlashes = (opts?.teardrops ?? []).filter((t) => (layers as string[]).includes(t.layer));
+  // Physical stack order → 1-based X2 layer numbers (top=L1 … last=L<N>).
+  const stack = sortCopperLayers(layers as string[]);
   for (const layer of layers) {
     files.push({
       filename: `${layer}_copper.gbr`,
-      content: exportGerberX2Copper(layer, footprints, traces, vias, board, pours, teardropFlashes.filter((t) => t.layer === layer)),
+      content: exportGerberX2Copper(layer, footprints, traces, vias, board, pours, teardropFlashes.filter((t) => t.layer === layer), stack.indexOf(layer) + 1),
     });
   }
   files.push({ filename: 'top_soldermask.gbr', content: exportGerberSolderMask('top', footprints, board) });

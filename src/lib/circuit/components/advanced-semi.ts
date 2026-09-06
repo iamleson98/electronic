@@ -105,7 +105,7 @@ export const diodeShockley: ComponentPlugin = {
     // else sim temp) so .temp sweeps move the Shockley curve.
     const simTemp = deviceTemp(sim, comp);
     const Vt = thermalVoltage(simTemp);
-    const IsT = tempScaleIs(Is, 27, simTemp);
+    const IsT = tempScaleIs(Is, simTemp, 27);
     const vscale = N * Vt;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('dio', comp, a, k);

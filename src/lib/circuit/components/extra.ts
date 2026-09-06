@@ -121,9 +121,15 @@ const pnp: ComponentPlugin = {
     sys.stampCCCS(e, c, ibBranch, hfe);
     st[key + '_branch'] = ibBranch;
     // Saturation clamp: only when there's actual collector current.
+    // Thevenin to Vec(sat) — mirror of the NPN fix: conductance G in
+    // parallel with a current source G·vecSat (injected into the emitter)
+    // holds Vec ≈ vecSat. The previous bare 100S conductance shorted the
+    // clamp to 0V, forcing Vec ≈ Ic/100 (~1mV @ 100mA) instead of ~0.2V.
     const prevIc = hfe * prevIb;
     if (prevIc > 1e-9 && vec < vecSat) {
-      sys.stampConductance(e, c, 100);
+      const gSat = 100;
+      sys.stampConductance(e, c, gSat);
+      sys.stampCurrentSource(c, e, vecSat * gSat);
     }
     // Reverse-Vec protection (mirror of NPN fix): if Vec goes negative
     // (collector above emitter — PNP reverse-active region), clamp so the

@@ -977,25 +977,12 @@ function computeDescriptorPoles(
       method: 'static-eig',
     };
   }
-  // Descriptor solve: our C block is DIAGONAL by construction, so when
-  // algebraic rows exist (source constraints, unconstrained nodes) the Schur
-  // reduction below is EXACT (Schur complement preserves finite eigenvalues)
-  // and runs on the proven QR solver. QZ-lite's implicit iterations mistake
-  // algebraic rows for dynamics on some topologies (series RLC returned
-  // right-half-plane garbage while parallel/RC were exact) and its
-  // determinant-based cross-check cannot discriminate (det is dominated by
-  // the large singular values — true and spurious poles differ by <100×).
-  // So: Schur whenever algebraic rows exist; QZ only for fully-dynamic
-  // descriptors (no infinite eigenvalues to deflate).
-  let hasAlgebraic = false;
-  for (let i = 0; i < size; i++) {
-    let rowNz = false;
-    for (let j = 0; j < size; j++) {
-      if (Math.abs(C[i][j]) > 1e-300) { rowNz = true; break; }
-    }
-    if (!rowNz) { hasAlgebraic = true; break; }
-  }
-  const eig = hasAlgebraic ? schurReducedPoles(G, C) : qzEigenvalues(G, C);
+  // Descriptor solve. The C block is NOT diagonal in general — floating
+  // capacitors stamp off-diagonal entries (C[a][b] = C[b][a] = −C). The
+  // Schur/reverse-pencil solver below handles that exactly and falls back to
+  // QZ-lite only when the reduced G is singular. (QZ-lite's implicit
+  // iterations mistake algebraic rows for dynamics on some topologies.)
+  const eig = schurReducedPoles(G, C);
   const polesRaw = eig.length > 0 ? eig : qzEigenvalues(G, C);
   return {
     // Keep finite poles; drop huge algebraic artifacts (|s| > 1e12 — source
@@ -1010,71 +997,133 @@ function computeDescriptorPoles(
 }
 
 /**
- * Exact finite poles via Schur reduction. Our C block is DIAGONAL by
- * construction (capacitor shunts on nodal rows, −L on inductor branch rows),
- * so variables split cleanly into dynamic rows (C_ii ≠ 0) and algebraic rows
- * (C row all zero). Eliminating the algebraic variables:
- *   G_red = G_dd − G_da·G_aa⁻¹·G_ad,   det(G_red + s·C_dd) = 0
- * with diagonal nonsingular C_dd — a STANDARD eigenproblem
- * s = −eig(C_dd⁻¹·G_red) solved by the proven QR solver. This preserves the
- * finite eigenvalues exactly (Schur complement) while QZ-lite's implicit
- * iterations can mistake algebraic rows for dynamics. Falls back to QZ-lite
- * output when G_aa is singular.
+ * Exact finite poles for det(G + s·C) = 0.
+ *
+ * The C block is NOT diagonal in general: a capacitor floating between two
+ * non-ground nodes stamps C[a][a]+=C, C[b][b]+=C, C[a][b]−=C, C[b][a]−=C.
+ * The previous implementation assumed diagonal C and divided rows by
+ * diag(C) only — poles were ~2× wrong for ANY AC-coupled network (and the
+ * no-algebraic branch contained a no-op ternary that computed the same
+ * wrong quotient twice).
+ *
+ * Method:
+ *   1. Split variables into dynamic (C row OR column nonzero) and algebraic
+ *      (no dynamics anywhere). Eliminate the algebraic block via the Schur
+ *      complement: Gred = G_dd − G_da·G_aa⁻¹·G_ad, Cred = C_dd. This is exact
+ *      — the algebraic variables' columns in C are zero, so they carry no
+ *      s-dependence and deflation preserves the finite pencil roots.
+ *   2. Reverse-pencil transform on the reduced pencil det(Gred + s·Cred) = 0:
+ *      for invertible Gred, det(I + s·Gred⁻¹·Cred) = 0, so the poles are
+ *      s = −1/λ_i with λ_i = eig(Gred⁻¹·Cred). This handles off-diagonal AND
+ *      singular Cred (a floating cap's common mode → λ = 0 → pole at
+ *      infinity, filtered by the caller's |s| < 1e12 cap) and is identical
+ *      to the old diagonal-scaled result when Cred happens to be diagonal.
+ *   3. QZ-lite fallback when G_aa or Gred is singular.
  */
 function schurReducedPoles(G: number[][], C: number[][]): { re: number; im: number }[] {
   const n = G.length;
+  // Dynamic variables: C row OR column nonzero.
+  const isDyn = new Array<boolean>(n).fill(false);
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      if (Math.abs(C[i][j]) > 1e-300) { isDyn[i] = true; isDyn[j] = true; }
+    }
+  }
   const dyn: number[] = [];
   const alg: number[] = [];
-  for (let i = 0; i < n; i++) {
-    let rowNz = false;
-    for (let j = 0; j < n; j++) {
-      if (Math.abs(C[i][j]) > 1e-300) { rowNz = true; break; }
-    }
-    (rowNz ? dyn : alg).push(i);
-  }
+  for (let i = 0; i < n; i++) (isDyn[i] ? dyn : alg).push(i);
   if (dyn.length === 0) return [];
-  if (alg.length === 0) {
-    // No algebraic rows — plain generalized problem with nonsingular
-    // diagonal C: s = −eig(C⁻¹G) directly.
-    const M = G.map((row, i) => row.map((g, j) => (i === j ? g / C[i][i] : g / C[i][i])));
-    return qrEigenvalues(M).map((p) => ({ re: -p.re, im: -p.im }));
+
+  let Gred: number[][] = dyn.map((r) => dyn.map((c) => G[r][c]));
+  const Cred: number[][] = dyn.map((r) => dyn.map((c) => C[r][c]));
+  if (alg.length > 0) {
+    const na = alg.length;
+    // Gauss-Jordan on [G_aa | G_ad | I] → G_aa⁻¹·G_ad (and G_aa⁻¹ implicitly).
+    const aug: number[][] = alg.map((r, i) => [
+      ...alg.map((c) => G[r][c]),
+      ...dyn.map((c) => G[r][c]),
+      ...alg.map((_, k) => (k === i ? 1 : 0)),
+    ]);
+    let maxAbs = 0;
+    for (let i = 0; i < na; i++) for (let j = 0; j < na; j++) maxAbs = Math.max(maxAbs, Math.abs(aug[i][j]));
+    for (let k = 0; k < na; k++) {
+      let piv = k;
+      let pivMag = 0;
+      for (let i = k; i < na; i++) {
+        const m = Math.abs(aug[i][k]);
+        if (m > pivMag) { pivMag = m; piv = i; }
+      }
+      if (pivMag < 1e-13 * (1 + maxAbs)) return qzEigenvalues(G, C); // singular — QZ fallback
+      if (piv !== k) [aug[k], aug[piv]] = [aug[piv], aug[k]];
+      const d = aug[k][k];
+      for (let j = 0; j < aug[k].length; j++) aug[k][j] /= d;
+      for (let i = 0; i < na; i++) {
+        if (i === k) continue;
+        const f = aug[i][k];
+        if (f === 0) continue;
+        for (let j = 0; j < aug[i].length; j++) aug[i][j] -= f * aug[k][j];
+      }
+    }
+    // Gred = G_dd − G_da·(G_aa⁻¹·G_ad); the solved block starts at col na.
+    Gred = dyn.map((r) => dyn.map((c, j) => {
+      let v = G[r][c];
+      for (let k = 0; k < na; k++) v -= G[r][alg[k]] * aug[k][na + j];
+      return v;
+    }));
   }
+  // Reverse pencil: M = Gred⁻¹·Cred → poles s = −1/λ(M).
+  const Ginv = invertDense(Gred);
+  if (!Ginv) return qzEigenvalues(G, C);
   const nd = dyn.length;
-  const na = alg.length;
-  // G_aa⁻¹·G_ad and G_aa⁻¹ via Gauss-Jordan on [G_aa | G_ad | I].
-  const aug: number[][] = alg.map((r, i) => [
-    ...alg.map((c) => G[r][c]),
-    ...dyn.map((c) => G[r][c]),
-    ...alg.map((_, k) => (k === i ? 1 : 0)),
+  const M: number[][] = Array.from({ length: nd }, () => new Array(nd).fill(0));
+  for (let i = 0; i < nd; i++) {
+    for (let j = 0; j < nd; j++) {
+      let v = 0;
+      for (let k = 0; k < nd; k++) v += Ginv[i][k] * Cred[k][j];
+      M[i][j] = v;
+    }
+  }
+  return qrEigenvalues(M)
+    .filter((p) => {
+      const mag2 = p.re * p.re + p.im * p.im;
+      return mag2 > 1e-300; // λ = 0 → pole at infinity; caller's |s|<1e12 filter drops it
+    })
+    .map((p) => {
+      const mag2 = p.re * p.re + p.im * p.im;
+      // s = −1/λ = −conj(λ)/|λ|²
+      return { re: -p.re / mag2, im: p.im / mag2 };
+    });
+}
+
+/** Dense matrix inverse via Gauss-Jordan with partial pivoting.
+ *  Returns null when (near-)singular. */
+function invertDense(M: number[][]): number[][] | null {
+  const n = M.length;
+  const aug: number[][] = M.map((row, i) => [
+    ...row,
+    ...Array.from({ length: n }, (_, k) => (k === i ? 1 : 0)),
   ]);
-  for (let k = 0; k < na; k++) {
+  let maxAbs = 0;
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) maxAbs = Math.max(maxAbs, Math.abs(M[i][j]));
+  for (let k = 0; k < n; k++) {
     let piv = k;
     let pivMag = 0;
-    for (let i = k; i < na; i++) {
+    for (let i = k; i < n; i++) {
       const m = Math.abs(aug[i][k]);
       if (m > pivMag) { pivMag = m; piv = i; }
     }
-    if (pivMag < 1e-14) return qzEigenvalues(G, C); // singular — QZ fallback
+    if (pivMag < 1e-13 * (1 + maxAbs)) return null; // (near-)singular
     if (piv !== k) [aug[k], aug[piv]] = [aug[piv], aug[k]];
     const d = aug[k][k];
     for (let j = 0; j < aug[k].length; j++) aug[k][j] /= d;
-    for (let i = 0; i < na; i++) {
+    for (let i = 0; i < n; i++) {
       if (i === k) continue;
       const f = aug[i][k];
       if (f === 0) continue;
       for (let j = 0; j < aug[i].length; j++) aug[i][j] -= f * aug[k][j];
     }
   }
-  // G_red = G_dd − G_da·(G_aa⁻¹·G_ad); the solved block starts at col na.
-  const Gred: number[][] = dyn.map((r, i) => dyn.map((c, j) => {
-    let v = G[r][c];
-    for (let k = 0; k < na; k++) v -= G[r][alg[k]] * aug[k][na + j];
-    return v;
-  }));
-  void nd;
-  // s = −eig(C_dd⁻¹·G_red), C_dd diagonal.
-  const M = Gred.map((row, i) => row.map((v) => v / C[dyn[i]][dyn[i]]));
-  return qrEigenvalues(M).map((p) => ({ re: -p.re, im: -p.im }));
+  return aug.map((row) => row.slice(n));
 }
 
 /**

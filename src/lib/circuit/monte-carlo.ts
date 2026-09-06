@@ -134,10 +134,15 @@ export function runMonteCarlo(
     resistor: 0.05, capacitor: 0.05, inductor: 0.05, potentiometer: 0.1,
     led: 0.1, diode: 0.1, zener: 0.05,
   };
+  // Auto-tolerance mapping: passives/semiconductors only. SOURCES are the
+  // exact stimulus of the experiment — perturbing them by default measures
+  // input variation, not component spread, and swamps the real tolerance
+  // signal (a divider's output spread becomes the supply's ±5%, not the
+  // resistors'). Users can still explicitly list a source in
+  // config.tolerances to model an actual noisy supply.
   const PARAM_BY_TYPE: Record<string, string> = {
     resistor: 'resistance', capacitor: 'capacitance', inductor: 'inductance',
-    potentiometer: 'resistance', dcVoltage: 'voltage', acVoltage: 'amplitude',
-    currentSource: 'current', led: 'seriesR', diode: 'onR', zener: 'zenerV',
+    potentiometer: 'resistance', led: 'seriesR', diode: 'onR', zener: 'zenerV',
   };
   const tolerances: MonteCarloTolerance[] = (config.tolerances && config.tolerances.length > 0)
     ? config.tolerances

@@ -67,27 +67,61 @@ export function parseKiCadFootprint(content: string): ParsedKiCadFootprint | nul
     const modelM = content.match(/\(model\s+"([^"]+)"\)/);
     if (modelM) model3d = modelM[1];
 
-    // Parse pads: (pad N smd/through_hole rect/circle/oval (at X Y) (size W H) (drill D)? (layers ...))
-    const padRegex = /\(pad\s+(\S+)\s+(smd|through_hole|np_thru_hole)\s+(rect|circle|oval|roundrect|custom)\s+\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)\s+\(size\s+([-\d.]+)\s+([-\d.]+)\)([^)]*\(layers\s+([^)]*)\)[^)]*)?/g;
-    let padMatch;
-    while ((padMatch = padRegex.exec(content)) !== null) {
-      const padNum = padMatch[1];
-      const padType = padMatch[2]; // smd, through_hole
-      const padShape = padMatch[3] as 'rect' | 'circle' | 'oval';
-      const x = parseFloat(padMatch[4]);
-      const y = parseFloat(padMatch[5]);
-      const w = parseFloat(padMatch[7]);
-      const h = parseFloat(padMatch[8]);
-      const layersStr = padMatch[10] ?? '';
-      // Drill: (drill D) or (drill oval W H)
-      const drillM = padMatch[0].match(/\(drill\s+([-\d.]+)/);
-      const drill = drillM ? parseFloat(drillM[1]) : (padType === 'through_hole' ? Math.min(w, h) * 0.5 : 0);
+    // Parse pads. Real KiCad s-expressions:
+    //   (pad "1" thru_hole circle (at -1.27 0) (size 1.7 1.7) (drill 1.0) (layers *.Cu *.Mask))
+    // The previous single-regex approach had two defects:
+    //   1. the pad TYPE alternation listed `through_hole` — but KiCad's actual
+    //      keyword is `thru_hole`, so every THT pad in a real file was silently
+    //      skipped (only hand-written `through_hole` strings ever matched);
+    //   2. the drill was searched in match[0], which ends right after
+    //      `(size W H)` — the `(drill D)` token follows it, so the capture was
+    //      inert and drills always fell back to the min(w,h)/2 guess.
+    // Robust approach: split the content at `(pad ` boundaries and parse each
+    // segment's fields independently (order-insensitive, quote-tolerant).
+    const padStartIdx: number[] = [];
+    const padStartRe = /\(pad\s/g;
+    let padStartM: RegExpExecArray | null;
+    while ((padStartM = padStartRe.exec(content)) !== null) {
+      padStartIdx.push(padStartM.index);
+    }
+    for (let i = 0; i < padStartIdx.length; i++) {
+      const segStart = padStartIdx[i];
+      // Segment runs to the next pad (bounded) — pad fields never nest another pad.
+      const segEnd = i + 1 < padStartIdx.length ? padStartIdx[i + 1] : Math.min(content.length, segStart + 4000);
+      const seg = content.slice(segStart, segEnd);
+
+      // (pad <name|quoted> <type> <shape> ...) — name may be quoted ("1", "A1").
+      const headM = seg.match(/\(pad\s+(?:"([^"]*)"|'([^']*)'|(\S+))\s+(smd|thru_hole|through_hole|np_thru_hole|connect)\s+(rect|circle|oval|roundrect|custom|trapezoid)/);
+      if (!headM) continue;
+      const padNum = headM[1] ?? headM[2] ?? headM[3];
+      const padType = headM[4] as 'smd' | 'thru_hole' | 'through_hole' | 'np_thru_hole' | 'connect';
+      const padShape = headM[5];
+
+      const atM = seg.match(/\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)/);
+      if (!atM) continue;
+      const x = parseFloat(atM[1]);
+      const y = parseFloat(atM[2]);
+
+      const sizeM = seg.match(/\(size\s+([-\d.]+)\s+([-\d.]+)\)/);
+      const w = sizeM ? parseFloat(sizeM[1]) : 1;
+      const h = sizeM ? parseFloat(sizeM[2]) : 1;
+
+      const layersM = seg.match(/\(layers\s+([^)]*)\)/);
+      const layersStr = layersM ? layersM[1] : '';
+
+      // Drill: (drill D), (drill oval W H), or (drill D (offset X Y)) — the
+      // first number after the keyword is always the drill diameter.
+      const drillM = seg.match(/\(drill(?:\s+oval)?\s+([-\d.]+)/);
+      const isTht = padType !== 'smd';
+      const drill = drillM
+        ? parseFloat(drillM[1])
+        : (isTht ? Math.min(w, h) * 0.5 : 0);
 
       // Map shape
       let shape: 'circle' | 'rect' | 'oval' = 'rect';
       if (padShape === 'circle') shape = 'circle';
       else if (padShape === 'oval') shape = 'oval';
-      // roundrect/custom → rect
+      // roundrect/custom/trapezoid → rect
 
       pads.push({
         terminalId: padNum,
@@ -99,7 +133,6 @@ export function parseKiCadFootprint(content: string): ParsedKiCadFootprint | nul
         paste: /Paste/.test(layersStr),
         mask: /Mask/.test(layersStr),
       });
-      void padType;
     }
 
     // Parse fp_line with layer: (fp_line (start X1 Y1) (end X2 Y2) (layer L) (width W))

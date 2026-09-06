@@ -1,7 +1,7 @@
 // Additional manufacturing output formats: BOM, IPC-2581, ODB++, DXF, SVG, PDF, STEP, VRML
 
 import type { Footprint, Trace, Via, BoardOutline } from './types';
-import type { PartInfo } from './part-database';
+import { partDatabase, type PartInfo } from './part-database';
 
 // ===== BOM (CSV) =====
 // Joins the part database for MPN/manufacturer/distributor/price columns so
@@ -30,11 +30,11 @@ export function exportBOM(footprints: Footprint[]): string {
 }
 
 function findPartForType(type: string): PartInfo | undefined {
-  // Lazy import avoids a hard dependency cycle (part-database is leaf data).
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const db = require('./part-database') as typeof import('./part-database');
+  // part-database is leaf data (zero imports) — a static ESM import is safe.
+  // The previous lazy require() broke under ESM test runners (vitest:
+  // "require is not defined"), failing the whole BOM test group.
   const lower = type.toLowerCase();
-  return db.partDatabase.find((p) =>
+  return partDatabase.find((p) =>
     p.mpn.toLowerCase().includes(lower) ||
     p.description.toLowerCase().includes(lower) ||
     p.category === lower,

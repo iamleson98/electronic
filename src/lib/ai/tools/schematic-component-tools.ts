@@ -81,10 +81,17 @@ const addComponentTool: Tool = {
       const def = plugin.parameters.find((p) => p.key === k);
       overrides[k] = def ? coerceParamValue(def, v, defaults[k]) : v;
     }
+    // Models occasionally send x/y as strings or null — coerce with a clear
+    // failure message so the model can retry with numbers (a malformed
+    // position would later crash PropertyPanel's position.x.toFixed).
+    const nx = Number(args.x), ny = Number(args.y);
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) {
+      return { ok: false, error: `Invalid position: x and y must be numbers (got x=${JSON.stringify(args.x)}, y=${JSON.stringify(args.y)}).` };
+    }
     const comp: CircuitComponent = {
       id,
       type: args.type,
-      position: { x: args.x, y: args.y },
+      position: { x: nx, y: ny },
       rotation: 0,
       parameters: { ...defaults, ...overrides },
     };

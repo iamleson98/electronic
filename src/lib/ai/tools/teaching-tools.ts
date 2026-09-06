@@ -22,6 +22,7 @@ import {
 } from '../knowledge/knowledge-base';
 import { getAllPlugins } from '@/lib/circuit/registry';
 import type { Tool, ToolContext } from './types';
+import { partDatabase } from '@/lib/pcb/part-database';
 import {
   calcOhmsLaw,
   calcLedResistor,
@@ -491,11 +492,9 @@ export function recommendComponents(useCase: string): Recommendation[] {
   }
   const plugins = new Map(getAllPlugins().map((p) => [p.type, p]));
   // Best-effort part-database join for footprint/price/datasheet.
-  let partDb: Array<{ mpn: string; manufacturer: string; description: string; package: string; category: string; digikeyPN?: string; mouserPN?: string; lcscPN?: string; datasheet?: string; unitPrice?: number }> = [];
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    partDb = (require('@/lib/pcb/part-database') as typeof import('@/lib/pcb/part-database')).partDatabase;
-  } catch { /* part db unavailable — recommendations still work without it */ }
+  // Static ESM import (part-database is leaf data — no cycle); the old lazy
+  // require() broke under ESM test runners.
+  const partDb: Array<{ mpn: string; manufacturer: string; description: string; package: string; category: string; digikeyPN?: string; mouserPN?: string; lcscPN?: string; datasheet?: string; unitPrice?: number }> = partDatabase;
   const out: Recommendation[] = [];
   for (const type of rule.want) {
     const p = plugins.get(type);

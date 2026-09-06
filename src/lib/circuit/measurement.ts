@@ -41,6 +41,18 @@ export interface MeasCommand {
   cross?: number;
   rise?: number;
   fall?: number;
+  /** SPICE TRIG/TARG clause modifiers — each side gets its own set:
+   *  `TRIG V(a) VAL=1 TD=1m RISE=2 TARG V(b) VAL=2 FALL=1`. Previously only
+   *  VAL was parsed and TD/RISE/FALL/CROSS on either clause were silently
+   *  ignored, so measurements like a delayed 2nd-crossing trigger were wrong. */
+  trigTd?: number;
+  trigRise?: number;
+  trigFall?: number;
+  trigCross?: number;
+  targTd?: number;
+  targRise?: number;
+  targFall?: number;
+  targCross?: number;
 }
 
 export interface MeasResult {
@@ -70,19 +82,6 @@ export function parseMeasLine(line: string): MeasCommand | null {
 
   const cmd: MeasCommand = { mode, name, type, expr: rest };
 
-  // TRIG-form delay: `TRIG V(a)=x TARG V(b)=y` — the TRIG keyword was
-  // consumed as the type, so the expressions are parsed from `rest` directly.
-  if (rawType === 'TRIG') {
-    const suffix = '[+-]?[\\d.]+(?:[eE][+-]?\\d+)?(?:meg|k|mil|m|u|µ|n|p|f|t|g)?s?';
-    const tm = rest.match(new RegExp(`^(\\S+)\\s*=\\s*(${suffix})\\s+TARG\\s+(\\S+)\\s*=\\s*(${suffix})`, 'i'));
-    if (tm) {
-      cmd.trigExpr = tm[1];
-      cmd.trigVal = parseNumberWithSuffix(tm[2]);
-      cmd.targExpr = tm[3];
-      cmd.targVal = parseNumberWithSuffix(tm[4]);
-    }
-  }
-
   // Extract WHEN clause (for FIND...WHEN)
   const whenMatch = rest.match(/^(.+?)\s+WHEN\s+(.+)$/i);
   if (whenMatch) {
@@ -96,11 +95,44 @@ export function parseMeasLine(line: string): MeasCommand | null {
   const toMatch = rest.match(/TO\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?(?:meg|k|mil|m|u|µ|n|p|f|t|g)?s?)/i);
   if (toMatch) cmd.toTime = parseNumberWithSuffix(toMatch[1]);
 
-  // Extract TRIG/TARG
-  const trigMatch = rest.match(/TRIG\s+(\S+)\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?(?:meg|k|mil|m|u|µ|n|p|f|t|g)?s?)/i);
-  if (trigMatch) { cmd.trigExpr = trigMatch[1]; cmd.trigVal = parseNumberWithSuffix(trigMatch[2]); }
-  const targMatch = rest.match(/TARG\s+(\S+)\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?(?:meg|k|mil|m|u|µ|n|p|f|t|g)?s?)/i);
-  if (targMatch) { cmd.targExpr = targMatch[1]; cmd.targVal = parseNumberWithSuffix(targMatch[2]); }
+  // Extract TRIG/TARG + each clause's own TD/RISE/FALL/CROSS modifiers.
+  // Clause scoping: the TRIG clause spans from its keyword (or from `rest`
+  // itself in the leading-`TRIG` form, where the keyword was consumed as the
+  // measurement TYPE) up to the TARG keyword; the TARG clause runs to the
+  // end. Handles both `.meas tran t TRIG V(a)=x TARG V(b)=y` and
+  // `.meas tran t DELAY V(out) TRIG V(in)=1 TARG V(out)=4`, with or without
+  // modifiers between VAL and TARG.
+  const targStartM = rest.match(/\btarg\b/i);
+  const trigStartIdx: number | null = rawType === 'TRIG'
+    ? 0
+    : rest.match(/\btrig\b/i)?.index ?? null;
+  if (trigStartIdx !== null && targStartM && trigStartIdx < (targStartM.index ?? Infinity)) {
+    const parseClause = (clause: string, side: 'trig' | 'targ') => {
+      const head = clause.match(/^(?:TRIG\s+|TARG\s+)?(\S+)\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?(?:meg|k|mil|m|u|µ|n|p|f|t|g)?s?)/i);
+      if (head) {
+        cmd[`${side}Expr`] = head[1];
+        cmd[`${side}Val`] = parseNumberWithSuffix(head[2]);
+      }
+      const tdM = clause.match(/\bTD\s*=\s*([+-]?[\d.]+(?:[eE][+-]?\d+)?(?:meg|k|mil|m|u|µ|n|p|f|t|g)?s?)/i);
+      if (tdM) cmd[`${side}Td`] = parseNumberWithSuffix(tdM[1]);
+      const riseM = clause.match(/\bRISE\s*=\s*(\d+)/i);
+      if (riseM) cmd[`${side}Rise`] = parseInt(riseM[1], 10);
+      const fallM = clause.match(/\bFALL\s*=\s*(\d+)/i);
+      if (fallM) cmd[`${side}Fall`] = parseInt(fallM[1], 10);
+      const crossM = clause.match(/\bCROSS\s*=\s*(\d+)/i);
+      if (crossM) cmd[`${side}Cross`] = parseInt(crossM[1], 10);
+    };
+    parseClause(rest.slice(trigStartIdx, targStartM.index), 'trig');
+    parseClause(rest.slice(targStartM.index), 'targ');
+  }
+
+  // Global CROSS/RISE/FALL (WHEN/DELAY shorthand outside the clauses)
+  const globalCross = rest.match(/(?:^|\s)CROSS\s*=\s*(\d+)/i);
+  if (globalCross) cmd.cross = parseInt(globalCross[1], 10);
+  const globalRise = rest.match(/(?:^|\s)RISE\s*=\s*(\d+)/i);
+  if (globalRise) cmd.rise = parseInt(globalRise[1], 10);
+  const globalFall = rest.match(/(?:^|\s)FALL\s*=\s*(\d+)/i);
+  if (globalFall) cmd.fall = parseInt(globalFall[1], 10);
 
   // strip modifiers from expr
   cmd.expr = cmd.expr.split(/\s+(WHEN|FROM|TO|TRIG|TARG|CROSS|RISE|FALL)/i)[0].trim();
@@ -237,12 +269,12 @@ export function execMeas(
     }
     case 'DELAY': {
       // Time between the TRIG crossing and the TARG crossing with SPICE
-      // CROSS/RISE/FALL/TD filtering (previously a stub that always
-      // returned 0, then a first-crossing-only version). Note: the
-      // single-trace API evaluates both on this trace — use measureDelay()
-      // for the true two-trace TRIG/TARG form.
-      const tTrig = findTraceCrossing(trace, cmd.trigVal ?? NaN, { cross: cmd.cross, rise: cmd.rise, fall: cmd.fall });
-      const tTarg = findTraceCrossing(trace, cmd.targVal ?? NaN, { cross: cmd.cross, rise: cmd.rise, fall: cmd.fall });
+      // CROSS/RISE/FALL/TD filtering — each clause carries its OWN modifier
+      // set (TRIG ... TD=1m RISE=2 TARG ... FALL=1). Note: the single-trace
+      // API evaluates both on this trace — use measureDelay() for the true
+      // two-trace TRIG/TARG form.
+      const tTrig = findTraceCrossing(trace, cmd.trigVal ?? NaN, { cross: cmd.trigCross ?? cmd.cross, rise: cmd.trigRise ?? cmd.rise, fall: cmd.trigFall ?? cmd.fall, td: cmd.trigTd });
+      const tTarg = findTraceCrossing(trace, cmd.targVal ?? NaN, { cross: cmd.targCross ?? cmd.cross, rise: cmd.targRise ?? cmd.rise, fall: cmd.targFall ?? cmd.fall, td: cmd.targTd });
       if (tTrig === null || tTarg === null) return { name: cmd.name, value: 0, unit: 's' };
       return { name: cmd.name, value: tTarg - tTrig, unit: 's' };
     }

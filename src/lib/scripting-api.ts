@@ -35,6 +35,23 @@ function emit(event: string, data: any) {
   if (l) for (const cb of l) cb(data);
 }
 
+/** Validate a user-supplied position from the public console API.
+ *  Accepts {x, y} with finite numbers (numbers-as-strings are coerced);
+ *  throws a descriptive TypeError otherwise — a malformed position that
+ *  slips through crashes PropertyPanel (comp.position.x.toFixed) and takes
+ *  the whole app to the error boundary. */
+function requirePosition(position: unknown, api: string): { x: number; y: number } {
+  const bad = () => new TypeError(
+    `circuitlab.${api}: position must be {x, y} with finite numbers — ` +
+    `e.g. addComponent('resistor', {x: 10, y: 4}) (got ${typeof position === 'object' && position !== null ? JSON.stringify(position) : String(position)})`,
+  );
+  if (typeof position !== 'object' || position === null || Array.isArray(position)) throw bad();
+  const { x, y } = position as { x?: unknown; y?: unknown };
+  const nx = Number(x), ny = Number(y);
+  if (!Number.isFinite(nx) || !Number.isFinite(ny)) throw bad();
+  return { x: nx, y: ny };
+}
+
 export function createScriptingAPI(): ScriptingAPI {
   return {
     version: '1.0.0',
@@ -43,13 +60,14 @@ export function createScriptingAPI(): ScriptingAPI {
       return { components: s.components.map(c => ({ ...c, simState: undefined })), wires: s.wires.map(w => ({ ...w })) };
     },
     addComponent: (type, position, params) => {
-      const id = useEditor.getState().addComponent(type, position);
+      const pos = requirePosition(position, 'addComponent');
+      const id = useEditor.getState().addComponent(type, pos);
       if (params) for (const [k, v] of Object.entries(params)) useEditor.getState().setParameter(id, k, v);
-      emit('componentAdded', { id, type, position });
+      emit('componentAdded', { id, type, position: pos });
       return id;
     },
     removeComponent: (id) => { useEditor.getState().deleteComponent(id); emit('componentRemoved', { id }); },
-    moveComponent: (id, position) => { useEditor.getState().moveComponent(id, position); emit('componentMoved', { id, position }); },
+    moveComponent: (id, position) => { const pos = requirePosition(position, 'moveComponent'); useEditor.getState().moveComponent(id, pos); emit('componentMoved', { id, position: pos }); },
     setParameter: (id, key, value) => { useEditor.getState().setParameter(id, key, value); emit('parameterChanged', { id, key, value }); },
     addWire: (from, to) => {
       const s = useEditor.getState();

@@ -10,6 +10,7 @@ import type { CircuitComponent, ComponentPlugin, Wire, SimContext } from './type
 import { buildNodeMap, getTerminalsForComponent, solveDC } from './engine';
 import { createMnaSystem, solveMna } from './solver';
 import { mergeOptions, type SimOptions, type ConvergenceReport } from './sim-options';
+import { runAC } from './analysis';
 import type { AnalysisResult, RealTrace, ComplexTrace } from './analysis';
 
 export interface SensConfig {
@@ -98,6 +99,11 @@ export function runSens(
     xLabel: 'Component',
     yLabel: 'Sensitivity (V/unit)',
   };
+  // Attach component identities for consumers (chart tooltips, the AI
+  // yield.sensitivity tool) — yValues only carry entries for components
+  // whose perturbed solve SUCCEEDED, so index alignment with a fresh
+  // component filter is not guaranteed. The AC path does the same.
+  (trace as RealTrace & { labels?: string[] }).labels = xValues;
 
   return {
     type: 'sens',
@@ -135,11 +141,12 @@ export function computeACModeSensitivity(
   );
 
   // Self-contained AC sensitivity: perturb each parameter, re-run the AC sweep
-  // through the public runAC entry point (lazy-required to avoid a module
-  // cycle — analysis.ts already imports sensitivity.ts), and differentiate
-  // |H| and ∠H.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { runAC } = require('./analysis') as typeof import('./analysis');
+  // through the public runAC entry point, and differentiate |H| and ∠H.
+  // (analysis.ts imports sensitivity.ts — a static circular ESM import is
+  // safe here because both sides only export hoisted function declarations,
+  // and the binding is only dereferenced at call time, long after both
+  // modules finished initializing. The old require() broke under ESM test
+  // runners.)
   const nominal = acTransfer(runAC, components, wires, plugins, stimulus?.id ?? '', config.outputNode, freq, options);
   if (!nominal) {
     return {

@@ -10,6 +10,8 @@
 //     `action` field, which the chat client executes against the live PCB store.
 
 import type { Tool } from './types';
+import { runDRC, DEFAULT_DRC_CONFIG } from '@/lib/pcb/drc';
+import { generateCopperPour } from '@/lib/pcb/copper-pour';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -59,8 +61,6 @@ const setDefaultTraceWidthTool: Tool = {
       ctx.pcb.defaultTraceWidth = w;
       // Server-verify: re-run DRC so the model sees violations immediately.
       try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { runDRC, DEFAULT_DRC_CONFIG } = require('@/lib/pcb/drc');
         const errors = runDRC(ctx.pcb.footprints ?? [], ctx.pcb.traces ?? [], ctx.pcb.vias ?? [], ctx.pcb.ratsnest ?? [], ctx.pcb.board, DEFAULT_DRC_CONFIG);
         return { ok: true, result: { width: w, applied: 'server', drcErrors: errors.length, message: `Default trace width set to ${w}mm (DRC: ${errors.length} issue(s)).` } };
       } catch {
@@ -100,10 +100,6 @@ const addCopperPourTool: Tool = {
   execute(args, ctx) {
     if (ctx.pcb) {
       try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { generateCopperPour } = require('@/lib/pcb/copper-pour');
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { runDRC, DEFAULT_DRC_CONFIG } = require('@/lib/pcb/drc');
         const pour = generateCopperPour(args.layer, args.net, ctx.pcb.footprints ?? [], ctx.pcb.traces ?? [], ctx.pcb.vias ?? [], ctx.pcb.board);
         ctx.pcb.copperPours = [...(ctx.pcb.copperPours ?? []).filter((p: { layer: string; net: string }) => !(p.layer === args.layer && p.net === args.net)), pour];
         const errors = runDRC(ctx.pcb.footprints ?? [], ctx.pcb.traces ?? [], ctx.pcb.vias ?? [], ctx.pcb.ratsnest ?? [], ctx.pcb.board, DEFAULT_DRC_CONFIG);

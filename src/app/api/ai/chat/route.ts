@@ -19,6 +19,7 @@ import { getPlugin } from '@/lib/circuit/registry';
 import { buildSystemPrompt, MUTATING_TOOL_NAMES, runAutoVerify, autoVerifyNeedsAttention, buildAutoVerifyMessages } from '@/lib/ai/system-prompt';
 import { buildContextPreamble } from '@/lib/ai/netlist-summary';
 import { ensurePlugins } from '@/lib/ai/tools/helpers';
+import { searchArticles } from '@/lib/ai/knowledge/knowledge-base';
 import { checkRateLimit, clientIpFromRequest } from '@/lib/ai/rate-limit';
 
 export const runtime = 'nodejs';
@@ -294,12 +295,12 @@ export async function POST(req: NextRequest) {
     // with an "offline KB" notice.
     if (e instanceof AIProviderConfigError) {
       try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const kb = require('@/lib/ai/knowledge/knowledge-base') as typeof import('@/lib/ai/knowledge/knowledge-base');
+        // Static ESM import — knowledge-base is leaf data; the old lazy
+        // require() broke under ESM test runners.
         const msgs = body?.messages ?? [];
         const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
         const q = String(lastUser?.content ?? '').slice(0, 500);
-        const hits = kb.searchArticles(q, 3);
+        const hits = searchArticles(q, 3);
         if (hits.length > 0) {
           const sections = hits.map((h) => `### ${h.title}\n${h.summary}\n[kb:${h.id}]`);
           return NextResponse.json({

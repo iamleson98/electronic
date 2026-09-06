@@ -347,23 +347,24 @@ function bentLead(padX: number, bodyHalfLen: number, r = 0.25, bodyY = 0.9): THR
 const BAND_COLORS: Record<number, number> = {
   0: 0x1a1a1a, 1: 0x8b4513, 2: 0xd0021b, 3: 0xd97706, 4: 0xd4b106,
   5: 0x16a34a, 6: 0x2563eb, 7: 0x7c3aed, 8: 0x9ca3af, 9: 0xf5f5f4,
+  // sub-1Ω multipliers: silver ×10⁻¹, gold ×10⁻²
+  '-1': 0xc0c0c0, '-2': 0xc9a227,
 };
 
-/** Compute the 4-band color code digits for a resistance in ohms. */
+/** Compute the 4-band color code digits for a resistance in ohms.
+ *  Normalizes to 2 significant digits × 10^mult with mult ∈ [−2, +6],
+ *  so sub-10Ω values (e.g. 4.7Ω = yellow-violet-SILVER) get real codes. */
 function resistorBands(rOhms: number): number[] {
   let r = Math.max(0.1, rOhms);
   let mult = 0;
-  while (r < 1 && mult > -6) { r *= 10; mult--; }
-  while (r >= 100 && mult < 6) { r /= 10; mult++; }
-  // 2 significant digits + multiplier exponent. `mult` is the power-of-ten
-  // exponent in `d1d2 × 10^mult`, so it maps directly to the resistor band
-  // color index (0 = black / ×10⁰, 1 = brown / ×10¹, 2 = red / ×10², …).
-  // (The old `(mult + 9) % 10` was off by one — it produced brown instead of
-  // red for 1 kΩ — and wrapped wrong for the negative sub-ohm exponents.)
+  // normalize into [10, 100): the 2 significant digits + exponent form
+  while (r < 10 && mult > -6) { r *= 10; mult--; }
+  while (r >= 100 && mult < 9) { r /= 10; mult++; }
   const d1 = Math.floor(r / 10);
   const d2 = Math.floor(r) % 10;
-  const band = Math.max(0, Math.min(9, mult));
-  return [d1, d2, band]; // multiplier index 0 = black
+  // multiplier exponent: valid band range is −2 (gold) … 9; clamp
+  const band = Math.max(-2, Math.min(9, mult));
+  return [d1, d2, band]; // multiplier index 0 = black, −1 = silver, −2 = gold
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -399,15 +400,51 @@ function chipResistor(ctx: ModelBuildContext): THREE.Group {
     if (px < 0) { f.rotation.y = Math.PI; f.position.x = -(bodyL / 2 - termL * 0.4); }
     g.add(f);
   }
-  // white value code on top (e.g. "103" for 10k) — the #1 "real chip" cue
+  // white value code on top (EIA-96-style 3-digit: dd×10^e, R-notation
+  // below 10Ω) — the #1 "real chip" cue
   try {
     const r = (ctx.params.resistance as number) ?? 10000;
-    const code = r >= 1000 ? `${Math.round(r / 1000)}${r % 1000 === 0 ? '3' : '2'}` : `${Math.round(r)}`;
-    const label = labelPlane(code.slice(0, 3), bodyL * 0.5, bodyW * 0.42, { fg: '#e8e8e8', fontPx: 40 });
+    const label = labelPlane(smdResistorCode(r).slice(0, 4), bodyL * 0.5, bodyW * 0.42, { fg: '#e8e8e8', fontPx: 40 });
     label.position.set(0, y + bodyH / 2 + 0.005, 0);
     g.add(label);
   } catch { /* label optional */ }
   return g;
+}
+
+/** EIA-96-style 3-digit SMD resistor code: value = dd × 10^e (e.g. 4.7k →
+ *  "472", 100k → "104"); R-notation below 10Ω (4.7Ω → "4R7", 0.47Ω → "R47").
+ *  The old concat heuristic produced "52" for 4.7k and "100" for 100k.
+ *  Exported for tests + future reuse (BOM/schematic markings). */
+export function smdResistorCode(r: number): string {
+  if (!Number.isFinite(r) || r <= 0) return '';
+  if (r < 1) return `R${String(Math.round(r * 100)).padStart(2, '0')}`; // R47
+  if (r < 10) {
+    const t = Math.round(r * 10); // 47 tenths
+    return `${Math.floor(t / 10)}R${t % 10}`; // 4R7
+  }
+  const exp = Math.floor(Math.log10(r));
+  let dd = Math.round(r / Math.pow(10, exp - 1)); // 2 significant digits
+  let e = exp - 1;
+  if (dd >= 100) { dd = 10; e += 1; } // rounding pushed to 3 digits (99.6 → 100)
+  return `${dd}${Math.min(e, 9)}`;
+}
+
+/** 3-digit ceramic capacitor code in picofarads: value = dd × 10^e pF
+ *  (100nF = 100000pF → "104"; 10nF → "103"; 100pF → "101"; 22pF → "220").
+ *  Below 10pF the code is the literal pF value ("4.7", "8"). Exported for
+ *  tests + future reuse. */
+export function ceramicCapCode(capFarads: number): string {
+  if (!Number.isFinite(capFarads) || capFarads <= 0) return '';
+  const pf = capFarads * 1e12;
+  if (pf < 10) {
+    const v = Math.round(pf * 10) / 10;
+    return v % 1 === 0 ? `${v}` : `${v.toFixed(1)}`; // "8" / "4.7"
+  }
+  const exp = Math.floor(Math.log10(pf));
+  let dd = Math.round(pf / Math.pow(10, exp - 1));
+  let e = exp - 1;
+  if (dd >= 100) { dd = 10; e += 1; }
+  return `${dd}${Math.min(e, 9)}`;
 }
 
 /** Axial THT resistor: beige cylinder body, 4 color bands, dome ends, leads. */
@@ -562,12 +599,10 @@ function ceramicCap(ctx: ModelBuildContext): THREE.Group {
   for (const s of [-1, 1]) {
     g.add(mesh(new THREE.SphereGeometry(0.55, 12, 10), coatMat, s * r * 0.45, 1.15, 0));
   }
-  // value print (e.g. "104") on the disc face
+  // value print (3-digit ceramic code: 100nF → "104") on the disc face
   try {
     const cap = (ctx.params.capacitance as number) ?? 1e-7;
-    const pf = Math.round(cap * 1e12);
-    const code = pf >= 1000 ? `${Math.round(pf / 100)}${pf % 100 === 0 ? '3' : '2'}`.slice(0, 3) : `${pf}`;
-    const label = labelPlane(code.slice(0, 3), r * 0.9, r * 0.4, { fg: '#1c0a00', fontPx: 40 });
+    const label = labelPlane(ceramicCapCode(cap).slice(0, 4), r * 0.9, r * 0.4, { fg: '#1c0a00', fontPx: 40 });
     label.rotation.z = Math.PI / 2;
     label.position.set(r * 0.42, 2.4, 0);
     label.rotation.y = Math.PI / 2;
@@ -1160,17 +1195,26 @@ function inductorModel(ctx: ModelBuildContext): THREE.Group {
 /** 9V PP3 battery: steel jacket, paper wrap with brand print, snap terminals, formed leads. */
 function batteryModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
-  const span = Math.max(6, padSpanX(ctx.footprint));
+  const pts = padPoints(ctx.footprint, 2);
+  const span = Math.max(6, Math.max(padSpanX(ctx.footprint), padSpanZ(ctx.footprint)));
   const s = Math.min(1, span / 13);
   const bodyW = 17 * s, bodyH = 26 * s, bodyD = 12 * s;
+  // Pad axis: rotate the battery so its terminal axis (local Z) faces the
+  // pads — the snap wires then splay outward naturally instead of crossing.
+  const alongZ = pts.length >= 2 && Math.abs(pts[1][1] - pts[0][1]) >= Math.abs(pts[1][0] - pts[0][0]);
+  // Pads under the body silhouette → stand the battery on a plastic holder so
+  // the snap wires can route beneath it (real PP3 PCB holders do exactly this).
+  const body = new THREE.Group();
+  if (!alongZ) body.rotation.y = Math.PI / 2;
+  g.add(body);
   // rolled-steel jacket with vertical seam
   const jacket = mesh(
     new RoundedBoxGeometry(bodyW, bodyH, bodyD, 3, 1.2 * s),
     new THREE.MeshPhysicalMaterial({ color: 0x3a3f47, roughness: 0.35, metalness: 0.85, clearcoat: 0.4, clearcoatRoughness: 0.3 }),
     0, bodyH / 2, 0,
   );
-  g.add(jacket);
-  g.add(mesh(new THREE.BoxGeometry(0.15, bodyH * 0.9, bodyD * 0.9),
+  body.add(jacket);
+  body.add(mesh(new THREE.BoxGeometry(0.15, bodyH * 0.9, bodyD * 0.9),
     new THREE.MeshStandardMaterial({ color: 0x23262c, roughness: 0.5, metalness: 0.7 }), bodyW / 2 - 0.1, bodyH / 2, 0));
   // paper label wrap (upper 62%) with gold band + red stripe + print
   const label = mesh(
@@ -1178,92 +1222,152 @@ function batteryModel(ctx: ModelBuildContext): THREE.Group {
     new THREE.MeshPhysicalMaterial({ color: 0xc9a441, roughness: 0.6, metalness: 0.0, clearcoat: 0.12 }),
     0, bodyH * 0.68, 0,
   );
-  g.add(label);
-  g.add(mesh(new THREE.BoxGeometry(bodyW * 1.02, bodyH * 0.09, bodyD * 1.02),
+  body.add(label);
+  body.add(mesh(new THREE.BoxGeometry(bodyW * 1.02, bodyH * 0.09, bodyD * 1.02),
     new THREE.MeshPhysicalMaterial({ color: 0x8c1f1f, roughness: 0.55 }), 0, bodyH * 0.52, 0));
   try {
-    const brand = labelPlane('9V ALKALINE', bodyW * 0.7, bodyH * 0.07, { fg: '#2a1f00', fontPx: 36 });
+    const v = Number(ctx.params.voltage ?? ctx.params.voltageDC ?? 9) || 9;
+    const txt = v === 9 ? '9V ALKALINE' : `${Math.abs(v) % 1 === 0 ? Math.abs(v) : Math.abs(v).toFixed(1)}V CELL`;
+    const brand = labelPlane(txt, bodyW * 0.7, bodyH * 0.07, { fg: '#2a1f00', fontPx: 36 });
     brand.rotation.z = Math.PI / 2;
     brand.position.set(bodyW * 0.52, bodyH * 0.72, 0);
     brand.rotation.y = Math.PI / 2;
-    g.add(brand);
+    body.add(brand);
   } catch { /* label optional */ }
   // black plastic top cap
-  g.add(mesh(new RoundedBoxGeometry(bodyW * 0.96, 1.6 * s, bodyD * 0.94, 2, 0.4 * s), MAT.darkPlastic, 0, bodyH + 0.6 * s, 0));
+  body.add(mesh(new RoundedBoxGeometry(bodyW * 0.96, 1.6 * s, bodyD * 0.94, 2, 0.4 * s), MAT.darkPlastic, 0, bodyH + 0.6 * s, 0));
   // PP3 snap terminals: hex + stud (+) and round socket (−) with rims
-  const plusBase = mesh(new THREE.CylinderGeometry(3.0 * s, 3.0 * s, 1.0 * s, 6), MAT.aluminum, 0, bodyH + 1.6 * s, -bodyD * 0.16);
-  g.add(plusBase);
-  g.add(mesh(new THREE.CylinderGeometry(1.5 * s, 1.5 * s, 1.2 * s, 14), MAT.brass, 0, bodyH + 2.4 * s, -bodyD * 0.16));
-  const minusRim = mesh(new THREE.CylinderGeometry(2.2 * s, 2.2 * s, 1.0 * s, 18), MAT.aluminum, 0, bodyH + 1.6 * s, bodyD * 0.2);
-  g.add(minusRim);
-  g.add(mesh(new THREE.CylinderGeometry(1.8 * s, 1.8 * s, 0.6 * s, 16), MAT.rubber, 0, bodyH + 1.8 * s, bodyD * 0.2));
-  // snap leads: red (+) and black (−) wires from terminals down to the pads
-  const pts = padPoints(ctx.footprint, 2);
+  body.add(mesh(new THREE.CylinderGeometry(3.0 * s, 3.0 * s, 1.0 * s, 6), MAT.aluminum, 0, bodyH + 1.6 * s, -bodyD * 0.16));
+  body.add(mesh(new THREE.CylinderGeometry(1.5 * s, 1.5 * s, 1.2 * s, 14), MAT.brass, 0, bodyH + 2.4 * s, -bodyD * 0.16));
+  body.add(mesh(new THREE.CylinderGeometry(2.2 * s, 2.2 * s, 1.0 * s, 18), MAT.aluminum, 0, bodyH + 1.6 * s, bodyD * 0.2));
+  body.add(mesh(new THREE.CylinderGeometry(1.8 * s, 1.8 * s, 0.6 * s, 16), MAT.rubber, 0, bodyH + 1.8 * s, bodyD * 0.2));
+  // snap leads: red (+) and black (−) wires from the terminals down THROUGH
+  // the board at the pads' REAL positions, with solder joints on the copper.
   if (pts.length >= 2) {
+    // Terminal positions mapped into the OUTER (pad-aligned) frame:
+    // rotation.y = π/2 maps (x,z) → (z,−x), so body-Z terminals land on X.
+    const tPos: [number, number][] = alongZ
+      ? [[0, -bodyD * 0.16], [0, bodyD * 0.2]]
+      : [[-bodyD * 0.16, 0], [bodyD * 0.2, 0]];
     const colors = [0xb91c1c, 0x17171a];
+    const halfX = (alongZ ? bodyW : bodyD) / 2;
+    const halfZ = (alongZ ? bodyD : bodyW) / 2;
+    const padsUnderBody = pts.every(([px, pz]) => Math.abs(px) <= halfX + 0.3 && Math.abs(pz) <= halfZ + 0.3);
+    const lift = padsUnderBody ? 3.4 : 0;
+    if (padsUnderBody) {
+      // molded plastic holder: base plate + corner posts, battery snapped in on top
+      const hw = (alongZ ? bodyW : bodyD) / 2 + 1.0, hd = (alongZ ? bodyD : bodyW) / 2 + 1.0;
+      body.position.y = lift;
+      g.add(mesh(new RoundedBoxGeometry(hw * 2, 0.6, hd * 2, 2, 0.15), MAT.darkPlastic, 0, 0.3, 0));
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+        g.add(mesh(new THREE.BoxGeometry(1.2, lift - 0.6, 1.2), MAT.darkPlastic, sx * (hw - 0.6), (lift + 0.6) / 2, sz * (hd - 0.6)));
+      }
+    }
     for (let i = 0; i < 2; i++) {
-      const [px] = pts[i];
+      const [px, pz] = pts[i];
+      const [tx, tz] = tPos[i];
       const wireMat = new THREE.MeshPhysicalMaterial({ color: colors[i], roughness: 0.6 });
-      const curve = new THREE.CatmullRomCurve3([
-        new THREE.Vector3(i === 0 ? -bodyW * 0.2 : bodyW * 0.2, bodyH + 1.2 * s, 0),
-        new THREE.Vector3(px * 0.6, bodyH * 0.5, 0),
-        new THREE.Vector3(px, 1.2, 0),
-        new THREE.Vector3(px, -2.2, 0),
-      ], false, 'centripetal', 0.5);
-      const wire = new THREE.Mesh(new THREE.TubeGeometry(curve, 24, 0.45 * s, 8, false), wireMat);
-      wire.castShadow = true;
+      const terminal = new THREE.Vector3(tx, lift + bodyH + 1.4 * s, tz);
+      const wire = snapLeadWire(terminal, px, pz, halfX, halfZ, lift, 0.45 * s, wireMat);
       g.add(wire);
+      // solder joint: the wire is soldered INTO the pad, piercing the board
+      g.add(mesh(new THREE.CylinderGeometry(0.42, 0.68, 0.65, 12), MAT.solder, px, 0.3, pz));
     }
   }
   return g;
 }
 
-/** Panel-mount switch: body + actuator lever. */
+/**
+ * Formed snap/wire lead from a source's terminal down to the pad's REAL
+ * (x,z): the wire arcs over the body silhouette when the pad is outside it,
+ * routes around the side and beneath a lifted body when the pad is under it,
+ * then drops straight THROUGH the board at the pad — the "drill through the
+ * solder point" look.
+ */
+function snapLeadWire(
+  terminal: THREE.Vector3, padX: number, padZ: number,
+  halfX: number, halfZ: number, lift: number, r: number, mat: THREE.Material,
+): THREE.Mesh {
+  const underBody = Math.abs(padX) < halfX + 0.2 && Math.abs(padZ) < halfZ + 0.2;
+  const curve = underBody
+    ? new THREE.CatmullRomCurve3([
+      terminal,
+      // splay outward past the body silhouette while still high on the terminal
+      new THREE.Vector3(Math.sign(padX || 1) * (halfX + 1.1), Math.max(lift + 2.2, terminal.y * 0.5), Math.sign(padZ || 1) * (halfZ + 1.1)),
+      // beneath the lifted body, above the board
+      new THREE.Vector3(padX, Math.max(1.3, lift - 0.9), padZ),
+      // pierce the board at the pad
+      new THREE.Vector3(padX, -2.2, padZ),
+    ], false, 'centripetal', 0.5)
+    : new THREE.CatmullRomCurve3([
+      terminal,
+      // swing out above the body, directly over the pad
+      new THREE.Vector3(padX, Math.max(terminal.y - 0.5, 2.6), padZ),
+      new THREE.Vector3(padX, 1.3, padZ),
+      // pierce the board at the pad
+      new THREE.Vector3(padX, -2.2, padZ),
+    ], false, 'centripetal', 0.5);
+  const wire = new THREE.Mesh(new THREE.TubeGeometry(curve, 28, r, 8, false), mat);
+  wire.castShadow = true;
+  return wire;
+}
+
+/** Panel-mount toggle switch: plastic body + metal bushing/lever, legs on the REAL pads. */
 function switchModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
-  const spanZ = Math.max(4, padSpanZ(ctx.footprint));
-  const w = Math.max(6, spanZ + 1);
-  g.add(mesh(new RoundedBoxGeometry(4.5, 4, w, 2, 0.3), MAT.darkPlastic, 0, 2, 0));
+  const pts = padPoints(ctx.footprint, 3);
+  // Pad axis drives the body's long dimension (pads at ±3 on X by default).
+  const alongZ = pts.length >= 2 && Math.abs(pts[1][1] - pts[0][1]) >= Math.abs(pts[1][0] - pts[0][0]);
+  const span = Math.max(4, Math.max(padSpanX(ctx.footprint), padSpanZ(ctx.footprint)));
+  const bodyX = alongZ ? 4.5 : span + 1.5;
+  const bodyZ = alongZ ? span + 1.5 : 4.5;
+  g.add(mesh(new RoundedBoxGeometry(bodyX, 4, bodyZ, 2, 0.3), MAT.darkPlastic, 0, 2, 0));
   // metal bushing + lever
   g.add(mesh(new THREE.CylinderGeometry(1.5, 1.5, 1.2, 16), MAT.aluminum, 0, 4.6, 0));
   const lever = mesh(new THREE.BoxGeometry(0.9, 3.6, 0.9), MAT.lead, 0, 6.8, 0);
   lever.rotation.z = 0.5;
   g.add(lever);
-  // 2 legs
-  for (const s of [-1, 1]) {
-    g.add(mesh(new THREE.CylinderGeometry(0.28, 0.28, 2.4, 8), MAT.lead, 0, -0.9, s * spanZ / 2));
+  // legs at the footprint's REAL pad positions, soldered through the board
+  for (const [px, pz] of pts) {
+    g.add(mesh(new THREE.CylinderGeometry(0.28, 0.28, 2.6, 8), MAT.lead, px, -0.9, pz));
+    g.add(mesh(new THREE.CylinderGeometry(0.45, 0.7, 0.6, 10), MAT.solder, px, 0.3, pz));
   }
   return g;
 }
 
-/** Push button: square body + round actuator. */
+/** Push button: square body + round actuator, legs on the REAL pads. */
 function pushButtonModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
-  const spanZ = Math.max(4, padSpanZ(ctx.footprint));
-  const w = Math.max(5.5, spanZ + 0.5);
-  g.add(mesh(new RoundedBoxGeometry(w, 3.4, w, 2, 0.3), MAT.darkPlastic, 0, 1.7, 0));
-  g.add(mesh(new THREE.CylinderGeometry(w * 0.28, w * 0.28, 2.0, 20),
+  const pts = padPoints(ctx.footprint, 4);
+  const alongZ = pts.length >= 2 && Math.abs(pts[1][1] - pts[0][1]) >= Math.abs(pts[1][0] - pts[0][0]);
+  const span = Math.max(4, Math.max(padSpanX(ctx.footprint), padSpanZ(ctx.footprint)));
+  const w = Math.max(5.5, span + 1.0);
+  const bodyX = alongZ ? w * 0.8 : w;
+  const bodyZ = alongZ ? w : w * 0.8;
+  g.add(mesh(new RoundedBoxGeometry(bodyX, 3.4, bodyZ, 2, 0.3), MAT.darkPlastic, 0, 1.7, 0));
+  g.add(mesh(new THREE.CylinderGeometry(Math.min(bodyX, bodyZ) * 0.28, Math.min(bodyX, bodyZ) * 0.28, 2.0, 20),
     new THREE.MeshStandardMaterial({ color: 0x3b82f6, roughness: 0.35 }), 0, 4.2, 0));
-  for (const s of [-1, 1]) {
-    for (const t of [-1, 1]) {
-      g.add(mesh(new THREE.CylinderGeometry(0.25, 0.25, 2.2, 8), MAT.lead, t * w * 0.35, -0.8, s * spanZ / 2));
-    }
+  for (const [px, pz] of pts) {
+    g.add(mesh(new THREE.CylinderGeometry(0.25, 0.25, 2.4, 8), MAT.lead, px, -0.8, pz));
+    g.add(mesh(new THREE.CylinderGeometry(0.42, 0.66, 0.6, 10), MAT.solder, px, 0.3, pz));
   }
   return g;
 }
 
-/** Potentiometer: body + shaft + knob. */
+/** Potentiometer: body + shaft + knob; 3 legs (a, b, wiper) on the REAL pads. */
 function potentiometerModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
-  const spanZ = Math.max(3.5, padSpanZ(ctx.footprint));
-  const w = Math.max(6, spanZ + 1.5);
-  g.add(mesh(new RoundedBoxGeometry(5, 5.5, w, 2, 0.3), MAT.darkPlastic, 0, 2.75, 0));
+  const pts = padPoints(ctx.footprint, 3);
+  const span = Math.max(3.5, Math.max(padSpanX(ctx.footprint), padSpanZ(ctx.footprint)));
+  const w = Math.max(6, span + 1.5);
+  g.add(mesh(new RoundedBoxGeometry(w * 0.9, 5.5, w, 2, 0.3), MAT.darkPlastic, 0, 2.75, 0));
   g.add(mesh(new THREE.CylinderGeometry(1.5, 1.5, 6, 16), MAT.aluminum, 0, 8.2, 0));
   g.add(mesh(new THREE.CylinderGeometry(2.6, 2.6, 2.6, 20), MAT.blackPlastic, 0, 11.4, 0));
   // pointer groove on the knob
   g.add(mesh(new THREE.BoxGeometry(0.5, 0.3, 2.4), MAT.lead, 0, 12.8, 0));
-  for (const s of [-1, 1]) {
-    g.add(mesh(new THREE.CylinderGeometry(0.28, 0.28, 2.4, 8), MAT.lead, 0, -0.9, s * spanZ / 2));
+  for (const [px, pz] of pts) {
+    g.add(mesh(new THREE.CylinderGeometry(0.28, 0.28, 2.6, 8), MAT.lead, px, -0.9, pz));
+    g.add(mesh(new THREE.CylinderGeometry(0.45, 0.7, 0.6, 10), MAT.solder, px, 0.3, pz));
   }
   return g;
 }
@@ -1295,19 +1399,30 @@ function fuseModel(ctx: ModelBuildContext): THREE.Group {
   return g;
 }
 
-/** Photoresistor (LDR): orange disc with squiggle face + 2 leads. */
+/** Photoresistor (LDR): orange disc with squiggle face, legs on the REAL pads. */
 function photoresistorModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
-  const spanZ = Math.max(2, padSpanZ(ctx.footprint));
-  const r = 2.5;
+  const pts = padPoints(ctx.footprint, 2);
+  const span = Math.max(2, Math.max(padSpanX(ctx.footprint), padSpanZ(ctx.footprint)));
+  const r = Math.min(span * 0.62 + 1.2, 2.8);
   g.add(mesh(new THREE.CylinderGeometry(r, r, 1.8, 24), MAT.ceramic, 0, 2.6, 0));
   // zig-zag face (3 dark strips)
   const faceMat = new THREE.MeshStandardMaterial({ color: 0x6b3a1f, roughness: 0.65 });
   for (const off of [-0.9, 0, 0.9]) {
     g.add(mesh(new THREE.BoxGeometry(1.6, 0.12, 0.5), faceMat, off * 0.8, 3.55, 0));
   }
-  for (const s of [-1, 1]) {
-    g.add(mesh(new THREE.CylinderGeometry(0.25, 0.25, 2.4, 8), MAT.lead, 0, -0.9, s * spanZ / 2));
+  // kinked radial leads down to the footprint's REAL pads + solder joints
+  for (const [x, z] of pts) {
+    const curve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(x * 0.3, 2.0, z * 0.3),
+      new THREE.Vector3(x * 0.8, 1.0, z * 0.8),
+      new THREE.Vector3(x, 0.5, z),
+      new THREE.Vector3(x, -2.4, z),
+    ], false, 'centripetal', 0.5);
+    const lead = new THREE.Mesh(new THREE.TubeGeometry(curve, 16, 0.22, 8, false), MAT.lead);
+    lead.castShadow = true;
+    g.add(lead);
+    g.add(mesh(new THREE.CylinderGeometry(0.4, 0.64, 0.55, 10), MAT.solder, x, 0.28, z));
   }
   return g;
 }
@@ -1529,6 +1644,7 @@ function transformerModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
   const spanX = Math.max(10, padSpanX(ctx.footprint));
   const w = Math.min(14, spanX * 0.8);
+  const pts = padPoints(ctx.footprint, 4);
   // laminated core (stack of dark plates)
   const coreMat = new THREE.MeshStandardMaterial({ color: 0x555a63, roughness: 0.45, metalness: 0.7 });
   g.add(mesh(new THREE.BoxGeometry(w, 6.5, w * 0.5), coreMat, 0, 3.25, -w * 0.28));
@@ -1539,11 +1655,19 @@ function transformerModel(ctx: ModelBuildContext): THREE.Group {
     ring.rotation.x = Math.PI / 2;
     g.add(ring);
   }
-  // pins
-  for (const s of [-1, 1]) {
-    for (let i = 0; i < 2; i++) {
-      g.add(mesh(new THREE.CylinderGeometry(0.3, 0.3, 2.2, 8), MAT.lead, s * w * 0.4, -0.8, (i - 0.5) * w * 0.3));
-    }
+  // pins at the footprint's REAL pad positions (kinked down from the bobbin),
+  // soldered through the board
+  for (const [px, pz] of (pts.length >= 2 ? pts : [[-w * 0.4, 0], [w * 0.4, 0]] as [number, number][])) {
+    const curve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(px * 0.4, 1.8, pz * 0.4),
+      new THREE.Vector3(px * 0.9, 1.0, pz * 0.9),
+      new THREE.Vector3(px, 0.5, pz),
+      new THREE.Vector3(px, -2.3, pz),
+    ], false, 'centripetal', 0.5);
+    const pin = new THREE.Mesh(new THREE.TubeGeometry(curve, 14, 0.3, 8, false), MAT.brass);
+    pin.castShadow = true;
+    g.add(pin);
+    g.add(mesh(new THREE.CylinderGeometry(0.45, 0.72, 0.62, 10), MAT.solder, px, 0.3, pz));
   }
   return g;
 }
@@ -1999,6 +2123,134 @@ function sourceBoxModel(ctx: ModelBuildContext, label: string): THREE.Group {
   return g;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Bench-style lab sources — AC source & pulse/function generator. AC and
+// pulsed excitations are NOT batteries: they render as miniature instrument
+// enclosures with binding posts, a waveform glyph, and red/black leads
+// soldered down through the footprint's REAL pads.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Compact frequency label ("50Hz", "2.2kHz", "10MHz"). */
+function freqLabelValue(freq: number): string {
+  if (!Number.isFinite(freq) || freq <= 0) return '';
+  if (freq >= 1e6) return `${trimNum(freq / 1e6)}MHz`;
+  if (freq >= 1e3) return `${trimNum(freq / 1e3)}kHz`;
+  return `${trimNum(freq)}Hz`;
+}
+
+function trimNum(v: number): string {
+  const r = Math.round(v * 10) / 10;
+  return r % 1 === 0 ? `${r}` : `${r.toFixed(1)}`;
+}
+
+/**
+ * Miniature bench source: dark instrument enclosure, top panel with a
+ * waveform glyph (sine/square tube), red(+) and black(−) binding posts, and
+ * colored leads that arc down and pierce the board AT the solder pads.
+ */
+function benchSourceModel(
+  ctx: ModelBuildContext,
+  opts: { glyph: 'sine' | 'square'; title: string; detail: string },
+): THREE.Group {
+  const g = new THREE.Group();
+  const pts = padPoints(ctx.footprint, 2);
+  const span = Math.max(6, Math.max(padSpanX(ctx.footprint), padSpanZ(ctx.footprint)));
+  const s = Math.min(1, span / 13);
+  // enclosure: 14×9×10 scaled (a bench function generator in miniature)
+  const boxW = 14 * s, boxH = 9 * s, boxD = 10 * s;
+  const enclosure = new THREE.MeshPhysicalMaterial({
+    color: 0x2b2f36, roughness: 0.42, metalness: 0.55, clearcoat: 0.35, clearcoatRoughness: 0.3,
+  });
+  g.add(mesh(new RoundedBoxGeometry(boxW, boxH, boxD, 3, 0.8 * s), enclosure, 0, boxH / 2, 0));
+  // brushed front panel plate on top (slightly inset, lighter metal)
+  const panel = mesh(new RoundedBoxGeometry(boxW * 0.88, 0.35, boxD * 0.76, 2, 0.1),
+    new THREE.MeshStandardMaterial({ color: 0x6b7178, roughness: 0.32, metalness: 0.85 }), 0, boxH + 0.1, 0);
+  g.add(panel);
+  // waveform glyph on the panel (glowing cyan tube along the wave path)
+  try {
+    const glyphMat = new THREE.MeshStandardMaterial({ color: 0x22d3ee, roughness: 0.3, metalness: 0.2, emissive: 0x0e7490, emissiveIntensity: 0.6 });
+    const gw = boxW * 0.34, amp = boxD * 0.16;
+    const wavePts: THREE.Vector3[] = [];
+    const N = opts.glyph === 'sine' ? 48 : 8;
+    for (let i = 0; i <= N; i++) {
+      const t = i / N;
+      const u = (t - 0.5) * gw;
+      const v = opts.glyph === 'sine'
+        ? Math.sin(t * Math.PI * 2) * amp
+        : (Math.floor(t * 4) % 2 === 0 ? amp : -amp);
+      wavePts.push(new THREE.Vector3(u, boxH + 0.35, -boxD * 0.14 + v));
+    }
+    const glyph = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(wavePts), 64, 0.16 * s + 0.05, 6, false), glyphMat);
+    g.add(glyph);
+  } catch { /* glyph optional */ }
+  // title + detail print on the panel
+  try {
+    const t = labelPlane(opts.title, boxW * 0.42, boxD * 0.16, { fg: '#e8e8ec', fontPx: 42 });
+    t.position.set(-boxW * 0.22, boxH + 0.32, boxD * 0.22);
+    g.add(t);
+    if (opts.detail) {
+      const d = labelPlane(opts.detail, boxW * 0.6, boxD * 0.14, { fg: '#a8b0b8', fontPx: 30 });
+      d.position.set(boxW * 0.08, boxH + 0.32, boxD * 0.34);
+      g.add(d);
+    }
+  } catch { /* labels optional */ }
+  // binding posts: red (+, hex) and black (−, round) on the panel's pad side
+  const alongZ = pts.length >= 2 && Math.abs(pts[1][1] - pts[0][1]) >= Math.abs(pts[1][0] - pts[0][0]);
+  const postOff = boxD * 0.32; // posts sit toward the pad axis
+  const posts: [number, number][] = alongZ
+    ? [[0, -postOff], [0, postOff]]
+    : [[-postOff, 0], [postOff, 0]];
+  const postMats = [
+    new THREE.MeshPhysicalMaterial({ color: 0xb91c1c, roughness: 0.4, clearcoat: 0.4 }),
+    new THREE.MeshPhysicalMaterial({ color: 0x17171a, roughness: 0.4, clearcoat: 0.4 }),
+  ];
+  for (let i = 0; i < 2; i++) {
+    const [ux, uz] = posts[i];
+    g.add(mesh(new THREE.CylinderGeometry(0.9 * s + 0.25, 0.9 * s + 0.25, 1.6, 14), postMats[i], ux, boxH + 1.0, uz));
+    g.add(mesh(new THREE.CylinderGeometry(0.42 * s + 0.14, 0.42 * s + 0.14, 0.8, 12), MAT.brass, ux, boxH + 1.9, uz));
+  }
+  // red/black leads from the posts down THROUGH the board at the REAL pads
+  if (pts.length >= 2) {
+    const halfX = (alongZ ? boxW : boxD) / 2;
+    const halfZ = (alongZ ? boxD : boxW) / 2;
+    const colors = [0xb91c1c, 0x17171a];
+    for (let i = 0; i < 2; i++) {
+      const [px, pz] = pts[i];
+      const [ux, uz] = posts[i];
+      const wireMat = new THREE.MeshPhysicalMaterial({ color: colors[i], roughness: 0.6 });
+      const wire = snapLeadWire(new THREE.Vector3(ux, boxH + 1.6, uz), px, pz, halfX, halfZ, 0, 0.4 * s + 0.08, wireMat);
+      g.add(wire);
+      // solder joint where the lead pierces the pad
+      g.add(mesh(new THREE.CylinderGeometry(0.42, 0.68, 0.65, 12), MAT.solder, px, 0.3, pz));
+    }
+  }
+  return g;
+}
+
+/** AC voltage source: bench signal-generator module with a sine glyph. */
+function acSourceModel(ctx: ModelBuildContext): THREE.Group {
+  const amp = (ctx.params.amplitude as number) ?? 5;
+  const freq = (ctx.params.frequency as number) ?? 50;
+  return benchSourceModel(ctx, {
+    glyph: 'sine',
+    title: 'AC',
+    detail: `${trimNum(amp)}V ${freqLabelValue(freq)}`,
+  });
+}
+
+/** Pulse source: function-generator module with a square-wave glyph. */
+function pulseSourceModel(ctx: ModelBuildContext): THREE.Group {
+  const high = (ctx.params.high as number) ?? 5;
+  const low = (ctx.params.low as number) ?? 0;
+  const freq = (ctx.params.frequency as number) ?? 1;
+  const duty = (ctx.params.duty as number) ?? 50;
+  return benchSourceModel(ctx, {
+    glyph: 'square',
+    title: 'PULSE',
+    detail: `${trimNum(high)}/${trimNum(low)}V ${freqLabelValue(freq)} ${Math.round(duty)}%`,
+  });
+}
+
 /** Transmission line: thin microstrip segment with launch pads. */
 function transLineModel(ctx: ModelBuildContext): THREE.Group {
   const g = new THREE.Group();
@@ -2098,8 +2350,8 @@ const FACTORIES: Record<string, ModelFactory> = {
   crystal: crystal,
   inductor: inductorModel,
   dcVoltage: batteryModel,
-  acVoltage: batteryModel,
-  pulseSource: batteryModel,
+  acVoltage: acSourceModel,
+  pulseSource: pulseSourceModel,
   switch: switchModel,
   pushButton: pushButtonModel,
   potentiometer: potentiometerModel,

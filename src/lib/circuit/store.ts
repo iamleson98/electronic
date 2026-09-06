@@ -508,10 +508,17 @@ export const useEditor = create<EditorState>((set, get) => ({
     const id = genId('comp');
     const s = get();
     const refdes = nextRefdes(type, s.components);
+    // Defensive normalization: scripting-API misuse or plugin-fed garbage can
+    // pass a non-{x,y} position — a missing x/y later crashes PropertyPanel
+    // (comp.position.x.toFixed) and takes the app to the error boundary.
+    const px = Number(position?.x), py = Number(position?.y);
     const comp: CircuitComponent = {
       id,
       type,
-      position: { ...position },
+      position: {
+        x: Number.isFinite(px) ? px : 0,
+        y: Number.isFinite(py) ? py : 0,
+      },
       rotation: 0,
       parameters: defaultsFor(type),
       refdes,

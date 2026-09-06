@@ -1,6 +1,7 @@
 'use client';
 
 import { usePCB } from '@/lib/pcb/store';
+import { drcErrorKey } from '@/lib/pcb/drc';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
@@ -38,7 +39,10 @@ export function DRCSettingsDialog({ open, onClose }: { open: boolean; onClose: (
   const filteredErrors = drcErrors.filter((e) => {
     // Waived violations are already filtered by runDRC — this is a display
     // fallback for errors produced before the waiver was added.
-    const key = `${e.type}:${e.position.x.toFixed(2)},${e.position.y.toFixed(2)}`;
+    // NOTE: the key MUST come from drcErrorKey — the store persists waivers
+    // with `type@x,y` and this dialog previously hand-built `type:x,y`, so
+    // waived errors showed as un-waived and could never be un-waived here.
+    const key = drcErrorKey(e);
     if (waivedKeys.has(key)) return false;
     const override = severityOverrides[e.type];
     if (override === 'ignore') return false;
@@ -158,7 +162,7 @@ export function DRCSettingsDialog({ open, onClose }: { open: boolean; onClose: (
             ) : (
               <ul className="divide-y divide-slate-800">
                 {filteredErrors.map((err, i) => {
-                  const key = `${err.type}:${err.position.x.toFixed(2)},${err.position.y.toFixed(2)}`;
+                  const key = drcErrorKey(err);
                   const waived = waivedKeys.has(key);
                   return (
                     <li key={i} className="px-3 py-2 flex items-center gap-2">

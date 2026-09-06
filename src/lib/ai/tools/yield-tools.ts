@@ -8,14 +8,14 @@ import { runSens } from '../../circuit/sensitivity';
 import type { Tool, ToolContext } from './types';
 import { ensurePlugins } from './helpers';
 
-/** Numeric sweepable parameters per component type (tolerance applies here). */
+/** Numeric sweepable parameters per component type (tolerance applies here).
+ *  SOURCES excluded by default: the stimulus is exact in a tolerance study
+ *  (perturbing the supply measures input variation, not part spread). A
+ *  per-part `tolerance` on a source still opts it in explicitly below. */
 const TOL_PARAMS: Record<string, string[]> = {
   resistor: ['resistance'],
   capacitor: ['capacitance'],
   inductor: ['inductance'],
-  dcVoltage: ['voltage'],
-  acVoltage: ['amplitude'],
-  currentSource: ['current'],
   potentiometer: ['resistance'],
   led: ['forwardV', 'seriesR'],
   diode: ['forwardV', 'onR'],
@@ -76,12 +76,16 @@ export const yieldMonteCarloTool: Tool = {
       // Per-part merge: a component's own ProductionSection tolerance +
       // distribution WIN when set (1% reference vs 5% jellybeans); the
       // global args are the fallback for parts without explicit values.
+      // NOTE: per-part tolerance/dist are COMPONENT-level production fields
+      // (c.tolerance / c.toleranceDist), not parameters — reading them from
+      // c.parameters.* always missed, silently applying the global tolerance
+      // to every part including 1% references.
       const tolerances = ctx.doc.components.flatMap((c) => {
-        const perPartTol = typeof c.parameters.tolerance === 'number' && c.parameters.tolerance > 0
-          ? c.parameters.tolerance
+        const perPartTol = typeof c.tolerance === 'number' && c.tolerance > 0
+          ? c.tolerance
           : tol;
-        const perPartDist = c.parameters.toleranceDist === 'uniform' || c.parameters.toleranceDist === 'gauss'
-          ? c.parameters.toleranceDist
+        const perPartDist = c.toleranceDist === 'uniform' || c.toleranceDist === 'gauss'
+          ? c.toleranceDist
           : dist;
         return (TOL_PARAMS[c.type] ?? [])
           .filter((p) => typeof c.parameters[p] === 'number')
@@ -153,12 +157,20 @@ export const yieldSensitivityTool: Tool = {
         { type: 'sens', outputNode: args.outputNode, mode: 'dc', parameter: param },
       );
       const trace = result.traces[0] as unknown as
-        | { xValues: Float64Array; yValues: Float64Array } | undefined;
-      // runSens labels components by refdes in order; recover ids in the same
-      // order (only components carrying the parameter are included).
+        | { xValues: Float64Array; yValues: Float64Array; labels?: string[] }
+        | undefined;
+      // Identity comes from the TRACE's own labels (runSens pushes a label
+      // per successfully-perturbed component) — re-filtering components here
+      // misaligned indices whenever a perturbed solve failed or a value was
+      // exactly 0, silently attributing sensitivities to the WRONG parts.
+      const labels = trace?.labels;
       const comps = ctx.doc.components.filter((c) => typeof c.parameters[param] === 'number');
-      const rows = comps.map((c, i) => ({
-        component: c.refdes ?? c.id,
+      const identityFor = (i: number): string =>
+        (labels && labels[i])
+        ?? (comps[i] ? (comps[i].refdes ?? comps[i].id) : `#${i}`);
+      const n = trace ? trace.yValues.length : 0;
+      const rows = Array.from({ length: n }, (_, i) => ({
+        component: identityFor(i),
         param,
         dVdP: trace ? trace.yValues[i] ?? 0 : 0,
       })).sort((a, b) => Math.abs(b.dVdP) - Math.abs(a.dVdP));
