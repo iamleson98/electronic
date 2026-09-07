@@ -32,6 +32,7 @@ import { toast } from 'sonner';
 import { confirmDialog } from '@/lib/confirm';
 import type { ComponentPlugin, PinElecType, PinShape, Vec2 } from '@/lib/circuit/types';
 import { registerPlugin } from '@/lib/circuit/registry';
+import { saveUserDesign } from '@/lib/circuit/user-library';
 import {
   type SymbolDesign, type SymbolPin, type SymbolRect, type SymbolLine,
   type SymbolText, type PinDirection,
@@ -658,11 +659,17 @@ export function SymbolEditorDialog({ open, onClose, onSaved, initialDesign }: Pr
         type: d.type.toLowerCase(),
       });
       registerPlugin(plugin);
+      // Persist to the user library so the symbol survives reloads (and is
+      // re-registered at app startup by registerAllUserSymbols). Best-effort:
+      // quota failure keeps the in-session registration working.
+      const persisted = saveUserDesign({ ...d, type: d.type.toLowerCase() }, 'symbol-editor');
       // Notify any listening UI (e.g. ComponentPalette) that a new plugin
       // is available so they re-fetch the registry.
       window.dispatchEvent(new CustomEvent('circuitlab:plugin-registered'));
       toast.success(`Symbol "${plugin.name}" registered (${plugin.terminals.length} pins)`, {
-        description: `Find "${plugin.name}" in the component palette under "IC" category`,
+        description: persisted
+          ? `Find "${plugin.name}" in the component palette under "IC" category — it is saved to your library and survives reloads`
+          : `Find "${plugin.name}" in the component palette under "IC" category (library is full — symbol is session-only)`,
       });
       onSaved?.(plugin);
       onClose();

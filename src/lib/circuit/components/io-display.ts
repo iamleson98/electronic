@@ -521,7 +521,7 @@ export const buzzer: ComponentPlugin = {
   type: 'buzzer',
   name: 'Buzzer (Active 5V)',
   category: 'io',
-  description: 'Active electromagnetic buzzer. The coil is stamped as ratedVoltage/current (≈167 Ω at 5 V/30 mA) so it draws real current; sound plays when the voltage across it reaches 80% of the rated voltage.',
+  description: 'Active electromagnetic buzzer. The coil is stamped as ratedVoltage/current (≈167 Ω at 5 V/30 mA) so it draws real current; it plays a real tone at its resonant frequency (enable sound with the speaker icon in the status bar) when the voltage across it reaches 80% of the rated voltage.',
   symbol: 'BZ',
   boundingBox: { width: 4, height: 2 },
   terminals: [
@@ -593,8 +593,13 @@ export const buzzer: ComponentPlugin = {
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
   step(params, terminals, sim, instance) {
     if (!instance.simState) instance.simState = {};
+    // v/rated/freq are consumed by the WebAudio engine (lib/circuit/audio.ts)
+    // — the rated voltage and resonant frequency are part of the state so the
+    // poller doesn't need component-parameter access.
     instance.simState.__buzzer = {
       v: v(sim, pinOf(terminals, 'pos')) - v(sim, pinOf(terminals, 'neg')),
+      rated: (params.ratedVoltage as number) ?? 5,
+      freq: (params.frequency as number) ?? 2300,
     };
   },
   measure(params, terminals, sim) {

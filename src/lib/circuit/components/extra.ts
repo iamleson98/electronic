@@ -963,7 +963,7 @@ const speaker: ComponentPlugin = {
   type: 'speaker',
   name: 'Speaker',
   category: 'io',
-  description: '8Ω speaker. Visual indicator shows when current flows. Will produce audio in future.',
+  description: '8Ω speaker. Plays the real waveform frequency as audible sound (enable sound with the speaker icon in the status bar); the visual sound-wave animation scales with current.',
   symbol: 'SPK',
   boundingBox: { width: 3, height: 2 },
   terminals: [
@@ -1029,6 +1029,38 @@ const speaker: ComponentPlugin = {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
     sys.stampConductance(a, b, 1 / r);
+  },
+  step(params, terminals, sim, instance) {
+    // Frequency estimation for real audio playback: keep a short rolling
+    // history of the terminal voltage and count zero crossings. The dominant
+    // frequency is zc / (2·span). Published as __speaker = { freq, vpp } —
+    // consumed by lib/circuit/audio.ts (100 ms poll).
+    if (!instance.simState) instance.simState = {};
+    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
+    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    const voltage = sim.nodeVoltage[a] - sim.nodeVoltage[b];
+    const prev = (instance.simState.__speaker ?? {}) as {
+      hist?: { t: number; v: number }[]; freq?: number; vpp?: number;
+    };
+    const hist = prev.hist ?? [];
+    hist.push({ t: sim.time, v: voltage });
+    const HIST = 96;
+    if (hist.length > HIST) hist.splice(0, hist.length - HIST);
+    let zc = 0;
+    for (let i = 1; i < hist.length; i++) {
+      if ((hist[i - 1].v >= 0) !== (hist[i].v >= 0)) zc++;
+    }
+    const span = hist.length > 1 ? hist[hist.length - 1].t - hist[0].t : 0;
+    // Need at least 2 crossings (one full period) for a trustworthy estimate.
+    const freq = zc >= 2 && span > 0 ? zc / (2 * span) : 0;
+    let minV = Infinity;
+    let maxV = -Infinity;
+    for (const h of hist) {
+      if (h.v < minV) minV = h.v;
+      if (h.v > maxV) maxV = h.v;
+    }
+    const vpp = hist.length > 0 ? maxV - minV : 0;
+    instance.simState.__speaker = { hist, freq, vpp };
   },
   measure(params, terminals, sim) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;

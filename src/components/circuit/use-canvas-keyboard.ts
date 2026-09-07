@@ -31,6 +31,12 @@ export function useCanvasKeyboard(opts: {
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') return;
 
+      // ── Embed mode (read-only /embed route) — block every editing key.
+      // Space (play/pause) stays live so embed viewers can control the sim.
+      if (useEditor.getState().embedMode) {
+        if (e.code !== 'Space') return;
+      }
+
       // ── Wire tool (W) — the hotkey the help/shortcuts list has always
       // advertised; it now actually engages wire mode (any pin click starts
       // drawing, clicks place bends). Esc or W again returns to select.

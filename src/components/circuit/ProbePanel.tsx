@@ -7,13 +7,14 @@ import { getTerminalsForComponent, buildNodeMap } from '@/lib/circuit/engine';
 import { parseMeasLine, execMeas, computeFFT, type MeasCommand, type MeasResult } from '@/lib/circuit/measurement';
 import { computeTHD, downsampleSpectrum, type THDResult } from '@/lib/circuit/fourier';
 import {
-  applyCoupling, computeCursorDeltas, computeMeasurements, computeTimeWindow, computeVoltageWindow,
+  applyCoupling, computeCursorDeltas, computeMathSamples, computeMeasurements, computeTimeWindow, computeVoltageWindow,
   createDefaultScopeConfig, cursorIntervalStats, formatDuration, formatFrequency, formatTimebase, formatVoltage,
   formatVoltageScale, getVoltageAtTime, mapTimeToX, mapVoltageToY, mapXToTime, meanVoltage,
   pickDefaultVoltageScale, PROBE_MODELS, refitVoltageScale, resolveTriggerAnchor, stepPreset, SCOPE_H_DIVS, SCOPE_V_DIVS,
-  TIMEBASE_PRESETS, VOLTAGE_SCALE_PRESETS, type ScopeChannel, type ScopeConfig,
+  TIMEBASE_PRESETS, VOLTAGE_SCALE_PRESETS, type MathOp, type ScopeChannel, type ScopeConfig,
 } from '@/lib/circuit/scope-viewer';
-import { Activity, BarChart3, AlertCircle, Crosshair, Waves, Sparkles, Zap } from 'lucide-react';
+import { SerialMonitorTab } from './SerialMonitorTab';
+import { Activity, BarChart3, AlertCircle, Crosshair, Waves, Sparkles, Zap, Sigma, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -68,9 +69,52 @@ export function ProbePanel() {
   }, [scopeConfig.timebase, scopeConfig.cursorA, scopeConfig.cursorB, scopeConfig.trigger, scopeConfig.showGrid, scopeConfig.showMeasurements]);
   const [channelSettings, setChannelSettings] = useState<Record<string, ScopeChannelSettings>>({});
   const [selectedChannel, setSelectedChannel] = useState(0);
-  const [activeTab, setActiveTab] = useState<'scope' | 'measurements' | 'meas' | 'spectrum'>('scope');
+  const [activeTab, setActiveTab] = useState<'scope' | 'measurements' | 'meas' | 'spectrum' | 'serial'>('scope');
   const [xyMode, setXyMode] = useState(false);
   const [probeModel, setProbeModel] = useState(0);
+
+  // ─── Scope math channels (A±B, A×B) ───────────────────────────────────
+  // Definitions are panel-local (never dirty the document / undo history) and
+  // persisted so they survive reloads. Computed traces are appended to the
+  // trace list passed to the scope — they flow through ALL existing channel
+  // machinery (V/div knobs, coupling, cursors, XY, measurements, spectrum).
+  const [mathChannels, setMathChannels] = useState<MathChannelDef[]>(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? window.localStorage.getItem('scope-math-v1') : null;
+      if (raw) {
+        const parsed = JSON.parse(raw) as MathChannelDef[];
+        if (Array.isArray(parsed)) {
+          return parsed.filter((d) => d && typeof d.op === 'string' && typeof d.aIdx === 'number' && typeof d.bIdx === 'number');
+        }
+      }
+    } catch { /* corrupted prefs — fall through to defaults */ }
+    return [];
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('scope-math-v1', JSON.stringify(mathChannels));
+    } catch { /* storage full/blocked */ }
+  }, [mathChannels]);
+
+  const displayTraces = useMemo(() => {
+    if (mathChannels.length === 0) return traces;
+    const mathTraces: ProbeTrace[] = [];
+    for (const def of mathChannels) {
+      if (!def.visible) continue;
+      const a = traces[def.aIdx];
+      const b = traces[def.bIdx];
+      if (!a || !b) continue; // trace removed — definition goes dormant
+      const samples = computeMathSamples(a.samples, b.samples, def.op);
+      if (samples.length < 2) continue;
+      mathTraces.push({
+        componentId: def.id,
+        color: '#f472b6',
+        label: mathLabel(def, a, b),
+        samples,
+      });
+    }
+    return mathTraces.length > 0 ? [...traces, ...mathTraces] : traces;
+  }, [traces, mathChannels]);
 
   // ─── .meas commands ───────────────────────────────────────────────────
   const [measCommands, setMeasCommands] = useState<MeasCommand[]>([]);
@@ -119,7 +163,7 @@ export function ProbePanel() {
     setChannelSettings((prev) => {
       let changed = false;
       const next = { ...prev };
-      for (const t of traces) {
+      for (const t of displayTraces) {
         const cs = next[t.componentId];
         if (cs?.touched || t.samples.length < 2) continue;
         let vMin = Infinity, vMax = -Infinity;
@@ -146,7 +190,7 @@ export function ProbePanel() {
       }
       return changed ? next : prev;
     });
-  }, [traces]);
+  }, [displayTraces]);
 
   const updateChannelSetting = useCallback((componentId: string, patch: Partial<ScopeChannelSettings>) => {
     setChannelSettings((prev) => {
@@ -164,15 +208,15 @@ export function ProbePanel() {
   // Pure computation — no canvas access — evaluated for the selected channel.
   const scopeReadout = useMemo(() => {
     if (!scopeConfig.cursorA.enabled) return null;
-    const idx = traces.length > 0 ? Math.min(selectedChannel, traces.length - 1) : -1;
-    const trace = idx >= 0 ? traces[idx] : null;
+    const idx = displayTraces.length > 0 ? Math.min(selectedChannel, displayTraces.length - 1) : -1;
+    const trace = idx >= 0 ? displayTraces[idx] : null;
     if (!trace || trace.samples.length === 0) return null;
     const cs = channelSettings[trace.componentId];
     const coupled = applyCoupling(trace.samples, cs?.coupling ?? 'DC');
     const v = getVoltageAtTime(coupled, scopeConfig.cursorA.time);
     if (v === null) return null;
     return { label: trace.label, color: trace.color, time: scopeConfig.cursorA.time, voltage: v };
-  }, [scopeConfig.cursorA, traces, selectedChannel, channelSettings]);
+  }, [scopeConfig.cursorA, displayTraces, selectedChannel, channelSettings]);
 
   // ─── .meas handlers ──────────────────────────────────────────────────
   const handleAddMeas = () => {
@@ -252,7 +296,7 @@ export function ProbePanel() {
 
       {/* Tab bar */}
       <div className="flex border-b border-slate-800">
-        {(['scope', 'measurements', 'meas', 'spectrum'] as const).map(tab => (
+        {(['scope', 'measurements', 'meas', 'spectrum', 'serial'] as const).map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -270,7 +314,10 @@ export function ProbePanel() {
           <>
             {/* Oscilloscope — div-based scope UI driven by scope-viewer */}
             <ScopeTab
-              traces={traces}
+              traces={displayTraces}
+              realTraceCount={traces.length}
+              mathChannels={mathChannels}
+              setMathChannels={setMathChannels}
               scopeConfig={scopeConfig}
               setScopeConfig={setScopeConfig}
               channelSettings={channelSettings}
@@ -465,16 +512,39 @@ export function ProbePanel() {
           </div>
         )}
 
-        {activeTab === 'spectrum' && <SpectrumTab traces={traces} canvasRef={spectrumCanvasRef} />}
+        {activeTab === 'spectrum' && <SpectrumTab traces={displayTraces} canvasRef={spectrumCanvasRef} />}
+        {activeTab === 'serial' && <SerialMonitorTab />}
       </div>
     </div>
   );
 }
 
+// ─── Scope math channels ────────────────────────────────────────────────────
+
+/** User-defined math channel: A (op) B over two real scope traces. */
+export interface MathChannelDef {
+  id: string;
+  op: MathOp;
+  /** index into the REAL trace list (not the display list) */
+  aIdx: number;
+  bIdx: number;
+  visible: boolean;
+}
+
+function mathLabel(def: MathChannelDef, a: { label: string }, b: { label: string }): string {
+  const sym = def.op === 'add' ? '+' : def.op === 'sub' ? '−' : '×';
+  return `${a.label} ${sym} ${b.label}`;
+}
+
 // ─── Scope tab — real oscilloscope UI driven by scope-viewer ────────────────
 
 interface ScopeTabProps {
+  /** real traces + computed math traces (math appended at the end) */
   traces: ProbeTrace[];
+  /** how many leading entries of `traces` are real (non-math) channels */
+  realTraceCount: number;
+  mathChannels: MathChannelDef[];
+  setMathChannels: React.Dispatch<React.SetStateAction<MathChannelDef[]>>;
   scopeConfig: ScopeConfig;
   setScopeConfig: React.Dispatch<React.SetStateAction<ScopeConfig>>;
   channelSettings: Record<string, ScopeChannelSettings>;
@@ -488,7 +558,7 @@ interface ScopeTabProps {
   setProbeModel: React.Dispatch<React.SetStateAction<number>>;
 }
 
-function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, updateChannelSetting, selectedChannel, setSelectedChannel, canvasRef, xyMode, setXyMode, probeModel, setProbeModel }: ScopeTabProps) {
+function ScopeTab({ traces, realTraceCount, mathChannels, setMathChannels, scopeConfig, setScopeConfig, channelSettings, updateChannelSetting, selectedChannel, setSelectedChannel, canvasRef, xyMode, setXyMode, probeModel, setProbeModel }: ScopeTabProps) {
   const a = scopeConfig.cursorA;
   const b = scopeConfig.cursorB;
   const trig = scopeConfig.trigger;
@@ -981,6 +1051,14 @@ function ScopeTab({ traces, scopeConfig, setScopeConfig, channelSettings, update
             ))}
           </select>
         </div>
+
+        {/* Row 4: math channels (A±B, A×B) */}
+        <MathChannelRow
+          traces={traces}
+          realTraceCount={realTraceCount}
+          mathChannels={mathChannels}
+          setMathChannels={setMathChannels}
+        />
       </div>
 
       {/* Graticule canvas: 10 × 8 divisions, pointer-draggable A/B cursors */}
@@ -1057,6 +1135,108 @@ function ToolBtn({ children, label, onClick, disabled, active }: {
     >
       {children}
     </button>
+  );
+}
+
+/** Math-channel definition row: pick A (op) B and manage existing math traces. */
+function MathChannelRow({ traces, realTraceCount, mathChannels, setMathChannels }: {
+  traces: ProbeTrace[];
+  realTraceCount: number;
+  mathChannels: MathChannelDef[];
+  setMathChannels: React.Dispatch<React.SetStateAction<MathChannelDef[]>>;
+}) {
+  const [aIdx, setAIdx] = useState(0);
+  const [bIdx, setBIdx] = useState(Math.min(1, Math.max(0, realTraceCount - 1)));
+  const [op, setOp] = useState<MathOp>('add');
+
+  const canAdd = realTraceCount >= 2;
+  const addMath = () => {
+    if (!canAdd) return;
+    if (aIdx === bIdx) return; // A op A is pointless — guard it
+    const id = `math_${Date.now().toString(36)}`;
+    setMathChannels((prev) => [...prev, { id, op, aIdx, bIdx, visible: true }]);
+  };
+  const clampIdx = (v: number) => Math.min(Math.max(0, v), Math.max(0, realTraceCount - 1));
+
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      <span className="flex items-center gap-1 text-[9px] uppercase tracking-wider text-slate-500">
+        <Sigma size={10} /> Math
+      </span>
+      <select
+        value={clampIdx(aIdx)}
+        onChange={(e) => setAIdx(parseInt(e.target.value, 10))}
+        disabled={!canAdd}
+        aria-label="Math channel source A"
+        className="cursor-pointer rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-200 disabled:opacity-40"
+      >
+        {traces.slice(0, realTraceCount).map((t, i) => (
+          <option key={t.componentId} value={i}>{t.label}</option>
+        ))}
+      </select>
+      <select
+        value={op}
+        onChange={(e) => setOp(e.target.value as MathOp)}
+        aria-label="Math operation"
+        className="cursor-pointer rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-200"
+      >
+        <option value="add">+</option>
+        <option value="sub">−</option>
+        <option value="mul">×</option>
+      </select>
+      <select
+        value={clampIdx(bIdx)}
+        onChange={(e) => setBIdx(parseInt(e.target.value, 10))}
+        disabled={!canAdd}
+        aria-label="Math channel source B"
+        className="cursor-pointer rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-[10px] text-slate-200 disabled:opacity-40"
+      >
+        {traces.slice(0, realTraceCount).map((t, i) => (
+          <option key={t.componentId} value={i}>{t.label}</option>
+        ))}
+      </select>
+      <ToolBtn
+        label={canAdd ? 'Add math channel A op B' : 'Needs two scope channels'}
+        onClick={addMath}
+        disabled={!canAdd || aIdx === bIdx}
+      >
+        + Add
+      </ToolBtn>
+      {mathChannels.map((def) => {
+        const a = traces[def.aIdx];
+        const b = traces[def.bIdx];
+        const live = a && b;
+        return (
+          <span
+            key={def.id}
+            className={`flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] ${
+              def.visible && live
+                ? 'border-pink-500/50 bg-pink-500/10 text-pink-300'
+                : 'border-slate-700 bg-slate-800/60 text-slate-500'
+            }`}
+            title={live ? `Math trace ${mathLabel(def, a, b)}` : 'Source trace removed — dormant'}
+          >
+            {live ? mathLabel(def, a, b) : `${def.op} (dormant)`}
+            <button
+              type="button"
+              aria-label={def.visible ? 'Hide math channel' : 'Show math channel'}
+              onClick={() => setMathChannels((prev) => prev.map((d) => d.id === def.id ? { ...d, visible: !d.visible } : d))}
+              className="cursor-pointer text-slate-500 hover:text-slate-200"
+            >
+              {def.visible ? '◉' : '○'}
+            </button>
+            <button
+              type="button"
+              aria-label="Remove math channel"
+              onClick={() => setMathChannels((prev) => prev.filter((d) => d.id !== def.id))}
+              className="cursor-pointer text-slate-500 hover:text-rose-400"
+            >
+              <X size={9} />
+            </button>
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1199,7 +1379,7 @@ function SpectrumTab({ traces, canvasRef }: SpectrumTabProps) {
     );
 
     ctx.restore();
-  }, [thdResult, realTrace, traces.length, canvasRef]);
+  }, [thdResult, realTrace, traces.length, canvasRef, fftWindow]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

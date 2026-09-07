@@ -337,6 +337,33 @@ export function computeCursorDeltas(timeA: number, timeB: number): CursorDeltaRe
   return { dt, freq: adt > 0 ? 1 / adt : null };
 }
 
+// ─── Math channels ─────────────────────────────────────────────────────────
+
+export type MathOp = 'add' | 'sub' | 'mul';
+
+/**
+ * Compute a math channel (A+B / A−B / A×B) from two source sample streams.
+ * Samples are index-aligned (both scope channels are captured on the same
+ * simulation step, so their timestamps match); the shorter stream bounds the
+ * result and the tail is aligned (latest samples pair together).
+ */
+export function computeMathSamples(a: ScopeSample[], b: ScopeSample[], op: MathOp): ScopeSample[] {
+  const n = Math.min(a.length, b.length);
+  if (n === 0) return [];
+  const aTail = a.slice(a.length - n);
+  const bTail = b.slice(b.length - n);
+  const out: ScopeSample[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const va = aTail[i].voltage;
+    const vb = bTail[i].voltage;
+    out[i] = {
+      time: aTail[i].time,
+      voltage: op === 'add' ? va + vb : op === 'sub' ? va - vb : va * vb,
+    };
+  }
+  return out;
+}
+
 // ─── Config factory ────────────────────────────────────────────────────────
 
 export function createDefaultScopeConfig(): ScopeConfig {

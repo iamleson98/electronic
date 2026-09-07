@@ -164,6 +164,27 @@ export function CircuitCanvas() {
       return;
     }
 
+    // ── Embed mode (read-only interactive /embed route) ───────────────────
+    // Editing is blocked, but the embed stays INTERACTIVE: switches/buttons
+    // toggle while running (viewers can play with the circuit) and left-drag
+    // pans the view. Zoom stays on the wheel handler.
+    if (useEditor.getState().embedMode) {
+      const isRunningNow = useEditor.getState().running;
+      if (isRunningNow && e.button === 0) {
+        const comp = findComponentAt(g.x, g.y);
+        if (comp && TOGGLEABLE_TYPES.has(comp.type)) {
+          toggleSwitch(comp.id);
+          return;
+        }
+        if (comp) {
+          setSelection({ type: 'component', id: comp.id });
+          return;
+        }
+      }
+      panRef.current = { start: { x: sx, y: sy }, origin: { ...viewRef.current.pan } };
+      return;
+    }
+
     // Placement mode (keyboard placement / palette click): a canvas click
     // moves the draft to the clicked grid cell and confirms it there.
     const draftNow = useEditor.getState().placementDraft;

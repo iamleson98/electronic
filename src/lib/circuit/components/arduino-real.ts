@@ -13,6 +13,10 @@
 //   D3 = A0             // copy A0 voltage (digital threshold) to D3
 //   wait 500ms          // delay 500ms
 //   wait 1s             // delay 1 second
+//   print "V=" A0       // serial output: text + pin voltage (no newline)
+//   println "A0=" A0    // serial output with newline
+//   plot A0             // serial plotter: add (t, A0) point to series "A0"
+//   plot pot A0         // serial plotter: custom series name "pot"
 //   loop                // label: jump back here
 //   if A0 > 2.5 goto triggered
 //   goto loop
@@ -24,8 +28,11 @@
 // The interpreter runs one "instruction" per simulation step (or skips wait
 // instructions until the wait expires). Pin reads use the actual simulated node
 // voltages; pin writes drive voltage sources in the next stamp pass.
+//
+// Serial output (print/println/plot) accumulates in the persistent sim-state
+// map under `${key}_serial` — the ProbePanel's "Serial" tab reads it live.
 
-import type { ComponentPlugin, SimContext, MnaSystem } from '../types';
+import type { ComponentPlugin, SimContext } from '../types';
 
 export interface ArduinoPin {
   id: string;        // 'd2', 'a0', etc.
@@ -40,8 +47,83 @@ export interface ArduinoFirmwareState {
   outputs: Record<string, number>;    // pin id -> voltage to drive (set by firmware)
 }
 
+// ─── Serial Monitor / Plotter state ─────────────────────────────────────────
+// Written by print/println/plot instructions, read by the Serial tab in the
+// ProbePanel. Lives in the persistent sim-state map so it survives steps and
+// clears on simulation reset (like real MCU serial).
+
+export const SERIAL_MAX_LINES = 500;
+export const SERIAL_MAX_POINTS = 2000;
+
+export interface SerialLine {
+  t: number;      // sim time (s) when the line was completed
+  text: string;
+}
+
+export interface SerialPlotSeries {
+  points: { t: number; v: number }[];
+}
+
+export interface SerialState {
+  /** completed lines (oldest first); capped at SERIAL_MAX_LINES */
+  lines: SerialLine[];
+  /** partial line being built by bare `print` (no newline yet) */
+  pending: string;
+  /** sim time of the pending line's first print */
+  pendingT: number;
+  /** named plotter series, each capped at SERIAL_MAX_POINTS */
+  plots: Record<string, SerialPlotSeries>;
+  /** bumped on every mutation — lets the UI skip work when nothing changed */
+  version: number;
+}
+
+export function createSerialState(): SerialState {
+  return { lines: [], pending: '', pendingT: 0, plots: {}, version: 0 };
+}
+
+/** Append text to the serial buffer (println commits the line, print extends
+ *  the pending line). Exported for tests. */
+export function serialWrite(st: SerialState, text: string, newline: boolean, time: number): void {
+  if (newline) {
+    const line = st.pending + text;
+    if (line.length > 0) {
+      st.lines.push({ t: time, text: line });
+      if (st.lines.length > SERIAL_MAX_LINES) st.lines.splice(0, st.lines.length - SERIAL_MAX_LINES);
+    }
+    st.pending = '';
+    st.pendingT = 0;
+  } else {
+    if (st.pending.length === 0) st.pendingT = time;
+    st.pending += text;
+    // Guard: a runaway print loop without newlines must not grow unbounded.
+    if (st.pending.length > 2000) st.pending = st.pending.slice(-2000);
+  }
+  st.version++;
+}
+
+/** Add a plotter point to a named series. Exported for tests. */
+export function serialPlot(st: SerialState, label: string, time: number, value: number): void {
+  let series = st.plots[label];
+  if (!series) {
+    series = { points: [] };
+    st.plots[label] = series;
+  }
+  series.points.push({ t: time, v: value });
+  if (series.points.length > SERIAL_MAX_POINTS) {
+    series.points.splice(0, series.points.length - SERIAL_MAX_POINTS);
+  }
+  st.version++;
+}
+
+/** One print argument: a quoted string, a pin reference (resolved to its
+ *  live voltage), or a bare number/word (printed literally). */
+export type PrintArg =
+  | { kind: 'str'; text: string }
+  | { kind: 'pin'; pin: string }
+  | { kind: 'literal'; text: string };
+
 export interface ArduinoInstruction {
-  op: 'setPin' | 'wait' | 'goto' | 'label' | 'ifGoto' | 'setPinFromPin' | 'nop';
+  op: 'setPin' | 'wait' | 'goto' | 'label' | 'ifGoto' | 'setPinFromPin' | 'nop' | 'print' | 'println' | 'plot';
   args: any[];
 }
 
@@ -113,13 +195,56 @@ export function compileArduinoSketch(source: string): { instructions: ArduinoIns
       instructions.push({ op: 'setPinFromPin', args: [dst, src] });
       continue;
     }
+    // plot A0   /   plot pot A0   — serial plotter point
+    m = line.match(/^plot\s+(\w+)(?:\s+(\w+))?$/i);
+    if (m) {
+      // `plot label pin` — the label is the optional first token; a bare pin
+      // name defaults to the series label.
+      let label: string;
+      let pin: string;
+      if (m[2]) {
+        label = m[1].toLowerCase();
+        pin = m[2].toLowerCase();
+      } else {
+        pin = m[1].toLowerCase();
+        label = pin;
+      }
+      instructions.push({ op: 'plot', args: [label, pin] });
+      continue;
+    }
+    // print / println — serial monitor output. Tokens after the opcode are
+    // quoted strings, pin names (printed as their live voltage) or literals.
+    m = line.match(/^(print(?:ln)?)\s+(.+)$/i);
+    if (m) {
+      const op: 'print' | 'println' = m[1].toLowerCase() === 'println' ? 'println' : 'print';
+      const body = m[2];
+      const args: PrintArg[] = [];
+      // Split respecting double-quoted strings
+      const tokenRe = /"([^"]*)"|(\S+)/g;
+      let tm: RegExpExecArray | null;
+      while ((tm = tokenRe.exec(body)) !== null) {
+        if (tm[1] !== undefined) {
+          if (tm[1].length > 0) args.push({ kind: 'str', text: tm[1] });
+        } else {
+          const tok = tm[2];
+          if (/^[\d.]+$/.test(tok)) {
+            args.push({ kind: 'literal', text: tok });
+          } else {
+            args.push({ kind: 'pin', pin: tok.toLowerCase() });
+          }
+        }
+      }
+      instructions.push({ op, args: [args] });
+      continue;
+    }
     // unknown line - skip silently
   }
 
   return { instructions, labels };
 }
 
-/** Execute one firmware "tick" against the current sim state. Updates `state` in place. */
+/** Execute one firmware "tick" against the current sim state. Updates `state` in place.
+ *  `serial` (optional) receives print/println/plot output. */
 export function executeFirmwareTick(
   state: ArduinoFirmwareState,
   instructions: ArduinoInstruction[],
@@ -127,6 +252,7 @@ export function executeFirmwareTick(
   sim: SimContext,
   pinToNode: Record<string, number>,
   vccV: number,
+  serial?: SerialState,
 ): void {
   if (state.waitUntil > sim.time) return; // still waiting
   if (state.pc >= instructions.length) return; // program ended
@@ -165,6 +291,27 @@ export function executeFirmwareTick(
         else state.pc++;
         break;
       }
+      case 'print':
+      case 'println': {
+        const [args] = instr.args as [PrintArg[]];
+        if (serial) {
+          const text = formatPrintArgs(args, pinToNode, sim);
+          serialWrite(serial, text, instr.op === 'println', sim.time);
+        }
+        state.pc++;
+        break;
+      }
+      case 'plot': {
+        const [label, pin] = instr.args as [string, string];
+        if (serial) {
+          const node = pinToNode[pin];
+          if (node !== undefined) {
+            serialPlot(serial, label, sim.time, sim.nodeVoltage[node] ?? 0);
+          }
+        }
+        state.pc++;
+        break;
+      }
       case 'ifGoto': {
         const [pin, op, val, label] = instr.args as [string, string, number, string];
         const node = pinToNode[pin];
@@ -189,6 +336,28 @@ export function executeFirmwareTick(
         break;
     }
   }
+}
+
+/** Evaluate print args against live pin voltages → the printed text. */
+function formatPrintArgs(
+  args: PrintArg[],
+  pinToNode: Record<string, number>,
+  sim: SimContext,
+): string {
+  let out = '';
+  for (const a of args) {
+    if (a.kind === 'pin') {
+      const node = pinToNode[a.pin];
+      if (node !== undefined) {
+        out += (sim.nodeVoltage[node] ?? 0).toFixed(2);
+      } else {
+        out += a.pin; // not a pin — print the word itself
+      }
+    } else {
+      out += a.text;
+    }
+  }
+  return out;
 }
 
 // Pre-built sketches as examples
@@ -232,6 +401,12 @@ D5 = HIGH
 wait 100ms
 D5 = LOW
 goto loop`,
+  serial: `// Serial Monitor + Serial Plotter demo
+loop:
+println "A0=" A0
+plot A0
+wait 200ms
+goto loop`,
 };
 
 // Plugin definition
@@ -239,7 +414,7 @@ const arduinoReal: ComponentPlugin = {
   type: 'arduinoReal',
   name: 'Arduino (programmable)',
   category: 'mcu',
-  description: 'Arduino-compatible MCU with user-programmable firmware. Write a tiny sketch with pin/wait/goto/if.',
+  description: 'Arduino-compatible MCU with user-programmable firmware. Write a tiny sketch with pin/wait/goto/if, plus print/println/plot for the Serial Monitor and Serial Plotter.',
   symbol: 'ARD',
   boundingBox: { width: 8, height: 13 },
   terminals: [
@@ -424,8 +599,14 @@ const arduinoReal: ComponentPlugin = {
       sim.time = target;
     }
 
-    // Execute firmware
-    executeFirmwareTick(st, compiled.instructions, compiled.labels, sim, pinToNode, vccV);
+    // Execute firmware (serial output accumulates in the persistent state map)
+    const serialKey = `${key}_serial`;
+    let serial = sim.state[serialKey] as SerialState | undefined;
+    if (!serial) {
+      serial = createSerialState();
+      sim.state[serialKey] = serial;
+    }
+    executeFirmwareTick(st, compiled.instructions, compiled.labels, sim, pinToNode, vccV, serial);
 
     // Stamp outputs: drive each pin mentioned in st.outputs as a voltage source
     for (const [pin, v] of Object.entries(st.outputs)) {

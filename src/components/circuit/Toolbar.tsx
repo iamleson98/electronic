@@ -8,7 +8,7 @@ import {
   Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Gauge, Zap,
   FileText, ChevronDown, Settings2, Database, FileCode, Boxes, ShieldCheck,
   Search, FileDown, Network, Layers, BookOpen, Wand2, Ruler, Pencil, Spline,
-  Activity, Sliders, Sigma, Waves, ChevronRight, ChevronLeft, RotateCcw,
+  Activity, Sliders, Sigma, Waves, ChevronRight, ChevronLeft, RotateCcw, Library,
 } from 'lucide-react';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
@@ -24,6 +24,7 @@ import { MyCircuitsDialog } from './MyCircuitsDialog';
 import { SpiceImportDialog } from './SpiceImportDialog';
 import { SubCircuitDialog } from './SubCircuitDialog';
 import { SymbolEditorDialog } from './SymbolEditorDialog';
+import { KiCadLibraryImportDialog } from './dialogs/schematic/KiCadLibraryImportDialog';
 import {
   FindReplaceDialog, ViolationsBrowserDialog, NetInspectorDialog,
   PageSetupDialog, SavedViewsDialog, HierarchicalSheetsDialog, NetClassesDialog,
@@ -105,6 +106,7 @@ export function Toolbar() {
   const [showSpiceImport, setShowSpiceImport] = useState(false);
   const [showSubCircuit, setShowSubCircuit] = useState(false);
   const [showSymbolEditor, setShowSymbolEditor] = useState(false);
+  const [showKiCadLibImport, setShowKiCadLibImport] = useState(false);
   const [showFindReplace, setShowFindReplace] = useState(false);
   const [showViolations, setShowViolations] = useState(false);
   const [showNetInspector, setShowNetInspector] = useState(false);
@@ -640,6 +642,9 @@ export function Toolbar() {
             <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={() => schImportInputRef.current?.click()} disabled={running}>
               <Upload size={14} className="mr-2" /> Import KiCad .sch
             </DropdownMenuItem>
+            <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer" onClick={() => setShowKiCadLibImport(true)} disabled={running}>
+              <Library size={14} className="mr-2" /> Import KiCad Library…
+            </DropdownMenuItem>
             <DropdownMenuSeparator className="bg-slate-700" />
             {/* Design tools */}
             <DropdownMenuLabel className="text-slate-300">Design</DropdownMenuLabel>
@@ -773,6 +778,7 @@ export function Toolbar() {
           window.dispatchEvent(new CustomEvent('circuitlab:plugin-registered'));
         }}
       />
+      <KiCadLibraryImportDialog open={showKiCadLibImport} onClose={() => setShowKiCadLibImport(false)} />
       <FindReplaceDialog open={showFindReplace} onClose={() => setShowFindReplace(false)} />
       <ViolationsBrowserDialog open={showViolations} onClose={() => setShowViolations(false)} />
       <NetInspectorDialog open={showNetInspector} onClose={() => setShowNetInspector(false)} />

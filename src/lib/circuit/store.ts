@@ -307,6 +307,13 @@ interface EditorState {
   setDt: (dt: number) => void;
   step: () => void;
   reset: () => void;
+  /** Embed (read-only interactive) mode — the /embed route sets this so the
+   *  canvas blocks editing interactions but keeps pan/zoom/switch-toggles and
+   *  simulation controls. */
+  embedMode: boolean;
+  setEmbedMode: (on: boolean) => void;
+  /** Clear the serial monitor/plotter buffers of an arduinoReal component */
+  clearSerialMonitor: (compId: string) => void;
   setShowGrid: (s: boolean) => void;
   setSnapToGrid: (s: boolean) => void;
 
@@ -465,6 +472,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   running: false,
   speed: 1,
   dt: 1e-4,
+  embedMode: false,
   simContext: null,
   simError: null,
   physicsViolations: [],
@@ -1813,6 +1821,21 @@ export const useEditor = create<EditorState>((set, get) => ({
   setSimError: (msg: string | null) => set({ simError: msg }),
   setSpeed: (speed) => set({ speed }),
   setDt: (dt) => set({ dt }),
+  setEmbedMode: (on) => set({ embedMode: on }),
+
+  /** Clear the Serial Monitor + Plotter buffers of an arduinoReal component
+   *  (the serial state lives in the persistent sim-state map — mutated in the
+   *  store, not from React render, so the React compiler stays happy). */
+  clearSerialMonitor: (compId) => {
+    const st = get().simContext?.state?.[`arduinoReal_${compId}_serial`];
+    if (st && typeof st === 'object') {
+      st.lines = [];
+      st.pending = '';
+      st.pendingT = 0;
+      st.plots = {};
+      st.version++;
+    }
+  },
 
   step: () => {
     const s = get();

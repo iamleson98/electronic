@@ -34,6 +34,8 @@ import { useChatSession } from '@/lib/ai/chat-session';
 import { installScriptingAPI } from '@/lib/scripting-api';
 import { hasSharedCircuit, loadFromShareURL, createShareURL } from '@/lib/circuit/share-url';
 import { AutosaveManager, detectCrashRecovery, loadAutosave, clearAutosave } from '@/lib/circuit/autosave';
+import { registerAllUserSymbols } from '@/lib/circuit/user-library';
+import { useCircuitAudio } from '@/components/circuit/use-circuit-audio';
 import { confirmDialog } from '@/lib/confirm';
 import { ConfirmDialogHost } from '@/components/ui/ConfirmDialogHost';
 import '@/lib/circuit/components';
@@ -51,6 +53,8 @@ export default function Home() {
   const [hasUnseenChangelog, setHasUnseenChangelog] = useState(false);
   // Screen-reader announcements (keyboard focus cycling / placement mode)
   const announcement = useEditor((s) => s.announcement);
+  // Buzzer/speaker WebAudio poller (voices are driven from live sim state)
+  useCircuitAudio();
 
   // "What's New" badge — visible on the Help button when there's an unseen changelog entry.
   useEffect(() => {
@@ -72,6 +76,10 @@ export default function Home() {
   useEffect(() => {
     try {
       installScriptingAPI();
+      // Re-register persisted user symbols (Symbol Editor creations + KiCad
+      // library imports) BEFORE loading any document so their plugin types
+      // resolve when components are placed back on the canvas.
+      registerAllUserSymbols();
       if (hasSharedCircuit()) {
         const doc = loadFromShareURL(window.location.hash);
         if (doc && doc.components && doc.wires) useEditor.getState().loadDocument(doc);
