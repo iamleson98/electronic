@@ -24,7 +24,7 @@ import { exportAllGerbers, exportAllGerbersX2 } from '../src/lib/pcb/gerber-expo
 import { flagSatisfiedRatsnestLegs } from '../src/lib/pcb/netlist-verify';
 import { FOUR_LAYER_STACK, DEFAULT_LAYER_STACK } from '../src/lib/pcb/types';
 import type { Footprint, Pad, Trace, Via, CopperLayer } from '../src/lib/pcb/types';
-import { exampleCategories } from '../src/lib/circuit/examples';
+import { exampleCategories, exampleLed } from '../src/lib/circuit/examples';
 import '../src/lib/circuit/components';
 
 // ── fixtures ────────────────────────────────────────────────────────────────
@@ -235,7 +235,8 @@ describe('Bug 2 — ratsnest airwires disappear after routing', () => {
   });
 
   it('importFromSchematic → runAutoRoute → EVERY leg satisfied; unrouteAll → legs return', () => {
-    const ex = exampleCategories.flatMap((c) => c.examples).find((e) => e.name === 'LED + Resistor')!;
+    // 'LED + Resistor' left the example menu (kept as a test fixture export)
+    const ex = { name: 'LED + Resistor', doc: exampleLed };
     usePCB.getState().importFromSchematic(ex.doc.components, ex.doc.wires);
     const before = usePCB.getState().ratsnest;
     expect(before.length).toBeGreaterThanOrEqual(2);
@@ -256,7 +257,8 @@ describe('Bug 2 — ratsnest airwires disappear after routing', () => {
   });
 
   it('loadDocument of a routed board does NOT resurrect airwires', () => {
-    const ex = exampleCategories.flatMap((c) => c.examples).find((e) => e.name === 'LED + Resistor')!;
+    // 'LED + Resistor' left the example menu (kept as a test fixture export)
+    const ex = { name: 'LED + Resistor', doc: exampleLed };
     usePCB.getState().importFromSchematic(ex.doc.components, ex.doc.wires);
     usePCB.getState().runAutoRoute();
     const doc = JSON.parse(JSON.stringify(usePCB.getState().serialize()));

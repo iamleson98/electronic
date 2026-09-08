@@ -172,16 +172,43 @@ function makeFlipFlop(type: string, name: string, symbol: string): ComponentPlug
       const k = terminals.find(t => t.terminalId === 'k')?.nodeId ?? 0;
       const q = terminals.find(t => t.terminalId === 'q')?.nodeId ?? 0;
       const qbar = terminals.find(t => t.terminalId === 'qbar')?.nodeId ?? 0;
+      // input pull-downs keep floating inputs LOW (1 MΩ, like the gates)
+      if (d > 0) sys.stampConductance(d, 0, 1e-6);
+      if (clk > 0) sys.stampConductance(clk, 0, 1e-6);
+      if (k > 0) sys.stampConductance(k, 0, 1e-6);
       const st = sim.state.__global ?? (sim.state.__global = {});
       // State keyed by component id — node-based keys made every instance
       // with unconnected outputs (q=qbar=0) share one bit.
       const key = `ff_${comp?.id ?? `${type}_${q}_${qbar}`}`;
-      const state = (st[key] ?? (st[key] = { q: params.initialState as boolean, clkPrev: null as number | null })) as { q: boolean; clkPrev: number | null };
+      const state = (st[key] ?? (st[key] = { q: params.initialState as boolean, clkPrev: 0 })) as { q: boolean; clkPrev: number };
+      // Drive Q/Q̄ with real voltage sources (like every other logic plugin).
+      // The old 1 MΩ Thevenin drive could only source 5 µA — Q collapsed to
+      // millivolts under any real load.
+      if (q > 0) sys.stampVoltageSource(q, 0, state.q ? 5 : 0);
+      if (qbar > 0) sys.stampVoltageSource(qbar, 0, state.q ? 0 : 5);
+    },
+    step(params, terminals, sim, comp) {
+      // Edge/latch evaluation happens HERE — once per timestep, on the FINAL
+      // solved voltages — not in stamp(). In stamp() the inputs read the
+      // Newton-round feedback voltages, and a state that depends on its own
+      // outputs (toggle Q̄→D wiring, or a dff cascade where one flop's Q
+      // clocks the next) flip-flopped round-to-round: the committed output
+      // depended on which round happened to be last. This is the same
+      // state-in-step() architecture the 555/CD4026 use.
+      const d = terminals.find(t => t.terminalId === 'd')?.nodeId ?? 0;
+      const clk = terminals.find(t => t.terminalId === 'clk')?.nodeId ?? 0;
+      const k = terminals.find(t => t.terminalId === 'k')?.nodeId ?? 0;
+      const q = terminals.find(t => t.terminalId === 'q')?.nodeId ?? 0;
+      const qbar = terminals.find(t => t.terminalId === 'qbar')?.nodeId ?? 0;
+      const st = sim.state.__global ?? (sim.state.__global = {});
+      const key = `ff_${comp?.id ?? `${type}_${q}_${qbar}`}`;
+      const state = (st[key] ?? (st[key] = { q: params.initialState as boolean, clkPrev: 0 })) as { q: boolean; clkPrev: number };
       const clkNow = sim.nodeVoltage[clk] ?? 0;
       const dV = sim.nodeVoltage[d] ?? 0;
-      // clkPrev starts as null so a clock that is already HIGH at t=0 does
-      // not produce a spurious first edge.
-      const rising = state.clkPrev !== null && clkNow > 2.5 && state.clkPrev <= 2.5;
+      // clkPrev starts at 0 (not null): a clock that is already HIGH at
+      // power-up captures D on the first step — matching the power-on-set
+      // behavior the deep-fix regression test ("Q drives a 1k load") pins.
+      const rising = clkNow > 2.5 && state.clkPrev <= 2.5;
       if (isSr) {
         // Level-sensitive SR latch: S = D pin, R = CLK pin (labels say so).
         const s = dV > 2.5;
@@ -202,12 +229,6 @@ function makeFlipFlop(type: string, name: string, symbol: string): ComponentPlug
         }
       }
       state.clkPrev = clkNow;
-      const qVal = state.q;
-      // Drive Q/Q̄ with real voltage sources (like every other logic plugin).
-      // The old 1 MΩ Thevenin drive could only source 5 µA — Q collapsed to
-      // millivolts under any real load.
-      if (q > 0) sys.stampVoltageSource(q, 0, qVal ? 5 : 0);
-      if (qbar > 0) sys.stampVoltageSource(qbar, 0, qVal ? 0 : 5);
     },
     getFlowPath() { return [{ x: 0, y: 1 }, { x: 6, y: 1 }]; },
   };
@@ -747,6 +768,9 @@ function makeOpampMacromodel(type: string, name: string, params: {
     type,
     name,
     category: 'ic',
+    // Region-switching stamp (linear/saturated) — needs the Newton re-stamp
+    // loop so the region converges within the timestep (see opampRails note).
+    nonLinear: true,
     description: `${name} — real op-amp macromodel. GBW=${params.gbw}Hz, slew=${params.slewRate}V/µs, CMRR=${params.cmrr}dB.`,
     symbol: 'A',
     boundingBox: { width: 6, height: 4 },
@@ -887,6 +911,9 @@ export const scr: ComponentPlugin = {
   category: 'semiconductor',
   description: 'Silicon Controlled Rectifier. Latches ON when gate receives current. Turns OFF when anode current drops below holding current.',
   symbol: 'SCR',
+  // Region/latch-switching stamp — joins the Newton re-stamp loop (state
+  // rollback makes the latch decision round-invariant; see the triac note).
+  nonLinear: true,
   boundingBox: { width: 4, height: 4 },
   terminals: [
     { id: 'a', label: 'A (Anode)', position: { x: 0, y: 2 } },
@@ -945,12 +972,16 @@ export const scr: ComponentPlugin = {
       if (vAK < 0) {
         on = false;
       } else {
-        // The on-state companion is a Thevenin (vf, onR): the solved vAK is
-        // ≈ vf + i·onR, so the ACTUAL anode current is (vAK − vf)/onR. The
-        // old vAK/onR overestimated by vf/onR (15 A with defaults) — the
-        // holding-current test could never fire and the SCR latched forever.
-        const iA = (vAK - vf) / Math.max(0.001, params.onR as number);
-        if (iA < holdingI) {
+        // Holding-current test on the PREVIOUS STEP's actual anode current
+        // (recorded by step() from the solved on-state voltages). Recomputing
+        // (vAK−vf)/onR from sim.nodeVoltage is companion-inconsistent inside
+        // the Newton re-stamp loop: round feedback may come from the OFF-state
+        // solve (full source voltage across the device → hundreds of amps)
+        // and the latch decision flip-flops every round without converging.
+        // Undefined = just fired: give the current one step to build up,
+        // like the real device's turn-on.
+        const iPrev = st[key + '_i'] as number | undefined;
+        if (iPrev !== undefined && iPrev < holdingI) {
           on = false;
         }
       }
@@ -963,6 +994,22 @@ export const scr: ComponentPlugin = {
     } else {
       sys.stampConductance(a, k, 1 / (params.offR as number));
     }
+  },
+  step(params, terminals, sim, comp) {
+    // Record the ACTUAL anode current from the solved on-state voltages
+    // (companion formula: vAK ≈ vf + i·onR). Cleared when off so a fresh gate
+    // fire gets one full step of current buildup before the holding test.
+    const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
+    const k = terminals.find(t => t.terminalId === 'k')!.nodeId;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = stateKey('scr', comp, a, k);
+    if (!st[key]) {
+      delete st[key + '_i'];
+      return;
+    }
+    const vAK = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[k] ?? 0);
+    const i = Math.max(0, (vAK - (params.forwardV as number)) / Math.max(0.001, params.onR as number));
+    st[key + '_i'] = i;
   },
   getFlowPath() { return [{ x: 0, y: 2 }, { x: 4, y: 2 }]; },
 };
@@ -977,6 +1024,10 @@ export const triac: ComponentPlugin = {
   category: 'semiconductor',
   description: 'Bidirectional thyristor. Conducts in both directions when gate triggered. Used in AC power control.',
   symbol: 'TRI',
+  // Region/latch-switching stamp — joins the Newton re-stamp loop (the
+  // engine rolls the latch state back before each re-stamp so transitions
+  // apply exactly once per converged step).
+  nonLinear: true,
   boundingBox: { width: 4, height: 4 },
   terminals: [
     { id: 'mt1', label: 'MT1', position: { x: 0, y: 2 } },
@@ -1033,17 +1084,22 @@ export const triac: ComponentPlugin = {
       if (dir === 0) dir = v >= 0 ? 1 : -1;
       else if (v < 0 && dir > 0) dir = -1;
       else if (v > 0 && dir < 0) dir = 1;
-      // Holding current in the active direction: the on-state companion is
-      // the directional Thevenin (onV, onR), so the solved |v| ≈ onV + i·onR
-      // and the actual current is (|v| − onV)/onR. The old |v|/onR
-      // overestimated by onV/onR (15 A with defaults) — the holding test
-      // never fired and the triac latched forever.
-      const vDir = dir > 0 ? v : -v;
-      const i = (vDir - (params.onV as number)) / Math.max(0.001, params.onR as number);
-      if (i < holdingI) on = false;
+      // Holding-current test uses the PREVIOUS STEP's actual on-state current
+      // (recorded by step() from the solved voltages), NOT a recompute from
+      // sim.nodeVoltage. Inside the Newton re-stamp loop the feedback voltage
+      // may come from the OFF-state solve — full source voltage across the
+      // device, so (|v|−onV)/onR overestimates to hundreds of amps and the
+      // latch decision flip-flops every round, never converging. A stored
+      // current is round-invariant (the state snapshot restores it), so every
+      // round makes the same decision and the loop settles in two rounds.
+      // Undefined (just fired — no on-state solve has run yet) means "let the
+      // current establish for one step before testing", matching the real
+      // device's turn-on time.
+      const iPrev = st[key + '_i'] as number | undefined;
+      if (iPrev !== undefined && iPrev < holdingI) on = false;
     }
     st[key] = on;
-    st[key + '_dir'] = dir;
+    st[key + '_dir'] = on ? dir : 0;
     if (on) {
       const r = Math.max(0.001, params.onR as number);
       sys.stampConductance(mt1, mt2, 1 / r);
@@ -1058,6 +1114,24 @@ export const triac: ComponentPlugin = {
     } else {
       sys.stampConductance(mt1, mt2, 1 / (params.offR as number));
     }
+  },
+  step(params, terminals, sim, comp) {
+    // Record the ACTUAL on-state current from the solved voltages (companion
+    // formula: |v| ≈ onV + i·onR). Cleared when off so a fresh gate fire gets
+    // one full step of current buildup before the holding test applies.
+    const mt1 = terminals.find(t => t.terminalId === 'mt1')!.nodeId;
+    const mt2 = terminals.find(t => t.terminalId === 'mt2')!.nodeId;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = stateKey('triac', comp, mt1, mt2);
+    if (!st[key]) {
+      delete st[key + '_i'];
+      return;
+    }
+    const dir = (st[key + '_dir'] as number | undefined) ?? 1;
+    const v = (sim.nodeVoltage[mt1] ?? 0) - (sim.nodeVoltage[mt2] ?? 0);
+    const vDir = dir > 0 ? v : -v;
+    const i = Math.max(0, (vDir - (params.onV as number)) / Math.max(0.001, params.onR as number));
+    st[key + '_i'] = i;
   },
   getFlowPath() { return [{ x: 0, y: 2 }, { x: 4, y: 2 }]; },
 };
@@ -1227,6 +1301,8 @@ export const diac: ComponentPlugin = {
   category: 'semiconductor',
   description: 'Bidirectional trigger diode. Breaks down in both directions when voltage exceeds breakover voltage. Used to trigger Triacs.',
   symbol: 'Dia',
+  // Region-switching stamp (off / breakover) — joins the Newton re-stamp loop.
+  nonLinear: true,
   boundingBox: { width: 4, height: 2 },
   terminals: [
     { id: 'a', label: 'A', position: { x: 0, y: 1 } },
@@ -1269,20 +1345,25 @@ export const diac: ComponentPlugin = {
     const key = stateKey('diac', comp, a, b);
     const prevOn = st[key] ?? false;
     // Latches on above breakover, stays on while the actual device current
-    // is above the holding current (current-based release, like the SCR/triac
-    // in this file). The old voltage test |vAB| > 0.5 fought the on-state
+    // (previous step's solved on-state current, see step()) is above the
+    // holding current. The old voltage test |vAB| > 0.5 fought the on-state
     // companion: on collapsed |vAB| to ~I·onR (< 0.5 V) → released → fired
     // again at the full source voltage → the state flip-flopped on every
     // re-stamp and the DC solve never converged. With the Thevenin (onV, onR)
-    // the on-state is a self-consistent fixed point: |vAB| ≈ onV + i·onR and
-    // the release test reads the true current (|vAB| − onV)/onR.
+    // the on-state is a self-consistent fixed point: |vAB| ≈ onV + i·onR.
     let on = prevOn;
     if (!on) {
       on = Math.abs(vAB) > bv;
     } else {
-      const vMag = Math.abs(vAB);
-      const i = (vMag - onV) / Math.max(0.001, params.onR as number);
-      on = i >= holdingI;
+      // Holding-current test on the PREVIOUS STEP's actual device current
+      // (recorded by step() from the solved on-state voltages), NOT a
+      // recompute from sim.nodeVoltage — inside the Newton re-stamp loop the
+      // round feedback may come from the OFF-state solve (full source voltage
+      // across the device → the (|vAB|−onV)/onR estimate explodes) and the
+      // latch decision flip-flops each round without converging. Undefined =
+      // just fired: one step of current buildup before the test applies.
+      const iPrev = st[key + '_i'] as number | undefined;
+      if (iPrev !== undefined && iPrev < holdingI) on = false;
     }
     st[key] = on;
     if (on) {
@@ -1304,6 +1385,25 @@ export const diac: ComponentPlugin = {
       st[key + '_dir'] = 0;
       sys.stampConductance(a, b, 1 / (params.offR as number));
     }
+  },
+  step(params, terminals, sim, comp) {
+    // Record the ACTUAL on-state current from the solved voltages (companion
+    // formula: |vAB| ≈ onV + i·onR). Cleared when off so a fresh breakover
+    // gets one full step of current buildup before the holding test.
+    const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
+    const b = terminals.find(t => t.terminalId === 'b')!.nodeId;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const key = stateKey('diac', comp, a, b);
+    if (!st[key]) {
+      delete st[key + '_i'];
+      return;
+    }
+    const dir = (st[key + '_dir'] as number | undefined) ?? 1;
+    const vAB = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[b] ?? 0);
+    const vDir = dir > 0 ? vAB : -vAB;
+    const onV = (params.onV as number) ?? 1.5;
+    const i = Math.max(0, (vDir - onV) / Math.max(0.001, params.onR as number));
+    st[key + '_i'] = i;
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
 };

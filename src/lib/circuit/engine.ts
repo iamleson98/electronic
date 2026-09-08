@@ -700,7 +700,25 @@ export function computeComponentCurrents(
       const i = (sim.nodeVoltage[a] - sim.nodeVoltage[b]) / r;
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
-    } else if (comp.type === 'voltmeter' || comp.type === 'ammeter' || comp.type === 'oscilloscope') {
+    } else if (comp.type === 'ammeter') {
+      // The ammeter stamps a 0V voltage source (a true short) — its current
+      // lives in the MNA branch array, NOT in any node-level V/R estimate.
+      // Reading V(p)−V(n)/1e7 here made the meter invisible to the KCL
+      // bookkeeping: every wire-dot current around a series ammeter read
+      // ~0 and source currents were misattributed. Feed the ACTUAL branch
+      // current into the node sums (p→n positive).
+      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+      const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+      const st = sim.state.__global ?? {};
+      const branchIdx = st[stateKey('ammeter', comp, p, n)] as number | undefined;
+      let i = 0;
+      if (branchIdx !== undefined) {
+        const rel = branchIdx - (sim.nodeVoltage.length - 1);
+        if (rel >= 0 && rel < sim.branchCurrent.length) i = sim.branchCurrent[rel];
+      }
+      nodeCurrentOut.set(p, (nodeCurrentOut.get(p) ?? 0) + i);
+      nodeCurrentOut.set(n, (nodeCurrentOut.get(n) ?? 0) - i);
+    } else if (comp.type === 'voltmeter' || comp.type === 'oscilloscope') {
       // Meters: very high impedance (10MΩ)
       const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
       const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
@@ -982,7 +1000,18 @@ export function computeComponentCurrents(
         totalCurrent += Math.abs(nodeCurrentOut.get(t.nodeId) ?? 0);
       }
       current = totalCurrent;
-    } else if (comp.type === 'voltmeter' || comp.type === 'ammeter' || comp.type === 'oscilloscope') {
+    } else if (comp.type === 'ammeter') {
+      // the meter's own current = its MNA branch current (see the KCL note above)
+      const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
+      const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
+      const stg = sim.state.__global ?? {};
+      const bIdx = stg[stateKey('ammeter', comp, p, n)] as number | undefined;
+      current = 0;
+      if (bIdx !== undefined) {
+        const rel = bIdx - (sim.nodeVoltage.length - 1);
+        if (rel >= 0 && rel < sim.branchCurrent.length) current = sim.branchCurrent[rel];
+      }
+    } else if (comp.type === 'voltmeter' || comp.type === 'oscilloscope') {
       const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
       const n = terms.find((t) => t.terminalId === 'n')?.nodeId ?? 0;
       current = (sim.nodeVoltage[p] - sim.nodeVoltage[n]) / 1e7;

@@ -17,7 +17,7 @@ import type { Footprint, Ratsnest, BoardOutline, Pad, Trace, Via } from '../src/
 import { createPCBFromSchematic, computeSmartPlacement } from '../src/lib/pcb/netlist-sync';
 import { runDRC, DEFAULT_DRC_CONFIG } from '../src/lib/pcb/drc';
 import { computeNetCompletion } from '../src/lib/pcb/netlist-verify';
-import { exampleCategories } from '../src/lib/circuit/examples';
+import { exampleCategories, exampleLed, exampleLogicGates } from '../src/lib/circuit/examples';
 import '../src/lib/circuit/components';
 
 // ── fixtures ───────────────────────────────────────────────────────────────
@@ -511,11 +511,11 @@ describe('connectivity-driven placement', () => {
 // ── realistic end-to-end examples ──────────────────────────────────────────
 
 describe('v2 auto-router on realistic example circuits', () => {
-  const examples = exampleCategories.flatMap((c) => c.examples);
+  const examples = [{ name: 'LED + Resistor', doc: exampleLed }, { name: 'AND Gate', doc: exampleLogicGates }, ...exampleCategories.flatMap((c) => c.examples)];
   const picks = [
     'LED + Resistor',
     '555 Astable Blink',
-    'Op-Amp Inverting Amp',
+    'Inverting Amplifier',
     'Two-Stage Audio Amplifier',
     'AND Gate',
     'Arduino Blink',

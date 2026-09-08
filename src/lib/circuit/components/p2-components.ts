@@ -14,6 +14,8 @@ export const tl431: ComponentPlugin = {
   category: 'ic',
   description: 'Adjustable precision shunt regulator. Maintains 2.495V reference between REF and GND.',
   symbol: 'TL',
+  // Region-switching stamp (conducts / shunts) — joins the Newton re-stamp loop.
+  nonLinear: true,
   boundingBox: { width: 4, height: 4 },
   terminals: [
     { id: 'c', label: 'CATH', position: { x: 0, y: 1 } },

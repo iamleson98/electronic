@@ -7,6 +7,7 @@
 
 import type { CircuitDocument } from './types';
 import { normalizeExampleWires } from './example-wires';
+import { rawComplexExamples } from './examples-complex';
 import { getPlugin } from './registry';
 import './components';
 
@@ -1589,61 +1590,124 @@ export const exampleLCTank = normalizeExampleWires(rawExampleLCTank);
 export const exampleVCO = normalizeExampleWires(rawExampleVCO);
 export const exampleAudioAmplifier = normalizeExampleWires(rawExampleAudioAmplifier);
 
+// ── Complex examples (examples-complex.ts) — normalized like the rest ──────
+export const exampleCeAmplifier = normalizeExampleWires(rawComplexExamples.ceAmplifier);
+export const examplePushPull = normalizeExampleWires(rawComplexExamples.pushPull);
+export const examplePhaseShiftOscillator = normalizeExampleWires(rawComplexExamples.phaseShiftOscillator);
+export const exampleCurrentMirror = normalizeExampleWires(rawComplexExamples.currentMirror);
+export const exampleEmitterFollower = normalizeExampleWires(rawComplexExamples.emitterFollower);
+export const exampleRelayFlyback = normalizeExampleWires(rawComplexExamples.relayFlyback);
+export const exampleOpampIntegrator = normalizeExampleWires(rawComplexExamples.opampIntegrator);
+export const exampleTriangleGen = normalizeExampleWires(rawComplexExamples.triangleGen);
+export const exampleSallenKey = normalizeExampleWires(rawComplexExamples.sallenKey);
+export const exampleSchmitt = normalizeExampleWires(rawComplexExamples.schmitt);
+export const exampleDiffAmp = normalizeExampleWires(rawComplexExamples.diffAmp);
+export const exampleWienBridge = normalizeExampleWires(rawComplexExamples.wienBridge);
+export const examplePrecisionRectifier = normalizeExampleWires(rawComplexExamples.precisionRectifier);
+export const example555Monostable = normalizeExampleWires(rawComplexExamples.monostable555);
+export const example555Pwm = normalizeExampleWires(rawComplexExamples.pwm555);
+export const example555Tone = normalizeExampleWires(rawComplexExamples.tone555);
+export const exampleBridgeSupply = normalizeExampleWires(rawComplexExamples.bridgeSupply);
+export const exampleVoltageDoubler = normalizeExampleWires(rawComplexExamples.voltageDoubler);
+export const exampleZenerRegulator = normalizeExampleWires(rawComplexExamples.zenerRegulator);
+export const exampleInductorKickback = normalizeExampleWires(rawComplexExamples.inductorKickback);
+export const exampleSrLatch = normalizeExampleWires(rawComplexExamples.srLatch);
+export const exampleDffCounter = normalizeExampleWires(rawComplexExamples.dffCounter);
+export const exampleHalfAdder = normalizeExampleWires(rawComplexExamples.halfAdder);
+export const exampleWheatstone = normalizeExampleWires(rawComplexExamples.wheatstone);
+export const exampleR2rDac = normalizeExampleWires(rawComplexExamples.r2rDac);
+
 export const exampleCategories: ExampleCategory[] = [
   {
-    label: 'Basic Circuits',
+    label: 'Transistor Amplifiers',
     examples: [
-      { name: 'LED + Resistor', description: 'Simple DC circuit: 5V → R → LED → GND', doc: exampleLed },
-      { name: 'RC Low-pass Filter', description: 'Pulse source through RC filter, oscilloscope traces', doc: exampleRC },
-      { name: 'RL High-pass Filter', description: 'Inductor + resistor: high frequencies pass, low blocked', doc: exampleRLHighPass },
-      { name: 'Diode Rectifier', description: 'Half-wave rectifier: AC → diode → DC (positive only)', doc: exampleDiodeRectifier },
-      { name: 'Voltage Divider', description: 'Potentiometer as variable voltage divider + voltmeter', doc: exampleVoltageDivider },
-      { name: 'Current Source', description: 'Current source drives resistor, ammeter measures current', doc: exampleCurrentSource },
-      { name: 'Behavioral Signal Chain', description: 'BV sources: V=3*V(in) amplifier + if(V>2,4,0) comparator — square wave from a sine', doc: exampleBehavioral },
-    ],
-  },
-  {
-    label: 'Timers & Oscillators',
-    examples: [
-      { name: '555 Astable Blink', description: 'Classic 555 timer in astable mode driving an LED', doc: example555 },
-      { name: 'LC Tank Oscillator', description: 'Parallel LC tank rings at 159 Hz — switch Integration Method (Options) between Backward Euler / Trapezoidal / Gear and watch the amplitude: Euler damps it away, Trapezoidal preserves it', doc: exampleLCTank },
-      { name: 'VCO Frequency Sweep', description: 'Voltage-controlled oscillator, DC input controls frequency', doc: exampleVCO },
-    ],
-  },
-  {
-    label: 'Transistors & Switches',
-    examples: [
-      { name: 'Transistor Switch (NPN)', description: 'NPN transistor used as a digital switch with push-button', doc: exampleTransistor },
-      { name: 'NMOS Switch', description: 'NMOS transistor switching an LED, push-button on gate', doc: exampleNmos },
-      { name: 'PNP Switch', description: 'PNP high-side switch — base LOW turns it ON', doc: examplePnpSwitch },
-    ],
-  },
-  {
-    label: 'Op-Amps',
-    examples: [
-      { name: 'Op-Amp Inverting Amp', description: 'Op-amp with gain -10 (Rf/Rin = 10k/1k)', doc: exampleOpamp },
-      { name: 'Op-Amp Non-inverting Amp', description: 'Real op-amp with rails, gain = 1 + Rf/Rg = 11', doc: exampleOpampNonInverting },
+      { name: 'Common-Emitter Amplifier', description: 'The canonical single-stage amp: divider bias, emitter degeneration, AC-coupled in/out — watch the inverted, amplified collector swing', doc: exampleCeAmplifier },
+      { name: 'Emitter Follower (Buffer)', description: 'Common-collector buffer: Vout = Vin − 0.7, high-Z in, low-Z out, unity gain', doc: exampleEmitterFollower },
+      { name: 'NPN Current Mirror', description: 'The backbone of analog ICs: Q1 diode-connected sets Vbe, Q2 sinks the same current into its load regardless of load voltage', doc: exampleCurrentMirror },
+      { name: 'Class-B Push-Pull Output', description: 'Complementary NPN/PNP emitter followers — see the 0.7V crossover dead zone on the output', doc: examplePushPull },
       { name: 'Two-Stage Audio Amplifier', description: 'Pre-amp + tone control + class-A emitter-follower power amp driving a speaker (24 components, 37 wires)', doc: exampleAudioAmplifier },
     ],
   },
   {
-    label: 'Sensors & Indicators',
+    label: 'Transistor Switches & Drivers',
     examples: [
-      { name: 'Photoresistor Light Sensor', description: 'LDR + resistor divider, voltage changes with light', doc: examplePhotoresistor },
-      { name: 'Speaker Driver', description: 'Op-amp drives an 8Ω speaker', doc: exampleSpeaker },
+      { name: 'Transistor Switch (NPN)', description: 'NPN as a digital switch with push-button base drive', doc: exampleTransistor },
+      { name: 'NMOS Switch', description: 'NMOS transistor switching an LED, push-button on gate', doc: exampleNmos },
+      { name: 'PNP Switch', description: 'PNP high-side switch — base LOW turns it ON', doc: examplePnpSwitch },
+      { name: 'Relay Driver + Flyback Diode', description: 'Switch an inductive relay load; the diode clamps the coil kickback when the switch opens', doc: exampleRelayFlyback },
     ],
   },
   {
-    label: 'Logic Gates',
+    label: 'Op-Amp Amplifiers',
     examples: [
-      { name: 'AND Gate', description: 'Two buttons → AND gate → LED (HIGH only when both pressed)', doc: exampleLogicGates },
+      { name: 'Inverting Amplifier', description: 'Op-amp with gain −Rf/Rin = −10', doc: exampleOpamp },
+      { name: 'Non-Inverting Amplifier', description: 'Real op-amp with rails, gain = 1 + Rf/Rg = 11', doc: exampleOpampNonInverting },
+      { name: 'Differential Amplifier', description: 'Four matched resistors: Vout = V2 − V1 — the sensor-bridge front-end', doc: exampleDiffAmp },
+    ],
+  },
+  {
+    label: 'Op-Amp Wave Shaping',
+    examples: [
+      { name: 'Integrator (Miller)', description: 'Square wave in → triangle out; slope dV/dt = −Vin/RC. The analog computer building block', doc: exampleOpampIntegrator },
+      { name: 'Schmitt Trigger', description: 'Positive feedback hysteresis switch: ±1.05V trip points, clean square output from a noisy-ish sine', doc: exampleSchmitt },
+      { name: 'Precision Rectifier (Super-Diode)', description: 'Op-amp wraps the diode drop in its feedback loop: rectifies down to millivolts, no 0.7V dead zone', doc: examplePrecisionRectifier },
+    ],
+  },
+  {
+    label: 'Op-Amp Filters & Oscillators',
+    examples: [
+      { name: 'Sallen-Key Low-Pass Filter', description: '2nd-order Butterworth active filter, fc ≈ 1.1kHz: passes 200Hz untouched, kills 10kHz', doc: exampleSallenKey },
+      { name: 'Wien Bridge Oscillator', description: 'Classic RC sine oscillator at ~1.6kHz with diode soft-limiting amplitude stabilization', doc: exampleWienBridge },
+      { name: 'Triangle + Square Generator', description: 'One op-amp, two resistors, one cap: relaxation oscillator giving BOTH waveforms (every function generator front end)', doc: exampleTriangleGen },
+    ],
+  },
+  {
+    label: '555 Timers',
+    examples: [
+      { name: '555 Astable Blink', description: 'Classic 555 astable driving an LED — real RC timing physics', doc: example555 },
+      { name: '555 Monostable One-Shot', description: 'Press the button → exactly one 0.5s pulse (T = 1.1·R·C), then re-arms', doc: example555Monostable },
+      { name: '555 PWM LED Dimmer', description: 'Diode-steered pot: trade charge against discharge resistance to sweep the duty cycle at fixed frequency', doc: example555Pwm },
+      { name: '555 Tone Generator', description: '~420Hz astable driving a speaker — enable sound and it actually tones', doc: example555Tone },
+    ],
+  },
+  {
+    label: 'Power Supplies',
+    examples: [
+      { name: 'Bridge Rectifier + Zener Supply', description: 'Complete linear front-end: AC → 4-diode bridge → smoothing cap → zener regulator; full-wave humps then flat 5.1V', doc: exampleBridgeSupply },
+      { name: 'Voltage Doubler', description: 'Greinacher charge pump: two diodes, two caps, 2·Vp from a single AC source', doc: exampleVoltageDoubler },
+      { name: 'Zener Shunt Regulator', description: '12V raw → 5.1V regulated; the zener absorbs whatever the load leaves behind (KCL on the wire dots)', doc: exampleZenerRegulator },
+      { name: 'Inductive Kickback', description: 'Open the switch on an inductor: V = −L·di/dt spikes the node THOUSANDS of volts — bounded but violent', doc: exampleInductorKickback },
+    ],
+  },
+  {
+    label: 'Digital Logic',
+    examples: [
+      { name: 'NAND SR Latch', description: '1-bit memory from two cross-coupled NANDs: set, hold, reset — the SRAM cell', doc: exampleSrLatch },
+      { name: 'D Flip-Flop Counter', description: 'Two edge-triggered D-FFs as toggle stages: LEDs count 00→01→10→11 (divide-by-4)', doc: exampleDffCounter },
+      { name: 'Half Adder', description: 'SUM = A XOR B, CARRY = A AND B — one bit of binary addition from raw gates', doc: exampleHalfAdder },
+    ],
+  },
+  {
+    label: 'Measurement & Conversion',
+    examples: [
+      { name: 'Wheatstone Bridge', description: 'Precision imbalance measurement: balanced reads exactly 0V; 20% leg change reads −0.227V', doc: exampleWheatstone },
+      { name: 'R-2R Ladder DAC', description: '4-bit DAC from R/2R legs and complementary switches: Vout = 5V·(Σ bits)/16, exact binary weighting', doc: exampleR2rDac },
+      { name: 'Behavioral Signal Chain', description: 'BV sources: V=3·V(in) amplifier + if(V>2,4,0) comparator — square from sine, no lag', doc: exampleBehavioral },
+    ],
+  },
+  {
+    label: 'Oscillators & Sweep',
+    examples: [
+      { name: 'Phase-Shift Oscillator', description: 'CE amp + 3 RC sections: 180° ladder + 180° inversion = sine oscillation built from nothing', doc: examplePhaseShiftOscillator },
+      { name: 'LC Tank (Integration Methods)', description: 'Parallel LC rings at 159Hz — switch Integration Method (Options) and watch Euler damp vs Trapezoidal preserve it', doc: exampleLCTank },
+      { name: 'VCO Frequency Sweep', description: 'Voltage-controlled oscillator: DC input controls frequency', doc: exampleVCO },
     ],
   },
   {
     label: 'Microcontrollers',
     examples: [
       { name: 'Arduino Blink', description: 'Arduino blinking an LED on D2', doc: exampleArduino },
-      { name: '7-Segment Counter', description: 'Arduino drives 7-segment display counting 0-9 with BCD decoder', doc: exampleSevenSeg },
+      { name: '7-Segment Counter', description: 'Arduino drives a 7-segment display counting 0-9 with BCD decoder', doc: exampleSevenSeg },
     ],
   },
   {

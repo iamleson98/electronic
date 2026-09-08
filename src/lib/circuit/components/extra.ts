@@ -418,6 +418,14 @@ const opampRails: ComponentPlugin = {
   category: 'ic',
   description: 'Op-amp with V+ and V- power pins. Output clamps to rails. Use for realistic circuits.',
   symbol: 'OPR',
+  // Region-switching stamp (linear / saturated-high / saturated-low, chosen
+  // from the current iterate's node voltages) — must participate in the
+  // engine's Newton re-stamp loop. Without this flag, a circuit containing
+  // ONLY op-amps never re-stamps: the region (and the V+/V- rail readout)
+  // lags one solve behind, the very first step decides the region from the
+  // all-zero initial guess (vHigh = -0.5V → spurious saturation), and a
+  // saturating amplifier recovers one step late.
+  nonLinear: true,
   boundingBox: { width: 4, height: 5 },
   terminals: [
     { id: 'in+', label: 'IN+', position: { x: 0, y: 1 } },

@@ -81,21 +81,32 @@ function getVoltageAt(run: SimRun, sim: SimContext, compId: string, termId: stri
   return sim.nodeVoltage[nodeIdx];
 }
 
+// Circuits whose event timescale exceeds the default 20 ms window get a
+// longer run; circuits that legitimately sit static until the USER presses
+// their button get their scope-variation check waived.
+const STEP_OVERRIDES: Record<string, number> = {
+  '555 PWM LED Dimmer': 2500,          // 69 ms period
+  'D Flip-Flop Counter': 40000,        // 1 Hz clock
+  '555 Tone Generator': 4000,          // ~2.4 ms period at fine dt
+  'Phase-Shift Oscillator': 8000,      // ~2.4 ms period
+};
+const STATIC_UNTIL_TRIGGERED = new Set(['555 Monostable One-Shot']);
+
 // Deep verification suite
 describe('Deep verification — all examples actually WORK (signal flows, output changes)', () => {
   for (const category of exampleCategories) {
     for (const ex of category.examples) {
       describe(`Circuit: ${ex.name}`, () => {
-        const run = () => runSimWithHistory(ex.doc, 200, 1e-4);
+        const run = () => runSimWithHistory(ex.doc, STEP_OVERRIDES[ex.name] ?? 200, 1e-4);
 
         it('simulation produces non-null result', () => {
           const { sim } = run();
           expect(sim).not.toBeNull();
         });
 
-        it('simulation history has 200 steps (full run, not early-abort)', () => {
+        it('simulation history is complete (full run, not early-abort)', () => {
           const { history } = run();
-          expect(history.length).toBe(200);
+          expect(history.length).toBe(STEP_OVERRIDES[ex.name] ?? 200);
         });
 
         it('all node voltages are finite at final step', () => {
@@ -166,11 +177,16 @@ describe('Deep verification — all examples actually WORK (signal flows, output
         // ── Capacitor checks: voltage should change over time ───────────
         const caps = ex.doc.components.filter(c => c.type === 'capacitor');
         for (const cap of caps.slice(0, 5)) { // limit to first 5 to avoid spam
-          it(`Capacitor ${cap.id} charges (voltage at 'a' changes over time)`, () => {
+          it(`Capacitor ${cap.id} charges (voltage ACROSS it changes over time)`, () => {
             const r = run();
             if (r.history.length < 10) return;
-            const v0 = getVoltageAt(r, r.history[5], cap.id, 'a') ?? 0;
-            const v1 = getVoltageAt(r, r.history[r.history.length - 1], cap.id, 'a') ?? 0;
+            // measure a−b: a cap can sit on a virtual ground (node a pinned
+            // near 0, e.g. a Miller integrator) while its stored charge
+            // grows — the node-voltage check false-failed on those.
+            const vAcross = (h: SimContext) =>
+              (getVoltageAt(r, h, cap.id, 'a') ?? 0) - (getVoltageAt(r, h, cap.id, 'b') ?? 0);
+            const v0 = vAcross(r.history[5]);
+            const v1 = vAcross(r.history[r.history.length - 1]);
             const changes = Math.abs(v1 - v0) > 0.001;
             const nonZero = Math.abs(v1) > 0.001;
             expect(changes || nonZero).toBe(true);
@@ -181,6 +197,7 @@ describe('Deep verification — all examples actually WORK (signal flows, output
         const scopes = ex.doc.components.filter(c => c.type === 'oscilloscope');
         for (const sc of scopes) {
           it(`Oscilloscope ${sc.id} (label: ${sc.parameters.label}) sees varying voltage`, () => {
+            if (STATIC_UNTIL_TRIGGERED.has(ex.name)) return; // one-shot: idle until the user presses its button
             const r = run();
             if (r.history.length < 20) return;
             const voltages = r.history.slice(10).map(h => getVoltageAt(r, h, sc.id, 'p') ?? 0);

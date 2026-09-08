@@ -18,7 +18,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { simulateStep, buildNodeMap, getTerminalsForComponent, computeComponentCurrents } from '../src/lib/circuit/engine';
 import { getPlugin } from '../src/lib/circuit/registry';
 import { validatePhysics } from '../src/lib/circuit/physics-validator';
-import { exampleCategories } from '../src/lib/circuit/examples';
+import { exampleCategories, exampleRC, exampleVoltageDivider } from '../src/lib/circuit/examples';
 import type { CircuitComponent, Wire, ComponentPlugin, SimContext } from '../src/lib/circuit/types';
 
 beforeAll(async () => {
@@ -145,8 +145,17 @@ describe('Physics Laws — every example circuit respects fundamental physics', 
               if (!r) break;
               prev = { nodeVoltage: r.sim.nodeVoltage, branchCurrent: r.sim.branchCurrent, time: r.sim.time, state: r.sim.state };
               if (i > 100) {
-                const idx = longRun.nodeMap.terminalNode.get(`${src.id}:p`);
-                if (idx !== undefined) samples.push(r.sim.nodeVoltage[idx]);
+                // Measure the source DIFFERENTIAL (V(p)-V(n)): a floating AC
+                // secondary (bridge rectifier) or a DC-offset source (biased
+                // follower) legitimately moves its NODE voltages far from
+                // ±amp — the source only controls the p-n difference.
+                const idxP = longRun.nodeMap.terminalNode.get(`${src.id}:p`);
+                const idxN = longRun.nodeMap.terminalNode.get(`${src.id}:n`);
+                // subtract the source's own DC offset: the ±amp expectation
+                // applies to the oscillation around the bias point (a biased
+                // follower drive legitimately rides on +3V)
+                const offset = (src.parameters.offset as number) ?? 0;
+                if (idxP !== undefined) samples.push(r.sim.nodeVoltage[idxP] - (idxN !== undefined ? r.sim.nodeVoltage[idxN] : 0) - offset);
               }
             }
             if (samples.length > 0) {
@@ -297,9 +306,15 @@ describe('Physics Laws — every example circuit respects fundamental physics', 
             // Forward voltage should be 0..5V (typical LED Vf = 2V, diode = 0.7V)
             // Reverse voltage shouldn't cause breakdown (limited by the circuit's supply)
             const maxRail = Math.max(0, ...ex.doc.components
-              .filter(s => s.type === 'dcVoltage')
-              .map(s => Math.abs(s.parameters.voltage as number)));
-            expect(v).toBeGreaterThan(-maxRail - 1);
+              .filter(s => s.type === 'dcVoltage' || s.type === 'acVoltage' || s.type === 'pulseSource')
+              .map(s => {
+                const p = s.parameters as Record<string, number>;
+                return Math.max(Math.abs(p.voltage ?? 0), Math.abs(p.offset ?? 0) + Math.abs(p.amplitude ?? 0), Math.abs(p.high ?? 0));
+              }));
+            // Off-state diodes in bridge rectifiers / voltage multipliers
+            // legitimately block up to 2x the peak supply — allow that, plus
+            // a small margin; anything beyond is a breakdown-style artifact.
+            expect(v).toBeGreaterThan(-2 * maxRail - 5);
             expect(v).toBeLessThan(10);
           });
         }
@@ -434,7 +449,7 @@ describe('Specific physics law checks — known previously-buggy circuits', () =
 
   // ── Capacitor I = C × dV/dt verification ──────────────────────────────
   describe('RC Low-pass Filter — capacitor I = C × dV/dt', () => {
-    const ex = exampleCategories.flatMap(c => c.examples).find(e => e.name === 'RC Low-pass Filter');
+    const ex = { name: 'RC Low-pass Filter', doc: exampleRC };
     if (!ex) {
       it('example found', () => expect(ex).toBeDefined());
     } else {
@@ -526,7 +541,7 @@ describe('Specific physics law checks — known previously-buggy circuits', () =
 
   // ── Voltage Divider — verify Vout = Vin × R2/(R1+R2) ──────────────────
   describe('Voltage Divider — output voltage follows divider formula', () => {
-    const ex = exampleCategories.flatMap(c => c.examples).find(e => e.name === 'Voltage Divider');
+    const ex = { name: 'Voltage Divider', doc: exampleVoltageDivider };
     if (!ex) {
       it('example found', () => expect(ex).toBeDefined());
     } else {

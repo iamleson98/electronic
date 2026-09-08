@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
-import { exampleCategories } from '@/lib/circuit/examples';
 import { toast } from 'sonner';
 import {
   Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Gauge, Zap,
@@ -21,6 +20,7 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { MyCircuitsDialog } from './MyCircuitsDialog';
+import { ExamplesDialog } from './toolbar/ExamplesDialog';
 import { SpiceImportDialog } from './SpiceImportDialog';
 import { SubCircuitDialog } from './SubCircuitDialog';
 import { SymbolEditorDialog } from './SymbolEditorDialog';
@@ -43,6 +43,7 @@ import {
 } from '@/lib/circuit/netlist-export';
 import { parseSchematicFile } from '@/lib/circuit/kicad-sch-import';
 import { confirmDialog } from '@/lib/confirm';
+import type { CircuitDocument } from '@/lib/circuit/types';
 
 export function Toolbar() {
   const running = useEditor((s) => s.running);
@@ -394,37 +395,8 @@ export function Toolbar() {
         {/* ─── TERTIARY CONTROLS (visible on lg+ screens) ─── */}
         <div className="hidden lg:flex items-center gap-1">
           <div className="mx-0.5 h-5 w-px shrink-0 bg-slate-700" />
-          {/* Examples dropdown */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="ghost" className="h-7 px-2" disabled={running}>
-                <FileText size={14} />
-                <span className="ml-1 hidden 2xl:inline">Examples</span>
-                <ChevronDown size={10} className="ml-0.5" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-72 bg-slate-900 border-slate-700 max-h-[70vh] overflow-y-auto">
-              <DropdownMenuLabel className="text-slate-300">Load Example Circuit</DropdownMenuLabel>
-              <DropdownMenuSeparator className="bg-slate-700" />
-              {exampleCategories.map((cat) => (
-                <DropdownMenuGroup key={cat.label}>
-                  <DropdownMenuLabel className="text-xs text-cyan-400 font-semibold uppercase tracking-wide px-2 pt-3 pb-1">
-                    {cat.label}
-                  </DropdownMenuLabel>
-                  {cat.examples.map((ex) => (
-                    <DropdownMenuItem
-                      key={ex.name}
-                      onClick={() => loadDocument(ex.doc)}
-                      className="flex flex-col items-start gap-1 py-2 text-slate-200 hover:bg-slate-800"
-                    >
-                      <span className="text-sm font-medium">{ex.name}</span>
-                      <span className="text-xs text-slate-400">{ex.description}</span>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuGroup>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {/* Examples dialog (searchable accordion of categories) */}
+          <ExamplesDialogButton loadDocument={loadDocument} disabled={running} />
 
           {/* Simulate menu */}
           <DropdownMenu>
@@ -794,5 +766,26 @@ export function Toolbar() {
       <BatchSweepDialog open={showBatchSweep} onClose={() => setShowBatchSweep(false)} />
       <StimuliEditorDialog open={showStimuliEditor} onClose={() => setShowStimuliEditor(false)} />
     </TooltipProvider>
+  );
+}
+
+// Trigger button + searchable accordion dialog for the example library.
+// (The old flat dropdown didn't scale to 45 circuits / 12 categories.)
+function ExamplesDialogButton({
+  loadDocument,
+  disabled,
+}: {
+  loadDocument: (doc: CircuitDocument) => void;
+  disabled: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button size="sm" variant="ghost" className="h-7 px-2" disabled={disabled} onClick={() => setOpen(true)}>
+        <FileText size={14} />
+        <span className="ml-1 hidden 2xl:inline">Examples</span>
+      </Button>
+      <ExamplesDialog open={open} onOpenChange={setOpen} loadDocument={loadDocument} />
+    </>
   );
 }

@@ -21,7 +21,13 @@ import { usePCB } from '../src/lib/pcb/store';
 import type { CircuitComponent, Wire } from '../src/lib/circuit/types';
 import '../src/lib/circuit/components';
 
-const examples = exampleCategories.flatMap((c) => c.examples);
+// The 'LED + Resistor' starter left the example MENU (it survives as a
+// test fixture export) — keep it resolvable for these placement checks.
+import { exampleLed } from '../src/lib/circuit/examples';
+const examples = [
+  { name: 'LED + Resistor', doc: exampleLed },
+  ...exampleCategories.flatMap((c) => c.examples),
+];
 function example(name: string): { components: CircuitComponent[]; wires: Wire[] } {
   const ex = examples.find((e) => e.name === name);
   if (!ex) throw new Error(`example not found: ${name}`);

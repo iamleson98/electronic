@@ -35,6 +35,10 @@ function makeOpampMacromodel(type: string, name: string, params: {
     name,
     category: 'ic',
     description: `${name} — real op-amp macromodel. GBW=${params.gbw}Hz, slew=${params.slewRate}V/µs, CMRR=${params.cmrr}dB, output swings to V+−${params.voutMargin}V.`,
+    // Region-switching stamp (linear/saturated, picked from the previous
+    // iterate) — must join the Newton re-stamp loop or the region lags one
+    // solve behind and pure-opamp circuits mis-converge (see opampRails).
+    nonLinear: true,
     symbol: 'A',
     boundingBox: { width: 6, height: 4 },
     terminals: [
@@ -181,6 +185,9 @@ function makeOpenCollectorComparator(type: string, name: string, opts: {
     type,
     name,
     category: 'ic',
+    // Region-switching stamp (output transistor on/off, with hysteresis) —
+    // joins the Newton re-stamp loop (see opampRails note in extra.ts).
+    nonLinear: true,
     description: hasStrobe
       ? `${name} — open-collector comparator with active-low STROBE. Output transistor pulls LOW when V(+) > V(−); pull STROBE low to force the output off (high-Z).`
       : `${name} — open-collector comparator. Output transistor pulls LOW when V(+) > V(−); output level when off is set by the external pull-up.`,
@@ -408,6 +415,9 @@ export const igbt: ComponentPlugin = {
   category: 'semiconductor',
   description: 'Insulated-gate bipolar transistor. VGE > Vth turns the channel on; IGBTs combine MOS gate drive with bipolar conduction (low VCE(sat)).',
   symbol: 'IGBT',
+  // Region-switching stamp (ohmic / active, from previous-iterate voltages)
+  // — joins the Newton re-stamp loop (see opampRails note in extra.ts).
+  nonLinear: true,
   boundingBox: { width: 3, height: 4 },
   terminals: [
     { id: 'c', label: 'C', position: { x: 3, y: 0 }, electricalType: 'passive' as const },

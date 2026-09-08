@@ -12,10 +12,10 @@ import { describe, it, expect } from 'vitest';
 import { autoRoute, netPriorityClass } from '../src/lib/pcb/auto-router';
 import { createPCBFromSchematic } from '../src/lib/pcb/netlist-sync';
 import { runDRC, DEFAULT_DRC_CONFIG } from '../src/lib/pcb/drc';
-import { exampleCategories } from '../src/lib/circuit/examples';
+import { exampleCategories, exampleLed } from '../src/lib/circuit/examples';
 import '../src/lib/circuit/components';
 
-const examples = exampleCategories.flatMap((c) => c.examples);
+const examples = [{ name: 'LED + Resistor', doc: exampleLed }, ...exampleCategories.flatMap((c) => c.examples)];
 function example(name: string) {
   const ex = examples.find((e) => e.name === name);
   if (!ex) throw new Error(`example not found: ${name}`);

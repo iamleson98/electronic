@@ -9,10 +9,10 @@
 //      (traces, vias, pours, keepouts, net classes, padNets).
 import { describe, it, expect, beforeEach } from 'vitest';
 import { usePCB, _resetPCBHistory } from '../src/lib/pcb/store';
-import { exampleCategories } from '../src/lib/circuit/examples';
+import { exampleCategories, exampleLed } from '../src/lib/circuit/examples';
 import '../src/lib/circuit/components';
 
-const examples = exampleCategories.flatMap((c) => c.examples);
+const examples = [{ name: 'LED + Resistor', doc: exampleLed }, ...exampleCategories.flatMap((c) => c.examples)];
 
 /** Import an example as the test's baseline document, then reset history so
  *  undo steps count ONLY the mutations each test performs. */

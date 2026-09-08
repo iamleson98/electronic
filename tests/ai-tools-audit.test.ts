@@ -654,7 +654,7 @@ describe('AI audit: simContext invalidation on whole-doc mutations', () => {
       [mkWire('w1', 'V1', 'p', 'R1', 'a'), mkWire('w2', 'R1', 'b', 'GND', 'g'), mkWire('w3', 'V1', 'n', 'GND', 'g')],
     );
     (ctx as any).simContext = { nodeVoltage: [0, 5, 2.5], branchCurrent: [0.05], state: {}, time: 0, dt: 1e-4 };
-    const res = await loadExampleTool.execute({ name: 'LED + Resistor' }, ctx) as any;
+    const res = await loadExampleTool.execute({ name: 'Zener Shunt Regulator' }, ctx) as any;
     expect(res.ok).toBe(true);
     expect(ctx.simContext).toBeNull();
   });
