@@ -95,8 +95,7 @@ describe('grounding: walkthrough predictions vs engine physics', () => {
       wire('w4', 'V1', 'n', 'GND', 'g'),
     ];
 
-    // What the AI would teach (includes the LED model's internal 220 Ω
-    // series resistance — the real current path is R1 + LED seriesR):
+    // What the AI would teach (R1 + the LED's 5 Ω bulk resistance):
     const wt = analyzeCircuitWalkthrough(comps, ws);
     const outBlock = wt.blocks.find((b) => b.kind === 'output')!;
     const ledPart = outBlock.components.find((p) => p.type === 'led')!;
@@ -104,7 +103,7 @@ describe('grounding: walkthrough predictions vs engine physics', () => {
     const predicted = parseFloat(predStr.replace(/[^\d.]/g, ''));
     const predScale = predStr.includes('m') ? 1e-3 : predStr.includes('u') ? 1e-6 : 1;
     const predictedA = predicted * predScale;
-    expect(predictedA).toBeCloseTo((5 - 2) / 550, 3); // 5.45 mA with internal Rs
+    expect(predictedA).toBeCloseTo((5 - 2) / 335, 4); // 8.96 mA
 
     // What the engine actually does:
     const sim = solveDC(comps, ws, plugins() as never);

@@ -6,7 +6,7 @@ import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
 import { simpleBjtModel } from './semiconductors';
-import { stampBJT, stepBJT, measureBJT } from './advanced-semi';
+import { stampBJT, stepBJT, measureBJT, mosLevel1N, mosLevel1P } from './advanced-semi';
 import { stampOpamp, stepOpamp, measureOpamp, acStampOpamp, specFromParams, type OpampPins, type OpampSpec } from './opamp-core';
 
 // ----- PNP BJT (mirror of NPN) -----
@@ -101,12 +101,21 @@ const pnp: ComponentPlugin = {
   },
 };
 
+/** Level-1 parameters of the basic 3-terminal MOSFETs (W = L, bulk = source). */
+function basicMosParams(p: Record<string, unknown>, isN: boolean): Record<string, number> {
+  const num = (k: string, d: number) => (typeof p[k] === 'number' && Number.isFinite(p[k]) ? p[k] as number : d);
+  const vth = Math.abs(num('vth', 2));
+  return { Vto: isN ? vth : -vth, Kp: num('kp', 0.1), Gamma: 0, Phi: 0.7, Lambda: num('lambda', 0.02), Rd: Math.max(0, num('ron', 0.1)), Rs: 0 };
+}
+const withBulk = (terminals: { terminalId: string; nodeId: number }[]) =>
+  [...terminals, { terminalId: 'b', nodeId: terminals.find((t) => t.terminalId === 's')!.nodeId }];
+
 // ----- NMOS MOSFET -----
 const nmos: ComponentPlugin = {
   type: 'nmos',
   name: 'NMOS MOSFET',
   category: 'semiconductor',
-  description: 'N-channel enhancement MOSFET. Threshold model: on when Vgs > Vth.',
+  description: 'N-channel enhancement MOSFET (SPICE Level 1, bulk tied to source): Id = ½·Kp·(Vgs−Vth)²·(1+λ·Vds) in saturation, triode below; weak-inversion tail under threshold.',
   symbol: 'NMOS',
   nonLinear: true,
   boundingBox: { width: 3, height: 4 },
@@ -119,7 +128,8 @@ const nmos: ComponentPlugin = {
     { key: 'vth', label: 'Threshold Vth', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 10, step: 0.1 },
     { key: 'kp', label: 'Transconductance Kp', type: 'number', default: 0.1, unit: 'A/V²', min: 0.001, max: 10, step: 0.01 },
     { key: 'lambda', label: 'Channel-Length Mod (λ)', type: 'number', default: 0.02, unit: 'V⁻¹', min: 0, max: 1, step: 0.005 },
-    { key: 'ron', label: 'On Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 1000, step: 0.1 },
+    // drain series resistance (bond / package); the channel's own Rds(on) = 1/(Kp·Vov)
+    { key: 'ron', label: 'Drain Series Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 1000, step: 0.1 },
   ],
   render(ctx, params, cellSize) {
     // gate lead
@@ -174,54 +184,13 @@ const nmos: ComponentPlugin = {
     ];
   },
   stamp(params, terminals, sys, sim, comp) {
-    const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
-    const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
-    const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
-    const vth = params.vth as number;
-    const ron = Math.max(0.001, params.ron as number);
-    const vgs = sim.nodeVoltage[g] - sim.nodeVoltage[s];
-    const vds = sim.nodeVoltage[d] - sim.nodeVoltage[s];
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('nmos', comp, d, g, s);
-    const prevOn = st[key] ?? false;
-    const on = prevOn ? vgs > vth - 0.2 : vgs > vth;
-    st[key] = on;
-    if (!on) {
-      sys.stampConductance(d, s, 1e-13);
-      // gate is high-Z
-      sys.stampConductance(g, s, 1e-6);
-      return;
-    }
-    // On: if vds > (vgs - vth): saturation -> current source Id = ½·Kp·(vgs−vth)²
-    // Else: linear region -> approximately a small resistor (ron)
-    // Pick based on vds.
-    const vov = vgs - vth;
-    if (vds > vov && vov > 0) {
-      // saturation: Id = ½·Kp·vov²·(1+λ·Vds) (SPICE Level-1 square law with
-      // channel-length modulation — the ½ was missing, doubling every
-      // saturation current, and λ was dropped from Id while gds kept it).
-      const kp = params.kp as number;
-      const lambda = (params.lambda as number) ?? 0.02; // default 0.02 V^-1
-      const id = 0.5 * kp * vov * vov * (1 + lambda * vds);
-      sys.stampCurrentSource(d, s, id);
-      // Output conductance: gds = lambda * Id (limits gain in amplifiers)
-      const gds = lambda * Math.abs(id);
-      sys.stampConductance(d, s, Math.max(gds, 1e-12));
-    } else {
-      // linear: small resistor
-      sys.stampConductance(d, s, 1 / ron);
-    }
-    // gate high-Z
-    sys.stampConductance(g, s, 1e-6);
+    mosLevel1N.stamp!(basicMosParams(params, true), withBulk(terminals), sys, sim, comp);
   },
-  measure(params, terminals, sim) {
-    const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
-    const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
-    const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
-    return [
-      { label: 'Vgs', value: (sim.nodeVoltage[g] - sim.nodeVoltage[s]).toFixed(3), unit: 'V' },
-      { label: 'Vds', value: (sim.nodeVoltage[d] - sim.nodeVoltage[s]).toFixed(3), unit: 'V' },
-    ];
+  step(params, terminals, sim, comp) {
+    mosLevel1N.step!(basicMosParams(params, true), withBulk(terminals), sim, comp);
+  },
+  measure(params, terminals, sim, comp) {
+    return mosLevel1N.measure!(basicMosParams(params, true), withBulk(terminals), sim, comp);
   },
 };
 
@@ -230,7 +199,7 @@ const pmos: ComponentPlugin = {
   type: 'pmos',
   name: 'PMOS MOSFET',
   category: 'semiconductor',
-  description: 'P-channel enhancement MOSFET. Threshold model: on when Vgs < -Vth (i.e. Vsg > Vth).',
+  description: 'P-channel enhancement MOSFET (SPICE Level 1, bulk tied to source): on when Vsg > |Vth|, Id = ½·Kp·(Vsg−|Vth|)²·(1+λ·Vsd) in saturation.',
   symbol: 'PMOS',
   nonLinear: true,
   boundingBox: { width: 3, height: 4 },
@@ -243,7 +212,8 @@ const pmos: ComponentPlugin = {
     { key: 'vth', label: 'Threshold |Vth|', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 10, step: 0.1 },
     { key: 'kp', label: 'Transconductance Kp', type: 'number', default: 0.1, unit: 'A/V²', min: 0.001, max: 10, step: 0.01 },
     { key: 'lambda', label: 'Channel-Length Mod (λ)', type: 'number', default: 0.02, unit: 'V⁻¹', min: 0, max: 1, step: 0.005 },
-    { key: 'ron', label: 'On Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 1000, step: 0.1 },
+    // drain series resistance (bond / package); the channel's own Rds(on) = 1/(Kp·Vov)
+    { key: 'ron', label: 'Drain Series Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 1000, step: 0.1 },
   ],
   render(ctx, params, cellSize) {
     ctx.beginPath();
@@ -297,50 +267,13 @@ const pmos: ComponentPlugin = {
     ];
   },
   stamp(params, terminals, sys, sim, comp) {
-    const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
-    const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
-    const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
-    // Use |Vth| as the threshold magnitude: the plugin's default is +2.0 but
-    // SPICE imports carry a negative PMOS Vto — a raw `vsg > vth` with a
-    // negative vth made the device conduct even with gate = source.
-    const vthMag = Math.abs(params.vth as number);
-    const ron = Math.max(0.001, params.ron as number);
-    const vsg = sim.nodeVoltage[s] - sim.nodeVoltage[g];
-    const vsd = sim.nodeVoltage[s] - sim.nodeVoltage[d];
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('pmos', comp, s, g, d);
-    const prevOn = st[key] ?? false;
-    const on = prevOn ? vsg > vthMag - 0.2 : vsg > vthMag;
-    st[key] = on;
-    if (!on) {
-      sys.stampConductance(s, d, 1e-13);
-      sys.stampConductance(g, s, 1e-6);
-      return;
-    }
-    const vov = vsg - vthMag;
-    if (vsd > vov && vov > 0) {
-      // saturation: Is = ½·Kp·vov²·(1+λ·Vsd) (current from s to d) — SPICE
-      // Level-1 square law with the ½ factor and channel-length modulation.
-      const kp = params.kp as number;
-      const lambda = (params.lambda as number) ?? 0.02;
-      const id = 0.5 * kp * vov * vov * (1 + lambda * vsd);
-      sys.stampCurrentSource(s, d, id);
-      // Output conductance (channel modulation / Early effect)
-      const gds = lambda * Math.abs(id);
-      sys.stampConductance(s, d, Math.max(gds, 1e-12));
-    } else {
-      sys.stampConductance(s, d, 1 / ron);
-    }
-    sys.stampConductance(g, s, 1e-6);
+    mosLevel1P.stamp!(basicMosParams(params, false), withBulk(terminals), sys, sim, comp);
   },
-  measure(params, terminals, sim) {
-    const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
-    const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
-    const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
-    return [
-      { label: 'Vsg', value: (sim.nodeVoltage[s] - sim.nodeVoltage[g]).toFixed(3), unit: 'V' },
-      { label: 'Vsd', value: (sim.nodeVoltage[s] - sim.nodeVoltage[d]).toFixed(3), unit: 'V' },
-    ];
+  step(params, terminals, sim, comp) {
+    mosLevel1P.step!(basicMosParams(params, false), withBulk(terminals), sim, comp);
+  },
+  measure(params, terminals, sim, comp) {
+    return mosLevel1P.measure!(basicMosParams(params, false), withBulk(terminals), sim, comp);
   },
 };
 
@@ -364,6 +297,7 @@ const opampRails: ComponentPlugin = {
   name: 'Op-Amp (real)',
   category: 'ic',
   description: 'Op-amp with V+ and V- power pins. Output clamps to rails. Use for realistic circuits.',
+  opampModel: { spec: railsSpec, pins: { inp: 'in+', inn: 'in-', out: 'out', vcc: 'v+', vee: 'v-' } },
   symbol: 'OPR',
   // Region-switching stamp (linear / saturated-high / saturated-low, chosen
   // from the current iterate's node voltages) — must participate in the

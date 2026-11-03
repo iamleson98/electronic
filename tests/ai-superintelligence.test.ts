@@ -345,9 +345,12 @@ describe('design.buildPattern', () => {
     expect(res.parameters.resistance).toBe(200);
     const { sim, nodeMap } = dcSolve(ctx);
     expect(sim).not.toBeNull();
+    // the series resistor carries the LED current
+    const vR = terminalV(ctx, nodeMap, sim, res.id, 'a') - terminalV(ctx, nodeMap, sim, res.id, 'b');
+    expect(vR / 200).toBeCloseTo(0.015, 3);
+    // and the LED drops its rated Vf (at 20 mA) less n·Vt·ln(20/15) at 15 mA
     const vLed = terminalV(ctx, nodeMap, sim, led.id, 'a') - terminalV(ctx, nodeMap, sim, led.id, 'k');
-    const current = Math.max(0, (vLed - 2) / 1); // LED on: I = (V−Vf)/seriesR
-    expect(current).toBeCloseTo(0.015, 2);
+    expect(vLed).toBeCloseTo(2 - 1.8 * 0.025852 * Math.log(20 / 15) + 0.015, 2);
   });
 
   it('voltage-divider: junction at ~3.3V (DC-verified)', () => {
@@ -395,6 +398,10 @@ describe('design.buildPattern', () => {
     expect(wires.some((w: any) => w.to.componentId === timer.id && w.to.terminalId === 'rst')).toBe(true);
     expect(wires.some((w: any) => (w.from.componentId === timer.id && w.from.terminalId === 'thr' && w.to.componentId === timer.id && w.to.terminalId === 'trig'))).toBe(true);
     expect(ctx.doc.components.some(c => c.type === 'led')).toBe(true);
+    // the LED has its own current-limiting resistor (OUT → R → LED), as on a real board
+    const led = ctx.doc.components.find(c => c.type === 'led')!;
+    expect(wires.some((w: any) => [w.from, w.to].some((e: any) => e.componentId === led.id && e.terminalId === 'a')
+      && [w.from, w.to].some((e: any) => e.componentId === timer.id))).toBe(false);
   });
 
   it('555-monostable: button trigger + timing RC', () => {
@@ -416,6 +423,12 @@ describe('design.buildPattern', () => {
     expect(vCollector).toBeLessThan(0.5); // saturated
     const vLed = terminalV(ctx, nodeMap, sim, led.id, 'a') - terminalV(ctx, nodeMap, sim, led.id, 'k');
     expect(vLed).toBeGreaterThan(1.8); // LED conducting
+    // a real current-limiting resistor sets Ic ≈ icTarget (10 mA)
+    const rled = ctx.doc.components.find(c => c.type === 'resistor' && c.parameters.resistance === 280)!; // (5 − 2 − 0.2)/10 mA
+    expect(rled).toBeDefined();
+    const iLed = (terminalV(ctx, nodeMap, sim, rled.id, 'a') - terminalV(ctx, nodeMap, sim, rled.id, 'b')) / 280;
+    expect(iLed).toBeGreaterThan(0.009);
+    expect(iLed).toBeLessThan(0.011);
   });
 
   it('opamp-inverting: gain −10 (DC-verified with a DC-shifted source)', () => {
@@ -571,8 +584,9 @@ describe('simulate.whatIf (real engine)', () => {
     const led = built.doc.components.find(c => c.type === 'led')!;
     const r = built.doc.components.find(c => c.type === 'resistor')!;
 
-    // What if the resistor doubles? Current halves (LED drop is fixed):
-    // I = (5−2)/(400+1) = 7.48mA → drop across R = 2.99V → LED anode at 2.01V.
+    // What if the resistor doubles? The current roughly halves and the LED
+    // (Shockley junction, Vf = 2 V at 20 mA, N = 1.8, Rs = 1 Ω) drops
+    //   V = 2 + 1.8·Vt·ln(I/20 mA) + I·1 Ω,  I = (5 − V)/400  →  V ≈ 1.96 V.
     const res = simulateWhatIfTool.execute({
       modifications: [{ componentId: r.id, key: 'resistance', value: 400 }],
       probes: [`${led.id}:a`],
@@ -581,7 +595,9 @@ describe('simulate.whatIf (real engine)', () => {
     }, built) as any;
     expect(res.ok).toBe(true);
     const probe = res.result.probes[`${led.id}:a`];
-    expect(probe.dcVoltage).toBeCloseTo(2.01, 2);
+    let v = 2;
+    for (let k = 0; k < 50; k++) { const i = (5 - v) / 400; v = 2 + 1.8 * 0.025852 * Math.log(i / 0.02) + i; }
+    expect(probe.dcVoltage).toBeCloseTo(v, 2);
   });
 
   it('handles op-amp circuits (extra unknowns — the old fake simulator could not)', () => {

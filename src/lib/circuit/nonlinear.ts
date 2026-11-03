@@ -84,12 +84,15 @@ export function shockleyCompanion(
   vscale: number,
   gmin: number,
 ): { g: number; iEq: number; i0: number } {
-  // Clamp the exponent: beyond e^40 the double would overflow in the
-  // current source term even though g stays finite — this also matches
-  // the "explosion guard" every SPICE has.
-  const x = Math.min(v0 / vscale, 40);
+  // Explosion guard: past x = 200 (e^200 ≈ 7e86, far from overflow)
+  // continue the exponential along its tangent. The old cap at x = 40 froze
+  // the current instead — an LED (Is ≈ 1e-21, x ≈ 43 at 20 mA) or any
+  // junction above ~1 V stopped conducting more as the voltage rose.
+  const XMAX = 200;
+  const x = Math.min(v0 / vscale, XMAX);
   const ev = Math.exp(x);
-  const i0 = saturationCurrent * (ev - 1);
+  const over = v0 - XMAX * vscale;
+  const i0 = saturationCurrent * (ev - 1) + (over > 0 ? (saturationCurrent * ev / vscale) * over : 0);
   const g = (saturationCurrent * ev) / vscale + gmin;
   const iEq = i0 - g * v0;
   return { g, iEq, i0 };

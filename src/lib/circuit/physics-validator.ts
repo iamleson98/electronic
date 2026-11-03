@@ -191,8 +191,9 @@ export function validatePhysics(
     }
   }
 
-  // ── Law 4: Diode / LED Forward Law ──────────────────────────────────────
-  // When forward-biased (V > Vf), I = (V - Vf) / R. When off, I = 0.
+  // ── Law 4: Diode / LED Law ──────────────────────────────────────────────
+  // Shockley junction: a diode is passive (I and V share their sign) and in
+  // reverse bias a diode / LED only leaks (Is + V/Rleak — nanoamps).
   for (const comp of components) {
     if (comp.type !== 'led' && comp.type !== 'diode') continue;
     const plugin = plugins.get(comp.type);
@@ -201,40 +202,27 @@ export function validatePhysics(
     const aNode = terms.find(t => t.terminalId === 'a')?.nodeId ?? 0;
     const kNode = terms.find(t => t.terminalId === 'k')?.nodeId ?? 0;
     const v = sim.nodeVoltage[aNode] - sim.nodeVoltage[kNode];
-    const vf = (comp.parameters.forwardV as number) || 0.7;
-    // Guard against undefined params — Math.max(0.01, undefined) is NaN and
-    // NaN comparisons are always false, silently disabling this whole check.
-    const r = comp.type === 'led'
-      ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
-      : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
-    const st = sim.state.__global ?? {};
-    const on = st[stateKey(comp.type, comp, aNode, kNode)] ?? false;
-    const actualI = Math.abs(compCurrents.get(comp.id) ?? 0);
-    if (on) {
-      // Should have current ≈ (V - Vf) / R
-      const expectedI = Math.max(0, (v - vf) / r);
-      if (Math.abs(actualI - expectedI) > Math.max(0.001, expectedI * 0.1)) {
-        violations.push({
-          law: 'Diode Forward Law',
-          severity: 'warning',
-          componentId: comp.id,
-          message: `${comp.id}: ON state current ${(actualI*1000).toFixed(3)}mA ≠ expected ${(expectedI*1000).toFixed(3)}mA`,
-          expected: `${(expectedI*1000).toFixed(3)}mA`,
-          actual: `${(actualI*1000).toFixed(3)}mA`,
-        });
-      }
-    } else {
-      // OFF state: should have ~0 current
-      if (actualI > 0.0001) { // > 0.1 mA
-        violations.push({
-          law: 'Diode Forward Law',
-          severity: 'error',
-          componentId: comp.id,
-          message: `${comp.id}: OFF state but current = ${(actualI*1000).toFixed(3)}mA (should be ~0)`,
-          expected: '0mA',
-          actual: `${(actualI*1000).toFixed(3)}mA`,
-        });
-      }
+    const i = compCurrents.get(comp.id) ?? 0;
+    if (v * i < -1e-9) {
+      violations.push({
+        law: 'Diode Forward Law',
+        severity: 'error',
+        componentId: comp.id,
+        message: `${comp.id}: current ${(i*1000).toFixed(3)}mA flows against the ${v.toFixed(3)}V across it (a diode cannot deliver power)`,
+        expected: 'V·I ≥ 0',
+        actual: `${(v*i*1000).toFixed(3)}mW`,
+      });
+    }
+    const leak = comp.type === 'led' ? 0 : 1 / Math.max(1e3, (comp.parameters.offR as number) ?? 1e7);
+    if (v < 0 && Math.abs(i) > 1e-6 + leak * Math.abs(v) * 1.1) {
+      violations.push({
+        law: 'Diode Forward Law',
+        severity: 'error',
+        componentId: comp.id,
+        message: `${comp.id}: reverse-biased but current = ${(Math.abs(i)*1000).toFixed(3)}mA (should only leak)`,
+        expected: '≈0mA',
+        actual: `${(Math.abs(i)*1000).toFixed(3)}mA`,
+      });
     }
   }
 

@@ -202,6 +202,87 @@ export const diodeShockley: ComponentPlugin = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Basic diode / LED / zener parts on the Shockley core
+//   The simple parts expose datasheet-style numbers; they map to a Shockley
+//   junction (no charge storage) so the I–V curve is the real exponential:
+//     forwardV  junction drop at the datasheet test current (1 mA signal
+//               diode / zener, 20 mA LED) — the old piecewise model's drop
+//               at that current, so circuits keep their operating point
+//     onR / seriesR   bulk series resistance Rs
+//     zenerV    breakdown voltage at Izt = 5 mA
+//     offR      parallel leakage (diode / zener), as before
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const SIMPLE_DIODE_N = 1.8;
+const ZENER_IZT = 5e-3;
+const SHOCKLEY_IBV = 1e-3; // matches diodeShockley's breakdown IBV
+
+export function simpleDiodeIref(type: string): number {
+  return type === 'led' ? 20e-3 : 1e-3;
+}
+
+/** diodeShockley parameters for a basic diode-family part. */
+export function simpleDiodeModel(type: string, p: Record<string, unknown>): Record<string, number> {
+  const num = (k: string, d: number) => (typeof p[k] === 'number' && Number.isFinite(p[k]) ? p[k] as number : d);
+  const N = SIMPLE_DIODE_N;
+  const vt = thermalVoltage(27);
+  const vf = num('forwardV', type === 'led' ? 2.0 : 0.7);
+  const Is = simpleDiodeIref(type) / Math.expm1(Math.max(0.05, vf) / (N * vt));
+  const Rs = type === 'led' ? Math.max(0.01, num('seriesR', 5)) : Math.max(0.001, num('onR', 1));
+  const Bv = type === 'zener' ? Math.max(0.1, num('zenerV', 3.3) - N * vt * Math.log(ZENER_IZT / SHOCKLEY_IBV)) : 0;
+  return { Is, N, Rs, Cjo: 0, M: 0.333, Vj: 0.7, Tt: 0, Bv };
+}
+
+const leakG = (type: string, p: Record<string, unknown>) =>
+  type === 'led' ? 0 : 1 / Math.max(1e3, typeof p.offR === 'number' ? p.offR : 1e7);
+
+export function stampSimpleDiode(type: string, params: Record<string, unknown>, terminals: { terminalId: string; nodeId: number }[], sys: Parameters<NonNullable<ComponentPlugin['stamp']>>[2], sim: SimContext, comp?: CircuitComponent): void {
+  diodeShockley.stamp!(simpleDiodeModel(type, params), terminals, sys, sim, comp);
+  const g = leakG(type, params);
+  if (g > 0) {
+    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
+    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    sys.stampConductance(a, k, g);
+  }
+}
+
+export function stepSimpleDiode(type: string, params: Record<string, unknown>, terminals: { terminalId: string; nodeId: number }[], sim: SimContext, comp: CircuitComponent): void {
+  diodeShockley.step!(simpleDiodeModel(type, params), terminals, sim, comp);
+}
+
+/** Exact element current a→k (A) of a basic diode-family part in `sim`. */
+export function simpleDiodeCurrent(comp: CircuitComponent, sim: SimContext, a: number, k: number): number {
+  const m = simpleDiodeModel(comp.type, comp.parameters);
+  const st = sim.state?.__global ?? {};
+  const an = st[stateKey('dio', comp, a, k) + '_an'] as number | undefined;
+  const v = nodeV(sim, a) - nodeV(sim, k);
+  let i: number;
+  if (an !== undefined && an !== a && m.Rs > 0) {
+    i = (nodeV(sim, a) - nodeV(sim, an)) / m.Rs; // the Rs branch carries it all
+  } else {
+    const T = deviceTemp(sim, comp);
+    const vs = m.N * thermalVoltage(T);
+    i = tempScaleIs(m.Is, T, 27, m.N) * Math.expm1(Math.min(v / vs, 200));
+  }
+  return i + leakG(comp.type, comp.parameters) * v;
+}
+
+/** Small-signal conductance a–k at the operating point in `sim`. */
+export function simpleDiodeSmallSignalG(comp: CircuitComponent, sim: Pick<SimContext, 'nodeVoltage' | 'state'>, a: number, k: number): number {
+  const m = simpleDiodeModel(comp.type, comp.parameters);
+  const T = deviceTemp(sim as SimContext, comp);
+  const vs = m.N * thermalVoltage(T);
+  const IsT = tempScaleIs(m.Is, T, 27, m.N);
+  const st = sim.state?.__global ?? {};
+  // the junction voltage step() committed (excludes the Rs drop)
+  const vj = (st[stateKey('dio', comp, a, k)] as number | undefined)
+    ?? (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[k] ?? 0);
+  let gd = (IsT * Math.exp(Math.min(vj / vs, 200))) / vs + 1e-12;
+  if (m.Bv > 0) gd += (SHOCKLEY_IBV / vs) * Math.exp(Math.min(80, -(vj + m.Bv) / vs));
+  return 1 / (m.Rs + 1 / gd) + leakG(comp.type, comp.parameters);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Gummel-Poon BJT (NPN and PNP)
 //   Includes: Is (saturation), Bf (forward beta), Br (reverse beta),
 //             Vaf (Forward Early voltage), Var (Reverse Early voltage),
@@ -515,7 +596,29 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
       // previous round's solution) — the old code used voltages written by
       // step() once per timestep, so re-stamp rounds never moved and a
       // resistive circuit took several timesteps to reach its DC answer.
-      const op = level1Op(params, sim, comp, nodeV(sim, dEff), sim.nodeVoltage[g], nodeV(sim, sEff), sim.nodeVoltage[b], isNmos);
+      // Newton step limiting (SPICE fetlim on Vgs and Vgd, device frame),
+      // against this step's previous round, else the last committed step.
+      const pol = isNmos ? 1 : -1;
+      const vto = pol * (params.Vto as number);
+      const mem = sim.newtonMemory;
+      const st = sim.state.__global ?? {};
+      const key = stateKey('mos', comp, d, g, s, b);
+      const vS = nodeV(sim, sEff);
+      const rawGs = pol * (sim.nodeVoltage[g] - vS);
+      const rawGd = pol * (sim.nodeVoltage[g] - nodeV(sim, dEff));
+      const cGs = st[key + '_vgs'] as number | undefined;
+      const cDs = st[key + '_vds'] as number | undefined;
+      const oldGs = mem?.[key + '_lgs'] ?? (cGs !== undefined ? pol * cGs : undefined);
+      const oldGd = mem?.[key + '_lgd'] ?? (cGs !== undefined && cDs !== undefined ? pol * (cGs - cDs) : undefined);
+      const vgs = oldGs !== undefined ? fetlim(rawGs, oldGs, vto) : rawGs;
+      const vgd = oldGd !== undefined ? fetlim(rawGd, oldGd, vto) : rawGd;
+      if (mem) {
+        mem[key + '_lgs'] = vgs;
+        mem[key + '_lgd'] = vgd;
+        if (Math.abs(vgs - rawGs) > 1e-9 || Math.abs(vgd - rawGd) > 1e-9) mem.__limited = (mem.__limited ?? 0) + 1;
+      }
+      // linearize at the limited point (node voltages rebuilt around the source)
+      const op = level1Op(params, sim, comp, vS + pol * (vgs - vgd), vS + pol * vgs, vS, sim.nodeVoltage[b], isNmos);
       // Reverse mode (Vds < 0 in the device's polarity): the physical source
       // and drain swap roles. The old model fed a negative Vds into the
       // triode formula, which has spurious roots (Vd = −50 V from a 10 V rail).
@@ -573,6 +676,38 @@ function nodeV(sim: SimContext, n: number): number {
  * (`reversed`), returning the controlling voltages relative to the
  * effective source plus gm / gds / gmbs for the Newton stamp.
  */
+/**
+ * SPICE DEVfetlim (ngspice devsup.c): limit a MOSFET's gate-referenced
+ * voltage step per Newton round, relative to the threshold `vto` (device
+ * polarity frame). Without it a switching node that swings hundreds of volts
+ * in one round turns the device fully on, flings the node back, and the
+ * iteration cycles (a buck converter's freewheel diode never caught the
+ * inductor current).
+ */
+export function fetlim(vnew: number, vold: number, vto: number): number {
+  const vtsthi = Math.abs(2 * (vold - vto)) + 2;
+  const vtstlo = vtsthi / 2 + 2;
+  const vtox = vto + 3.5;
+  const delv = vnew - vold;
+  if (vold >= vto) {
+    if (vold >= vtox) {
+      if (delv <= 0) {
+        if (vnew >= vtox) { if (-delv > vtstlo) return vold - vtstlo; }
+        else return Math.max(vnew, vto + 2);
+      } else if (delv >= vtsthi) return vold + vtsthi;
+    } else {
+      return delv <= 0 ? Math.max(vnew, vto - 0.5) : Math.min(vnew, vto + 4);
+    }
+  } else if (delv <= 0) {
+    if (-delv > vtsthi) return vold - vtsthi;
+  } else {
+    const vtemp = vto + 0.5;
+    if (vnew <= vtemp) { if (delv > vtstlo) return vold + vtstlo; }
+    else return vtemp;
+  }
+  return vnew;
+}
+
 function level1Op(
   params: Record<string, unknown>, sim: SimContext, comp: CircuitComponent | undefined,
   vd: number, vg: number, vs: number, vb: number, isNmos: boolean,
@@ -610,12 +745,24 @@ function level1Op(
       gds = Kp * (vov - vds) * (1 + Lambda * vds) + Kp * core * Lambda;
     }
   } else {
-    // weak inversion: Id ∝ exp(Vov/(n·Vt)), continuous with Id = 0 at Vov = 0
-    const nVt = 1.5 * thermalVoltage(deviceTemp(sim, comp));
-    const ex = Math.exp(Math.max(-80, vov / nVt));
-    id = 1e-7 * (ex - 1) * (1 + Lambda * vds);
-    gm = 1e-7 * ex / nVt * (1 + Lambda * vds);
-    gds = 1e-7 * (ex - 1) * Lambda;
+    id = 0;
+    gm = 0;
+    gds = 0;
+  }
+  // Weak inversion: I = I0·e^(min(Vov,0)/(n·Vt))·(1 − e^(−Vds/Vt)) — positive,
+  // zero at Vds = 0, continuous across threshold. (The old I0·(e^x − 1)
+  // went to −100 nA below threshold: an off device conducted backwards.)
+  {
+    const Vt = thermalVoltage(deviceTemp(sim, comp));
+    const nVt = 1.5 * Vt;
+    const I0 = 1e-7;
+    const ex = Math.exp(Math.max(-80, Math.min(vov, 0) / nVt));
+    const ed = Math.exp(-Math.min(vds / Vt, 80));
+    const clm = 1 + Lambda * vds;
+    const w = I0 * ex * (1 - ed);
+    id += w * clm;
+    if (vov < 0) gm += (w / nVt) * clm;
+    gds += I0 * ex * (ed / Vt) * clm + w * Lambda;
   }
   // dId/dVbs = dId/dVov · (−dVth/dVbs) = gm·(−dVth/dVbs)
   const gmbs = gm * -dVthdVbs;

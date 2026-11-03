@@ -1153,6 +1153,7 @@ export const opampReal: ComponentPlugin = {
   description: 'Real op-amp (741-class defaults): finite gain with a GBW dominant pole, slew-rate limit, offset, CMRR, input bias current, Rout with short-circuit current limit, output swing limited by the VCC/VEE rails, quiescent supply current.',
   // Smooth-limited Newton stamp (opamp-core.ts) — joins the re-stamp loop.
   nonLinear: true,
+  opampModel: { spec: realSpec, pins: { inp: 'in+', inn: 'in-', out: 'out', vcc: 'vcc', vee: 'vee' } },
   symbol: 'A',
   boundingBox: { width: 6, height: 4 },
   terminals: [

@@ -112,10 +112,10 @@ export interface SimContext {
   dt: number;
   /**
    * Integration method for reactive companion models (capacitors/inductors).
-   * - 'euler': backward Euler (1st order, most damping — the historical default)
+   * - 'euler': backward Euler (1st order, most damping)
    * - 'trap':  trapezoidal (2nd order, energy-conserving, SPICE default)
-   * - 'gear':  Gear/BDF-2 (2nd order, L-stable, extra damping for stiff circuits)
-   * Undefined = 'euler' (backward compatibility for hand-rolled SimContexts).
+   * - 'gear':  Gear/BDF-2 (2nd order, stiffly stable — the engine default)
+   * simulateStep always sets it. Undefined (a hand-rolled SimContext) = 'euler'.
    */
   method?: 'euler' | 'trap' | 'gear';
   /**
@@ -627,6 +627,18 @@ export interface ComponentPlugin {
    * regions on fast switching circuits. Linear circuits pay zero cost.
    */
   nonLinear?: boolean;
+  /**
+   * Behavioral op-amp parts (opamp-core.ts): the spec their stamp uses and
+   * which terminals are the inputs / output / supplies. SPICE export builds
+   * a macromodel from the same numbers, so the netlist saturates, rolls off
+   * and offsets like the part does in the app.
+   */
+  opampModel?: {
+    spec: (params: Record<string, any>) => import('./components/opamp-core').OpampSpec;
+    pins: { inp: string; inn: string; out: string; vcc?: string; vee?: string };
+    /** extra input resistance to ground the plugin stamps besides the core's 1 GΩ */
+    rin?: number;
+  };
 }
 
 // ----- MNA system interface -----

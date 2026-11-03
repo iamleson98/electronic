@@ -163,7 +163,8 @@ describe('6. Gummel-Poon BJT', () => {
     const { c, ws } = npnBias('bjtGPNpn', 100e3);
     const dc = volt(c, ws, solveDC(c, ws, plugins(), 200)!, 'Q1:c');
     const tr = transient(npnBias('bjtGPNpn', 100e3).c, ws, 1e-6, 5, 'Q1:c');
-    for (const s of tr) expect(s.v).toBeCloseTo(dc, 6); // was 5.83 → 5.23, drifting
+    // within Newton tolerance (reltol·V ≈ 5 mV; seen ≈ 2.5 µV) — was 5.83 → 5.23, drifting
+    for (const s of tr) expect(s.v).toBeCloseTo(dc, 4);
     // forward-active: Ic ≈ Bf·Ib with Early effect, VC ≈ 5.5 V
     expect(dc).toBeGreaterThan(5.3);
     expect(dc).toBeLessThan(5.8);

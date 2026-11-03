@@ -28,6 +28,7 @@ import type { CircuitComponent, Wire, CircuitDocument } from './types';
 import { getPlugin } from './registry';
 import './components'; // register all built-in plugins (idempotent)
 import { parseSpiceValue as canonicalParseSpiceValue } from './spice';
+import { fromSpiceExpr } from './spice-expr';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Value parsing — handles SPICE engineering suffixes (case-insensitive)
@@ -515,7 +516,7 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
           const plugin = getPlugin(type);
           const params: any = {};
           if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
-          params.expr = expr;
+          params.expr = fromSpiceExpr(expr);
           components.push({
             id, type, position: { x: 0, y: 0 }, rotation: 0, parameters: params,
           });

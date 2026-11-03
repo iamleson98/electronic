@@ -32,6 +32,7 @@
 
 import type { CircuitComponent, CircuitDocument, Wire } from './types';
 import { getPlugin } from './registry';
+import { thermalVoltage } from './sim-options';
 import './components'; // register all built-in plugins
 
 let idCounter = 1000;
@@ -126,6 +127,8 @@ interface SubCkt {
   name: string;
   pins: string[];
   body: string[]; // raw lines
+  /** our own export's marker: this subckt IS one app part (restored as-is) */
+  part?: { type: string; terminals: string[]; params: Record<string, number | string | boolean> };
 }
 
 /** Tokenize a SPICE line into tokens, honoring parens. */
@@ -196,6 +199,13 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
   const directiveCards: string[] = [];
 
   for (const line of lines) {
+    const marker = currentSubckt && line?.match(/^\*\s*circuit-lab part=(\S+) pins=(\S+) params=(\{.*\})\s*$/);
+    if (marker && currentSubckt) {
+      try {
+        currentSubckt.part = { type: marker[1], terminals: marker[2].split(','), params: JSON.parse(marker[3]) };
+      } catch { /* malformed marker: fall back to flattening the body */ }
+      continue;
+    }
     if (!line || line.startsWith('*') || line.startsWith(';')) continue;
     const tokens = tokenize(line);
     if (tokens.length === 0) continue;
@@ -377,6 +387,7 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
   // Renamed elements keep their DEVICE letter first (`R1_X1`, not `X1_R1`)
   // so the card-type switch below still recognizes them — the old X-prefixed
   // names made every expanded element look like an X card and it was skipped.
+  const partCalls = new Map<string, NonNullable<SubCkt['part']> & { nodes: string[] }>();
   function expandOnce(input: string[]): { out: string[]; expanded: boolean } {
     const out: string[] = [];
     let expanded = false;
@@ -412,6 +423,13 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
         const sub = subckts.get(subcktName);
         if (!sub) {
           throw new Error(`Unknown subcircuit: ${subcktName}`);
+        }
+        if (sub.part && getPlugin(sub.part.type)) {
+          // one of our own parts (e.g. an op-amp macromodel): restore the
+          // part itself rather than its behavioural approximation
+          partCalls.set(head, { ...sub.part, nodes: sub.pins.map((_, i) => pins[i] || '0') });
+          out.push(`__PART ${head}`);
+          continue;
         }
         // map subckt's formal pins to actual pins (SPICE is case-insensitive)
         const pinMap: Record<string, string> = {};
@@ -476,6 +494,13 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
     if (tokens.length === 0) continue;
     const name = tokens[0];
     const first = name[0].toUpperCase();
+
+    if (name === '__PART') {
+      const call = partCalls.get(tokens[1])!;
+      call.nodes.forEach((nd) => allNodes.add(nd));
+      addComponent(call.type, tokens[1], call.terminals.map((terminalId, i) => ({ terminalId, node: call.nodes[i] })), call.params);
+      continue;
+    }
 
     switch (first) {
       case 'R': {
@@ -621,13 +646,17 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
         // hard-coded 0.7 V, so every LED imported as a silicon diode)
         const is = model?.params['is'] ?? 1e-14;
         const nf = model?.params['n'] ?? 1;
-        const vf = +(nf * 0.025852 * Math.log1p(1e-3 / is)).toFixed(3);
+        const nVt = nf * thermalVoltage(27);
+        // the parts' datasheet points: Vf at 1 mA (diode / zener) or 20 mA
+        // (LED), Vz at Izt = 5 mA (BV is the drop at IBV)
+        const vfAt = (i: number) => +(nVt * Math.log1p(i / is)).toFixed(4);
         const rs = model?.params['rs'] ?? 1;
         const bv = model?.params['bv'];
+        const ibv = model?.params['ibv'] ?? 1e-3;
         const terms = [{ terminalId: 'a', node: na }, { terminalId: 'k', node: nk }];
-        if (bv !== undefined) addComponent('zener', name, terms, { zenerV: bv, forwardV: vf, onR: rs });
-        else if (vf > 1.4 || /^led/i.test(modelName ?? '')) addComponent('led', name, terms, { forwardV: vf, seriesR: rs });
-        else addComponent('diode', name, terms, { forwardV: vf, onR: rs });
+        if (bv !== undefined) addComponent('zener', name, terms, { zenerV: +(bv + nVt * Math.log(5e-3 / ibv)).toFixed(4), forwardV: vfAt(1e-3), onR: rs });
+        else if (vfAt(1e-3) > 1.4 || /^led/i.test(modelName ?? '')) addComponent('led', name, terms, { forwardV: vfAt(20e-3), seriesR: rs });
+        else addComponent('diode', name, terms, { forwardV: vfAt(1e-3), onR: rs });
         break;
       }
       case 'E': {
@@ -658,7 +687,7 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
         const params: Record<string, number> = {
           hfe: model?.params['bf'] ?? 100,
           // the part's on-voltage: Vbe at Ic = 1 mA for the model's Is
-          [pluginType === 'pnp' ? 'veb' : 'vbe']: +(0.025852 * Math.log1p(1e-3 / (model?.params['is'] ?? 1e-14))).toFixed(3),
+          [pluginType === 'pnp' ? 'veb' : 'vbe']: +(thermalVoltage(27) * Math.log1p(1e-3 / (model?.params['is'] ?? 1e-14))).toFixed(4),
           is: model?.params['is'] ?? 1e-14,
           vaf: model?.params['vaf'] ?? 0,
           nf: model?.params['nf'] ?? 1,
@@ -723,6 +752,7 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
         params.vth = Math.abs(params.Vto);
         params.kp = params.Kp * (params.W / params.L);
         params.lambda = params.Lambda;
+        params.ron = Math.max(0.001, params.Rd); // the basic part's drain series resistance
         addComponent(pluginType, name, [
           { terminalId: 'd', node: nd },
           { terminalId: 'g', node: ng },

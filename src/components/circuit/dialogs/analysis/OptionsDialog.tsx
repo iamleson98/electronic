@@ -76,9 +76,9 @@ export function OptionsDialog({ open, onClose }: { open: boolean; onClose: () =>
             <Select value={simOptions.method} onValueChange={(v) => setSimOptions({ method: v as 'euler' | 'trap' | 'gear' })}>
               <SelectTrigger className="bg-slate-800 border-slate-700"><SelectValue /></SelectTrigger>
               <SelectContent className="bg-slate-800">
-                <SelectItem value="euler">Backward Euler (default, stable)</SelectItem>
-                <SelectItem value="trap">Trapezoidal (2nd order, faster)</SelectItem>
-                <SelectItem value="gear">Gear (variable order)</SelectItem>
+                <SelectItem value="gear">Gear / BDF-2 (default, 2nd order, no ringing)</SelectItem>
+                <SelectItem value="trap">Trapezoidal (2nd order, may ring on edges)</SelectItem>
+                <SelectItem value="euler">Backward Euler (1st order, damps oscillators)</SelectItem>
               </SelectContent>
             </Select>
           </div>

@@ -37,6 +37,7 @@ function makeOpampMacromodel(type: string, name: string, params: {
     type,
     name,
     category: 'ic',
+    opampModel: { spec, pins: { inp: 'inp', inn: 'inn', out: 'out', vcc: 'vcc', vee: 'vee' } },
     description: `${name} op-amp (datasheet-typical): A0=${params.gain.toExponential(0)}, GBW=${params.gbw / 1e6}MHz, SR=${params.slewRate}V/µs, Vos=${params.voffMv}mV, swing V+−${params.swingHigh}V / V−+${params.swingLow}V, Isc=${params.iLimitMa}mA. Dominant pole, slew limiting, rail-limited output, CMRR, bias current and supply current are all simulated.`,
     // Smooth-limited Newton stamp (opamp-core.ts) — joins the re-stamp loop.
     nonLinear: true,

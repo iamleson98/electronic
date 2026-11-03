@@ -1950,7 +1950,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const simOpts = {
       initialConditions: s.simOptions?.initialConditions,
       nodeSets: s.simOptions?.nodeSets,
-      method: s.simOptions?.method ?? 'euler',
+      method: s.simOptions?.method ?? 'gear',
       temp: s.simOptions?.temp ?? 27,
     };
     let result: { sim: SimContext; branchCurrentSize: number; nodeMap: any } | null = null;

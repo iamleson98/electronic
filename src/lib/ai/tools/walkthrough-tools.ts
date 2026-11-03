@@ -523,10 +523,10 @@ export function analyzeCircuitWalkthrough(
       const role = 'LED — emits light when forward current flows';
       if (seriesR) {
         const vinGuess = estimateDriveVoltage(c, seriesR, nl, components);
-        // The LED model carries a forward voltage AND an internal series
-        // resistance (params forwardV / seriesR) — both belong in the loop.
+        // The LED model carries a forward voltage (at 20 mA) AND its bulk
+        // series resistance (params forwardV / seriesR) — both in the loop.
         const vf = paramByPattern(c, /^forwardv/i, 2.0);
-        const ledRs = paramByPattern(c, /^seriesr$/i, 220);
+        const ledRs = paramByPattern(c, /^seriesr$/i, 5);
         const rTotal = paramOf(seriesR, 'resistance', 330) + ledRs;
         const driveV = Math.max(0.1, vinGuess - vf);
         const out = calcOhmsLaw(driveV, undefined, rTotal);

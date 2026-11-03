@@ -6,7 +6,7 @@ import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
 import { thermalVoltage } from '../sim-options';
-import { stampBJT, stepBJT, measureBJT } from './advanced-semi';
+import { stampBJT, stepBJT, measureBJT, stampSimpleDiode, stepSimpleDiode, simpleDiodeCurrent } from './advanced-semi';
 import { stampOpamp, stepOpamp, specFromParams, type OpampPins } from './opamp-core';
 
 function idealPins(terminals: { terminalId: string; nodeId: number }[]): OpampPins {
@@ -30,7 +30,7 @@ const diode: ComponentPlugin = {
   type: 'diode',
   name: 'Diode',
   category: 'semiconductor',
-  description: 'Diode with exponential I-V characteristic. Simplified to a threshold model.',
+  description: 'Silicon diode with the Shockley (exponential) I-V curve: Forward Voltage is the drop at 1 mA (1N4148 ≈ 0.7 V), On Resistance the bulk series resistance, Off Resistance a parallel leakage.',
   symbol: '▷',
   nonLinear: true,
   boundingBox: { width: 4, height: 2 },
@@ -39,9 +39,9 @@ const diode: ComponentPlugin = {
     { id: 'k', label: 'K', position: { x: 4, y: 1 } },
   ],
   parameters: [
-    { key: 'forwardV', label: 'Forward Voltage', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.05 },
-    { key: 'onR', label: 'On Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
-    { key: 'offR', label: 'Off Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
+    { key: 'forwardV', label: 'Forward Voltage (at 1 mA)', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.05 },
+    { key: 'onR', label: 'Series Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
+    { key: 'offR', label: 'Leakage Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
   ],
   render(ctx, params, cellSize) {
     ctx.beginPath();
@@ -68,45 +68,21 @@ const diode: ComponentPlugin = {
     ctx.stroke();
   },
   stamp(params, terminals, sys, sim, comp) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
-    const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-    const vf = params.forwardV as number;
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('diode', comp, a, k);
-    const prevOn = st[key] ?? false;
-    void prevOn;
-    // Current-aware threshold model. The on-state companion is a Thevenin
-    // (Vf, onR): its solved terminal voltage is v = Vf + i*onR, so v > Vf
-    // is EXACTLY "forward current is flowing". A voltage hysteresis margin
-    // (v > Vf - 0.1) swallows the small reverse-current signal (the on-state
-    // settles at Vf - i*onR with i < 0) and latches the diode on forever —
-    // which made the rectifier example pass the negative half-cycle at
-    // -5.7V. No margin: the companion fixed point is self-consistent.
-    const on = v > vf;
-    st[key] = on;
-    if (on) {
-      // Forward biased: Vf drop at 'a' in series with R.
-      // Norton: G = 1/R, current source Vf/R from k to a externally
-      // (diode absorbs power, current enters at a externally)
-      const r = Math.max(0.001, params.onR as number);
-      sys.stampConductance(a, k, 1 / r);
-      sys.stampCurrentSource(k, a, vf / r);
-    } else {
-      // reverse biased: leak per the offR parameter (default 10MΩ)
-      const rOff = Math.max(1e3, (params.offR as number) ?? 1e7);
-      sys.stampConductance(a, k, 1 / rOff);
-    }
+    stampSimpleDiode('diode', params, terminals, sys, sim, comp);
+  },
+  step(params, terminals, sim, comp) {
+    stepSimpleDiode('diode', params, terminals, sim, comp);
   },
   getFlowPath() {
     // anode (0,1) through body to cathode (4,1)
     return [{ x: 0, y: 1 }, { x: 4, y: 1 }];
   },
-  measure(params, terminals, sim) {
+  measure(_params, terminals, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-    return [{ label: 'V', value: v.toFixed(3), unit: 'V' }];
+    const i = comp ? simpleDiodeCurrent(comp, sim, a, k) : 0;
+    return [{ label: 'V', value: v.toFixed(3), unit: 'V' }, { label: 'I', value: (i * 1000).toFixed(3), unit: 'mA' }];
   },
 };
 
@@ -224,6 +200,7 @@ const opamp: ComponentPlugin = {
   description: 'Ideal op-amp: very high gain, no bandwidth limit, near-zero output resistance. Power terminals omitted — the output is limited to the Max/Min Output voltages (±15 V by default), like a real op-amp on ±15 V rails. Press M to toggle De Morgan alternate body (rectangle form).',
   // smooth output limiting (opamp-core.ts) — Newton re-stamp loop
   nonLinear: true,
+  opampModel: { spec: idealSpec, pins: { inp: 'in+', inn: 'in-', out: 'out' }, rin: 1e6 },
   symbol: 'OP',
   boundingBox: { width: 4, height: 4 },
   terminals: [
@@ -634,7 +611,7 @@ const zener: ComponentPlugin = {
   type: 'zener',
   name: 'Zener Diode',
   category: 'semiconductor',
-  description: 'Zener diode with reverse breakdown voltage. Conducts in reverse when V > Vz.',
+  description: 'Zener diode (Shockley junction with SPICE-style breakdown): Zener Voltage is the reverse drop at Izt = 5 mA, Forward Voltage the forward drop at 1 mA.',
   symbol: 'Z',
   nonLinear: true,
   boundingBox: { width: 4, height: 2 },
@@ -643,10 +620,10 @@ const zener: ComponentPlugin = {
     { id: 'k', label: 'K', position: { x: 4, y: 1 } },
   ],
   parameters: [
-    { key: 'zenerV', label: 'Zener Voltage', type: 'number', default: 3.3, unit: 'V', min: 0.1, max: 100, step: 0.1 },
-    { key: 'forwardV', label: 'Forward Voltage', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.05 },
-    { key: 'onR', label: 'On Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
-    { key: 'offR', label: 'Off Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
+    { key: 'zenerV', label: 'Zener Voltage (at 5 mA)', type: 'number', default: 3.3, unit: 'V', min: 0.1, max: 100, step: 0.1 },
+    { key: 'forwardV', label: 'Forward Voltage (at 1 mA)', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.05 },
+    { key: 'onR', label: 'Series Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
+    { key: 'offR', label: 'Leakage Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
   ],
   render(ctx, params, cellSize) {
     ctx.beginPath();
@@ -681,49 +658,20 @@ const zener: ComponentPlugin = {
     ctx.stroke();
   },
   stamp(params, terminals, sys, sim, comp) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
-    const v = sim.nodeVoltage[a] - sim.nodeVoltage[k]; // V(A) - V(K)
-    const vf = params.forwardV as number;
-    const vz = params.zenerV as number;
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('zener', comp, a, k);
-    const prevMode = st[key] ?? 'off'; // 'off' | 'forward' | 'reverse'
-    void prevMode;
-    // Self-consistent region selection (see diode note): each region's
-    // Thevenin companion makes its own threshold test exactly equivalent to
-    // "current flows in that region's direction", so plain thresholds are
-    // stable fixed points — the ±0.1V hysteresis margins latched reverse
-    // breakdown / forward conduction against reverse load current.
-    let mode: string;
-    if (v > vf) {
-      mode = 'forward';
-    } else if (v < -vz) {
-      mode = 'reverse';
-    } else {
-      mode = 'off';
-    }
-    st[key] = mode;
-    const r = Math.max(0.001, params.onR as number);
-    if (mode === 'forward') {
-      sys.stampConductance(a, k, 1 / r);
-      sys.stampCurrentSource(k, a, vf / r);
-    } else if (mode === 'reverse') {
-      // Reverse breakdown: V(K) - V(A) = Vz, current flows K→A
-      sys.stampConductance(a, k, 1 / r);
-      sys.stampCurrentSource(a, k, vz / r);
-    } else {
-      sys.stampConductance(a, k, 1 / (params.offR as number));
-    }
+    stampSimpleDiode('zener', params, terminals, sys, sim, comp);
+  },
+  step(params, terminals, sim, comp) {
+    stepSimpleDiode('zener', params, terminals, sim, comp);
   },
   getFlowPath() {
     return [{ x: 0, y: 1 }, { x: 4, y: 1 }];
   },
-  measure(params, terminals, sim) {
+  measure(_params, terminals, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-    return [{ label: 'V', value: v.toFixed(3), unit: 'V' }];
+    const i = comp ? simpleDiodeCurrent(comp, sim, a, k) : 0;
+    return [{ label: 'V', value: v.toFixed(3), unit: 'V' }, { label: 'I', value: (i * 1000).toFixed(3), unit: 'mA' }];
   },
 };
 registerPlugin(zener);

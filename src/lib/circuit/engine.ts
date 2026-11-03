@@ -15,6 +15,7 @@ import { createMnaSystem, solveMna } from './solver';
 import { createSparseMnaSystem, solveSparse, shouldUseSparseSolver, asMnaSystem } from './sparse-klu';
 import { stateKey } from './state-keys';
 import { getRegistryVersion } from './registry';
+import { simpleDiodeCurrent } from './components/advanced-semi';
 
 export interface NodeMap {
   /** key = `${componentId}:${terminalId}` -> node id (0 = ground) */
@@ -926,40 +927,11 @@ export function computeComponentCurrents(
       const i = st[`ind_${comp.id}_i`] ?? 0;
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - i);
-    } else if (comp.type === 'led' || comp.type === 'diode') {
+    } else if (comp.type === 'led' || comp.type === 'diode' || comp.type === 'zener') {
+      // Shockley junction (advanced-semi.ts): the exact current through Rs.
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-      const vf = (comp.parameters.forwardV as number) || 0.7;
-      const r = comp.type === 'led'
-        ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
-        : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
-      const st = sim.state.__global ?? {};
-      const on = st[stateKey(comp.type, comp, a, k)] ?? false;
-      const i = on ? Math.max(0, (v - vf) / r) : 0;
-      nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
-      nodeCurrentOut.set(k, (nodeCurrentOut.get(k) ?? 0) - i);
-    } else if (comp.type === 'zener') {
-      // Mirror the zener stamp's piecewise model (semiconductors.ts) so the
-      // current readout includes the companion source, not just G*v.
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-      const vf = (comp.parameters.forwardV as number) || 0.7;
-      const vz = (comp.parameters.zenerV as number) || 3.3;
-      const rOn = Math.max(0.001, (comp.parameters.onR as number) ?? 1);
-      const rOff = Math.max(1e3, (comp.parameters.offR as number) ?? 1e7);
-      const st = sim.state.__global ?? {};
-      const mode = st[stateKey('zener', comp, a, k)] ?? 'off';
-      let i: number;
-      if (mode === 'forward') {
-        i = (v - vf) / rOn;
-      } else if (mode === 'reverse') {
-        // In breakdown the element current (a→k) is (v + vz)/rOn.
-        i = (v + vz) / rOn;
-      } else {
-        i = v / rOff;
-      }
+      const i = simpleDiodeCurrent(comp, sim, a, k);
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + i);
       nodeCurrentOut.set(k, (nodeCurrentOut.get(k) ?? 0) - i);
     } else if (comp.type === 'switch' || comp.type === 'pushButton') {
@@ -1225,34 +1197,10 @@ export function computeComponentCurrents(
         const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
         current = iPrev + (v / L) * Math.max(sim.dt, 1e-12);
       }
-    } else if (comp.type === 'led' || comp.type === 'diode') {
+    } else if (comp.type === 'led' || comp.type === 'diode' || comp.type === 'zener') {
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-      const vf = (comp.parameters.forwardV as number) || 0.7;
-      const r = comp.type === 'led'
-        ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
-        : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
-      const st = sim.state.__global ?? {};
-      const on = st[stateKey(comp.type, comp, a, k)] ?? false;
-      current = on ? Math.max(0, (v - vf) / r) : 0;
-    } else if (comp.type === 'zener') {
-      const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
-      const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
-      const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-      const vf = (comp.parameters.forwardV as number) || 0.7;
-      const vz = (comp.parameters.zenerV as number) || 3.3;
-      const rOn = Math.max(0.001, (comp.parameters.onR as number) ?? 1);
-      const rOff = Math.max(1e3, (comp.parameters.offR as number) ?? 1e7);
-      const st = sim.state.__global ?? {};
-      const mode = st[stateKey('zener', comp, a, k)] ?? 'off';
-      if (mode === 'forward') {
-        current = (v - vf) / rOn;
-      } else if (mode === 'reverse') {
-        current = (v + vz) / rOn;
-      } else {
-        current = v / rOff;
-      }
+      current = simpleDiodeCurrent(comp, sim, a, k);
     } else if (comp.type === 'dcVoltage' || comp.type === 'acVoltage' || comp.type === 'pulseSource') {
       const p = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
       current = nodeCurrentOut.get(p) ?? 0;
@@ -1508,7 +1456,7 @@ export function simulateStep(
   simOptions?: {
     initialConditions?: Record<string, number>;
     nodeSets?: Record<string, number>;
-    /** integration method for reactive companion models (default 'euler') */
+    /** integration method for reactive companion models (default 'gear') */
     method?: 'euler' | 'trap' | 'gear';
     /** simulation temperature in °C (default 27) — lands on sim.temp */
     temp?: number;
@@ -1641,9 +1589,8 @@ export function simulateStep(
     time,
     dt,
     // Integration method for capacitor/inductor companion models. Defaults
-    // to backward Euler so every existing caller keeps its historical
-    // behavior unless it explicitly opts into trap/gear.
-    method: simOptions?.method ?? 'euler',
+    // to Gear/BDF-2 (see DEFAULT_OPTIONS.method); 'euler' remains available.
+    method: simOptions?.method ?? 'gear',
     // Simulation temperature for deviceTemp() (per-part override wins).
     temp: simOptions?.temp ?? 27,
     // Net-name resolution for behavioral sources (V(netname) expressions).
@@ -1778,8 +1725,11 @@ export function simulateStep(
     const VNTOL = 1e-6;
     const AITOL = 1e-12;
     const MAX_ITER = hasNonLinear ? 100 : 20;
-    // Convergence test: |ΔV| ≤ RELTOL·|V| + VNTOL on every node and
-    // |ΔI| ≤ AITOL on every branch current (SPICE `convTest`).
+    // Convergence test (SPICE `convTest`): |ΔV| ≤ RELTOL·|V| + VNTOL on every
+    // node and |ΔI| ≤ RELTOL·|I| + AITOL on every extra unknown. The extras
+    // were held to AITOL alone — but they include pseudo-nodes (a diode's Rs
+    // node, an op-amp's gain stage) whose ~1e-11 V round-off never reaches
+    // 1e-12, so every step with one ran to MAX_ITER.
     const convergedNewton = (
       prevV: Float64Array,
       newV: Float64Array,
@@ -1793,7 +1743,7 @@ export function simulateStep(
         }
       }
       for (let i = 0; i < nExtra; i++) {
-        if (Math.abs(newI[i] - prevI[i]) > AITOL) return false;
+        if (Math.abs(newI[i] - prevI[i]) > RELTOL * Math.max(Math.abs(newI[i]), Math.abs(prevI[i])) + AITOL) return false;
       }
       return true;
     };
@@ -2007,7 +1957,7 @@ export function solveDC(
     // random phase per round: the convergence test could never settle (always
     // 50 iterations), and the returned operating point — which runTran uses
     // to seed the transient — carried an arbitrary source phase.
-    const r = simulateStep(components, wires, plugins, prev, DC_DT, { fixedTime: 0, recordTerminalCurrents: true, ...opts?.simOptions });
+    const r = simulateStep(components, wires, plugins, prev, DC_DT, { fixedTime: 0, recordTerminalCurrents: true, ...opts?.simOptions, method: 'euler' }); // DC: caps open, no integration history
     if (!r) { failed = true; break; }
     result = r.sim;
     // check convergence

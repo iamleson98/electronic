@@ -10,8 +10,8 @@
 
 import { solveDC, buildNodeMap, getTerminalsForComponent, computeComponentCurrents } from './engine';
 import { getPlugin } from './registry';
-import { stateKey } from './state-keys';
 import type { CircuitComponent, Wire, ComponentPlugin } from './types';
+import { simpleDiodeSmallSignalG } from './components/advanced-semi';
 
 export interface ACPoint {
   frequency: number;    // Hz
@@ -343,26 +343,14 @@ function computeOutputVoltage(
         if (i1 >= 0) { Ire[i1] -= iRe; Iim[i1] -= iIm; }
         if (i2 >= 0) { Ire[i2] += iRe; Iim[i2] += iIm; }
       }
-    } else if (c.type === 'diode' || c.type === 'led') {
-      // Linearize at the ACTUAL DC operating point, consistent with the
-      // engine's piecewise model (forward = 1/onR, reverse = 1/offR) and with
-      // runAC() in analysis.ts. The old fixed 1 kΩ was ~4 decades off in
-      // reverse (leakage read as a 1 mA/V path) and off by the real dynamic
-      // resistance in forward — the Bode plot silently changed character
-      // depending on which solver path produced it.
+    } else if (c.type === 'diode' || c.type === 'led' || c.type === 'zener') {
+      // Linearize at the ACTUAL DC operating point with the solver's own
+      // Shockley model (runAC() in analysis.ts does the same).
       const a = terms.find(t => t.terminalId === 'a')?.nodeId ?? 0;
       const k = terms.find(t => t.terminalId === 'k')?.nodeId ?? 0;
-      const vAK = dcOp ? dcOp.nodeVoltage[a] - dcOp.nodeVoltage[k] : 0;
-      const vf = (c.parameters.forwardV as number) ?? (c.type === 'led' ? 2.0 : 0.7);
-      const rOn = c.type === 'led'
-        ? Math.max(0.01, (c.parameters.seriesR as number) ?? 220)
-        : Math.max(0.001, (c.parameters.onR as number) ?? 1);
-      const rOff = Math.max(1e3, (c.parameters.offR as number) ?? 1e7);
-      const st = dcOp?.state?.__global ?? {};
-      const on = st[stateKey(c.type, c, a, k)] ?? vAK > vf;
       const ai = a > 0 ? a - 1 : -1;
       const ki = k > 0 ? k - 1 : -1;
-      stampY(Yre, Yim, ai, ki, N, on ? 1 / rOn : 1 / rOff, 0);
+      stampY(Yre, Yim, ai, ki, N, dcOp ? simpleDiodeSmallSignalG(c, dcOp, a, k) : 1e-7, 0);
     } else if (c.type === 'ground') {
       // Ground node is implicit (we don't include row/col 0)
     } else if (c.type === 'npn' || c.type === 'pnp') {

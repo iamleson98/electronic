@@ -213,7 +213,11 @@ function build555Astable(ctx: ToolContext, args: any): PatternResult {
     { type: 'resistor', x: 6, y: 2, params: { resistance: r1 }, role: 'ra' },
     { type: 'resistor', x: 20, y: 2, params: { resistance: r2 }, role: 'rb' },
     { type: 'capacitor', x: 20, y: 14, params: { capacitance: c, initialV: 0 }, role: 'ctiming' },
-    ...(withLed ? [{ type: 'led', x: 24, y: 8, params: { color: 'green', forwardV: 2.0, seriesR: 220 }, role: 'led' as string }] : []),
+    // a real LED needs its own current-limiting resistor: (VCC − Vf)/220 Ω ≈ 14 mA
+    ...(withLed ? [
+      { type: 'resistor', x: 24, y: 8, params: { resistance: 220 }, role: 'rled' as string },
+      { type: 'led', x: 30, y: 8, params: { color: 'green', forwardV: 2.0 }, role: 'led' as string },
+    ] : []),
   ];
   const p = placePattern(ctx, spec, { x: args.x ?? 4, y: args.y ?? 4 });
   const wires = [
@@ -229,7 +233,8 @@ function build555Astable(ctx: ToolContext, args: any): PatternResult {
     connect(ctx, p.timer, 'thr', p.ctiming, 'a'),
     connect(ctx, p.ctiming, 'b', p.ground, 'g'),
     ...(withLed ? [
-      connect(ctx, p.timer, 'out', p.led, 'a'),
+      connect(ctx, p.timer, 'out', p.rled, 'a'),
+      connect(ctx, p.rled, 'b', p.led, 'a'),
       connect(ctx, p.led, 'k', p.ground, 'g'),
     ] : []),
   ].length;
@@ -292,19 +297,23 @@ function buildTransistorSwitch(ctx: ToolContext, args: any): PatternResult {
   const vbe = 0.7;
   const calc = calcBaseResistor(driveV, vbe, icTarget, hfeMin);
   const rb = calc.outputs.rStandard as number;
-  // LED load resistance so the collector current ≈ icTarget: (vcc − vf − Vce_sat)/icTarget
-  const ledSeriesR = Math.max(10, (vcc - 2.0 - 0.2) / icTarget);
+  // LED current-limiting resistor so the collector current ≈ icTarget:
+  // (vcc − vf − Vce_sat)/icTarget — a real part on the board, in series
+  const ledSeriesR = Math.max(10, Math.round((vcc - 2.0 - 0.2) / icTarget));
 
-  const loadSpec: PatternSpec = loadKind === 'led'
-    ? { type: 'led', x: 8, y: 12, params: { color: 'red', forwardV: 2.0, seriesR: ledSeriesR }, role: 'load' }
-    : { type: 'resistor', x: 8, y: 12, params: { resistance: loadR }, role: 'load' };
+  const loadSpec: PatternSpec[] = loadKind === 'led'
+    ? [
+      { type: 'resistor', x: 8, y: 8, params: { resistance: ledSeriesR }, role: 'rled' },
+      { type: 'led', x: 8, y: 12, params: { color: 'red', forwardV: 2.0 }, role: 'load' },
+    ]
+    : [{ type: 'resistor', x: 8, y: 12, params: { resistance: loadR }, role: 'load' }];
 
   const spec: PatternSpec[] = [
     { type: 'dcVoltage', x: 0, y: 4, params: { voltage: driveV }, role: 'drive' },
     { type: 'resistor', x: 8, y: 4, params: { resistance: rb }, role: 'rbase' },
     { type: 'npn', x: 16, y: 4, params: { hfe: hfeMin * 2, vbe: 0.7, satV: 0.2 }, role: 'transistor' },
     { type: 'dcVoltage', x: 0, y: 12, params: { voltage: vcc }, role: 'source' },
-    loadSpec,
+    ...loadSpec,
     { type: 'ground', x: 16, y: 18, params: {}, role: 'ground' },
   ];
   const p = placePattern(ctx, spec, { x: args.x ?? 4, y: args.y ?? 4 });
@@ -314,7 +323,9 @@ function buildTransistorSwitch(ctx: ToolContext, args: any): PatternResult {
     connect(ctx, p.drive, 'p', p.rbase, 'a'),
     connect(ctx, p.rbase, 'b', p.transistor, 'b'),
     connect(ctx, p.drive, 'n', p.ground, 'g'),
-    connect(ctx, p.source, 'p', p.load, 'a'),
+    ...(loadKind === 'led'
+      ? [connect(ctx, p.source, 'p', p.rled, 'a'), connect(ctx, p.rled, 'b', p.load, 'a')]
+      : [connect(ctx, p.source, 'p', p.load, 'a')]),
     connect(ctx, p.load, loadOut as any, p.transistor, 'c'),
     connect(ctx, p.transistor, 'e', p.ground, 'g'),
     connect(ctx, p.source, 'n', p.ground, 'g'),
@@ -322,7 +333,7 @@ function buildTransistorSwitch(ctx: ToolContext, args: any): PatternResult {
 
   return manifest('transistor-switch', ctx, p, spec, wires, {
     baseResistor: rb, baseCurrent: calc.outputs.ibActual, icCapable: calc.outputs.icCapable, ledSeriesR,
-  }, `NPN low-side switch: ${calc.explanation}. ${loadKind === 'led' ? `LED load (series ${engFormat(ledSeriesR, 'Ω')}) from VCC to collector.` : `Resistive load ${engFormat(loadR, 'Ω')} from VCC to collector.`}`, [
+  }, `NPN low-side switch: ${calc.explanation}. ${loadKind === 'led' ? `LED load with a ${engFormat(ledSeriesR, 'Ω')} current-limiting resistor from VCC to collector.` : `Resistive load ${engFormat(loadR, 'Ω')} from VCC to collector.`}`, [
     ...(calc.notes || []),
     'Drive source high → transistor saturates → load current flows. Drive low/off → load disconnected.',
     'For inductive loads (relay, motor), ALWAYS add a flyback diode across the load.',

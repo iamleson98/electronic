@@ -294,11 +294,19 @@ describe('555 Astable example — oscillator under every method', () => {
       const out = run(ex555.doc, 200, 1e-4, method);
       expect(out.ok).toBe(true);
       expect(out.steps).toBe(200);
+      const outNode = out.nodeMap!.get('ic1:out')!;
       const ledNode = out.nodeMap!.get('led1:a')!;
-      let maxLed = -Infinity;
-      for (const h of out.history) maxLed = Math.max(maxLed, h[ledNode]);
-      // the astable output drives the LED to the rail
-      expect(maxLed).toBeGreaterThan(4.5);
+      let maxOut = -Infinity;
+      let maxILed = 0;
+      for (const h of out.history) {
+        maxOut = Math.max(maxOut, h[outNode]);
+        maxILed = Math.max(maxILed, (h[outNode] - h[ledNode]) / 220);
+      }
+      // the astable output swings to the rail and drives ≈ (5 − 2)/220 Ω
+      // through its current-limiting resistor into the LED
+      expect(maxOut).toBeGreaterThan(4.5);
+      expect(maxILed).toBeGreaterThan(0.012);
+      expect(maxILed).toBeLessThan(0.016);
     });
   }
 });

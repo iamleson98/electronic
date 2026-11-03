@@ -70,7 +70,11 @@ export const DEFAULT_OPTIONS: SimOptions = {
   itl2: 50,
   itl4: 10,
   pivtol: 1e-13,
-  method: 'euler',           // preserve existing behavior
+  // Gear/BDF-2: 2nd-order and stiffly stable. Backward Euler (1st order)
+  // numerically damped every oscillator example to a standstill (Wien bridge
+  // 0.5 V p-p instead of 17 V, LC tank 0.06 V instead of 10 V); trapezoidal
+  // keeps amplitude but rings (−1)^n on switching edges at a fixed step.
+  method: 'gear',
   maxord: 2,
   temp: 27,
   tnom: 27,

@@ -198,12 +198,20 @@ describe('transient: dynamics match the closed-form solutions', () => {
     const s = tran(c, 10000, dt); // 200 ms → 10 cycles
     const out = s.series('c:a', 7500); // last 2.5 cycles
     const vmax = Math.max(...out), vmin = Math.min(...out);
-    // the floating source + bridge: out = |vin| − 2·Vf (Vf = 0.7 V + on-R drop)
-    expect(vmax).toBeGreaterThan(Vp - 2 * 0.7 - 0.6);
-    expect(vmax).toBeLessThan(Vp - 2 * 0.7 + 0.05);
+    // the floating source + bridge: out = |vin| − 2·Vf, each Shockley diode
+    // (0.7 V at 1 mA, N = 1.8, 1 Ω) dropping ≈ 1 V at the ~0.1 A recharge peak
+    expect(vmax).toBeGreaterThan(Vp - 2 * 1.05);
+    expect(vmax).toBeLessThan(Vp - 2 * 0.7);
+    // the cap discharges only while the bridge is NOT conducting:
+    // ripple = I·t_off/C with t_off = (1 − conduction fraction)/(2f) —
+    // I/(2fC) is the zero-conduction-angle upper bound
     const ripple = vmax - vmin;
     const iLoad = mean(out) / R;
-    expect(rel(ripple, iLoad / (2 * f * C))).toBeLessThan(0.15);
+    let rising = 0;
+    for (let i = 1; i < out.length; i++) if (out[i] > out[i - 1]) rising++;
+    const tOff = (1 - rising / out.length) / (2 * f);
+    expect(rel(ripple, (iLoad * tOff) / C)).toBeLessThan(0.05);
+    expect(ripple).toBeLessThan(iLoad / (2 * f * C));
     // ripple frequency is 2f
     const tz = crossings(out, dt, mean(out));
     expect(rel(1 / ((tz[tz.length - 1] - tz[0]) / (tz.length - 1)), 2 * f)).toBeLessThan(0.03);
