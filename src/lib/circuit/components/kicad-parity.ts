@@ -356,6 +356,7 @@ function makeNandGateUnit(unitLabel: string): ComponentPlugin {
     type: `7400_${unitLabel}`,
     name: `7400 NAND Gate (Unit ${unitLabel})`,
     category: 'logic',
+    nonLinear: true, // stamp decides from node voltages — Newton re-stamp loop
     description: `Quad 2-input NAND gate, unit ${unitLabel}. Place all 4 units to form a 7400.`,
     symbol: '&',
     boundingBox: { width: 4, height: 4 },
@@ -474,6 +475,7 @@ function makeMultiUnitGate(
       type: `${family}_${unit}`,
       name: `${partName} (Unit ${unit})`,
       category: 'logic',
+      nonLinear: true, // stamp decides from node voltages — Newton re-stamp loop
       description: `${partName} ${isNot ? 'inverter' : kind === 'nand' ? 'NAND gate' : 'NOR gate'}, unit ${unit}. Place all ${unitsList.length} units to form a ${family}.`,
       symbol: isNot ? '1' : kind === 'nand' ? '&' : '≥1',
       boundingBox: { width: 4, height: isNot ? 3 : 4 },

@@ -136,6 +136,26 @@ export interface SimContext {
    * without a node map (tests, AI tools).
    */
   netNames?: Map<string, number>;
+  /**
+   * Exact current INTO each component at each terminal
+   * (`${componentId}:${terminalId}` → A), evaluated from the solved MNA
+   * system — KCL holds exactly at every node. Present only when the step
+   * was run with `recordTerminalCurrents` (live sim, DC operating point).
+   */
+  terminalCurrents?: Map<string, number>;
+  /**
+   * Scratch memory that lives for ONE simulateStep call and survives the
+   * engine's per-round state rollback. Non-linear devices keep the junction
+   * voltages of their previous Newton linearization here, so SPICE-style
+   * step limiting compares against the previous ROUND (not the previous
+   * timestep). Empty on round 0.
+   */
+  newtonMemory?: Record<string, number>;
+  /**
+   * Nodes of unwired (floating) signal pins. Query through isPinUnwired()
+   * (pin-state.ts) to tell an open pin from one wired to ground.
+   */
+  floatingNodes?: ReadonlySet<number>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -495,6 +515,20 @@ export interface ComponentPlugin {
     system: MnaSystem,
     sim: SimContext,
     comp?: CircuitComponent,
+  ) => void;
+
+  /**
+   * Optional small-signal (phasor) model for AC / noise / TF / PZ analysis,
+   * for devices whose response depends on frequency (an op-amp's GBW pole).
+   * Parts without it are linearized generically from their DC stamp at the
+   * operating point (ac-linearize.ts) — exact for resistive small-signal
+   * behavior, with companion-model capacitances treated as open.
+   */
+  acStamp?: (
+    params: Record<string, any>,
+    terminals: { terminalId: string; nodeId: number }[],
+    sys: import('./complex-solver').ComplexMnaSystem,
+    ctx: { dcOp: SimContext; omega: number; comp: CircuitComponent },
   ) => void;
 
   /**

@@ -23,6 +23,32 @@ export interface NodeMap {
   numNodes: number;
   /** net label name -> node id (e.g. 'VCC' -> 3). Same final ids as terminalNode. */
   netNames: Map<string, number>;
+  /**
+   * Nodes created for unwired signal pins. Each floats (no DC path), so the
+   * solvers tie it to ground through FLOATING_PIN_GMIN to keep the matrix
+   * regular — the pin then reads whatever the device's own stamp implies.
+   */
+  floating?: ReadonlySet<number>;
+}
+
+/** Leak conductance on unwired (floating) pins — SPICE's gmin, 1 TΩ. */
+export const FLOATING_PIN_GMIN = 1e-12;
+
+/** Stamp the floating-pin leak into a real-valued MNA system. */
+export function stampFloatingGmin(sys: Pick<MnaSystem, 'stampConductance'>, nodeMap: NodeMap): void {
+  if (!nodeMap.floating) return;
+  for (const n of nodeMap.floating) sys.stampConductance(n, 0, FLOATING_PIN_GMIN);
+}
+
+/**
+ * Unwired pins that implicitly join a rail rather than float: ground and
+ * supply pins (plugins fall back to their nominal-voltage parameter when the
+ * supply pin is unwired) and hidden power pins (KiCad semantics). They keep
+ * the historical node-0 mapping.
+ */
+const IMPLICIT_RAIL_PIN = /^(gnd\d?|vss|agnd|dgnd|vcc\d?|vdd|vee|v\+|v-|5v|3v3|vbat)$/i;
+function isImplicitRailPin(t: { id: string; hidden?: boolean; electricalType?: string }): boolean {
+  return !!t.hidden || t.electricalType === 'power_in' || IMPLICIT_RAIL_PIN.test(t.id);
 }
 
 /**
@@ -192,6 +218,24 @@ function buildNodeMapUncached(components: CircuitComponent[], wires: Wire[], plu
     terminalNode.set(bKey, root);
   }
 
+  // Unwired signal pins float on their own node. (They used to fall back to
+  // node 0, silently GROUNDING every unconnected pin: a battery with one
+  // terminal wired shorted onto ground and made the whole circuit
+  // singular; a resistor with a free end conducted to "ground"; an unwired
+  // 555 RST held the timer in reset.)
+  const floatingRaw: number[] = [];
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (!plugin) continue;
+    for (const t of plugin.terminals) {
+      const k = termKey(comp.id, t.id);
+      if (terminalNode.has(k) || isImplicitRailPin(t)) continue;
+      const n = newNode();
+      terminalNode.set(k, n);
+      floatingRaw.push(n);
+    }
+  }
+
   // Finalize: compress all paths and remap to 0..N contiguous
   // Collect all distinct roots
   const rootSet = new Set<number>();
@@ -223,7 +267,8 @@ function buildNodeMapUncached(components: CircuitComponent[], wires: Wire[], plu
   netNames.set('gnd', 0);
   netNames.set('GND', 0);
 
-  return { terminalNode, numNodes: nextId, netNames };
+  const floating = new Set(floatingRaw.map((n) => rootToId.get(find(n))!));
+  return { terminalNode, numNodes: nextId, netNames, floating };
 }
 
 export function getTerminalsForComponent(
@@ -238,8 +283,254 @@ export function getTerminalsForComponent(
 }
 
 /**
+ * Recording stand-in for an MnaSystem: instead of building a matrix it
+ * evaluates each stamp at a known solution vector `x` and accumulates the
+ * KCL residual (A·x − z) per row. For a single component's stamps, the
+ * residual at a node row is exactly the current flowing FROM that node INTO
+ * the component — i.e. the component's terminal current, consistent with
+ * the solved MNA system by construction (no per-type bookkeeping).
+ *
+ * Extra-variable indices are allocated in the same order as the real solve
+ * (stamps are deterministic for a given state), so branch currents and
+ * pseudo-node voltages are read from the same slots the solver used.
+ */
+function createResidualRecorder(numNonGround: number, x: Float64Array) {
+  const residual = new Map<number, number>();
+  const xAt = (k: number) => (k >= 0 && k < x.length ? x[k] : 0);
+  const v = (n: number) => (n > 0 ? xAt(n - 1) : 0);
+  const add = (row: number, val: number) => {
+    if (row < 0 || val === 0 || !Number.isFinite(val)) return;
+    residual.set(row, (residual.get(row) ?? 0) + val);
+  };
+  const size = x.length;
+  // Direct matrix/RHS writes (a few device models touch sys.z / sys.A).
+  const zVals = new Map<number, number>();
+  const aVals = new Map<number, number>();
+  const z = new Proxy({} as any, {
+    get: (_t, k) => (typeof k === 'string' && /^\d+$/.test(k) ? zVals.get(+k) ?? 0 : undefined),
+    set: (_t, k, val) => {
+      const i = +String(k);
+      const old = zVals.get(i) ?? 0;
+      zVals.set(i, val);
+      add(i, -(val - old));
+      return true;
+    },
+  });
+  const A = new Proxy({} as any, {
+    get: (_t, k) => (typeof k === 'string' && /^\d+$/.test(k) ? aVals.get(+k) ?? 0 : undefined),
+    set: (_t, k, val) => {
+      const i = +String(k);
+      const old = aVals.get(i) ?? 0;
+      aVals.set(i, val);
+      add(Math.floor(i / size), (val - old) * xAt(i % size));
+      return true;
+    },
+  });
+  const sys = {
+    numNodes: numNonGround,
+    numExtra: Math.max(0, size - numNonGround),
+    size,
+    A,
+    z,
+    nextExtra: numNonGround,
+    addExtra: () => sys.nextExtra++,
+    stampConductance: (n1: number, n2: number, g: number) => {
+      const i = g * (v(n1) - v(n2));
+      if (n1 > 0) add(n1 - 1, i);
+      if (n2 > 0) add(n2 - 1, -i);
+    },
+    stampCurrentSource: (n1: number, n2: number, current: number) => {
+      if (n1 > 0) add(n1 - 1, current);
+      if (n2 > 0) add(n2 - 1, -current);
+    },
+    stampVoltageSource: (n1: number, n2: number, _voltage: number) => {
+      const k = sys.addExtra();
+      if (n1 > 0) add(n1 - 1, xAt(k));
+      if (n2 > 0) add(n2 - 1, -xAt(k));
+      return k;
+    },
+    stampVCVS: (a: number, b: number, _c: number, _d: number, _mu: number) => sys.stampVoltageSource(a, b, 0),
+    stampVCCS: (n1: number, n2: number, c: number, d: number, g: number) => {
+      const i = g * (v(c) - v(d));
+      if (n1 > 0) add(n1 - 1, i);
+      if (n2 > 0) add(n2 - 1, -i);
+    },
+    stampCCCS: (n1: number, n2: number, extraIndex: number, beta: number) => {
+      const i = beta * xAt(extraIndex);
+      if (n1 > 0) add(n1 - 1, i);
+      if (n2 > 0) add(n2 - 1, -i);
+    },
+    stampCCVS: (a: number, b: number, _extraIndex: number, _r: number) => sys.stampVoltageSource(a, b, 0),
+  };
+  return {
+    sys: sys as unknown as MnaSystem,
+    take(): Map<number, number> {
+      const r = new Map(residual);
+      residual.clear();
+      zVals.clear();
+      aVals.clear();
+      return r;
+    },
+  };
+}
+
+/**
+ * Re-evaluate every component's stamp at the solved vector `x` and return
+ * the current INTO each component at each terminal
+ * (`${componentId}:${terminalId}` → amperes). By KCL these sum to zero at
+ * every node. Terminals of one component that share a node get the node's
+ * total on the first such terminal (the split is not observable).
+ */
+function recordTerminalCurrents(
+  components: CircuitComponent[],
+  plugins: Map<string, ComponentPlugin>,
+  nodeMap: NodeMap,
+  sim: SimContext,
+  x: Float64Array,
+): Map<string, number> {
+  const numNonGround = nodeMap.numNodes - 1;
+  const rec = createResidualRecorder(numNonGround, x);
+  const out = new Map<string, number>();
+  for (const comp of components) {
+    const plugin = plugins.get(comp.type);
+    if (!plugin) continue;
+    const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
+    if (plugin.stamp) {
+      try {
+        (plugin.stamp as any)(comp.parameters, terminals, rec.sys, sim, comp);
+      } catch {
+        // a throwing stamp contributed nothing to the real solve either
+      }
+    }
+    const res = rec.take();
+    const seen = new Set<number>();
+    // When several of the part's terminals share a node, the node total goes
+    // to the most driver-like pin (an op-amp follower's OUT, not IN−), so the
+    // feedback wire does not appear to carry the load current.
+    const rank = (id: string) => DRIVE_RANK[plugin.terminals.find((d) => d.id === id)?.electricalType ?? ''] ?? 3;
+    const ordered = [...terminals].sort((x, y) => rank(x.terminalId) - rank(y.terminalId));
+    for (const t of ordered) {
+      const key = `${comp.id}:${t.terminalId}`;
+      if (t.nodeId <= 0 || seen.has(t.nodeId)) {
+        // ground terminal: its current is minus the sum of the others
+        out.set(key, 0);
+        continue;
+      }
+      seen.add(t.nodeId);
+      out.set(key, res.get(t.nodeId - 1) ?? 0);
+    }
+    // Ground-node terminals: KCL across the device's own terminals.
+    const groundTerms = terminals.filter((t) => t.nodeId <= 0);
+    if (groundTerms.length > 0) {
+      let sum = 0;
+      for (const t of terminals) if (t.nodeId > 0) sum += out.get(`${comp.id}:${t.terminalId}`) ?? 0;
+      out.set(`${comp.id}:${groundTerms[0].terminalId}`, -sum);
+    }
+  }
+  return out;
+}
+
+/** Preference order for crediting a shared node's current to one pin. */
+const DRIVE_RANK: Record<string, number> = {
+  output: 0, power_out: 1, tri_state: 2, open_collector: 2, open_emitter: 2,
+  bidirectional: 2, passive: 3, '': 3, unspecified: 4, power_in: 5, input: 6, no_connect: 7,
+};
+
+/** Component types that join nets without wires (labels, rails, ground). */
+const VIRTUAL_NET_TYPES = new Set([
+  'ground', 'powerGND', 'powerAGND', 'powerVCC', 'power5V', 'power3V3',
+  'power1V8', 'power2V5', 'power12V', 'powerMinus12V', 'powerMinus5V',
+  'powerAVDD', 'powerVBAT', 'powerFlag', 'netLabel', 'busLabel',
+  'busVectorLabel', 'hierLabel',
+]);
+
+/**
+ * Exact wire currents from terminal currents: inside each wire-connected
+ * cluster the wires form a graph whose vertices are terminals. Every
+ * terminal injects (−current into its component) into the cluster; on a
+ * spanning tree each wire carries the total injection of the subtree it
+ * separates — KCL holds at every terminal by construction. Redundant wires
+ * (cycles) carry 0. A cluster that joins the rest of its net through a
+ * label / rail / ground symbol routes its imbalance out through that symbol.
+ */
+function wireCurrentsFromTerminals(
+  components: CircuitComponent[],
+  wires: Wire[],
+  terminalCurrents: Map<string, number>,
+): Map<string, number> {
+  const typeOf = new Map(components.map((c) => [c.id, c.type]));
+  const adj = new Map<string, { wire: Wire; other: string }[]>();
+  const keyOf = (e: { componentId: string; terminalId: string }) => `${e.componentId}:${e.terminalId}`;
+  for (const wire of wires) {
+    const a = keyOf(wire.from);
+    const b = keyOf(wire.to);
+    if (!adj.has(a)) adj.set(a, []);
+    if (!adj.has(b)) adj.set(b, []);
+    if (a === b) continue;
+    adj.get(a)!.push({ wire, other: b });
+    adj.get(b)!.push({ wire, other: a });
+  }
+  const result = new Map<string, number>();
+  for (const wire of wires) result.set(wire.id, 0);
+  const visited = new Set<string>();
+  const isVirtual = (k: string) => VIRTUAL_NET_TYPES.has(typeOf.get(k.slice(0, k.indexOf(':'))) ?? '');
+  for (const start of adj.keys()) {
+    if (visited.has(start)) continue;
+    // collect the cluster
+    const cluster: string[] = [];
+    const stack = [start];
+    visited.add(start);
+    while (stack.length) {
+      const k = stack.pop()!;
+      cluster.push(k);
+      for (const { other } of adj.get(k)!) {
+        if (!visited.has(other)) { visited.add(other); stack.push(other); }
+      }
+    }
+    // Root at a terminal that can absorb the cluster's imbalance: a virtual
+    // net symbol, else a terminal with no recorded current (e.g. a
+    // hierarchical sheet pin whose internals were simulated flattened).
+    const root = cluster.find(isVirtual)
+      ?? cluster.find((k) => !terminalCurrents.has(k))
+      ?? cluster[0];
+    // BFS spanning tree from root
+    const parentWire = new Map<string, { wire: Wire; parent: string }>();
+    const order: string[] = [root];
+    const seen = new Set([root]);
+    for (let i = 0; i < order.length; i++) {
+      const k = order[i];
+      for (const { wire, other } of adj.get(k)!) {
+        if (seen.has(other)) continue;
+        seen.add(other);
+        parentWire.set(other, { wire, parent: k });
+        order.push(other);
+      }
+    }
+    // subtree injections, leaves first
+    const sub = new Map<string, number>();
+    for (const k of cluster) sub.set(k, -(terminalCurrents.get(k) ?? 0));
+    for (let i = order.length - 1; i > 0; i--) {
+      const k = order[i];
+      const { wire, parent } = parentWire.get(k)!;
+      const s = sub.get(k)!;
+      // s flows from k toward its parent along this wire
+      result.set(wire.id, keyOf(wire.from) === k ? s : -s);
+      sub.set(parent, sub.get(parent)! + s);
+    }
+  }
+  // Snap numerical dust to zero so idle wires show no dots.
+  for (const [id, i] of result) if (Math.abs(i) < 1e-12) result.set(id, 0);
+  return result;
+}
+
+/**
  * Compute the current flowing through each wire, in amperes.
  * Returns a map of wireId -> current (positive = from `from` terminal to `to` terminal).
+ *
+ * When the SimContext carries exact terminal currents (recorded by
+ * simulateStep from the solved MNA system) the wire currents are derived
+ * from them and satisfy KCL exactly at every junction. The per-type
+ * estimate below is the fallback for contexts without them.
  *
  * This follows the **conventional current** convention (positive charge flow from + to -),
  * which is what Falstad and most simulators use for the animated dots.
@@ -268,6 +559,9 @@ export function computeWireCurrents(
   plugins: Map<string, ComponentPlugin>,
   sim: SimContext,
 ): Map<string, number> {
+  if (sim.terminalCurrents && sim.terminalCurrents.size > 0) {
+    return wireCurrentsFromTerminals(components, wires, sim.terminalCurrents);
+  }
   // First compute per-component currents
   const compCurrents = computeComponentCurrents(components, wires, plugins, sim);
   const result = new Map<string, number>();
@@ -757,7 +1051,22 @@ export function computeComponentCurrents(
       nodeCurrentOut.set(a, (nodeCurrentOut.get(a) ?? 0) + iTOP);
       nodeCurrentOut.set(b, (nodeCurrentOut.get(b) ?? 0) - iBot);
       nodeCurrentOut.set(wp, (nodeCurrentOut.get(wp) ?? 0) + (-iTOP + iBot));
-    } else if (comp.type === 'transformer' || comp.type === 'coupledInductor') {
+    } else if (comp.type === 'coupledInductor') {
+      // Winding currents are the K-element's own state variables (i1 into
+      // P1, i2 into S1), integrated by its step().
+      const p1 = terms.find((t) => t.terminalId === 'p1')?.nodeId ?? 0;
+      const p2 = terms.find((t) => t.terminalId === 'p2')?.nodeId ?? 0;
+      const s1n = terms.find((t) => t.terminalId === 's1')?.nodeId ?? 0;
+      const s2n = terms.find((t) => t.terminalId === 's2')?.nodeId ?? 0;
+      const st = sim.state.__global ?? {};
+      const key = stateKey('xfmr', comp, p1, p2, s1n, s2n);
+      const i1 = (st[key] as number | undefined) ?? 0;
+      const i2 = (st[key + '_i2'] as number | undefined) ?? 0;
+      nodeCurrentOut.set(p1, (nodeCurrentOut.get(p1) ?? 0) + i1);
+      nodeCurrentOut.set(p2, (nodeCurrentOut.get(p2) ?? 0) - i1);
+      nodeCurrentOut.set(s1n, (nodeCurrentOut.get(s1n) ?? 0) + i2);
+      nodeCurrentOut.set(s2n, (nodeCurrentOut.get(s2n) ?? 0) - i2);
+    } else if (comp.type === 'transformer') {
       // Primary current = magnetizing companion current + the reflected
       // secondary current (−V2/V1 · I2, read from the recorded VCVS branch).
       const p1 = terms.find((t) => t.terminalId === 'p1')?.nodeId ?? 0;
@@ -768,12 +1077,6 @@ export function computeComponentCurrents(
       const g = dt / lm;
       const v = sim.nodeVoltage[p1] - sim.nodeVoltage[p2];
       let i = v * g;
-      // coupled inductor keeps its own companion state (iPrev)
-      if (comp.type === 'coupledInductor') {
-        const s1n = terms.find((t) => t.terminalId === 's1')?.nodeId ?? 0;
-        const s2n = terms.find((t) => t.terminalId === 's2')?.nodeId ?? 0;
-        i += (st[stateKey('xfmr', comp, p1, p2, s1n, s2n)] as number) ?? 0;
-      }
       // reflected secondary current
       const branchIdx = st[`xfmr_branch_${comp.id}`] as number | undefined;
       if (branchIdx !== undefined && branchIdx >= 0) {
@@ -781,9 +1084,7 @@ export function computeComponentCurrents(
         const relIdx = branchIdx - numNonGround;
         if (relIdx >= 0 && relIdx < sim.branchCurrent.length) {
           const i2 = sim.branchCurrent[relIdx];
-          const v2v1 = comp.type === 'transformer'
-            ? (comp.parameters.ratio as number) ?? 1
-            : 1 / ((comp.parameters.ratio as number) ?? 1);
+          const v2v1 = (comp.parameters.ratio as number) ?? 1;
           i += -v2v1 * i2;
         }
       }
@@ -1105,8 +1406,23 @@ export function computeComponentCurrents(
       const pNode = terms.find((t) => t.terminalId === 'p')?.nodeId ?? 0;
       current = nodeCurrentOut.get(pNode) ?? 0;
     } else if (comp.type === 'coupledInductor') {
-      const p1 = terms.find((t) => t.terminalId === 'p1')?.nodeId ?? 0;
-      current = nodeCurrentOut.get(p1) ?? 0;
+      // primary winding current (state variable of the K element)
+      const n = (id: string) => terms.find((t) => t.terminalId === id)?.nodeId ?? 0;
+      const st = sim.state.__global ?? {};
+      current = (st[stateKey('xfmr', comp, n('p1'), n('p2'), n('s1'), n('s2'))] as number | undefined) ?? 0;
+    } else if (sim.terminalCurrents && sim.terminalCurrents.has(`${comp.id}:${terms[0]?.terminalId}`)) {
+      // Exact solved terminal currents (current INTO the terminal): supply
+      // current for ICs, collector/drain current for transistors, output
+      // current (out of the pin) for drivers, else the first terminal's.
+      const tc = sim.terminalCurrents;
+      const pick = (id: string) => tc.get(`${comp.id}:${id}`) ?? 0;
+      const has = (id: string) => terms.some((t) => t.terminalId === id);
+      if (has('vcc')) current = pick('vcc');
+      else if (has('c')) current = pick('c');
+      else if (has('d')) current = pick('d');
+      else if (has('out')) current = -pick('out');
+      else if (has('y')) current = -pick('y');
+      else current = pick(terms[0].terminalId);
     } else {
       // GENERIC FALLBACK for any unhandled type.
       const vccNode = terms.find((t) => t.terminalId === 'vcc')?.nodeId;
@@ -1201,8 +1517,36 @@ export function simulateStep(
      * (solveDC passes 0). Omit for normal transient stepping.
      */
     fixedTime?: number;
+    /**
+     * Record exact per-terminal currents on sim.terminalCurrents (one extra
+     * stamp evaluation). Used by the live sim and the DC operating point so
+     * current readouts and wire-dot animation satisfy KCL exactly.
+     */
+    recordTerminalCurrents?: boolean;
   },
 ): StepResult | null {
+  // Trapezoidal cold start. Trap needs each reactive element's previous
+  // current; on a cold start (live sim, .tran UIC) it does not exist, and
+  // assuming 0 is wrong whenever a source steps at t=0 — trap never damps
+  // that error (it rings as (−1)^n and biases the waveform). A full-size
+  // backward-Euler first step fixes that but damps an LC tank by several
+  // percent. Do what ngspice effectively does: a tiny backward-Euler step
+  // establishes consistent currents at t=0⁺, then the real step runs trap.
+  const coldStart = !(prev && prev.nodeVoltage.length > 0);
+  if (coldStart && simOptions?.method === 'trap' && simOptions.fixedTime === undefined
+      && components.some((c) => c.type === 'capacitor' || c.type === 'inductor')) {
+    const pre = simulateStep(components, wires, plugins, prev, Math.max(dt * 1e-6, 1e-15), {
+      ...simOptions, method: 'euler', recordTerminalCurrents: false,
+    });
+    if (pre) {
+      return simulateStep(components, wires, plugins, {
+        nodeVoltage: pre.sim.nodeVoltage,
+        branchCurrent: pre.sim.branchCurrent,
+        time: prev?.time ?? 0,
+        state: pre.sim.state,
+      }, dt, simOptions);
+    }
+  }
   const nodeMap = buildNodeMap(components, wires, plugins);
   const numNodes = nodeMap.numNodes; // includes ground (0)
   // Per-component extra-variable demand (e.g. a discretized transmission
@@ -1226,7 +1570,12 @@ export function simulateStep(
   // carry an arbitrary source phase (polluting the transient's t=0 seed).
   // ngspice semantics: time-dependent sources hold their t=0 value during
   // .OP/.DC — which is exactly what the transient's first step also sees.
-  const time = simOptions?.fixedTime ?? (prev && prev.nodeVoltage.length > 0 ? prev.time + dt : 0);
+  //
+  // A cold start advances from t = 0 to t = dt like every other step: the
+  // companion models integrate over [0, dt], so sources must be sampled at
+  // dt too. (It used to report — and drive sources at — t = 0, leaving every
+  // source one step behind the reactive state in the live sim and UIC runs.)
+  const time = simOptions?.fixedTime ?? ((prev?.time ?? 0) + dt);
 
   // initialize SimContext with previous voltages (for companion models).
   // If prev has no data yet (first step), allocate fresh arrays sized to numNodes.
@@ -1299,6 +1648,9 @@ export function simulateStep(
     temp: simOptions?.temp ?? 27,
     // Net-name resolution for behavioral sources (V(netname) expressions).
     netNames: nodeMap.netNames,
+    // Per-step Newton scratch (not rolled back between rounds).
+    newtonMemory: {},
+    floatingNodes: nodeMap.floating,
   };
 
   // First pass: let plugins initialize their simState (e.g., capacitor voltage)
@@ -1333,6 +1685,7 @@ export function simulateStep(
     const sparse = useSparse ? createSparseMnaSystem(numNodes - 1, maxExtras) : null;
     const s = useSparse ? asMnaSystem(sparse!) : createMnaSystem(numNodes - 1, maxExtras);
     s.nextExtra = numNodes - 1;
+    stampFloatingGmin(s, nodeMap);
     if (withGmin) {
       for (let n = 1; n < numNodes; n++) s.stampConductance(n, 0, 1e-12);
     }
@@ -1464,7 +1817,10 @@ export function simulateStep(
     for (let i = 1; i < numNodes; i++) newV0[i] = x[i - 1];
     const newI0 = new Float64Array(attempt.sys.numExtra);
     for (let i = 0; i < attempt.sys.numExtra; i++) newI0[i] = x[numNodes - 1 + i];
-    const round0Converged = convergedNewton(
+    // SPICE "noncon": a device that limited its junction step this round
+    // has not reached the solution yet, whatever the residual says.
+    const deviceLimited = () => ((sim.newtonMemory?.__limited as number | undefined) ?? 0) > 0;
+    const round0Converged = !deviceLimited() && convergedNewton(
       sim.nodeVoltage, newV0, sim.branchCurrent, newI0, attempt.sys.numExtra,
     );
     if (!round0Converged && (deltaV0 >= 1e-9 || deltaI0 >= 1e-12)) {
@@ -1489,6 +1845,7 @@ export function simulateStep(
         // Undo state mutated by the previous round's stamp (edge counters,
         // region latches) so every re-stamp applies transitions exactly once.
         restoreStateInPlace(stateMap, stateSnapshot);
+        if (sim.newtonMemory) sim.newtonMemory.__limited = 0;
         let round = buildAndSolve(false);
         if (!round.x) {
           restoreStateInPlace(stateMap, stateSnapshot);
@@ -1512,12 +1869,13 @@ export function simulateStep(
           if (d > deltaI) deltaI = d;
           sim.branchCurrent[i] = iNew;
         }
-        if (deltaV < 1e-9 && deltaI < 1e-12) break; // self-consistent (absolute test)
+        const limited = deviceLimited();
+        if (!limited && deltaV < 1e-9 && deltaI < 1e-12) break; // self-consistent (absolute test)
         // SPICE tolerance test — the Newton loop's official exit: the solve
         // moved less than reltol·|V| + vntol from what this round's stamps
         // linearized around. Strictly stronger than the absolute test for
         // large signals; reachable for small ones.
-        {
+        if (!limited) {
           const newV = new Float64Array(numNodes);
           for (let i = 1; i < numNodes; i++) newV[i] = round.x[i - 1];
           const newI = new Float64Array(round.sys.numExtra);
@@ -1533,13 +1891,20 @@ export function simulateStep(
         // must not un-damp the iteration back into divergence). If the
         // residual STILL grows while damped (|gain| > 2), halve the blend
         // factor toward 0.05 until the iteration contracts.
-        if (!dampEngaged) {
+        // Rounds in which a device limited its own step are SPICE-damped
+        // already (the limiter IS the damping): feed the raw solution back
+        // and keep them out of the oscillation detector — blending them
+        // made node voltages lag the limiter and ratchet junctions to
+        // absurd biases (Vbe ≈ 2 V).
+        if (limited) {
+          nonDecreasing = 0;
+        } else if (!dampEngaged) {
           nonDecreasing = deltaV >= prevDeltaV ? nonDecreasing + 1 : 0;
           dampEngaged = nonDecreasing >= 2;
         } else if (deltaV > prevDeltaV) {
           dampAlpha = Math.max(0.05, dampAlpha * 0.5);
         }
-        const alpha = dampEngaged ? dampAlpha : 1;
+        const alpha = dampEngaged && !limited ? dampAlpha : 1;
         for (let i = 1; i < numNodes; i++) {
           const vNew = round.x[i - 1];
           sim.nodeVoltage[i] = (1 - alpha) * sim.nodeVoltage[i] + alpha * vNew;
@@ -1567,6 +1932,24 @@ export function simulateStep(
   }
   for (let i = 0; i < sys.numExtra; i++) {
     sim.branchCurrent[i] = x[numNodes - 1 + i];
+  }
+
+  // Exact terminal currents — evaluated BEFORE step() advances companion
+  // history (a capacitor re-stamped after step() would read I = 0). Stamps
+  // see the same plugin state as the final solve round: roll back to the
+  // pre-stamp snapshot, record, then restore the post-stamp state.
+  if (simOptions?.recordTerminalCurrents) {
+    let post: Record<string, any> | null = null;
+    if (stateSnapshot) {
+      try { post = (globalThis as any).structuredClone(stateMap); } catch { post = null; }
+      if (post) restoreStateInPlace(stateMap, stateSnapshot);
+    }
+    try {
+      sim.terminalCurrents = recordTerminalCurrents(components, plugins, nodeMap, sim, x);
+    } catch {
+      sim.terminalCurrents = undefined;
+    }
+    if (post) restoreStateInPlace(stateMap, post);
   }
 
   // call step() for stateful components
@@ -1624,7 +2007,7 @@ export function solveDC(
     // random phase per round: the convergence test could never settle (always
     // 50 iterations), and the returned operating point — which runTran uses
     // to seed the transient — carried an arbitrary source phase.
-    const r = simulateStep(components, wires, plugins, prev, DC_DT, { fixedTime: 0, ...opts?.simOptions });
+    const r = simulateStep(components, wires, plugins, prev, DC_DT, { fixedTime: 0, recordTerminalCurrents: true, ...opts?.simOptions });
     if (!r) { failed = true; break; }
     result = r.sim;
     // check convergence

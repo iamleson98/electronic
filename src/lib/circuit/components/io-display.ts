@@ -34,6 +34,7 @@
 import type { ComponentPlugin, ComponentCategory, MnaSystem, SimContext } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
+import { softClamp, limitAcross } from '../nl-limits';
 import { stateKey } from '../state-keys';
 
 // 'sensor' is not in the ComponentCategory union (widening it would touch
@@ -99,6 +100,9 @@ export const rotaryEncoder: ComponentPlugin = {
   type: 'rotaryEncoder',
   name: 'Rotary Encoder (EC11)',
   category: SENSOR,
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'EC11-style incremental rotary encoder with quadrature A/B outputs and a push-to-ground switch. Set the position parameter (quadrature counts); state = position mod 4 gives gray code 00→10→11→01. Detented EC11: 4 counts per detent.',
   symbol: 'ENC',
   boundingBox: { width: 4, height: 4 },
@@ -210,6 +214,9 @@ export const ws2812b: ComponentPlugin = {
   type: 'ws2812b',
   name: 'WS2812B (Addressable RGB LED)',
   category: 'io',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Addressable RGB LED (NeoPixel). Each color channel is a current sink: I = ledCurrent·(value/255)·brightness. DIN is a high-Z input; DOUT repeats the data signal at the supply level for daisy-chaining (100Ω push-pull).',
   symbol: 'RGB',
   boundingBox: { width: 4, height: 4 },
@@ -351,6 +358,9 @@ export const rgbLed: ComponentPlugin = {
   type: 'rgbLed',
   name: 'RGB LED (Common Cathode)',
   category: 'io',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Discrete common-cathode RGB LED modeled as three real diodes sharing one cathode: Vf ≈ 2.0 V red / 3.0 V green / 3.0 V blue with per-channel series resistance. The cathode carries the sum of the conducting channel currents.',
   symbol: 'RGB',
   boundingBox: { width: 4, height: 6 },
@@ -635,6 +645,9 @@ export const electretMic: ComponentPlugin = {
   type: 'electretMic',
   name: 'Electret Microphone',
   category: SENSOR,
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Electret condenser microphone with internal FET (2-terminal). OUT needs an external pull-up (2.2 kΩ typical): the FET sinks 0.5 mA, so the node sits at VCC − 0.5 mA·R. Set spl_dB to see the AC output amplitude in the measurements.',
   symbol: 'MIC',
   boundingBox: { width: 4, height: 2 },
@@ -927,6 +940,9 @@ export const nrf24l01: ComponentPlugin = {
   type: 'nrf24l01',
   name: 'nRF24L01+ (2.4GHz Transceiver)',
   category: 'ic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '2.4 GHz wireless transceiver module with PCB antenna. Current by mode: idle 26 µA, TX 11.3 mA at 0 dBm (−1.5 mA per 6 dB step), RX 12.6 mA. MISO goes high in RX mode when a packet waits (dataReady); IRQ asserts (open-drain) on dataReady.',
   symbol: 'RF',
   boundingBox: { width: 6, height: 8 },
@@ -1075,6 +1091,8 @@ export const esp32dev: ComponentPlugin = {
   type: 'esp32dev',
   name: 'ESP32 DevKitC',
   category: 'mcu',
+  // regulator / GPIO regions follow the Newton iterate — re-stamp loop
+  nonLinear: true,
   description: 'ESP32 DevKitC with on-board 3.3 V LDO (VIN 5 V → 3V3, 0.3 V dropout, 600 mA limit). Module current = 40 mA + WiFi (idle 20 mA / active 240 mA), drawn from the 3V3 rail (or VIN when 3V3 is unwired). GPIO2 drives the on-board LED; EN has the internal 10 kΩ pull-up to 3V3.',
   symbol: 'ESP',
   boundingBox: { width: 8, height: 16 },
@@ -1205,33 +1223,32 @@ export const esp32dev: ComponentPlugin = {
       sys.stampCurrentSource(vin, gnd, iModule);
     }
     // On-board LDO (VIN → 3V3), only meaningful with a wired 3V3 rail.
+    // Pass element: I(vin→3v3) = clamp((Vt − V3)/Ron, 0, Ilim) with the
+    // regulation target Vt = min(3.3, Vin − dropout) — sourcing only (an
+    // LDO cannot sink, so an external rail above 3.3 V turns it off instead
+    // of back-driving VIN), current-limited, and C¹-smooth so the Newton
+    // loop converges (the old hard regions bounced between the 600 mA limit
+    // and "off" from a cold start, and the regulated branch drove reverse
+    // current: 17 A into VIN with 3V3 held at 5 V).
     const V3V3 = 3.3, DROPOUT = 0.3, RON = 0.1, ILIMIT = 0.6;
     if (vin !== 0 && vin !== v3 && v3 !== 0 && v3 !== gnd) {
-      const vIn = v(sim, vin);   // previous iterate
-      if (vIn > V3V3 + DROPOUT) {
-        // estimate pass current from the previous-iterate rail voltage
-        const iEst = Math.max(0, (V3V3 - v(sim, v3)) / RON);
-        if (iEst <= ILIMIT) {
-          // Regulated: linear VCCS pass element — I(vin→3v3) = (3.3−V(3v3))/ron.
-          // Stamped as a Norton pair (fixed source + VCCS return, the Boyle
-          // op-amp pattern): exact in one solve AND energy-correct at both
-          // pins — VIN supplies exactly the rail load + module current,
-          // unlike the plain ground-referenced Thevenin the lm7805 uses.
-          sys.stampCurrentSource(vin, v3, V3V3 / RON);
-          // stampVCCS(v3, vin, v3, gnd, 1/RON): current from 3V3 back to VIN
-          // = V(3v3)/ron — combined with the fixed source above, the net
-          // pass current VIN→3V3 is exactly (3.3 − V(3v3))/ron.
-          sys.stampVCCS(v3, vin, v3, gnd, 1 / RON);
-        } else {
-          // current limit: fixed 600 mA pass + gmin to keep the row alive
-          sys.stampCurrentSource(vin, v3, ILIMIT);
-          sys.stampConductance(v3, gnd, 1e-9);
-        }
-      } else {
-        // dropout: series element, I = (Vin − Vout − dropout)/ron
-        sys.stampConductance(vin, v3, 1 / RON);
-        sys.stampCurrentSource(v3, vin, DROPOUT / RON);
-      }
+      const vIn = v(sim, vin) - v(sim, gnd);   // previous iterate
+      const vOut = v(sim, v3) - v(sim, gnd);
+      const dropoutLimited = vIn - DROPOUT < V3V3;
+      const vt = dropoutLimited ? vIn - DROPOUT : V3V3;
+      const mem = sim.newtonMemory;
+      const key = 'esp32ldo_' + v3 + '_' + vin;
+      const xRaw = (vt - vOut) / RON;
+      const x = limitAcross(xRaw, 0, ILIMIT, 0.01 * ILIMIT, mem, key);
+      const r = softClamp(x, 0, ILIMIT, 0.01 * ILIMIT);
+      // linearize I ≈ r.y + dI/dV3·ΔV3 + dI/dVin·ΔVin about the (limited) point
+      const g3 = -r.dy / RON;                         // ∂I/∂V3
+      const gi = dropoutLimited ? r.dy / RON : 0;     // ∂I/∂Vin
+      const vOutLin = vt - x * RON;                   // V3 consistent with x
+      sys.stampVCCS(vin, v3, v3, gnd, g3);
+      if (gi !== 0) sys.stampVCCS(vin, v3, vin, gnd, gi);
+      sys.stampCurrentSource(vin, v3, r.y - g3 * vOutLin - gi * vIn);
+      sys.stampConductance(vin, v3, 1e-9);
     }
     // GPIO2 / on-board LED: push-pull at the rail level, Hi-Z when low.
     if (d2 !== 0) {

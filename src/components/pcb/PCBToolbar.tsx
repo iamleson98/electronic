@@ -21,6 +21,7 @@ import {
 import { toast } from 'sonner';
 import { exportBOM, exportIPC2581, exportDXF, exportSVG, exportVRML, exportPCBPDF, exportSTEP } from '@/lib/pcb/additional-exports';
 import { exportAllGerbersX2 } from '@/lib/pcb/gerber-export';
+import { fabPreflight } from '@/lib/pcb/fab-preflight';
 import { importKiCadFootprint, importKiCadFootprintsFromFile } from '@/lib/pcb/kicad-import';
 import { footprintDefs } from '@/lib/pcb/footprints';
 import { FootprintEditorDialog } from './FootprintEditorDialog';
@@ -189,9 +190,18 @@ export function PCBToolbar() {
     e.target.value = '';
   };
 
+  /** Warn (after exporting) when the board is not fab-ready. */
+  const fabWarn = (what: string) => {
+    const s = usePCB.getState();
+    const netClasses = s.netClasses.map((c) => ({ id: c.name, ...c }));
+    const pre = fabPreflight(s.footprints, s.traces, s.vias, s.ratsnest, s.board, s.drcConfig, netClasses, s.drcWaivers);
+    if (pre.ok) toast.success(`${what} exported — DRC clean, all nets routed`);
+    else toast.warning(`${what} exported, but: ${pre.summary}`, { duration: 10000 });
+  };
+
   const handleGerberExport = () => {
     exportGerbers();
-    toast.success('Gerber X1 + drill + PnP files exported');
+    fabWarn('Gerber X1 + drill + PnP files');
   };
 
   const handleGerberX2Export = () => {
@@ -209,7 +219,7 @@ export function PCBToolbar() {
       a.click();
       URL.revokeObjectURL(url);
     }
-    toast.success(`Gerber X2 + drill + PnP exported (${files.length} files)`);
+    fabWarn(`Gerber X2 + drill + PnP (${files.length} files)`);
   };
 
   const handleBOMExport = () => {
@@ -235,7 +245,7 @@ export function PCBToolbar() {
     a.download = 'pcb.ipc2581.xml';
     a.click();
     URL.revokeObjectURL(url);
-    toast.success('IPC-2581 exported');
+    fabWarn('IPC-2581');
   };
 
   /** Download a text artifact (previously these exporters existed but had no UI). */

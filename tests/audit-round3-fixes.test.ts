@@ -644,7 +644,7 @@ describe('panelize replicates geometry', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('diode temperature scaling argument order', () => {
   it('hot device ⇒ higher saturation current (Is grows with temperature)', async () => {
-    const { solveDC } = await import('../src/lib/circuit/engine');
+    const { solveDC, buildNodeMap } = await import('../src/lib/circuit/engine');
     const build = () => {
       const comps = [
         mk('dcVoltage', 'v1', { voltage: 0.7 }),
@@ -666,10 +666,16 @@ describe('diode temperature scaling argument order', () => {
     const hot = solveDC(comps, wires, plugins, 50, { simOptions: { temp: 85 } });
     expect(cold).not.toBeNull();
     expect(hot).not.toBeNull();
-    // higher temp ⇒ larger Is ⇒ more current at the same 0.7V drive
-    const sum = (sim: NonNullable<typeof cold>) =>
-      Array.from(sim.branchCurrent).reduce((a, v) => a + Math.abs(v), 0);
-    expect(sum(hot!)).toBeGreaterThan(sum(cold!));
+    // higher temp ⇒ larger Is ⇒ more current at the same 0.7V drive.
+    // Measure the real diode current through r1 (summing branchCurrent mixed
+    // in the Rs internal node's VOLTAGE, which falls as the diode heats).
+    const nm = buildNodeMap(comps, wires, plugins);
+    const current = (sim: NonNullable<typeof cold>) =>
+      (0.7 - sim.nodeVoltage[nm.terminalNode.get('d1:a')!]) / 100;
+    expect(current(hot!)).toBeGreaterThan(current(cold!));
+    // and the forward voltage falls with temperature (silicon ≈ −2 mV/°C)
+    expect(sim0(hot!) < sim0(cold!)).toBe(true);
+    function sim0(sim: NonNullable<typeof cold>) { return sim.nodeVoltage[nm.terminalNode.get('d1:a')!]; }
   });
 });
 

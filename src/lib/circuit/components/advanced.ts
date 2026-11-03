@@ -8,6 +8,7 @@ import type { ComponentPlugin } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
+import { stampGpio, stampRegulatorPin, AVR_GPIO_ROUT, RPI_GPIO_ROUT } from './board-pins';
 
 // ----- Voltmeter -----
 // Ideal 1 TΩ input (a real DMM is ~10 MΩ) — documented so users probing
@@ -160,6 +161,9 @@ const arduino: ComponentPlugin = {
   type: 'arduino',
   name: 'Arduino Uno',
   category: 'mcu',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Arduino Uno (ATmega328P) stub. D2-D13 are digital I/O; A0-A5 analog. Runs a simple "blink" sketch by default. Add your own sketch via the `sketch` parameter.',
   symbol: 'ARD',
   boundingBox: { width: 8, height: 6 },
@@ -216,10 +220,9 @@ const arduino: ComponentPlugin = {
     const sketch = params.sketch as string;
     const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
     const five = terminals.find((t) => t.terminalId === '5v')!.nodeId;
-    // 5V pin: voltage source at vccV (only if the pin is actually wired to a non-ground node)
-    if (five !== gnd) {
-      sys.stampVoltageSource(five, gnd, vccV);
-    }
+    // 5V pin: regulator output (sources, never sinks — an external 5 V
+    // supply on this pin back-feeds the board like the real Uno)
+    stampRegulatorPin(sys, sim, five, gnd, vccV);
     // A0, A1: inputs (high-Z, weak pull-down to avoid floating node)
     ['a0', 'a1'].forEach((tid) => {
       const node = terminals.find((t) => t.terminalId === tid)!.nodeId;
@@ -233,20 +236,20 @@ const arduino: ComponentPlugin = {
       const phase = (sim.time % period) / period;
       st.outHigh = phase < 0.5;
       const d2 = terminals.find((t) => t.terminalId === 'd2')!.nodeId;
-      if (d2 !== gnd) sys.stampVoltageSource(d2, gnd, st.outHigh ? vccV : 0);
+      stampGpio(sys, d2, gnd, st.outHigh ? vccV : 0, AVR_GPIO_ROUT);
     } else if (sketch === 'button') {
       // read A0; if > 2.5V, drive D3 high
       const a0 = terminals.find((t) => t.terminalId === 'a0')!.nodeId;
       const d3 = terminals.find((t) => t.terminalId === 'd3')!.nodeId;
       const a0v = sim.nodeVoltage[a0];
-      if (d3 !== gnd) sys.stampVoltageSource(d3, gnd, a0v > 2.5 ? vccV : 0);
+      stampGpio(sys, d3, gnd, a0v > 2.5 ? vccV : 0, AVR_GPIO_ROUT);
     } else if (sketch === 'pwm') {
       // PWM on D3: 1kHz, duty cycle 50%
       const freq = 1000;
       const duty = 0.5;
       const phase = (sim.time * freq) % 1;
       const d3 = terminals.find((t) => t.terminalId === 'd3')!.nodeId;
-      if (d3 !== gnd) sys.stampVoltageSource(d3, gnd, phase < duty ? vccV : 0);
+      stampGpio(sys, d3, gnd, phase < duty ? vccV : 0, AVR_GPIO_ROUT);
     }
   },
   measure(params, terminals, sim) {
@@ -266,6 +269,9 @@ const raspberryPi: ComponentPlugin = {
   type: 'raspberryPi',
   name: 'Raspberry Pi',
   category: 'mcu',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Raspberry Pi GPIO stub. Exposes 3.3V, GND, and 4 GPIO pins. Drives a blink pattern by default.',
   symbol: 'RPi',
   boundingBox: { width: 8, height: 6 },
@@ -316,18 +322,18 @@ const raspberryPi: ComponentPlugin = {
   stamp(params, terminals, sys, sim) {
     const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
     const three = terminals.find((t) => t.terminalId === '3v3')!.nodeId;
-    if (three !== gnd) sys.stampVoltageSource(three, gnd, 3.3);
+    stampRegulatorPin(sys, sim, three, gnd, 3.3);
     const pattern = params.pattern as string;
     if (pattern === 'blink') {
       const period = 2;
       const phase = (sim.time % period) / period;
       const high = phase < 0.5;
       const gp4 = terminals.find((t) => t.terminalId === 'gpio4')!.nodeId;
-      if (gp4 !== gnd) sys.stampVoltageSource(gp4, gnd, high ? 3.3 : 0);
+      stampGpio(sys, gp4, gnd, high ? 3.3 : 0, RPI_GPIO_ROUT);
     } else if (pattern === 'all_high') {
       ['gpio2', 'gpio3', 'gpio4', 'gpio17'].forEach((tid) => {
         const node = terminals.find((t) => t.terminalId === tid)!.nodeId;
-        if (node !== gnd) sys.stampVoltageSource(node, gnd, 3.3);
+        stampGpio(sys, node, gnd, 3.3, RPI_GPIO_ROUT);
       });
     } else {
       ['gpio2', 'gpio3', 'gpio4', 'gpio17'].forEach((tid) => {

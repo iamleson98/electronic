@@ -5,6 +5,23 @@ import type { ComponentPlugin, CircuitComponent } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
+import { stampOpamp, stepOpamp, specFromParams, type OpampPins } from './opamp-core';
+
+function idealPins(terminals: { terminalId: string; nodeId: number }[]): OpampPins {
+  return {
+    inp: terminals.find((t) => t.terminalId === 'in+')!.nodeId,
+    inn: terminals.find((t) => t.terminalId === 'in-')!.nodeId,
+    out: terminals.find((t) => t.terminalId === 'out')!.nodeId,
+    vcc: 0,
+    vee: 0,
+  };
+}
+/** Ideal op-amp: no pole/slew, ~0 Ω output, limited to [vmin, vmax]. */
+function idealSpec(params: Record<string, any>) {
+  const vmax = typeof params.vmax === 'number' ? params.vmax : 15;
+  const vmin = typeof params.vmin === 'number' ? params.vmin : -15;
+  return specFromParams({ gain: params.gain, rout: 1e-3, swingHigh: 0, swingLow: 0 }, { defVcc: vmax, defVee: vmin });
+}
 
 // ----- Diode -----
 const diode: ComponentPlugin = {
@@ -286,7 +303,9 @@ const opamp: ComponentPlugin = {
   type: 'opamp',
   name: 'Op-Amp (ideal)',
   category: 'ic',
-  description: 'Ideal op-amp with infinite gain (VCCS model). Power terminals omitted for simplicity. Press M to toggle De Morgan alternate body (rectangle form).',
+  description: 'Ideal op-amp: very high gain, no bandwidth limit, near-zero output resistance. Power terminals omitted — the output is limited to the Max/Min Output voltages (±15 V by default), like a real op-amp on ±15 V rails. Press M to toggle De Morgan alternate body (rectangle form).',
+  // smooth output limiting (opamp-core.ts) — Newton re-stamp loop
+  nonLinear: true,
   symbol: 'OP',
   boundingBox: { width: 4, height: 4 },
   terminals: [
@@ -300,6 +319,8 @@ const opamp: ComponentPlugin = {
   hasAlternateBody: true,
   parameters: [
     { key: 'gain', label: 'Open-loop Gain', type: 'number', default: 1e5, unit: '', min: 1, max: 1e9, step: 100 },
+    { key: 'vmax', label: 'Max Output', type: 'number', default: 15, unit: 'V', min: -1000, max: 1000, step: 0.5 },
+    { key: 'vmin', label: 'Min Output', type: 'number', default: -15, unit: 'V', min: -1000, max: 1000, step: 0.5 },
   ],
   render(ctx, params, cellSize, _sim, instance) {
     // leads (common to both body styles)
@@ -344,16 +365,15 @@ const opamp: ComponentPlugin = {
       drawLabel(ctx, '−', cellSize * 1.5, 3 * cellSize);
     }
   },
-  stamp(params, terminals, sys) {
-    const gain = params.gain as number;
-    const inp = terminals.find((t) => t.terminalId === 'in+')!.nodeId;
-    const inn = terminals.find((t) => t.terminalId === 'in-')!.nodeId;
-    const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
-    // Add high-impedance input bias (1 MΩ to GND) on both input pins.
-    sys.stampConductance(inp, 0, 1e-6);
-    sys.stampConductance(inn, 0, 1e-6);
-    // VCVS: V(out) - V(0) = gain * (V(inp) - V(inn))
-    sys.stampVCVS(out, 0, inp, inn, gain);
+  stamp(params, terminals, sys, sim, comp) {
+    const pins = idealPins(terminals);
+    // high-impedance input bias (1 MΩ to GND) on both input pins
+    sys.stampConductance(pins.inp, 0, 1e-6);
+    sys.stampConductance(pins.inn, 0, 1e-6);
+    stampOpamp(idealSpec(params), pins, sys, sim, stateKey('opampIdeal', comp, pins.out));
+  },
+  step(_params, terminals, sim, comp) {
+    stepOpamp(sim, stateKey('opampIdeal', comp, idealPins(terminals).out));
   },
   measure(params, terminals, sim) {
     const inp = terminals.find((t) => t.terminalId === 'in+')!.nodeId;

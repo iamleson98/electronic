@@ -105,72 +105,94 @@ export const diodeShockley: ComponentPlugin = {
     // else sim temp) so .temp sweeps move the Shockley curve.
     const simTemp = deviceTemp(sim, comp);
     const Vt = thermalVoltage(simTemp);
-    const IsT = tempScaleIs(Is, simTemp, 27);
+    const IsT = tempScaleIs(Is, simTemp, 27, N);
     const vscale = N * Vt;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('dio', comp, a, k);
-    // ── Newton-Raphson with CircuitJS1/SPICE voltage limiting ────────────
-    // The engine re-stamps this component once per Newton round (nonLinear:
-    // true below) with fresh node voltages. vPrev = last round's accepted
-    // junction voltage; the raw new estimate is limited along the exponential
-    // (limitStep) so the linearized current changes by at most ~e per round —
-    // without this, a 0.8 V estimate on Is=1e-14 explodes to e^31 ≈ 3e13 A.
-    const vPrev = (st[key + '_vl'] as number | undefined) ?? 0.7;
-    const vRaw = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-    const v = limitStep(vRaw, vPrev, vscale, junctionVCrit(vscale, IsT));
-    st[key + '_vl'] = v;
-    // SPICE-style escalating gmin: keeps the matrix non-singular and tames
-    // stubborn convergence after many Newton rounds (CircuitJS1 Diode.java).
-    const gmin = escalateGmin(sim.newtonIter ?? 0);
-    // Shockley companion at the (limited) operating point v.
-    const { g, iEq } = shockleyCompanion(v, IsT, vscale, gmin);
     // ── Series resistance via a REAL internal node ───────────────────────
-    // Rs is in series with the junction; the correct MNA treatment is an
-    // internal pseudo-node (like makeLevel1MOS's Rd/Rs). The old code
-    // folded Rs into G_total = g/(1+g·Rs) — an approximation that
-    // distorts the linearization source when Rs is large.
+    // Rs sits in series with the junction; the junction (exponential and
+    // charge storage) lives between the internal node and the cathode.
     let an = a;
     if (Rs > 0) {
       an = sys.addExtra() + 1; // pseudo-node id (extra index + 1)
       sys.stampConductance(an, a, 1 / Rs);
     }
+    st[key + '_an'] = an;
+    // ── Newton-Raphson with SPICE junction limiting ─────────────────────
+    // Linearize at the JUNCTION voltage of the current iterate (internal
+    // node − cathode; the old code used the terminal voltage, i.e. it
+    // included the I·Rs drop), limited along the exponential against the
+    // previous ROUND (sim.newtonMemory — plugin state is rolled back every
+    // round) so the linearized current changes by at most ~e per round.
+    const mem = sim.newtonMemory;
+    const vRaw = nodeV(sim, an) - nodeV(sim, k);
+    const vPrev = mem?.[key + '_vl'] ?? (st[key] as number | undefined) ?? 0.7;
+    const vcrit = junctionVCrit(vscale, IsT);
+    let v = limitStep(vRaw, vPrev, vscale, vcrit);
+    // Reverse breakdown (SPICE BV/IBV): I_bv = −IBV·e^(−(v+Bv)/(N·Vt)),
+    // limited in the mirrored variable w = −v − Bv.
+    const Bv = params.Bv as number;
+    const IBV = 1e-3;
+    const hasBv = typeof Bv === 'number' && Number.isFinite(Bv) && Bv > 0;
+    if (hasBv && v < -Bv + 20 * vscale) {
+      const w = limitStep(-v - Bv, -vPrev - Bv, vscale, junctionVCrit(vscale, IBV));
+      v = -w - Bv;
+    }
+    if (mem) {
+      mem[key + '_vl'] = v;
+      if (Math.abs(v - vRaw) > 1e-9) mem.__limited = (mem.__limited ?? 0) + 1;
+    }
+    // SPICE-style escalating gmin: keeps the matrix non-singular and tames
+    // stubborn convergence after many Newton rounds (CircuitJS1 Diode.java).
+    const gmin = escalateGmin(sim.newtonIter ?? 0);
+    // Shockley companion at the (limited) operating point v.
+    let { g, iEq } = shockleyCompanion(v, IsT, vscale, gmin);
+    if (hasBv) {
+      const e = Math.exp(Math.min(80, -(v + Bv) / vscale));
+      const iB = -IBV * e;
+      const gB = (IBV / vscale) * e;
+      g += gB;
+      iEq += iB - gB * v;
+    }
     sys.stampConductance(an, k, g);
     sys.stampCurrentSource(an, k, iEq);
     // ── Charge storage: Cj(v) + diffusion capacitance ────────────────────
     // Cj = Cjo/(1−v/Vj)^M (depletion), Cd = Tt·g (diffusion, transit-time).
-    // Linearized at v with the backward-Euler capacitor companion
-    // (first-order keeps this robust; the parameters are small so BE's
-    // damping is invisible at normal timesteps).
+    // Linearized at v with the backward-Euler capacitor companion on the
+    // internal junction (the series Rs is outside the charge path). The
+    // history voltage is the previous step's COMMITTED junction voltage,
+    // written by step().
     const Ceq = junctionCapacitance(v, Cjo, Vj, M) + Tt * g;
     if (Ceq > 0) {
       const dt = Math.max(sim.dt, 1e-12);
-      const ckey = key + '_cj';
-      const vCjPrev = (st[ckey] as number | undefined) ?? v;
+      const vCjPrev = (st[key + '_cj'] as number | undefined) ?? v;
       const gc = Ceq / dt;
-      // i(a→k) = gc·v + (−gc·vCjPrev) — stamp onto the internal junction
-      // node so the series Rs is outside the charge path (physical).
       sys.stampConductance(an, k, gc);
       sys.stampCurrentSource(an, k, -gc * vCjPrev);
-      // persist for the next step (BE history — see capacitor plugin);
-      // only on the first Newton round so re-stamps don't shift history
-      if ((sim.newtonIter ?? 0) === 0) st[ckey] = v;
     }
   },
   step(params, terminals, sim, instance) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
-    st[stateKey('dio', instance, a, k)] = sim.nodeVoltage[a] - sim.nodeVoltage[k];
+    const key = stateKey('dio', instance, a, k);
+    const an = (st[key + '_an'] as number | undefined) ?? a;
+    const vj = nodeV(sim, an) - nodeV(sim, k);
+    st[key] = vj;          // committed junction voltage (limiting reference)
+    st[key + '_cj'] = vj;  // charge-storage history
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
   measure(params, terminals, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-    const Is = params.Is as number;
     const N = params.N as number;
-    const Vt = thermalVoltage(deviceTemp(sim, comp));
-    const i = Is * (Math.exp(Math.min(v / (N * Vt), 30)) - 1);
+    const T = deviceTemp(sim, comp);
+    const Vt = thermalVoltage(T);
+    // Prefer the exact solved current (includes Rs and temperature); else
+    // evaluate the same temperature-scaled Shockley law the stamp uses.
+    const recorded = comp ? sim.terminalCurrents?.get(`${comp.id}:a`) : undefined;
+    const i = recorded ?? tempScaleIs(params.Is as number, T, 27, N) * (Math.exp(Math.min(v / (N * Vt), 30)) - 1);
     return [
       { label: 'V', value: v.toFixed(4), unit: 'V' },
       { label: 'I', value: (i * 1000).toFixed(4), unit: 'mA' },
@@ -241,63 +263,37 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       ctx.fillStyle = '#cbd5e1'; ctx.fill();
       drawLabel(ctx, isNpn ? 'NPN' : 'PNP', 2 * cellSize, 0);
     },
+      // Gummel-Poon transport model:
+    //   If = Is(e^(vbe/Vt) − 1), Ir = Is(e^(vbc/Vt) − 1)
+    //   Icc = (If − Ir)/qb  (qb: Early effects Vaf/Var + high injection Ikf)
+    //   Ic = Icc − Ir/Br,  Ib = If/Bf + Ir/Br,  Ie = −(Ic + Ib)
+    // The previous model had no base–collector junction (Ic = Is·e^(vbe/Vt)
+    // ·(1+vce/Vaf)), so a saturated transistor drove its collector far below
+    // the emitter, and it linearized around the PREVIOUS TIMESTEP's voltages
+    // (written only by step()), so the engine's Newton loop re-stamped the
+    // same linearization every round and never converged within a step —
+    // a purely resistive bias network drifted away from its DC solution.
     stamp(params, terminals, sys, sim, comp) {
       const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
       const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
       const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
-      const Is = params.Is as number;
-      const Bf = params.Bf as number;
-      const Br = params.Br as number;
-      const Vaf = params.Vaf as number;
-      const Vt = thermalVoltage(deviceTemp(sim, comp));
-      // Get previous voltages
-      const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = stateKey('bjt', comp, c, b, e);
-      // PNP: work in the flipped world — negate the SIGNED stored voltages,
-      // and default the cold-start guess to the flipped ON value (−0.7 →
-      // +0.7 after negation). The old `?? 0.7` negated to −0.7 → exp(−27) ≈ 0:
-      // the very first stamp after power-up modeled the PNP as an open circuit.
-      const vBEguess = isNpn ? (st[key + '_vbe'] ?? 0.7) : -(st[key + '_vbe'] ?? -0.7);
-      const vCEguess = isNpn ? (st[key + '_vce'] ?? 0.2) : -(st[key + '_vce'] ?? -0.2);
-      // Ebers-Moll simplified:
-      // Ic = Is * (exp(vBE/Vt) - exp(-vCE/Vt)) * (1 + vCE/Vaf)
-      // For active region (vCE > 0, vBE > 0): Ic ≈ Is*exp(vBE/Vt)*(1 + vCE/Vaf)
-      //                                          Ib ≈ Is/Bf * exp(vBE/Vt)
-      // Conductances:
-      //   dIc/dvBE = Is/Vt * exp(vBE/Vt) * (1 + vCE/Vaf) = gm + Ic/Vt
-      //   dIc/dvCE = Is*exp(vBE/Vt)/Vaf = gds
-      //   dIb/dvBE = Is/(Bf*Vt) * exp(vBE/Vt) = gm/Bf
-      const evBE = Math.exp(Math.min(vBEguess / Vt, 30));
-      const Ic = Is * evBE * (1 + vCEguess / Vaf);
-      const gm = Is * evBE / Vt;
-      const gds = Is * evBE / Vaf;
-      const gpi = gm / Bf;
-      // Linearized model: VCCS c→e controlled by b→e (gm), conductance c-e
-      // (gds), conductance b-e (gpi). The LHS stamps are polarity-SYMMETRIC:
-      // for both NPN and PNP the through-device current I(c→e) responds to
-      // V(b→e) and V(c→e) with positive gm/gds/gpi (the PNP's reversed current
-      // direction cancels its reversed junction polarities), so no `sign` is
-      // needed on the matrix stamps. Only the RHS offset sources carry the
-      // polarity: +IbEq/IcEq (NPN: currents c→e and b→e) vs −… for PNP.
-      // stampVCCS(c, e, b, e, gm): current c→e = gm·V(b→e) — sinks gm·Vbe
-      // from the collector and returns it at the emitter (correct for NPN;
-      // for PNP the negative Vbe makes the current flow e→c, also correct).
-      sys.stampVCCS(c, e, b, e, gm);
-      // output conductance gds (always positive — a negative conductance is a
-      // generator and blew PNP collectors above the rail)
-      sys.stampConductance(c, e, gds);
-      // input conductance gpi (at b-e junction, always positive)
-      sys.stampConductance(b, e, gpi);
+      const op = gummelPoonOp(params, sim, comp, c, b, e, isNpn, true);
+      const { gcbe, gcbc, gbbe, gbbc, ic, ib, vbe, vbc } = op;
+      const gmin = escalateGmin(sim.newtonIter ?? 0);
+      // Collector current c→e: ic + gcbe·Δvbe + gcbc·Δvbc. The Jacobian is
+      // polarity-symmetric (the PNP's flipped currents and voltages cancel);
+      // only the constant terms carry the polarity sign.
+      sys.stampVCCS(c, e, b, e, gcbe);
+      sys.stampVCCS(c, e, b, c, gcbc);
+      // Base current b→e: ib + gbbe·Δvbe + gbbc·Δvbc
+      sys.stampVCCS(b, e, b, e, gbbe);
+      sys.stampVCCS(b, e, b, c, gbbc);
+      // junction gmin keeps the matrix regular with both junctions off
+      sys.stampConductance(b, e, gmin);
+      sys.stampConductance(b, c, gmin);
       const sign = isNpn ? 1 : -1;
-      // current sources for the constant offsets (linearization around guess)
-      const IcEq = Ic - gm * vBEguess - gds * vCEguess;
-      // Base current at the operating point: Ib = Is/Bf·e^(vBE/Vt) = gm·Vt/Bf.
-      // The old expression `gm*vBEguess/Bf − gpi*vBEguess` collapsed to exactly
-      // zero because gpi = gm/Bf — leaving the b-e junction a plain resistor
-      // through the origin with no exponential base-current offset.
-      const IbEq = gpi * (Vt - vBEguess);
-      sys.stampCurrentSource(c, e, sign * IcEq);
-      sys.stampCurrentSource(b, e, sign * IbEq);
+      sys.stampCurrentSource(c, e, sign * (ic - gcbe * vbe - gcbc * vbc));
+      sys.stampCurrentSource(b, e, sign * (ib - gbbe * vbe - gbbc * vbc));
     },
     step(params, terminals, sim, instance) {
       const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
@@ -315,22 +311,98 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
       const vBE = sim.nodeVoltage[b] - sim.nodeVoltage[e];
       const vCE = sim.nodeVoltage[c] - sim.nodeVoltage[e];
-      const Is = params.Is as number;
-      const Bf = params.Bf as number;
-      const Vaf = params.Vaf as number;
-      const Vt = thermalVoltage(deviceTemp(sim, comp));
-      // Use |vBE| magnitude — a PNP's vBE is negative in normal operation and
-      // exp(negative) → 0 made every PNP read Ic ≈ 0.
-      const Ic = Is * Math.exp(Math.min(Math.abs(vBE) / Vt, 30)) * (1 + Math.abs(vCE) / Vaf);
-      const Ib = Ic / Bf;
+      // Same model as the stamp, evaluated (unlimited) at the solution;
+      // magnitudes so PNP currents read positive.
+      const op = gummelPoonOp(params, sim, comp, c, b, e, isNpn, false);
       return [
         { label: 'Vbe', value: vBE.toFixed(4), unit: 'V' },
         { label: 'Vce', value: vCE.toFixed(4), unit: 'V' },
-        { label: 'Ic', value: (Ic * 1000).toFixed(4), unit: 'mA' },
-        { label: 'Ib', value: (Ib * 1000).toFixed(4), unit: 'mA' },
+        { label: 'Ic', value: (Math.abs(op.ic) * 1000).toFixed(4), unit: 'mA' },
+        { label: 'Ib', value: (Math.abs(op.ib) * 1000).toFixed(4), unit: 'mA' },
       ];
     },
   };
+}
+
+/**
+ * Gummel-Poon (Ebers–Moll transport) operating point in the device's
+ * "flipped world" (PNP voltages negated so both polarities share one model).
+ * With `limit`, the junction voltages are Newton-limited against the
+ * previous round's linearization (sim.newtonMemory) and recorded for the
+ * next round.
+ */
+function gummelPoonOp(
+  params: Record<string, unknown>, sim: SimContext, comp: CircuitComponent | undefined,
+  c: number, b: number, e: number, isNpn: boolean, limit: boolean,
+) {
+  const Is = params.Is as number;
+  const Bf = Math.max(1e-3, params.Bf as number);
+  const Br = Math.max(1e-3, params.Br as number);
+  const Vaf = Math.max(1e-3, params.Vaf as number);
+  const Var = Math.max(1e-3, (params.Var as number) ?? Infinity);
+  const Ikf = Math.max(1e-12, (params.Ikf as number) ?? Infinity);
+  const T = deviceTemp(sim, comp);
+  const Vt = thermalVoltage(T);
+  const IsT = tempScaleIs(Is, T, 27);
+  const pol = isNpn ? 1 : -1;
+  let vbe = pol * (sim.nodeVoltage[b] - sim.nodeVoltage[e]);
+  let vbc = pol * (sim.nodeVoltage[b] - sim.nodeVoltage[c]);
+  if (limit) {
+    const mem = sim.newtonMemory;
+    const key = stateKey('bjt', comp, c, b, e);
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    const vcrit = junctionVCrit(Vt, IsT);
+    const cold = mem?.[key + '_lbe'] === undefined && st[key + '_vbe'] === undefined;
+    if (cold) {
+      // SPICE MODEINITJCT: first-ever linearization at Vbe = Vcrit, Vbc = 0
+      // (from all-zero node voltages Newton would start at an off junction
+      // and need many limited rounds to reach conduction).
+      vbe = vcrit;
+      vbc = 0;
+    } else {
+      // previous linearization: this step's last round, else the last
+      // committed step
+      const prevVbe = mem?.[key + '_lbe'] ?? pol * st[key + '_vbe'];
+      const prevVbc = mem?.[key + '_lbc'] ?? (st[key + '_vce'] !== undefined
+        ? pol * (st[key + '_vbe'] - st[key + '_vce']) : vbc);
+      const rawBe = vbe;
+      const rawBc = vbc;
+      vbe = limitStep(vbe, prevVbe, Vt, vcrit);
+      vbc = limitStep(vbc, prevVbc, Vt, vcrit);
+      if (mem && (Math.abs(vbe - rawBe) > 1e-9 || Math.abs(vbc - rawBc) > 1e-9)) {
+        mem.__limited = (mem.__limited ?? 0) + 1;
+      }
+    }
+    if (mem) { mem[key + '_lbe'] = vbe; mem[key + '_lbc'] = vbc; }
+  }
+  const ebe = Math.exp(Math.min(vbe / Vt, 80));
+  const ebc = Math.exp(Math.min(vbc / Vt, 80));
+  const If = IsT * (ebe - 1);
+  const Ir = IsT * (ebc - 1);
+  const gif = IsT * ebe / Vt;
+  const gir = IsT * ebc / Vt;
+  // Gummel-Poon base charge: qb = q1·(1 + √(1 + 4·q2))/2 with
+  //   q1 = 1/(1 − Vbc/Vaf − Vbe/Var)  (forward + reverse Early effect)
+  //   q2 = If/Ikf                       (high-level injection knee)
+  const den = 1 - vbc / Vaf - vbe / Var;
+  const clamped = den < 0.05;
+  const q1 = 1 / (clamped ? 0.05 : den);
+  const dq1be = clamped ? 0 : (q1 * q1) / Var;
+  const dq1bc = clamped ? 0 : (q1 * q1) / Vaf;
+  const q2 = Math.max(0, If) / Ikf;
+  const dq2be = If > 0 ? gif / Ikf : 0;
+  const sq = Math.sqrt(1 + 4 * q2);
+  const qb = (q1 * (1 + sq)) / 2;
+  const dqbbe = (dq1be * (1 + sq)) / 2 + (q1 * dq2be) / sq;
+  const dqbbc = (dq1bc * (1 + sq)) / 2;
+  const icc = (If - Ir) / qb;
+  const ic = icc - Ir / Br;
+  const ib = If / Bf + Ir / Br;
+  const gcbe = gif / qb - ((If - Ir) * dqbbe) / (qb * qb);
+  const gcbc = -gir / qb - ((If - Ir) * dqbbc) / (qb * qb) - gir / Br;
+  const gbbe = gif / Bf;
+  const gbbc = gir / Br;
+  return { vbe, vbc, ic, ib, gcbe, gcbc, gbbe, gbbc };
 }
 
 export const bjtGPNpn = makeGummelPoonBJT('npn');
@@ -361,12 +433,12 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
     ],
     parameters: [
       { key: 'Vto', label: 'Threshold Voltage', type: 'number', default: isNmos ? 1.0 : -1.0, unit: 'V', min: -10, max: 10, step: 0.05 },
-      { key: 'Kp', label: 'Transconductance Param', type: 'number', default: 0.05, unit: 'A/V²', min: 1e-6, max: 1, step: 1e-3 },
+      // Kp here is the WHOLE-DEVICE transconductance β (SPICE KP·W/L):
+      // Id = ½·β·Vov². W and L used to be listed too but were never used.
+      { key: 'Kp', label: 'Transconductance β (KP·W/L)', type: 'number', default: 0.05, unit: 'A/V²', min: 1e-6, max: 1, step: 1e-3 },
       { key: 'Gamma', label: 'Body Effect Coeff', type: 'number', default: 0.5, unit: 'V^0.5', min: 0, max: 5, step: 0.05 },
       { key: 'Phi', label: 'Surface Potential', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 2, step: 0.05 },
       { key: 'Lambda', label: 'Channel-Length Mod', type: 'number', default: 0.02, unit: '1/V', min: 0, max: 1, step: 0.005 },
-      { key: 'W', label: 'Channel Width', type: 'number', default: 100e-6, unit: 'm', min: 1e-9, max: 1e-2, step: 1e-7 },
-      { key: 'L', label: 'Channel Length', type: 'number', default: 10e-6, unit: 'm', min: 1e-9, max: 1e-2, step: 1e-7 },
       { key: 'Rd', label: 'Drain Resistance', type: 'number', default: 0, unit: 'Ω', min: 0, max: 1000, step: 0.1 },
       { key: 'Rs', label: 'Source Resistance', type: 'number', default: 0, unit: 'Ω', min: 0, max: 1000, step: 0.1 },
     ],
@@ -402,63 +474,11 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
       const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
       const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-      const Vto0 = params.Vto as number;
-      const Kp = params.Kp as number;
-      const Gamma = params.Gamma as number;
-      const Phi = params.Phi as number;
-      const Lambda = params.Lambda as number;
       const Rd = params.Rd as number;
       const Rs = params.Rs as number;
-      // Get previous voltages
-      const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = stateKey('mos', comp, d, g, s, b);
-      // Work in MAGNITUDES for region classification (NMOS: identity; PMOS:
-      // negate the signed stored values). The old code mixed a magnitude
-      // vGSguess with the SIGNED (negative) PMOS Vth, so any biased PMOS fell
-      // into the sub-threshold branch and exploded to ~1e6 A after the first
-      // timestep (the first step only worked by accident of the default).
-      const vGSguess = isNmos ? (st[key + '_vgs'] ?? 2) : -(st[key + '_vgs'] ?? -2);
-      const vDSguess = isNmos ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? -1);
-      const vBSguess = isNmos ? (st[key + '_vbs'] ?? 0) : -(st[key + '_vbs'] ?? 0);
-      // Threshold magnitude with body effect, SIGNED (flip-world Vbs for the
-      // P-channel): Vth = Vto + γ(√(2ΦF − Vbs) − √(2ΦF)) — reverse body bias
-      // (Vbs < 0) RAISES Vth. The old Math.abs() mapped reverse bias into the
-      // forward-bias formula √(2ΦF − |Vbs|), so Vth DECREASED with reverse
-      // body bias (Vsb=2 V, Vto=1, γ=0.5: 0.41 V instead of the required
-      // 1.33 V — the device conducted ~4× the true current).
-      const vthMag = (isNmos ? Vto0 : -Vto0) + Gamma * (Math.sqrt(Math.max(0, 2 * Phi - vBSguess)) - Math.sqrt(2 * Phi));
-      const vov = vGSguess - vthMag;
-      // Compute Id
-      let Id = 0;
-      let gm = 0;
-      let gds = 0;
-      if (vov > 0) {
-        if (vDSguess > vov) {
-          // saturation
-          Id = 0.5 * Kp * vov * vov * (1 + Lambda * vDSguess);
-          gm = Kp * vov;
-          gds = 0.5 * Kp * vov * vov * Lambda;
-        } else {
-          // linear
-          Id = Kp * (vov * vDSguess - 0.5 * vDSguess * vDSguess) * (1 + Lambda * vDSguess);
-          gm = Kp * vDSguess;
-          gds = Kp * (vov - vDSguess) * (1 + Lambda * vDSguess) + Kp * (vov * vDSguess - 0.5 * vDSguess * vDSguess) * Lambda;
-        }
-      } else {
-        // sub-threshold: weak inversion — Id ∝ exp((Vgs-Vth)/(n*Vt))
-        // n is sub-threshold slope factor (typical 1.5)
-        const Vt_thermal = 0.026; // 26 mV at room temp
-        const n = 1.5;
-        const expArg = Math.min((vGSguess - vthMag) / (n * Vt_thermal), 30);
-        Id = 1e-7 * (Math.exp(expArg) - 1) * (1 + Lambda * vDSguess);
-        gm = 1e-7 * Math.exp(expArg) / (n * Vt_thermal);
-        gds = 1e-7 * (Math.exp(expArg) - 1) * Lambda;
-      }
       // Effective channel terminals. When Rd/Rs > 0 the channel connects to
       // the external terminal through a REAL series conductance via an
-      // internal pseudo-node (an extra unknown used as a voltage node). The
-      // old code stamped them d→s in PARALLEL with the channel — a leak across
-      // the device even when the channel was off.
+      // internal pseudo-node (an extra unknown used as a voltage node).
       let dEff = d;
       let sEff = s;
       if (Rd > 0) {
@@ -471,18 +491,23 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
         sys.stampConductance(si, s, 1 / Rs);
         sEff = si;
       }
-      // stamp VCCS d→s controlled by g→s. Polarity-symmetric Jacobian (see
-      // bjtGPNpn note): through-device current I(d→s) responds to V(g→s)
-      // with +gm for BOTH N- and P-channel — the P-channel's reversed current
-      // direction cancels its reversed gate polarity. A negative gds stamp
-      // is a generator (PMOS drain hit −50 V before this fix).
-      sys.stampVCCS(dEff, sEff, g, sEff, gm);
-      // output conductance (always positive)
-      sys.stampConductance(dEff, sEff, gds);
-      // current source offset (linearization) — carries the channel polarity
+      // Linearize at the CURRENT Newton iterate (sim.nodeVoltage holds the
+      // previous round's solution) — the old code used voltages written by
+      // step() once per timestep, so re-stamp rounds never moved and a
+      // resistive circuit took several timesteps to reach its DC answer.
+      const op = level1Op(params, sim, comp, nodeV(sim, dEff), sim.nodeVoltage[g], nodeV(sim, sEff), sim.nodeVoltage[b], isNmos);
+      // Reverse mode (Vds < 0 in the device's polarity): the physical source
+      // and drain swap roles. The old model fed a negative Vds into the
+      // triode formula, which has spurious roots (Vd = −50 V from a 10 V rail).
+      const D = op.reversed ? sEff : dEff;
+      const S = op.reversed ? dEff : sEff;
+      sys.stampVCCS(D, S, g, S, op.gm);
+      sys.stampConductance(D, S, op.gds);
+      sys.stampVCCS(D, S, b, S, op.gmbs);
+      // channel gmin: keeps an off device from leaving its drain floating
+      sys.stampConductance(D, S, 1e-12);
       const sign = isNmos ? 1 : -1;
-      const Ieq = Id - gm * vGSguess - gds * vDSguess;
-      sys.stampCurrentSource(dEff, sEff, sign * Ieq);
+      sys.stampCurrentSource(D, S, sign * (op.id - op.gm * op.vgs - op.gds * op.vds - op.gmbs * op.vbs));
     },
     step(params, terminals, sim, instance) {
       const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
@@ -496,19 +521,85 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
       st[key + '_vbs'] = sim.nodeVoltage[b] - sim.nodeVoltage[s];
     },
     getFlowPath() { return [{ x: 4, y: 1 }, { x: 2, y: 2 }, { x: 4, y: 3 }]; },
-    measure(params, terminals, sim) {
+    measure(params, terminals, sim, comp) {
       const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
       const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
       const vGS = sim.nodeVoltage[g] - sim.nodeVoltage[s];
       const vDS = sim.nodeVoltage[d] - sim.nodeVoltage[s];
+      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+      const op = level1Op(params, sim, comp, sim.nodeVoltage[d], sim.nodeVoltage[g], sim.nodeVoltage[s], sim.nodeVoltage[b], isNmos);
       return [
         { label: 'Vgs', value: vGS.toFixed(4), unit: 'V' },
         { label: 'Vds', value: vDS.toFixed(4), unit: 'V' },
-        { label: 'Vth', value: (params.Vto as number).toFixed(3), unit: 'V' },
+        { label: 'Vth', value: (isNmos ? op.vth : -op.vth).toFixed(3), unit: 'V' },
+        { label: 'Id', value: (Math.abs(op.id) * 1000).toFixed(4), unit: 'mA' },
       ];
     },
   };
+}
+
+/** Voltage of a node id, including extra-row-backed pseudo-nodes. */
+function nodeV(sim: SimContext, n: number): number {
+  if (n <= 0) return 0;
+  if (n < sim.nodeVoltage.length) return sim.nodeVoltage[n];
+  const k = n - sim.nodeVoltage.length; // extra index − (numNodes − 1)
+  return sim.branchCurrent[k] ?? 0;
+}
+
+/**
+ * Schichman-Hodges Level-1 operating point in the flipped world (PMOS
+ * voltages negated). Handles reverse mode by swapping source and drain
+ * (`reversed`), returning the controlling voltages relative to the
+ * effective source plus gm / gds / gmbs for the Newton stamp.
+ */
+function level1Op(
+  params: Record<string, unknown>, sim: SimContext, comp: CircuitComponent | undefined,
+  vd: number, vg: number, vs: number, vb: number, isNmos: boolean,
+) {
+  const Vto0 = params.Vto as number;
+  const Kp = params.Kp as number;
+  const Gamma = params.Gamma as number;
+  const Phi = Math.max(1e-3, params.Phi as number);
+  const Lambda = params.Lambda as number;
+  const pol = isNmos ? 1 : -1;
+  let vds = pol * (vd - vs);
+  const reversed = vds < 0;
+  // in reverse mode the physical drain acts as the source
+  const vsrc = reversed ? vd : vs;
+  const vgs = pol * (vg - vsrc);
+  const vbs = pol * (vb - vsrc);
+  if (reversed) vds = -vds;
+  // Body effect: Vth = Vto + γ(√(2ΦF − Vbs) − √(2ΦF)); reverse bias raises Vth
+  const sq = Math.sqrt(Math.max(1e-9, 2 * Phi - vbs));
+  const vth = pol * Vto0 + Gamma * (sq - Math.sqrt(2 * Phi));
+  const dVthdVbs = Gamma > 0 && 2 * Phi - vbs > 1e-9 ? -Gamma / (2 * sq) : 0;
+  const vov = vgs - vth;
+  let id: number;
+  let gm: number;
+  let gds: number;
+  if (vov > 0) {
+    if (vds >= vov) {
+      id = 0.5 * Kp * vov * vov * (1 + Lambda * vds);
+      gm = Kp * vov * (1 + Lambda * vds);
+      gds = 0.5 * Kp * vov * vov * Lambda;
+    } else {
+      const core = vov * vds - 0.5 * vds * vds;
+      id = Kp * core * (1 + Lambda * vds);
+      gm = Kp * vds * (1 + Lambda * vds);
+      gds = Kp * (vov - vds) * (1 + Lambda * vds) + Kp * core * Lambda;
+    }
+  } else {
+    // weak inversion: Id ∝ exp(Vov/(n·Vt)), continuous with Id = 0 at Vov = 0
+    const nVt = 1.5 * thermalVoltage(deviceTemp(sim, comp));
+    const ex = Math.exp(Math.max(-80, vov / nVt));
+    id = 1e-7 * (ex - 1) * (1 + Lambda * vds);
+    gm = 1e-7 * ex / nVt * (1 + Lambda * vds);
+    gds = 1e-7 * (ex - 1) * Lambda;
+  }
+  // dId/dVbs = dId/dVov · (−dVth/dVbs) = gm·(−dVth/dVbs)
+  const gmbs = gm * -dVthdVbs;
+  return { reversed, vgs, vds, vbs, vth, id, gm, gds, gmbs };
 }
 
 export const mosLevel1N = makeLevel1MOS('nmos');

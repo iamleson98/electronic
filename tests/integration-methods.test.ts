@@ -121,19 +121,24 @@ describe('Integration method plumbing', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('RC discharge with trapezoidal (τ = dt)', () => {
-  // Companion recurrences, cold start (v0 = 5V, i0 = 0 — ngspice-UIC semantics):
+  // Companion recurrences, cold start (v0 = 5V):
   //   Euler: v_n = v_{n−1}/2                     → 2.5, 1.25, …
-  //   Trap:  v_n = 3.3333·(1/3)^{n−1}            → 3.3333, 1.1111, …
+  //   Trap:  v_n = 5·(1/3)^n                     → 1.6667, 0.5556, …
   //   True:  v_n = 5·e^{−n}                      → 1.8395, 0.6767, …
+  // Trap starts from the CONSISTENT initial current i(0⁺) = −v0/R (the engine
+  // takes a 1e-6·dt backward-Euler step first, as ngspice effectively does).
+  // Assuming i0 = 0 gave 3.3333, 1.1111, … — an initial-condition error that
+  // trapezoidal never damps (it made a step response LESS accurate than Euler).
   const euler = [2.5, 1.25, 0.625, 0.3125, 0.15625];
-  const trap = [3.333333333, 1.111111111, 0.370370370, 0.123456790, 0.041152263];
+  const trap = [1.666666667, 0.555555556, 0.185185185, 0.061728395, 0.020576132];
 
   it('trap matches the hand-derived companion sequence', () => {
     const circ = rcDischarge();
     const { volts } = runSteps(circ, 1e-3, 5, 'trap');
     expect(volts.length).toBe(5);
     for (let i = 0; i < 5; i++) {
-      expect(volts[i]).toBeCloseTo(trap[i], 6);
+      // 5 places: the 1e-6·dt start-up step perturbs results at ~1e-6
+      expect(volts[i]).toBeCloseTo(trap[i], 5);
     }
   });
 
@@ -156,8 +161,8 @@ describe('RC discharge with trapezoidal (τ = dt)', () => {
     const circ = rcDischarge();
     const { sim } = runSteps(circ, 1e-3, 1, 'trap');
     const st = sim!.state.__global ?? {};
-    // i_1 = (2C/dt)(v_1 − v_0) − i_0 = 2e-3·(3.3333−5) − 0 = −3.3333 mA
-    expect(st['cap_c1_i']).toBeCloseTo(-3.333333333e-3, 6);
+    // consistent trap: i_1 = −v_1/R = −1.6667 mA
+    expect(st['cap_c1_i']).toBeCloseTo(-1.666666667e-3, 8);
   });
 });
 
@@ -355,12 +360,13 @@ describe('RL step response with trapezoidal', () => {
   }
 
   it('trap inductor matches the hand-derived sequence', () => {
+    // consistent start (v_L(0⁺) = 10 V): i_n = 10 mA·(1 − (1/3)^n)
     const i = inductorCurrents('trap').map(x => x * 1000); // mA
-    expect(i[0]).toBeCloseTo(3.3333333, 6);
-    expect(i[1]).toBeCloseTo(7.7777778, 6);
-    expect(i[2]).toBeCloseTo(9.2592593, 6);
-    expect(i[3]).toBeCloseTo(9.7530864, 6);
-    expect(i[4]).toBeCloseTo(9.9176955, 6);
+    expect(i[0]).toBeCloseTo(6.6666667, 4);
+    expect(i[1]).toBeCloseTo(8.8888889, 4);
+    expect(i[2]).toBeCloseTo(9.6296296, 4);
+    expect(i[3]).toBeCloseTo(9.8765432, 4);
+    expect(i[4]).toBeCloseTo(9.9588477, 4);
   });
 
   it('euler inductor keeps its historical sequence (no regression)', () => {
@@ -370,11 +376,13 @@ describe('RL step response with trapezoidal', () => {
     expect(i[4]).toBeCloseTo(9.6875, 6);
   });
 
-  it('trap current error at t=5τ is >10x smaller than euler error', () => {
+  it('trap current error at t=5τ is >5x smaller than euler error', () => {
+    // At this very coarse step (dt = τ) trap's advantage is ≈9×; the old
+    // ">10×" only held because of the i0 = 0 start-up error.
     const analytic = 0.01 * (1 - Math.exp(-5)); // 9.93262 mA
     const eulerErr = Math.abs(inductorCurrents()[4] - analytic);
     const trapErr = Math.abs(inductorCurrents('trap')[4] - analytic);
-    expect(trapErr).toBeLessThan(eulerErr / 10);
+    expect(trapErr).toBeLessThan(eulerErr / 5);
   });
 
   it('trap inductor keeps voltage-history state (_vp key)', () => {
@@ -390,8 +398,8 @@ describe('RL step response with trapezoidal', () => {
     const r2 = simulateStep(circ.components, circ.wires, circ.plugins, nextPrev, 1e-3, { method: 'trap' });
     const st = r2!.sim.state.__global ?? {};
     expect(st['ind_l1_vp']).toBeDefined();
-    // v_L at end of step 2 = 10 − 1000·i_2 = 10 − 7.7778 = 2.2222 V
-    expect(st['ind_l1_vp']).toBeCloseTo(2.2222222, 5);
+    // v_L at end of step 2 = 10 − 1000·i_2 = 10 − 8.8889 = 1.1111 V
+    expect(st['ind_l1_vp']).toBeCloseTo(1.1111111, 4);
   });
 });
 
@@ -401,7 +409,8 @@ describe('RL step response with trapezoidal', () => {
 
 describe('Parallel capacitors keep independent trap state', () => {
   // Two 1µF caps in parallel (C_tot = 2µF), both initialV = 5, R = 1k → τ_eff = 2ms.
-  // dt = 1ms: trap v_1 = 4.0, v_2 = 2.4. If the two caps shared a state key the
+  // dt = 1ms: trap factor (1 − 1/4)/(1 + 1/4) = 0.6 → v_1 = 3.0, v_2 = 1.8.
+  // If the two caps shared a state key the
   // companion currents would double-count and the node voltage would differ.
   function parallelCaps() {
     const components = [
@@ -423,17 +432,17 @@ describe('Parallel capacitors keep independent trap state', () => {
   it('trap produces the correct combined-companion voltages', () => {
     const circ = parallelCaps();
     const { volts } = runSteps(circ, 1e-3, 2, 'trap');
-    expect(volts[0]).toBeCloseTo(4.0, 6);
-    expect(volts[1]).toBeCloseTo(2.4, 6);
+    expect(volts[0]).toBeCloseTo(3.0, 5);
+    expect(volts[1]).toBeCloseTo(1.8, 5);
   });
 
   it('each cap tracks its own current', () => {
     const circ = parallelCaps();
     const { sim } = runSteps(circ, 1e-3, 1, 'trap');
     const st = sim!.state.__global ?? {};
-    // i per cap = (2C/dt)(v_1 − v_0) − 0 = 2e-3·(4−5) = −2 mA each
-    expect(st['cap_c1_i']).toBeCloseTo(-2e-3, 6);
-    expect(st['cap_c2_i']).toBeCloseTo(-2e-3, 6);
+    // each cap carries half the resistor current: −v_1/(2R) = −1.5 mA
+    expect(st['cap_c1_i']).toBeCloseTo(-1.5e-3, 8);
+    expect(st['cap_c2_i']).toBeCloseTo(-1.5e-3, 8);
   });
 });
 

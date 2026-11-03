@@ -213,17 +213,28 @@ export function ResultDisplay({ result }: { result: AnalysisResult }) {
 export function TraceSparkline({ values, xValues, xLabel }: { values: Float64Array; xValues: Float64Array; xLabel: string }) {
   const width = 600;
   const height = 80;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  // Loop (not Math.min(...values): spreading 100k samples can overflow the
+  // stack) and skip non-finite points — a DC-sweep point that failed to
+  // converge is NaN and must render as a gap, not poison the whole path.
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of values) {
+    if (!Number.isFinite(v)) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  if (values.length < 2 || min > max) return <div className="text-xs text-slate-500">—</div>;
   const range = Math.max(max - min, 1e-12);
-  if (values.length < 2) return <div className="text-xs text-slate-500">—</div>;
   const xRange = xValues.length > 1 ? xValues[xValues.length - 1] - xValues[0] : 1;
   const xMin = xValues[0];
   let path = '';
+  let penDown = false;
   for (let i = 0; i < values.length; i++) {
+    if (!Number.isFinite(values[i])) { penDown = false; continue; }
     const x = ((xValues[i] - xMin) / xRange) * width;
     const y = height - ((values[i] - min) / range) * height;
-    path += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
+    path += (penDown ? 'L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
+    penDown = true;
   }
   return (
     <div>

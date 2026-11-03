@@ -353,9 +353,9 @@ describe('BV source circuits', () => {
 
   it('time-based expression: sin(2*pi*50*time) reaches 1V at t = 5ms', () => {
     const circ = bvCircuit('sin(2*pi*50*time)');
-    // Cold-start steps run at t = 0, 1, 2, …ms — the 6th step stamps at t=5ms
-    // where sin(π/2) = 1.
-    const sim = run(circ, 6);
+    // Step k ends at t = k·dt (a cold start advances 0 → dt like any other
+    // step) — the 5th step stamps at t=5ms where sin(π/2) = 1.
+    const sim = run(circ, 5);
     expect(sim).not.toBeNull();
     const nm = buildNodeMap(circ.components, circ.wires, circ.plugins);
     const outNode = nodeOf(sim!, nm, 'r1:a');

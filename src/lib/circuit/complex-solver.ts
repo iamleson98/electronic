@@ -140,6 +140,19 @@ export function cStampVCVS(sys: ComplexMnaSystem, a: number, b: number, c: numbe
  * — corrupting a DIFFERENT matrix cell — and silently drops the branch
  * equation. Re-layout preserves all earlier stamps.
  */
+/** Add v to matrix entry (r, c) — r/c are 0-based matrix indices. */
+export function cAddEntry(sys: ComplexMnaSystem, r: number, c: number, v: Complex): void {
+  ensureComplexCapacity(sys, Math.max(r, c));
+  addComplex(sys, r, c, v);
+}
+
+/** Allocate one extra unknown (branch current or internal pseudo-node). */
+export function cAddExtra(sys: ComplexMnaSystem): number {
+  const i = sys.nextExtra++;
+  ensureComplexCapacity(sys, i);
+  return i;
+}
+
 function ensureComplexCapacity(sys: ComplexMnaSystem, index: number): void {
   if (index < sys.size) return;
   const oldSize = sys.size;

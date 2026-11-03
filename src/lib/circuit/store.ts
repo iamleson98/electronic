@@ -1920,7 +1920,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     };
     let result: { sim: SimContext; branchCurrentSize: number; nodeMap: any } | null = null;
     for (let i = 0; i < subSteps; i++) {
-      result = simulateStep(simComponents, simWires, plugins, prev, dt, simOpts);
+      result = simulateStep(simComponents, simWires, plugins, prev, dt, { ...simOpts, recordTerminalCurrents: i === subSteps - 1 });
       if (!result) break;
       prev.nodeVoltage = result.sim.nodeVoltage;
       prev.branchCurrent = result.sim.branchCurrent;

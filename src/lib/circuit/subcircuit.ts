@@ -76,6 +76,14 @@ export function createSubCircuitPlugin(def: SubCircuitDefinition): ComponentPlug
     type: def.type,
     name: def.name,
     category: 'ic',
+    // A sub-circuit is as non-linear as its contents: inherit the internal
+    // parts' flags so the engine runs the Newton / feedback loops for it.
+    get nonLinear() {
+      return def.document.components.some((c) => getPlugin(c.type)?.nonLinear === true);
+    },
+    get feedback() {
+      return def.document.components.some((c) => getPlugin(c.type)?.feedback === true);
+    },
     description: def.description,
     symbol: def.name.charAt(0).toUpperCase() + def.name.slice(1, 3),
     boundingBox: def.boundingBox,

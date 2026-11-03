@@ -142,7 +142,7 @@ describe('Stepper Motor', () => {
     sim.nodeVoltage[4] = 0;   // bn
     const m = p.measure!(getParams(p), terms, sim);
     const labels = m.map(x => x.label);
-    expect(labels).toEqual(['V_A', 'V_B', 'I_A', 'I_B']);
+    expect(labels).toEqual(['V_A', 'V_B', 'I_A', 'I_B', 'Steps', 'Angle']);
   });
 });
 
@@ -191,18 +191,19 @@ describe('Photodiode', () => {
     const sim = mkSim();
     const terms = getTerms(p, sim);
     const params = getParams(p);
-    let currentStamped = false;
+    // the photocurrent source (the junction's Newton companion source is
+    // also stamped — it is 0 at zero bias)
+    let maxI = 0;
     const sys = {
       stampConductance: () => {},
       stampCurrentSource: (_n1: number, _n2: number, i: number) => {
-        currentStamped = true;
-        expect(i).toBeGreaterThan(0);  // photocurrent is positive
+        maxI = Math.max(maxI, i);
       },
       stampVoltageSource: () => 0,
       stampVCCS: () => {}, stampVCVS: () => {}, stampCCCS: () => {}, stampCCVS: () => {},
     };
     p.stamp!(params, terms, sys as any, sim);
-    expect(currentStamped).toBe(true);
+    expect(maxI).toBeGreaterThan(0);  // photocurrent is positive
   });
 
   it('measure returns V_R, I_ph, lux', () => {
@@ -223,7 +224,7 @@ describe('Photodiode', () => {
     params1.illuminance = 100;
     p.stamp!(params1, terms1, {
       stampConductance: () => {}, stampCurrentSource: (_n1, _n2, i: number) => {
-        sim1.state.__iLow = i;
+        sim1.state.__iLow = Math.max(sim1.state.__iLow ?? 0, i);
       },
       stampVoltageSource: () => 0,
       stampVCCS: () => {}, stampVCVS: () => {}, stampCCCS: () => {}, stampCCVS: () => {},
@@ -235,7 +236,7 @@ describe('Photodiode', () => {
     params2.illuminance = 10000;
     p.stamp!(params2, terms2, {
       stampConductance: () => {}, stampCurrentSource: (_n1, _n2, i: number) => {
-        sim2.state.__iHigh = i;
+        sim2.state.__iHigh = Math.max(sim2.state.__iHigh ?? 0, i);
       },
       stampVoltageSource: () => 0,
       stampVCCS: () => {}, stampVCVS: () => {}, stampCCCS: () => {}, stampCCVS: () => {},

@@ -364,11 +364,11 @@ describe('Bug 3 — copper pours are exported to the Gerbers', () => {
     // exact-size rect aperture for the merged 4.0×0.5mm row runs
     expect(top).toMatch(/%ADD\d+R,4\.0000X0\.5000\*%/);
     // a flash at the center of the first row run (x=2.0mm, y=0.25mm in X26Y26)
-    expect(top).toContain('X02000000Y00250000D03*');
+    expect(top).toContain('X0002000000Y0000250000D03*');
     // 4 rows → 4 pour flashes (no pads/vias/traces on this board)
     expect(top.match(/D03\*/g)?.length).toBe(4);
     // top-only pour → the bottom layer must NOT carry it
-    expect(bottom).not.toContain('X02000000Y00250000D03*');
+    expect(bottom).not.toContain('X0002000000Y0000250000D03*');
     expect(bottom).not.toMatch(/%ADD\d+R,4\.0000X0\.5000\*%/);
   });
 
@@ -387,9 +387,9 @@ describe('Bug 3 — copper pours are exported to the Gerbers', () => {
     const bottom = files.find((f) => f.filename === 'bottom_copper.gbr')!.content;
     expect(top).toContain('%TO.N,GND*%');
     expect(top).toMatch(/%ADD\d+R,4\.0000X0\.5000\*%/);
-    expect(top).toContain('X02000000Y00250000D03*');
+    expect(top).toContain('X0002000000Y0000250000D03*');
     expect(bottom).not.toContain('%TO.N,GND*%');
-    expect(bottom).not.toContain('X02000000Y00250000D03*');
+    expect(bottom).not.toContain('X0002000000Y0000250000D03*');
   });
 
   it('omitting the pours argument keeps the legacy export identical (backward compatible)', () => {

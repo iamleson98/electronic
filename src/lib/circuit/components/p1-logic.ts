@@ -17,6 +17,7 @@ function makeLogicIC(type: string, name: string, gateType: string, op: (a: boole
     type,
     name,
     category: 'logic',
+    nonLinear: true, // stamp decides from node voltages — Newton re-stamp loop
     description: `${name} — ${gateType.toUpperCase()} gate (7400-series). Drives output to VCC or 0.`,
     symbol: gateType,
     boundingBox: { width: 4, height: 3 },
@@ -123,6 +124,9 @@ registerPlugin({
   type: 'cd4013',
   name: 'CD4013 (D Flip-Flop)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'CD4013 CMOS dual D flip-flop. Clock on rising edge. Has Set and Reset pins.',
   symbol: 'D',
   boundingBox: { width: 6, height: 5 },
@@ -183,6 +187,9 @@ registerPlugin({
   type: 'cd4066',
   name: 'CD4066 (Bilateral Switch)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'CD4066 CMOS quad bilateral switch. When CTRL is HIGH, signal passes through.',
   symbol: 'SW',
   boundingBox: { width: 4, height: 3 },
@@ -234,6 +241,9 @@ registerPlugin({
   type: 'ic74138',
   name: '74138 (3-to-8 Decoder)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '3-to-8 line decoder/demultiplexer. Selects one of 8 outputs based on 3 select lines.',
   symbol: '138',
   boundingBox: { width: 8, height: 8 },
@@ -288,6 +298,9 @@ registerPlugin({
   type: 'ic74153',
   name: '74153 (4-to-1 MUX)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Dual 4-to-1 data selector/multiplexer. Selects one of 4 inputs based on 2 select lines.',
   symbol: '153',
   boundingBox: { width: 8, height: 5 },

@@ -51,8 +51,10 @@ describe('buildNodeMap memoization', () => {
     const ws2 = [...ws, wire('w3', 'R1', 'b', 'GND', 'g')];
     const m2 = buildNodeMap(comps, ws2, plugins());
     expect(m2).not.toBe(m1);
-    // R1:b is now wired to ground (it had no node entry before)
-    expect(m1.terminalNode.has('R1:b')).toBe(false);
+    // R1:b was unwired (its own floating node) and is now wired to ground
+    const floatingB = m1.terminalNode.get('R1:b')!;
+    expect(floatingB).toBeGreaterThan(0);
+    expect(m1.floating!.has(floatingB)).toBe(true);
     expect(m2.terminalNode.get('R1:b')).toBe(0);
     // new components array (e.g. a component was moved)
     const comps2 = [...comps];
