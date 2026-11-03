@@ -397,12 +397,13 @@ describe('State persistence — component state survives across steps', () => {
       wire('w3', 'c1', 'b', 'gnd', 'g'),
       wire('w4', 'v1', 'n', 'gnd', 'g'),
     ];
-    // Run 50 steps
-    const { sim: sim1 } = runSimSteps(comps, wires, 50, 1e-3);
+    // Run 50 steps (0.5 τ — still charging; at 1 ms steps the cap was full
+    // to the last bit after 50 τ, so "higher later" only held by rounding)
+    const { sim: sim1 } = runSimSteps(comps, wires, 50, 1e-5);
     expect(sim1).not.toBeNull();
     const v1 = nodeV(comps, wires, 'c1', 'a', sim1);
     // Run 100 more steps
-    const { sim: sim2 } = runSimSteps(comps, wires, 100, 1e-3);
+    const { sim: sim2 } = runSimSteps(comps, wires, 100, 1e-5);
     expect(sim2).not.toBeNull();
     const v2 = nodeV(comps, wires, 'c1', 'a', sim2);
     // Voltage should be higher after more steps (capacitor charging)

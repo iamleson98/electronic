@@ -16,6 +16,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { simulateStep, buildNodeMap, solveDC } from '../src/lib/circuit/engine';
 import { runTran } from '../src/lib/circuit/analysis';
+import { DEFAULT_OPTIONS } from '../src/lib/circuit/sim-options';
+import { exampleCategories } from '../src/lib/circuit/examples';
 import { getPlugin, getAllPlugins } from '../src/lib/circuit/registry';
 import type { CircuitComponent, Wire, ComponentPlugin, SimContext } from '../src/lib/circuit/types';
 
@@ -90,11 +92,14 @@ function runSteps(
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Integration method plumbing', () => {
-  it('defaults to backward Euler when no method is passed', () => {
+  it('defaults to Gear/BDF-2 when no method is passed', () => {
+    // Backward Euler used to be the default; it damped every oscillator
+    // example to a standstill (see "Gear default" below).
     const circ = rcDischarge();
     const { sim } = runSteps(circ, 1e-3, 1);
     expect(sim).not.toBeNull();
-    expect(sim!.method).toBe('euler');
+    expect(sim!.method).toBe('gear');
+    expect(DEFAULT_OPTIONS.method).toBe('gear');
   });
 
   it('sim.method reflects the requested method', () => {
@@ -144,7 +149,7 @@ describe('RC discharge with trapezoidal (τ = dt)', () => {
 
   it('euler still matches its historical sequence (no regression)', () => {
     const circ = rcDischarge();
-    const { volts } = runSteps(circ, 1e-3, 5);
+    const { volts } = runSteps(circ, 1e-3, 5, 'euler');
     for (let i = 0; i < 5; i++) {
       expect(volts[i]).toBeCloseTo(euler[i], 6);
     }
@@ -271,7 +276,7 @@ describe('LC tank energy conservation', () => {
     let prev: any;
     const volts: number[] = [];
     for (let i = 0; i < 400; i++) {
-      const r = simulateStep(circ.components, circ.wires, circ.plugins, prev, dt);
+      const r = simulateStep(circ.components, circ.wires, circ.plugins, prev, dt, { method: 'euler' });
       expect(r).not.toBeNull();
       prev = {
         nodeVoltage: r!.sim.nodeVoltage,
@@ -370,7 +375,7 @@ describe('RL step response with trapezoidal', () => {
   });
 
   it('euler inductor keeps its historical sequence (no regression)', () => {
-    const i = inductorCurrents().map(x => x * 1000);
+    const i = inductorCurrents('euler').map(x => x * 1000);
     expect(i[0]).toBeCloseTo(5, 6);
     expect(i[1]).toBeCloseTo(7.5, 6);
     expect(i[4]).toBeCloseTo(9.6875, 6);
@@ -380,7 +385,7 @@ describe('RL step response with trapezoidal', () => {
     // At this very coarse step (dt = τ) trap's advantage is ≈9×; the old
     // ">10×" only held because of the i0 = 0 start-up error.
     const analytic = 0.01 * (1 - Math.exp(-5)); // 9.93262 mA
-    const eulerErr = Math.abs(inductorCurrents()[4] - analytic);
+    const eulerErr = Math.abs(inductorCurrents('euler')[4] - analytic);
     const trapErr = Math.abs(inductorCurrents('trap')[4] - analytic);
     expect(trapErr).toBeLessThan(eulerErr / 5);
   });
@@ -473,7 +478,7 @@ describe('Method switching and DC safety', () => {
   });
 
   it('solveDC always runs Euler regardless of what a transient would use', () => {
-    // solveDC passes no simOptions → method defaults to 'euler' → the DC
+    // solveDC forces method 'euler' whatever the transient uses → the DC
     // operating point sees the classic cap-open/ind-short companions. A trap
     // DC solve would remember −vPrev across the (huge) DC step and oscillate.
     const components = [
@@ -492,7 +497,7 @@ describe('Method switching and DC safety', () => {
       wire('w6', 'l1', 'b', 'gnd', 'g'),
     ];
     const plugins = pluginsFor(components);
-    const sim = solveDC(components, wires, plugins);
+    const sim = solveDC(components, wires, plugins, undefined, { simOptions: { method: 'trap' } });
     expect(sim).not.toBeNull();
     // At DC the inductor is a short → node after R is pulled to ground (0V),
     // the full 5V drops across R1, and 5mA flows. A trap DC companion would
@@ -543,13 +548,23 @@ describe('runTran integration-method plumbing', () => {
     expect(y[9]).toBeCloseTo(0.041152263, 4);
   });
 
-  it('default (no method) keeps the Euler discharge tail', () => {
+  it('method=euler keeps the Euler discharge tail', () => {
+    const circ = pulseRC();
+    const result = runTran(circ.components, circ.wires, circ.plugins, {
+      type: 'tran', tStop: 10e-3, tStep: 1e-3, probes: ['c1:a'],
+    }, { method: 'euler' });
+    const y = result.traces[0].yValues;
+    expect(y[9]).toBeCloseTo(0.15625, 4);
+  });
+
+  it('default (no method) is Gear: the tail is far closer to 5·e^(−5) than Euler', () => {
     const circ = pulseRC();
     const result = runTran(circ.components, circ.wires, circ.plugins, {
       type: 'tran', tStop: 10e-3, tStep: 1e-3, probes: ['c1:a'],
     });
     const y = result.traces[0].yValues;
-    expect(y[9]).toBeCloseTo(0.15625, 4);
+    const exact = 5 * Math.exp(-5);
+    expect(Math.abs(y[9] - exact)).toBeLessThan(Math.abs(0.15625 - exact) / 3);
   });
 });
 
@@ -607,5 +622,75 @@ describe('runTran UIC (initial conditions)', () => {
     // First post-step sample: cap charged from .IC=2V, ramping toward 5V
     expect(y[1]).toBeGreaterThan(2);
     expect(y[1]).toBeLessThan(5);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gear default — oscillators keep oscillating; variable-step BDF-2
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Gear default', () => {
+  const example = (name: string) => exampleCategories.flatMap((c) => c.examples).find((e) => e.name === name)!.doc;
+  const lateSwing = (name: string, method?: 'euler' | 'gear') => {
+    const doc = example(name);
+    const comps = doc.components.map((c) => ({ ...c, parameters: { ...c.parameters }, simState: {} }));
+    const p = pluginsFor(comps);
+    let prev: any;
+    const H: Float64Array[] = [];
+    for (let i = 0; i < 1500; i++) {
+      const r = simulateStep(comps, doc.wires, p, prev, 1e-4, method ? { method } : undefined)!;
+      H.push(Float64Array.from(r.sim.nodeVoltage));
+      prev = { nodeVoltage: r.sim.nodeVoltage, branchCurrent: r.sim.branchCurrent, time: r.sim.time, state: r.sim.state };
+    }
+    let sw = 0;
+    for (let k = 1; k < H[0].length; k++) {
+      let lo = Infinity, hi = -Infinity;
+      for (const h of H.slice(-500)) { lo = Math.min(lo, h[k]); hi = Math.max(hi, h[k]); }
+      sw = Math.max(sw, hi - lo);
+    }
+    return sw;
+  };
+
+  it('the Wien bridge oscillator keeps oscillating (Euler damped it to 0.5 V p-p)', () => {
+    expect(lateSwing('Wien Bridge Oscillator', 'euler')).toBeLessThan(1);
+    expect(lateSwing('Wien Bridge Oscillator')).toBeGreaterThan(10);
+  });
+
+  it('the LC tank example keeps ≥ 90 % of its swing (Euler: < 1 %)', () => {
+    const g = lateSwing('LC Tank (Integration Methods)');
+    expect(lateSwing('LC Tank (Integration Methods)', 'euler')).toBeLessThan(0.01 * g + 0.1);
+    expect(g).toBeGreaterThan(9);
+  });
+
+  it('a step-size change uses the variable-coefficient BDF-2 formula', () => {
+    // RC discharge (τ = 1 ms): 4 steps of τ/8, then 4 of τ/16. Expected
+    // values come from the variable-step BDF-2 recurrence (ω = h/h_prev),
+    //   (a0/h + 1/τ)·v_n = (a1·v_{n−1} − a2·v_{n−2})/h,
+    // seeded by one Euler step. The fixed-coefficient formula (ω = 1) used
+    // across the change lands ≈3× further from the exact curve.
+    const tau = 1e-3;
+    const steps = [1.25e-4, 1.25e-4, 1.25e-4, 1.25e-4, 6.25e-5, 6.25e-5, 6.25e-5, 6.25e-5];
+    const recur = (variable: boolean) => {
+      const v = [5, 5 / (1 + steps[0] / tau)];
+      for (let n = 1; n < steps.length; n++) {
+        const h = steps[n];
+        const w = variable ? h / steps[n - 1] : 1;
+        const a0 = (1 + 2 * w) / (1 + w), a1 = 1 + w, a2 = (w * w) / (1 + w);
+        v.push(((a1 * v[n] - a2 * v[n - 1]) / h) / (a0 / h + 1 / tau));
+      }
+      return v.slice(1);
+    };
+    const circ = rcDischarge();
+    let prev: any;
+    const got: number[] = [];
+    for (const dt of steps) {
+      const r = simulateStep(circ.components, circ.wires, circ.plugins, prev, dt, { method: 'gear' })!;
+      prev = { nodeVoltage: r.sim.nodeVoltage, branchCurrent: r.sim.branchCurrent, time: r.sim.time, state: r.sim.state };
+      got.push(r.sim.nodeVoltage[1]);
+    }
+    const want = recur(true);
+    for (let i = 0; i < steps.length; i++) expect(got[i]).toBeCloseTo(want[i], 6);
+    const exact = 5 * Math.exp(-steps.reduce((a, b) => a + b, 0) / tau);
+    expect(Math.abs(got.at(-1)! - exact)).toBeLessThan(Math.abs(recur(false).at(-1)! - exact) / 2);
   });
 });

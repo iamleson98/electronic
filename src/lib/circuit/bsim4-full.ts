@@ -714,14 +714,14 @@ const bsim4Params: ParameterDef[] = [
   { key: 'vsat', label: 'Saturation velocity', type: 'number', default: 1.2e5, min: 1e3, max: 1e6, step: 100, unit: 'm/s' },
   { key: 'toxqm', label: 'Tunneling oxide', type: 'number', default: 1.8e-9, min: 1e-10, max: 1e-6, step: 1e-10, unit: 'm' },
   { key: 'ngate', label: 'Gate poly doping', type: 'number', default: 1e20, min: 1e18, max: 1e22, step: 1e18, unit: 'cm⁻³' },
-  { key: 'igcMod', label: 'Gate leak model', type: 'select', default: 1, options: [
+  { key: 'igcMod', label: 'Gate leak model', type: 'select', default: '1', options: [
     { label: 'Off', value: '0' },
     { label: 'On', value: '1' },
   ] },
   { key: 'aigc', label: 'Tunnel A coeff', type: 'number', default: 3.9e-9, min: 0, max: 1, step: 1e-10, unit: 'A/V²' },
   { key: 'bigc', label: 'Tunnel B coeff', type: 'number', default: 6.5e9, min: 1e8, max: 1e11, step: 1e8, unit: 'V/m' },
   { key: 'pigc', label: 'Gate→source split', type: 'number', default: 0.5, min: 0, max: 1, step: 0.05, unit: '' },
-  { key: 'capMod', label: 'Capacitance model', type: 'select', default: 1, options: [
+  { key: 'capMod', label: 'Capacitance model', type: 'select', default: '1', options: [
     { label: 'Off', value: '0' },
     { label: 'Meyer', value: '1' },
   ] },
@@ -734,7 +734,7 @@ const bsim4Params: ParameterDef[] = [
   { key: 'pb', label: 'Junction built-in V', type: 'number', default: 0.9, min: 0.1, max: 2, step: 0.01, unit: 'V' },
   { key: 'cjsw', label: 'Sidewall cap (Cjsw)', type: 'number', default: 1.0e-10, min: 0, max: 1e-8, step: 1e-12, unit: 'F/m' },
   { key: 'rshg', label: 'Gate sheet resistance', type: 'number', default: 5.0, min: 0, max: 1000, step: 0.1, unit: 'Ω/□' },
-  { key: 'nqsMod', label: 'NQS mode', type: 'select', default: 0, options: [
+  { key: 'nqsMod', label: 'NQS mode', type: 'select', default: '0', options: [
     { label: 'Quasi-static', value: '0' },
     { label: 'NQS', value: '1' },
   ] },

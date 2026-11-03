@@ -4,7 +4,7 @@
 import type { ComponentPlugin } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
-import { stateKey } from '../state-keys';
+import { stampSimpleDiode, stepSimpleDiode, simpleDiodeCurrent } from './advanced-semi';
 
 // ----- DC Voltage Source -----
 const dcVoltage: ComponentPlugin = {
@@ -336,7 +336,7 @@ const led: ComponentPlugin = {
   type: 'led',
   name: 'LED',
   category: 'io',
-  description: 'Light-emitting diode with series resistance. Color parameter controls glow color.',
+  description: 'Light-emitting diode (Shockley junction): Forward Voltage is the drop at 20 mA, the datasheet test current; Series Resistance is the die/bond resistance (a few Ω — add your own current-limiting resistor, as on a real board). Glow ∝ forward current.',
   symbol: 'LED',
   nonLinear: true,
   boundingBox: { width: 4, height: 2 },
@@ -352,8 +352,11 @@ const led: ComponentPlugin = {
       { label: 'Yellow', value: 'yellow' },
       { label: 'White', value: 'white' },
     ] },
-    { key: 'forwardV', label: 'Forward Voltage', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 10, step: 0.1 },
-    { key: 'seriesR', label: 'Series Resistance', type: 'number', default: 220, unit: 'Ω', min: 0.1, max: 1e6, step: 1 },
+    { key: 'forwardV', label: 'Forward Voltage (at 20 mA)', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 10, step: 0.1 },
+    // a real 5 mm LED's bulk resistance is a few ohms; the old 220 Ω default
+    // hid a current-limiting resistor inside the part, so an LED + resistor
+    // circuit drew about half the current the same parts draw on a bench
+    { key: 'seriesR', label: 'Series Resistance', type: 'number', default: 5, unit: 'Ω', min: 0.1, max: 1e6, step: 1 },
   ],
   render(ctx, params, cellSize, sim, instance) {
     const colorMap: Record<string, string> = {
@@ -440,31 +443,10 @@ const led: ComponentPlugin = {
     void vf; void seriesR;
   },
   stamp(params, terminals, sys, sim, comp) {
-    const vf = params.forwardV as number;
-    const r = Math.max(0.01, params.seriesR as number);
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
-    const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('led', comp, a, k);
-    const prevOn = st[key] ?? false;
-    void prevOn;
-    // Current-aware threshold model (see diode): the on-state Thevenin makes
-    // v > vf exactly "forward current flowing" — a hysteresis margin latches
-    // the LED on through reverse current (rectifier-style failures).
-    const on = v > vf;
-    st[key] = on;
-    if (on) {
-      // Forward biased: model as V_th = Vf at 'a' in series with R.
-      // Thevenin -> Norton: G = 1/R in parallel with current source I_N = Vf/R.
-      // Direction: I_N flows externally from k to a (the LED absorbs power, current
-      // enters at 'a' externally and leaves at 'k'). So stamp current source from k to a.
-      sys.stampConductance(a, k, 1 / r);
-      sys.stampCurrentSource(k, a, vf / r);
-    } else {
-      // reverse biased: leak (1e-9 S wins against open switches in voltage divider)
-      sys.stampConductance(a, k, 1e-13);
-    }
+    stampSimpleDiode('led', params, terminals, sys, sim, comp);
+  },
+  step(params, terminals, sim, comp) {
+    stepSimpleDiode('led', params, terminals, sim, comp);
   },
   getFlowPath(params, sim) {
     // Only show flow when LED is forward-biased (on).
@@ -479,12 +461,11 @@ const led: ComponentPlugin = {
       { x: 4, y: 1 },
     ];
   },
-  measure(params, terminals, sim) {
+  measure(_params, terminals, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-    const r = Math.max(0.01, params.seriesR as number);
-    const i = v >= (params.forwardV as number) ? (v - (params.forwardV as number)) / r : 0;
+    const i = comp ? simpleDiodeCurrent(comp, sim, a, k) : 0;
     return [
       { label: 'V', value: v.toFixed(3), unit: 'V' },
       { label: 'I', value: (i * 1000).toFixed(2), unit: 'mA' },

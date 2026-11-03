@@ -18,7 +18,7 @@ const runSimulationTool: Tool = {
     properties: {
       steps: { type: 'number', description: 'Number of simulation steps to run (default 200, max 2000). Each step is dt seconds.' },
       dt: { type: 'number', description: 'Time step in seconds (default 1e-4 = 100µs). Smaller = more accurate but slower.' },
-      method: { type: 'string', enum: ['euler', 'trap', 'gear'], description: 'Integration method for capacitors/inductors: "euler" (backward Euler, most stable, damps oscillators), "trap" (trapezoidal, 2nd-order, conserves LC energy — best for oscillators/filters), "gear" (Gear/BDF-2, 2nd-order, extra damping for stiff circuits). Default "euler".' },
+      method: { type: 'string', enum: ['euler', 'trap', 'gear'], description: 'Integration method for capacitors/inductors: "euler" (backward Euler, most stable, damps oscillators), "trap" (trapezoidal, 2nd-order, conserves LC energy — best for oscillators/filters), "gear" (Gear/BDF-2, 2nd-order, no ringing on switching edges). Default "gear".' },
     },
   },
   async execute(args, ctx) {
@@ -26,7 +26,7 @@ const runSimulationTool: Tool = {
     const dt = args.dt || 1e-4;
     const plugins = ctx.plugins;
     const method: 'euler' | 'trap' | 'gear' =
-      args.method === 'trap' || args.method === 'gear' ? args.method : 'euler';
+      args.method === 'trap' || args.method === 'euler' ? args.method : 'gear';
 
     // Reset simState for fresh run
     for (const c of ctx.doc.components) if (!c.simState) c.simState = {};

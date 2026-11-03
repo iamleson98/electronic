@@ -16,10 +16,10 @@ import {
   cStampVoltageSource, cStampVCCS, cStampVCVS, type Complex,
 } from './complex-solver';
 import { mergeOptions, type SimOptions, type ConvergenceReport, toKelvin } from './sim-options';
-import { thermalVoltage, dcSolveOpts } from './sim-options';
+import { dcSolveOpts } from './sim-options';
 import { stampGenericAC } from './ac-linearize';
 import { runSens as _runSens, type SensConfig, computeACModeSensitivity } from './sensitivity';
-import { stateKey } from './state-keys';
+import { simpleDiodeSmallSignalG } from './components/advanced-semi';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Trace data types (returned from analyses)
@@ -244,23 +244,13 @@ function buildACSystemAtFrequency(
       if (acVal.re !== 0 || acVal.im !== 0) {
         cStampCurrentSource(sys, p, n, acVal);
       }
-    } else if (comp.type === 'diode' || comp.type === 'led') {
-      // Linearize consistently with the DC model actually used by the solver
-      // (piecewise threshold model: forward = 1/onR, reverse = 1/offR). The
-      // previous Shockley default (Is/N params that don't exist on these
-      // plugins) was ~5 orders of magnitude off — effectively an open circuit.
+    } else if (comp.type === 'diode' || comp.type === 'led' || comp.type === 'zener') {
+      // Linearize the Shockley junction (+ Rs, + leakage) at the DC point —
+      // the same model the solver uses.
       const a = terms.find((t) => t.terminalId === 'a')?.nodeId ?? 0;
       const k = terms.find((t) => t.terminalId === 'k')?.nodeId ?? 0;
       const vAK = dcOp.nodeVoltage[a] - dcOp.nodeVoltage[k];
-      const vf = (comp.parameters.forwardV as number) ?? (comp.type === 'led' ? 2.0 : 0.7);
-      const rOn = comp.type === 'led'
-        ? Math.max(0.01, (comp.parameters.seriesR as number) ?? 220)
-        : Math.max(0.001, (comp.parameters.onR as number) ?? 1);
-      const rOff = Math.max(1e3, (comp.parameters.offR as number) ?? 1e7);
-      const st = (dcOp.state as any).__global ?? {};
-      const on = st[stateKey(comp.type, comp, a, k)] ?? vAK > vf;
-      const g = on ? 1 / rOn : 1 / rOff;
-      cStampConductance(sys, a, k, { re: g, im: 0 });
+      cStampConductance(sys, a, k, { re: simpleDiodeSmallSignalG(comp, dcOp, a, k), im: 0 });
       // Junction capacitance Cjo if present.
       // SPICE depletion law: Cj = Cjo / (1 - V/Vj)^M — forward bias WIDENS
       // the capacitance (denominator shrinks). The old Cjo*denom^+M shrank it.
@@ -272,41 +262,6 @@ function buildACSystemAtFrequency(
         const cj = Cjo / Math.pow(denom, M);
         cStampConductance(sys, a, k, { re: 0, im: omega * cj });
       }
-    } else if (comp.type === 'npn' || comp.type === 'pnp') {
-      // Hybrid-pi linearization at the DC operating point.
-      //   gm = Ic/Vt, rpi = β/gm, go = Ic/Vaf
-      // Ic is taken from the actual DC solution: the npn/pnp plugins store the
-      // external base current in `*_ib` state keys, so Ic = hfe * ib.
-      const c = terms.find((t) => t.terminalId === 'c')?.nodeId ?? 0;
-      const e = terms.find((t) => t.terminalId === 'e')?.nodeId ?? 0;
-      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-      const isNpn = comp.type === 'npn';
-      const st = (dcOp.state as any).__global ?? {};
-      const ibKey = stateKey(isNpn ? 'npn' : 'pnp', comp, isNpn ? c : e, b, isNpn ? e : c) + '_ib';
-      const ib = Math.abs((st[ibKey] as number) ?? 0);
-      const hfe = (comp.parameters.hfe as number) ?? 100;
-      const Ic = ib * hfe;
-      const Vt = thermalVoltage(temp);
-      const gm = Ic / Vt; // no cap — a 10 mA bias legitimately gives ~0.4 S
-      const beta = Math.max(1, hfe);
-      const gpi = gm > 0 ? gm / beta : 0; // input conductance 1/rπ (rπ = β/gm is a RESISTANCE)
-      if (gm > 0) {
-        // input conductance 1/rpi between base and emitter (the old code
-        // stamped rπ OHMS as SIEMENS — an effective short across the b-e
-        // junction that destroyed the AC input impedance)
-        cStampConductance(sys, b, e, { re: gpi, im: 0 });
-        // VCCS: ic = gm·vbe — polarity-symmetric Jacobian: +gm for BOTH NPN
-        // and PNP (the PNP's reversed current direction cancels its reversed
-        // junction polarity), so no sign here.
-        cStampVCCS(sys, c, e, b, e, { re: gm, im: 0 });
-      } else {
-        // Off: keep the base weakly defined (1 MΩ), no channel
-        cStampConductance(sys, b, e, { re: 1e-6, im: 0 });
-      }
-      // output conductance (Early effect) — polarity-symmetric: +go for both
-      const Vaf = Math.abs((comp.parameters.Vaf as number) ?? 100);
-      const go = Ic > 0 ? Ic / Math.max(1, Vaf) : 1e-12;
-      cStampConductance(sys, c, e, { re: go, im: 0 });
     } else if (comp.type === 'nmos' || comp.type === 'pmos') {
       // Linearize: gm = Kp·vov, gds = Id·λ (consistent with the ½·Kp·vov² DC law)
       const d = terms.find((t) => t.terminalId === 'd')?.nodeId ?? 0;
@@ -340,8 +295,8 @@ function buildACSystemAtFrequency(
       // Polarity-symmetric Jacobian: +gm/+gds for BOTH N and P channels.
       if (gm > 0) cStampVCCS(sys, d, s, g, s, { re: gm, im: 0 });
       cStampConductance(sys, d, s, { re: gds, im: 0 });
-      // gate is high impedance
-      cStampConductance(sys, g, s, { re: 1e-6, im: 0 });
+      // gate is high impedance (the DC model has no gate leak)
+      cStampConductance(sys, g, s, { re: 1e-12, im: 0 });
     } else if (comp.type === 'opamp') {
       // Ideal op-amp: VCVS with the plugin's open-loop gain (was hardcoded 1e6)
       const inn = terms.find((t) => t.terminalId === 'in-')?.nodeId ?? 0;

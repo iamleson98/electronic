@@ -84,7 +84,9 @@ describe('placement keeps the schematic arrangement', () => {
     expect(board.width * board.height).toBeLessThan(120 * 70);
     const r = autoRoute(footprints, [], [], ratsnest, board);
     expect(r.stats.failed).toBe(0);
-    expect(r.stats.vias).toBeLessThanOrEqual(45);
+    // real CD4026 / 5161AS pinouts scramble the segment order between chip and
+    // display, so traces must cross (the old invented pinouts needed fewer)
+    expect(r.stats.vias).toBeLessThanOrEqual(90);
   });
 });
 
@@ -93,11 +95,35 @@ describe('every physical part keeps all its pins on the board', () => {
     const bad: string[] = [];
     for (const p of getAllPlugins()) {
       if (isSchematicOnlyType(p.type)) continue;
-      const pads = new Set(getFootprintDef(p.type).pads.map((x) => x.terminalId));
+      const def = getFootprintDef(p.type);
+      const pads = new Set(def.pads.map((x) => x.terminalId));
       const missing = p.terminals.map((t) => t.id).filter((id) => !pads.has(id));
-      const extra = [...pads].filter((id) => !p.terminals.some((t) => t.id === id));
-      if (missing.length || extra.length) bad.push(`${p.type}: missing [${missing}] extra [${extra}]`);
+      // a real package may have pins the model lacks — each must say what to do with it
+      const extra = def.pads.filter((x) => !p.terminals.some((t) => t.id === x.terminalId) && !x.note).map((x) => x.terminalId);
+      if (missing.length || extra.length) bad.push(`${p.type}: missing [${missing}] unexplained extra [${extra}]`);
     }
     expect(bad).toEqual([]);
+  });
+});
+
+describe('measurement instruments on the board', () => {
+  it('scope / voltmeter probes are not parts; an ammeter becomes a jumper header that keeps the circuit closed', () => {
+    const amp = ex('Two-Stage Audio Amplifier');
+    const { footprints } = createPCBFromSchematic(amp.components, amp.wires);
+    expect(footprints.filter((f) => f.componentType === 'oscilloscope' || f.componentType === 'voltmeter')).toEqual([]);
+    expect(exportBOM(footprints)).not.toMatch(/oscilloscope|voltmeter/);
+
+    const c = (id: string, type: string) => ({ id, type, position: { x: 0, y: 0 }, rotation: 0, parameters: {} }) as CircuitComponent;
+    const w = (a: string, ta: string, b: string, tb: string) => ({ id: `${a}${ta}${b}${tb}`, from: { componentId: a, terminalId: ta }, to: { componentId: b, terminalId: tb } });
+    const comps = [c('v1', 'dcVoltage'), c('am', 'ammeter'), c('r1', 'resistor'), c('g', 'ground')];
+    const wires = [w('v1', 'p', 'am', 'p'), w('am', 'n', 'r1', 'a'), w('r1', 'b', 'g', 'g'), w('v1', 'n', 'g', 'g')];
+    const pcb = createPCBFromSchematic(comps, wires);
+    const am = pcb.footprints.find((f) => f.componentType === 'ammeter')!;
+    expect(am.refdes).toMatch(/^J\d+$/);
+    expect(am.verified).toBe(true);
+    // the header's pins carry the two nets the meter sat between
+    const vNet = pcb.footprints.find((f) => f.componentId === 'v1')!.pads.find((p) => p.terminalId === 'p')!.net;
+    const rNet = pcb.footprints.find((f) => f.componentId === 'r1')!.pads.find((p) => p.terminalId === 'a')!.net;
+    expect(am.pads.map((p) => p.net).sort()).toEqual([vNet, rNet].sort());
   });
 });

@@ -85,6 +85,14 @@ export interface Pad {
   polygon?: { x: number; y: number }[];
   /** Drill diameter in mm. > 0 means THT (plated through-hole). 0 = SMD. */
   drill?: number;
+  /** datasheet pin number */
+  number?: string;
+  /** a real-part pin with no schematic terminal that must be wired (see note) */
+  tie?: boolean;
+  /** the part's own terminal (or `pin<N>`) whose net this pin is tied to */
+  tieTo?: string;
+  /** instruction for a real-part pin with no schematic terminal */
+  note?: string;
 }
 
 /** A component footprint placed on the PCB */
@@ -106,6 +114,10 @@ export interface Footprint {
   pads: Pad[];
   /** which side of the board */
   side: CopperLayer;
+  /** the footprint matches a real part's package and pinout */
+  verified?: boolean;
+  /** package / part name of the footprint (e.g. "NE555 (DIP-8)") */
+  footprintName?: string;
   /**
    * Optional URL to a 3D model file (STL, VRML, or OBJ) for this footprint.
    * When set, the 3D viewer fetches and parses the model asynchronously;
@@ -245,6 +257,9 @@ export interface FootprintDef {
   name?: string;
   /** Optional reference designator prefix (e.g. "R", "U") */
   refdesPrefix?: string;
+  /** true when pad geometry AND pin assignment match a named real part
+   *  (real-packages.ts). Generic footprints are flagged before fabrication. */
+  verified?: boolean;
 }
 
 /** A pad definition in a FootprintDef. Fields beyond the legacy
@@ -266,4 +281,12 @@ export interface FootprintPadDef {
   drill?: number;
   /** For polygon shapes: list of polygon vertices */
   polygon?: { x: number; y: number }[];
+  /** datasheet pin number ("1", "14") */
+  number?: string;
+  /** pin the schematic model does not have that MUST be wired (see note) */
+  tie?: boolean;
+  /** the part's own terminal (or `pin<N>`) whose net this pin is tied to */
+  tieTo?: string;
+  /** what to do with a pin the schematic model does not have */
+  note?: string;
 }

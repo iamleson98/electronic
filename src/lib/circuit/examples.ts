@@ -80,7 +80,9 @@ const rawExample555: CircuitDocument = {
     comp('resistor', 'ra', [10, 4], 0, { resistance: 10000 }),
     comp('resistor', 'rb', [22, 4], 0, { resistance: 47000 }),
     comp('capacitor', 'c1', [22, 14], 0, { capacitance: 1e-6, initialV: 0 }),
-    comp('led', 'led1', [24, 8], 0, { color: 'green', forwardV: 2.0, seriesR: 220 }),
+    // OUT → 220 Ω → LED: the resistor sets ≈ 14 mA, as on a real board
+    comp('resistor', 'rled', [24, 8], 0, { resistance: 220 }),
+    comp('led', 'led1', [30, 8], 0, { color: 'green', forwardV: 2.0, seriesR: 5 }),
   ],
   wires: [
     // VCC: v1.p → ic1.vcc
@@ -105,9 +107,10 @@ const rawExample555: CircuitDocument = {
     wire('w10', 'ic1', 'thr', 'c1', 'a', [[14, 13], [22, 13]]),
     // c1.b → gnd1
     wire('w11', 'c1', 'b', 'gnd1', 'g', [[26, 15], [26, 18], [6, 18]]),
-    // OUT → LED → GND
-    wire('w12', 'ic1', 'out', 'led1', 'a', [[20, 9], [24, 9]]),
-    wire('w13', 'led1', 'k', 'gnd1', 'g', [[28, 9], [28, 18], [6, 18]]),
+    // OUT → R → LED → GND
+    wire('w12', 'ic1', 'out', 'rled', 'a', [[20, 9], [24, 9]]),
+    wire('w14', 'rled', 'b', 'led1', 'a', [[28, 9], [30, 9]]),
+    wire('w13', 'led1', 'k', 'gnd1', 'g', [[34, 9], [34, 18], [6, 18]]),
   ],
 };
 

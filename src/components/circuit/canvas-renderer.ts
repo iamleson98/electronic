@@ -35,6 +35,11 @@ import { computeWireCrossingMarks } from '@/lib/circuit/wire-crossings';
 import { computeFlowDotPositions } from '@/lib/circuit/wire-geometry';
 import { computeDraftPreview } from './wire-draft-preview';
 import { CELL_SIZE, type DragState, type WireDragState, type RotateDragState, type HoverState, TOGGLEABLE_TYPES } from './canvas-types';
+
+/** Below this no current-flow dots are drawn. Off-state leakage — a real
+ *  transistor's I_CEO, the solver's gmin floor — sits in the pA … nA range
+ *  and must not animate as if current flowed through an open switch. */
+export const VISIBLE_CURRENT = 1e-9;
 import { getWirePath, segmentMidpoint, angleFromCenter } from './canvas-wire-utils';
 
 /** Mutable view state owned by the render loop (updated without React). */
@@ -561,7 +566,7 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
     if (isAnimating) {
       const current = wireCurrents.get(wire.id) ?? 0;
       const absCurrent = Math.abs(current);
-      if (absCurrent > 1e-12) {
+      if (absCurrent > VISIBLE_CURRENT) {
         const dir = current >= 0 ? 1 : -1;
         // Physics-based flow speed (log scale):
         //   1µA → 0.15, 1mA → 0.4, 10mA → 0.6, 100mA → 0.8, 1A → 1.0
@@ -780,7 +785,7 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
     if (isAnimating && (plugin.getFlowPaths || plugin.getFlowPath)) {
       const current = componentCurrents.get(comp.id) ?? 0;
       const absCurrent = Math.abs(current);
-      if (absCurrent > 1e-12) {
+      if (absCurrent > VISIBLE_CURRENT) {
         const dir = current >= 0 ? 1 : -1;
         const speed = Math.min(1.2, Math.max(0.1, 0.15 + 0.25 * Math.log10(absCurrent / 1e-6 + 1)));
         const flowGridPaths: Vec2[][] = plugin.getFlowPaths

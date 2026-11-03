@@ -143,21 +143,22 @@ const rawExPushPull: CircuitDocument = {
 };
 
 // ── Phase-Shift Oscillator (BJT) ───────────────────────────────────────────
-// The classic RC sine oscillator: a common-emitter amplifier (β=150, gain
-// set well above 29) with a 3-section RC ladder feeding its output phase
-// back to its base. Each RC section contributes 60° at the oscillation
-// frequency, so the ladder's total 180° plus the CE stage's inversion
-// closes the loop at exactly 360°. Watch the oscillation build from
-// nothing on the scope — the loop gain only exceeds 1 thanks to the
-// bypassed emitter resistor, and the amplitude grows until the
-// transistor's nonlinearity clamps it.
+// The classic RC sine oscillator: a common-emitter amplifier with a
+// 3-section RC ladder feeding its output phase back to its base. Each RC
+// section contributes ≈60° at the oscillation frequency, so the ladder's
+// 180° plus the CE stage's inversion closes the loop at 360°. Designed
+// with real-transistor numbers: a high-β small-signal part (BC549C class,
+// β ≈ 400) biased at Ie ≈ 0.9 mA (gm = Ic/Vt ≈ 34 mS) with the collector at
+// mid-supply, giving a small-signal loop gain ≈ 1.9 at ≈ 490 Hz — enough
+// margin to start from the power-on transient. The amplitude grows until
+// the transistor's nonlinearity clamps it.
 const rawExPhaseShiftOscillator: CircuitDocument = {
   version: 1,
   components: [
     comp('dcVoltage', 'vcc1', [2, 4], 0, { voltage: 9 }),
-    comp('resistor', 'rb1', [8, 2], 0, { resistance: 68000 }),
-    comp('resistor', 'rb2', [8, 10], 0, { resistance: 8200 }),
-    comp('resistor', 'rc', [16, 2], 0, { resistance: 10000 }),
+    comp('resistor', 'rb1', [8, 2], 0, { resistance: 150000 }),
+    comp('resistor', 'rb2', [8, 10], 0, { resistance: 22000 }),
+    comp('resistor', 'rc', [16, 2], 0, { resistance: 4700 }),
     comp('resistor', 're', [16, 12], 0, { resistance: 470 }),
     comp('capacitor', 'ce', [22, 12], 0, { capacitance: 1e-4 }),
     // phase-shift ladder: 3 stages of C (10nF) + R (10k)
@@ -167,7 +168,7 @@ const rawExPhaseShiftOscillator: CircuitDocument = {
     comp('resistor', 'rs1', [26, 10], 0, { resistance: 10000 }),
     comp('resistor', 'rs2', [32, 10], 0, { resistance: 10000 }),
     comp('resistor', 'rs3', [38, 10], 0, { resistance: 10000 }),
-    comp('npn', 'q1', [20, 6], 0, { hfe: 150, vbe: 0.7, satV: 0.2 }),
+    comp('npn', 'q1', [20, 6], 0, { hfe: 400, vbe: 0.65 }),
     comp('oscilloscope', 'sc1', [24, 16], 0, { color: '#22d3ee', label: 'Out' }),
     comp('ground', 'gnd1', [3, 24], 0, {}),
   ],

@@ -1,5 +1,6 @@
 // Additional manufacturing output formats: BOM, IPC-2581, ODB++, DXF, SVG, PDF, STEP, VRML
 
+import { fabY, fabRotation } from './gerber-export';
 import type { Footprint, Trace, Via, BoardOutline } from './types';
 import { partDatabase, type PartInfo } from './part-database';
 
@@ -61,17 +62,17 @@ export function exportIPC2581(
   lines.push(`      <Profile><Rect x="0" y="0" width="${board.width}" height="${board.height}"/></Profile>`);
   // Components
   for (const fp of footprints) {
-    lines.push(`      <Component refDes="${esc(fp.refdes ?? fp.id)}" part="${esc(fp.componentType)}" x="${fp.position.x.toFixed(4)}" y="${fp.position.y.toFixed(4)}" rotation="${fp.rotation}" side="${fp.side}" footprintName="${esc(fp.componentType)}" />`);
+    lines.push(`      <Component refDes="${esc(fp.refdes ?? fp.id)}" part="${esc(fp.componentType)}" x="${fp.position.x.toFixed(4)}" y="${fabY(fp.position.y).toFixed(4)}" rotation="${fabRotation(fp.rotation)}" side="${fp.side}" footprintName="${esc(fp.componentType)}" />`);
   }
   // Traces
   for (const trace of traces) {
     for (const seg of trace.segments) {
-      lines.push(`      <Trace net="${esc(trace.net)}" layer="${esc(trace.layer)}" width="${seg.width.toFixed(4)}"><Line x1="${seg.start.x.toFixed(4)}" y1="${seg.start.y.toFixed(4)}" x2="${seg.end.x.toFixed(4)}" y2="${seg.end.y.toFixed(4)}" /></Trace>`);
+      lines.push(`      <Trace net="${esc(trace.net)}" layer="${esc(trace.layer)}" width="${seg.width.toFixed(4)}"><Line x1="${seg.start.x.toFixed(4)}" y1="${fabY(seg.start.y).toFixed(4)}" x2="${seg.end.x.toFixed(4)}" y2="${fabY(seg.end.y).toFixed(4)}" /></Trace>`);
     }
   }
   // Vias
   for (const via of vias) {
-    lines.push(`      <Via net="${esc(via.net)}" x="${via.position.x.toFixed(4)}" y="${via.position.y.toFixed(4)}" diameter="${via.diameter.toFixed(4)}" drill="${via.drill.toFixed(4)}" />`);
+    lines.push(`      <Via net="${esc(via.net)}" x="${via.position.x.toFixed(4)}" y="${fabY(via.position.y).toFixed(4)}" diameter="${via.diameter.toFixed(4)}" drill="${via.drill.toFixed(4)}" />`);
   }
   lines.push(`    </Step>`);
   lines.push(`  </Content>`);
@@ -94,14 +95,14 @@ export function exportODB(
           const net = padNets.get(`${pad.componentId}:${pad.terminalId}`) ?? '';
           const r = Math.max(pad.size.width, pad.size.height) / 2;
           feats.push(`# Pad ${pad.id} net=${net}`);
-          if (pad.shape === 'circle') feats.push(`P ${pad.position.x.toFixed(4)} ${pad.position.y.toFixed(4)} r${r.toFixed(4)} 0`);
-          else feats.push(`R ${pad.position.x.toFixed(4)} ${pad.position.y.toFixed(4)} ${pad.size.width.toFixed(4)} ${pad.size.height.toFixed(4)} 0`);
+          if (pad.shape === 'circle') feats.push(`P ${pad.position.x.toFixed(4)} ${fabY(pad.position.y).toFixed(4)} r${r.toFixed(4)} 0`);
+          else feats.push(`R ${pad.position.x.toFixed(4)} ${fabY(pad.position.y).toFixed(4)} ${pad.size.width.toFixed(4)} ${pad.size.height.toFixed(4)} 0`);
         }
       }
     }
     for (const trace of traces) {
       if (trace.layer !== layer) continue;
-      for (const seg of trace.segments) feats.push(`L ${seg.start.x.toFixed(4)} ${seg.start.y.toFixed(4)} ${seg.end.x.toFixed(4)} ${seg.end.y.toFixed(4)} w${seg.width.toFixed(4)}`);
+      for (const seg of trace.segments) feats.push(`L ${seg.start.x.toFixed(4)} ${fabY(seg.start.y).toFixed(4)} ${seg.end.x.toFixed(4)} ${fabY(seg.end.y).toFixed(4)} w${seg.width.toFixed(4)}`);
     }
     return feats;
   };
@@ -114,7 +115,7 @@ export function exportODB(
       for (const pad of fp.pads) {
         if ((pad.drill ?? 0) > 0) continue;
         if (pad.layer !== layer && fp.side !== layer) continue;
-        feats.push(`R ${pad.position.x.toFixed(4)} ${pad.position.y.toFixed(4)} ${(pad.size.width + 0.1).toFixed(4)} ${(pad.size.height + 0.1).toFixed(4)} 0`);
+        feats.push(`R ${pad.position.x.toFixed(4)} ${fabY(pad.position.y).toFixed(4)} ${(pad.size.width + 0.1).toFixed(4)} ${(pad.size.height + 0.1).toFixed(4)} 0`);
       }
     }
     return feats;
@@ -127,7 +128,7 @@ export function exportODB(
     if (fp.side !== 'top') continue;
     const hw = fp.bodySize.width / 2;
     const hh = fp.bodySize.height / 2;
-    silk.push(`R ${fp.position.x.toFixed(4)} ${fp.position.y.toFixed(4)} ${fp.bodySize.width.toFixed(4)} ${fp.bodySize.height.toFixed(4)} 0`);
+    silk.push(`R ${fp.position.x.toFixed(4)} ${fabY(fp.position.y).toFixed(4)} ${fp.bodySize.width.toFixed(4)} ${fp.bodySize.height.toFixed(4)} 0`);
     void hw; void hh;
   }
   files.push({ path: 'steps/pcb/layers/silktop/features', content: silk.join('\n') });
@@ -135,10 +136,10 @@ export function exportODB(
   const drill: string[] = ['$UNITS=MM'];
   for (const fp of footprints) {
     for (const pad of fp.pads) {
-      if ((pad.drill ?? 0) > 0) drill.push(`P ${pad.position.x.toFixed(4)} ${pad.position.y.toFixed(4)} d${pad.drill!.toFixed(4)}`);
+      if ((pad.drill ?? 0) > 0) drill.push(`P ${pad.position.x.toFixed(4)} ${fabY(pad.position.y).toFixed(4)} d${pad.drill!.toFixed(4)}`);
     }
   }
-  for (const via of vias) drill.push(`V ${via.position.x.toFixed(4)} ${via.position.y.toFixed(4)} d${via.diameter.toFixed(4)} ${via.drill.toFixed(4)}`);
+  for (const via of vias) drill.push(`V ${via.position.x.toFixed(4)} ${fabY(via.position.y).toFixed(4)} d${via.diameter.toFixed(4)} ${via.drill.toFixed(4)}`);
   files.push({ path: 'steps/pcb/layers/drill/features', content: drill.join('\n') });
   // Netlist
   const nets = new Set<string>();
@@ -153,7 +154,7 @@ export function exportODB(
 export function exportDXF(footprints: Footprint[], traces: Trace[], vias: Via[], board: BoardOutline): string {
   const lines: string[] = ['0', 'SECTION', '2', 'ENTITIES'];
   // Board outline
-  const wL = (x1: number, y1: number, x2: number, y2: number) => lines.push('0', 'LWPOLYLINE', '8', 'BOARD_OUTLINE', '90', '2', '70', '0', '10', x1.toFixed(4), '20', y1.toFixed(4), '10', x2.toFixed(4), '20', y2.toFixed(4));
+  const wL = (x1: number, y1: number, x2: number, y2: number) => lines.push('0', 'LWPOLYLINE', '8', 'BOARD_OUTLINE', '90', '2', '70', '0', '10', x1.toFixed(4), '20', fabY(y1).toFixed(4), '10', x2.toFixed(4), '20', fabY(y2).toFixed(4));
   wL(0, 0, board.width, 0); wL(board.width, 0, board.width, board.height); wL(board.width, board.height, 0, board.height); wL(0, board.height, 0, 0);
   // Traces
   for (const trace of traces) {
@@ -163,12 +164,12 @@ export function exportDXF(footprints: Footprint[], traces: Trace[], vias: Via[],
   for (const fp of footprints) {
     for (const pad of fp.pads) {
       const r = Math.max(pad.size.width, pad.size.height) / 2;
-      lines.push('0', 'CIRCLE', '8', 'PADS', '10', pad.position.x.toFixed(4), '20', pad.position.y.toFixed(4), '40', r.toFixed(4));
+      lines.push('0', 'CIRCLE', '8', 'PADS', '10', pad.position.x.toFixed(4), '20', fabY(pad.position.y).toFixed(4), '40', r.toFixed(4));
     }
   }
   // Vias
   for (const via of vias) {
-    lines.push('0', 'CIRCLE', '8', 'DRILL', '10', via.position.x.toFixed(4), '20', via.position.y.toFixed(4), '40', (via.diameter / 2).toFixed(4));
+    lines.push('0', 'CIRCLE', '8', 'DRILL', '10', via.position.x.toFixed(4), '20', fabY(via.position.y).toFixed(4), '40', (via.diameter / 2).toFixed(4));
   }
   lines.push('0', 'ENDSEC', '0', 'EOF');
   return lines.join('\n');
@@ -411,7 +412,7 @@ export function exportSTEP(footprints: Footprint[], board: BoardOutline, vias?: 
   const solids: string[] = [];
   // Board laminate.
   solids.push(emitBoxStep(b, {
-    x0: 0, y0: 0, z0: 0, x1: board.width, y1: board.height, z1: 1.6,
+    x0: 0, y0: fabY(board.height), z0: 0, x1: board.width, y1: 0, z1: 1.6,
   }, 'board'));
 
   // One body per footprint, centered on position and raised onto the board.
@@ -422,7 +423,7 @@ export function exportSTEP(footprints: Footprint[], board: BoardOutline, vias?: 
     const w = swap ? fp.bodySize.height : fp.bodySize.width;
     const h = swap ? fp.bodySize.width : fp.bodySize.height;
     const x0 = fp.position.x - w / 2;
-    const y0 = fp.position.y - h / 2;
+    const y0 = fabY(fp.position.y) - h / 2; // STEP is Z-up: Y-up top view
     // Bottom-side parts hang below the board.
     const zBase = fp.side === 'bottom' ? -3.0 : 1.6;
     solids.push(emitBoxStep(b, {
@@ -435,8 +436,8 @@ export function exportSTEP(footprints: Footprint[], board: BoardOutline, vias?: 
   for (const v of vias ?? []) {
     const r = v.drill / 2;
     solids.push(emitBoxStep(b, {
-      x0: v.position.x - r, y0: v.position.y - r, z0: -0.1,
-      x1: v.position.x + r, y1: v.position.y + r, z1: 1.7,
+      x0: v.position.x - r, y0: fabY(v.position.y) - r, z0: -0.1,
+      x1: v.position.x + r, y1: fabY(v.position.y) + r, z1: 1.7,
     }, `via_hole_${v.drill}mm`));
   }
 

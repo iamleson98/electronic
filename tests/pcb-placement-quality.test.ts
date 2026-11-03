@@ -68,12 +68,13 @@ describe('functional-module clustering', () => {
       const pa = pos(a), pb = pos(b);
       return Math.sqrt((pa.x - pb.x) ** 2 + (pa.y - pb.y) ** 2);
     };
-    // the 555 + its timing RC stay a module: each within 16 mm of the 555
+    // the 555 + its timing RC stay a module: each within 17 mm of the 555
+    // (real DIP-8: 7.62 mm rows)
     const timer = components.find((c) => c.type === 'timer555')!;
     const rc = components.filter((c) => c.type === 'resistor' || c.type === 'capacitor');
     expect(rc.length).toBeGreaterThanOrEqual(3);
     for (const c of rc) {
-      expect(dist(timer.id, c.id)).toBeLessThanOrEqual(16);
+      expect(dist(timer.id, c.id)).toBeLessThanOrEqual(17);
     }
     // every display has a counter within 28 mm, and on average within 16 mm
     // (module adjacency — the force relaxation + clustering jointly own
@@ -84,10 +85,10 @@ describe('functional-module clustering', () => {
     expect(displays.length).toBe(6);
     const nearests = displays.map((d) => Math.min(...counters.map((c) => dist(c.id, d.id))));
     // (modules stack vertically like the schematic — counter above its
-    // display — so the center distance is bounded below by the two parts'
-    // heights, ≈ 18 mm, not their widths)
-    expect(Math.max(...nearests)).toBeLessThanOrEqual(28);
-    expect(nearests.reduce((a, b) => a + b, 0) / nearests.length).toBeLessThanOrEqual(18);
+    // display — so the center distance is bounded below by half the two
+    // parts' heights: real DIP-16 ≈ 21 mm + 0.56″ display ≈ 19 mm → ≈ 20 mm)
+    expect(Math.max(...nearests)).toBeLessThanOrEqual(32);
+    expect(nearests.reduce((a, b) => a + b, 0) / nearests.length).toBeLessThanOrEqual(24);
   });
 
   it('scrambled schematic positions: modules still form next to their drivers', () => {
@@ -102,8 +103,8 @@ describe('functional-module clustering', () => {
       const pc = pos(c.id), pd = pos(d.id);
       return Math.sqrt((pc.x - pd.x) ** 2 + (pc.y - pd.y) ** 2);
     })));
-    expect(Math.max(...nearests)).toBeLessThanOrEqual(28);
-    expect(nearests.reduce((a, b) => a + b, 0) / nearests.length).toBeLessThanOrEqual(18);
+    expect(Math.max(...nearests)).toBeLessThanOrEqual(32);
+    expect(nearests.reduce((a, b) => a + b, 0) / nearests.length).toBeLessThanOrEqual(24);
   });
 
   it('moduleClustering: false disables the pre-pass entirely', () => {
@@ -115,12 +116,13 @@ describe('functional-module clustering', () => {
 });
 
 describe('RUDY congestion feedback', () => {
-  it('Arduino Clock on a dense 35×25 board: overflow detected, re-relaxed away', () => {
+  it('Arduino Clock on a dense 45×32 board: overflow detected, re-relaxed away', () => {
     const { components, wires } = example('Arduino Clock (MM:SS)');
-    // (50×35 no longer overflows at all since overlaps separate along the
-    // schematic's arrangement axis — peak demand 0.56 — so the feedback loop
-    // is exercised on a smaller board)
-    const r = computeSmartPlacement(components, wires, 35, 25);
+    // (50×35 no longer overflows since overlaps separate along the
+    // schematic's arrangement axis and parts have real package sizes; the
+    // board size is picked so the feedback loop is exercised — placement
+    // grows the board as needed, so overflow is not monotonic in size)
+    const r = computeSmartPlacement(components, wires, 45, 32);
     const s = r.stats;
     // the dense board genuinely overflows the routing supply estimate…
     expect(s.overflowCellsBefore).toBeGreaterThanOrEqual(1);

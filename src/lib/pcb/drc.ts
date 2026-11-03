@@ -24,7 +24,8 @@ import { computeNetCompletion } from './netlist-verify';
 export interface DRCError {
   type: 'clearance' | 'short' | 'unrouted' | 'outside_board' | 'overlap' |
     'annular_ring' | 'min_width' | 'min_drill' | 'silk_over_pad' | 'courtyard' | 'hole_to_hole' |
-    'net_mismatch' | 'isolated_copper' | 'starved_thermal';
+    'net_mismatch' | 'isolated_copper' | 'starved_thermal' |
+    'unwired_required_pin' | 'unverified_footprint';
   severity: 'error' | 'warning';
   message: string;
   position: { x: number; y: number };
@@ -110,6 +111,28 @@ export function runDRC(
   waivers?: DRCWaiver[],
 ): DRCError[] {
   const errors: DRCError[] = [];
+
+  // Real-part pins the schematic cannot express that still need wiring
+  // (the ideal op-amp's supplies), and footprints whose pinout is NOT a
+  // real part's — ordering a board built on them would miswire the chip.
+  for (const fp of footprints) {
+    for (const pad of fp.pads) {
+      if (pad.tie && !pad.net) {
+        errors.push({
+          type: 'unwired_required_pin', severity: 'warning',
+          message: `${fp.refdes} pin ${pad.number ?? pad.terminalId}: ${pad.note ?? 'must be wired'}`,
+          position: pad.position, layer: 'both',
+        });
+      }
+    }
+    if (fp.verified === false && fp.pads.length >= 3) {
+      errors.push({
+        type: 'unverified_footprint', severity: 'warning',
+        message: `${fp.refdes} (${fp.componentType}) uses a generic footprint — its pinout is not checked against a real part; assign a real footprint before ordering`,
+        position: fp.position, layer: 'both',
+      });
+    }
+  }
 
   // Build a net → NetClass lookup for per-net rules
   const netToClass = new Map<string, NetClass>();

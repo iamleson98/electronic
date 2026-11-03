@@ -197,9 +197,9 @@ describe('AC wrapper: superposition and device linearization', () => {
   it('diode linearizes at the DC operating point (not a fixed 1 kΩ)', () => {
     // Two identical RC-coupled dividers with a diode to ground; only the
     // stimulus PHASE differs. phase=90: the AC source sits at +1 V at t=0 →
-    // the diode is ON at the DC op → small-signal 1/onR (10 Ω) → gain ≈
-    // 10/1010. phase=270 (−1 V at t=0): OFF → 1/offR → gain ≈ 1. The old
-    // fixed 1 kΩ gave 0.5 for BOTH.
+    // the diode is ON at the DC op → small-signal rd + Rs → gain ≈
+    // (rd+Rs)/(1 kΩ+rd+Rs). phase=270 (−1 V at t=0): OFF → leakage → gain ≈ 1.
+    // The old fixed 1 kΩ gave 0.5 for BOTH.
     const build = (phase: number) => {
       const comps = [
         comp('acVoltage', 'VS', { amplitude: 1, frequency: 100, offset: 0, phase }),
@@ -220,7 +220,14 @@ describe('AC wrapper: superposition and device linearization', () => {
     };
     const on = build(90);
     const off = build(270);
-    expect(on.points[0].magnitude).toBeCloseTo(10 / 1010, 2);
+    // ON: the Shockley junction (0.7 V at 1 mA, N = 1.8) biased by
+    // 1 V = 1010·I + N·Vt·ln(1 + I/Is) has rd = N·Vt/I in series with 10 Ω
+    const nVt = 1.8 * 0.025852;
+    const Is = 1e-3 / Math.expm1(0.7 / nVt);
+    let I = 1e-4;
+    for (let k = 0; k < 100; k++) I = Math.max(1e-9, (1 - nVt * Math.log1p(I / Is)) / 1010);
+    const z = nVt / (I + Is) + 10;
+    expect(on.points[0].magnitude).toBeCloseTo(z / (1000 + z), 2);
     expect(off.points[0].magnitude).toBeCloseTo(1, 2);
   });
 });

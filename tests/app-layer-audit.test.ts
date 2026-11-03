@@ -200,7 +200,7 @@ describe('exportSPICENetlist: acVoltage', () => {
     const net = exportSPICENetlist(doc);
     const line = net.split('\n').find((l) => l.startsWith('VV1'))!;
     expect(line).toBeDefined();
-    expect(line).toContain('SINE(2.5 1 1000)');
+    expect(line).toContain('SINE(2.5 1 1000 0 0 0)'); // standard SINE(VO VA FREQ TD THETA PHASE)
   });
 });
 

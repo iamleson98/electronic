@@ -37,10 +37,10 @@ function totalSegments(result: ReturnType<typeof autoRoute>): number {
 // ── 1. Bend cost — the #1 visual quality signal ────────────────────────────
 
 describe('bend cost (minimal corners)', () => {
-  it('LED + Resistor: ≤ 15 segments (baseline 26 — the staircase offender)', () => {
+  it('LED + Resistor: ≤ 16 segments (baseline 26 — the staircase offender; real 1206 pads)', () => {
     const { result } = routeExample('LED + Resistor');
     expect(result.stats.failed).toBe(0);
-    expect(totalSegments(result)).toBeLessThanOrEqual(15);
+    expect(totalSegments(result)).toBeLessThanOrEqual(16);
     // every segment is still 45°/90° (aesthetics contract from v2)
     for (const t of result.traces) {
       for (const s of t.segments) {

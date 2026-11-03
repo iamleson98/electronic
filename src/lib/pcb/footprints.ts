@@ -4,6 +4,7 @@
 
 import type { FootprintDef, FootprintPadDef } from './types';
 import { getPlugin } from '../circuit/registry';
+import { realPackageDef, dipPos } from './real-packages';
 
 // Standard pad sizes (mm).
 // NOTE: PAD_SMD/PAD_SMALL keep their historical 1.5x0.8 / 1.0x1.0 sizes:
@@ -23,8 +24,6 @@ const PAD_SMALL = { width: 1.0, height: 1.0 }; // Small SMD pad
  * sit between grid points and no legal crossing exists, which stranded nets
  * on dense boards (the multi-digit clock examples).
  */
-const DIP_PITCH = 2.5;
-const DIP_ROW_SPAN = 5.0; // 2×2.5
 /** Parametric-IC pad: 1.6mm circle, 1.0mm drill (0.3mm annular ring).
  *  Leaves a 0.9mm corridor between pins — a 0.3mm trace + 2×0.2mm clearance
  *  fits with 0.2mm to spare. */
@@ -40,6 +39,8 @@ const ANNOTATION_TYPES = new Set([
   'powerGND', 'powerAGND', 'powerVCC', 'power5V', 'power3V3', 'power1V8',
   'power2V5', 'power12V', 'powerMinus12V', 'powerMinus5V', 'powerAVDD',
   'powerVBAT', 'customPower', 'ground', 'junction',
+  // measurement instruments: they observe the circuit, nothing to solder
+  'oscilloscope', 'voltmeter',
 ]);
 
 /** Schematic-only symbol: shapes the netlist, never becomes a PCB part. */
@@ -89,49 +90,53 @@ function parametricFootprintDef(type: string): FootprintDef | null {
     };
   }
 
-  // n ≥ 3: DIP layout — left column top→bottom, right column bottom→top.
-  const rows = Math.ceil(n / 2);
-  const pads: FootprintPadDef[] = [];
-  for (let i = 0; i < n; i++) {
-    const left = i < rows;
-    const rowIdx = left ? i : n - 1 - i; // right column runs bottom→up
-    const y = (rowIdx - (rows - 1) / 2) * DIP_PITCH;
-    const x = left ? -DIP_ROW_SPAN / 2 : DIP_ROW_SPAN / 2;
-    pads.push({ terminalId: terminals[i].id, position: { x, y }, shape: 'circle', size: PAD_DIP, drill: 1.0 });
-  }
+  // n ≥ 3: generic DIP with real geometry (2.54 mm pitch, 7.62 mm rows) —
+  // but the pins follow the MODEL's terminal order, not a datasheet, so the
+  // footprint is NOT verified and is flagged before fabrication.
+  const pins = n + (n % 2);
+  const pads: FootprintPadDef[] = terminals.map((t, i) => ({
+    terminalId: t.id, position: dipPos(i + 1, pins), shape: i === 0 ? 'rect' : 'circle',
+    size: PAD_DIP, drill: 0.8, number: String(i + 1),
+  }));
   return {
-    bodySize: {
-      width: Math.max(7.0, DIP_ROW_SPAN + 2.0),
-      height: rows * DIP_PITCH + 2.0,
-    },
+    bodySize: { width: 6.35, height: (pins / 2) * 2.54 + 0.5 },
     pads,
-    name: `${plugin.name} (DIP-${n})`,
+    name: `${plugin.name} (generic DIP-${pins}, pinout not verified)`,
   };
 }
 
 /** Footprint registry: component type → footprint definition */
 export const footprintDefs: Record<string, FootprintDef> = {
-  // ----- Passive components (SMD 1206 style) -----
+  // ----- Passive components: IPC-7351 nominal 1206 / 1210 land patterns
+  // (KiCad R_1206_3216Metric: 1.15 × 1.8 mm pads at ±1.5 mm). The old pads
+  // were 1.5 × 0.8 mm at ±2.1 mm — rotated 90° and too far apart for the
+  // part's end terminations to land on. -----
   resistor: {
     bodySize: { width: 3.2, height: 1.6 },
     pads: [
-      { terminalId: 'a', position: { x: -2.1, y: 0 }, shape: 'rect', size: PAD_SMD },
-      { terminalId: 'b', position: { x: 2.1, y: 0 }, shape: 'rect', size: PAD_SMD },
+      { terminalId: 'a', position: { x: -1.5, y: 0 }, shape: 'rect', size: { width: 1.15, height: 1.8 }, number: '1' },
+      { terminalId: 'b', position: { x: 1.5, y: 0 }, shape: 'rect', size: { width: 1.15, height: 1.8 }, number: '2' },
     ],
+    name: 'R_1206_3216Metric',
+    verified: true,
   },
   capacitor: {
     bodySize: { width: 3.2, height: 1.6 },
     pads: [
-      { terminalId: 'a', position: { x: -2.1, y: 0 }, shape: 'rect', size: PAD_SMD },
-      { terminalId: 'b', position: { x: 2.1, y: 0 }, shape: 'rect', size: PAD_SMD },
+      { terminalId: 'a', position: { x: -1.5, y: 0 }, shape: 'rect', size: { width: 1.15, height: 1.8 }, number: '1' },
+      { terminalId: 'b', position: { x: 1.5, y: 0 }, shape: 'rect', size: { width: 1.15, height: 1.8 }, number: '2' },
     ],
+    name: 'C_1206_3216Metric',
+    verified: true,
   },
   inductor: {
-    bodySize: { width: 4.0, height: 2.0 },
+    bodySize: { width: 3.2, height: 2.5 },
     pads: [
-      { terminalId: 'a', position: { x: -2.5, y: 0 }, shape: 'rect', size: PAD_SMD },
-      { terminalId: 'b', position: { x: 2.5, y: 0 }, shape: 'rect', size: PAD_SMD },
+      { terminalId: 'a', position: { x: -1.5, y: 0 }, shape: 'rect', size: { width: 1.15, height: 2.65 }, number: '1' },
+      { terminalId: 'b', position: { x: 1.5, y: 0 }, shape: 'rect', size: { width: 1.15, height: 2.65 }, number: '2' },
     ],
+    name: 'L_1210_3225Metric',
+    verified: true,
   },
   potentiometer: {
     bodySize: { width: 5.0, height: 5.0 },
@@ -146,16 +151,20 @@ export const footprintDefs: Record<string, FootprintDef> = {
   led: {
     bodySize: { width: 3.2, height: 1.6 },
     pads: [
-      { terminalId: 'a', position: { x: -2.1, y: 0 }, shape: 'rect', size: PAD_SMD },
-      { terminalId: 'k', position: { x: 2.1, y: 0 }, shape: 'rect', size: PAD_SMD },
+      { terminalId: 'k', position: { x: -1.5, y: 0 }, shape: 'rect', size: { width: 1.15, height: 1.8 }, number: '1' },
+      { terminalId: 'a', position: { x: 1.5, y: 0 }, shape: 'rect', size: { width: 1.15, height: 1.8 }, number: '2' },
     ],
+    name: 'LED_1206_3216Metric (pad 1 = cathode)',
+    verified: true,
   },
   diode: {
     bodySize: { width: 3.2, height: 1.6 },
     pads: [
-      { terminalId: 'a', position: { x: -2.1, y: 0 }, shape: 'rect', size: PAD_SMD },
-      { terminalId: 'k', position: { x: 2.1, y: 0 }, shape: 'rect', size: PAD_SMD },
+      { terminalId: 'k', position: { x: -1.5, y: 0 }, shape: 'rect', size: { width: 1.15, height: 1.8 }, number: '1' },
+      { terminalId: 'a', position: { x: 1.5, y: 0 }, shape: 'rect', size: { width: 1.15, height: 1.8 }, number: '2' },
     ],
+    name: 'D_1206_3216Metric (pad 1 = cathode)',
+    verified: true,
   },
 
   // ----- Switches -----
@@ -175,30 +184,6 @@ export const footprintDefs: Record<string, FootprintDef> = {
   },
 
   // ----- Transistors (SOT-23 style) -----
-  npn: {
-    bodySize: { width: 2.9, height: 2.8 },
-    pads: [
-      { terminalId: 'c', position: { x: 1.0, y: -1.0 }, shape: 'rect', size: PAD_SMALL },
-      { terminalId: 'b', position: { x: -1.0, y: 0 }, shape: 'rect', size: PAD_SMALL },
-      { terminalId: 'e', position: { x: 1.0, y: 1.0 }, shape: 'rect', size: PAD_SMALL },
-    ],
-  },
-  pnp: {
-    bodySize: { width: 2.9, height: 2.8 },
-    pads: [
-      { terminalId: 'e', position: { x: 1.0, y: -1.0 }, shape: 'rect', size: PAD_SMALL },
-      { terminalId: 'b', position: { x: -1.0, y: 0 }, shape: 'rect', size: PAD_SMALL },
-      { terminalId: 'c', position: { x: 1.0, y: 1.0 }, shape: 'rect', size: PAD_SMALL },
-    ],
-  },
-  nmos: {
-    bodySize: { width: 2.9, height: 2.8 },
-    pads: [
-      { terminalId: 'd', position: { x: 1.0, y: -1.0 }, shape: 'rect', size: PAD_SMALL },
-      { terminalId: 'g', position: { x: -1.0, y: 0 }, shape: 'rect', size: PAD_SMALL },
-      { terminalId: 's', position: { x: 1.0, y: 1.0 }, shape: 'rect', size: PAD_SMALL },
-    ],
-  },
   pmos: {
     bodySize: { width: 2.9, height: 2.8 },
     pads: [
@@ -238,54 +223,20 @@ export const footprintDefs: Record<string, FootprintDef> = {
     ],
   },
 
-  // ----- ICs -----
-  // NOTE: opamp keeps its historical 3-pad (in+/in-/out) def. A real 8-pin
-  // DIP-8 needs power pins, but widening this def to ±3.81mm moves pads off
-  // the router's 0.25mm-tuned corridors and breaks the dense-board routing
-  // contracts. Use opampRails (parametric DIP fallback) for powered builds.
-  opamp: {
-    bodySize: { width: 6.0, height: 5.0 },
-    pads: [
-      { terminalId: 'in+', position: { x: -3.0, y: -1.0 }, shape: 'rect', size: PAD_SMALL },
-      { terminalId: 'in-', position: { x: -3.0, y: 1.0 }, shape: 'rect', size: PAD_SMALL },
-      { terminalId: 'out', position: { x: 3.0, y: 0 }, shape: 'rect', size: PAD_SMALL },
-    ],
-  },
-  timer555: {
-    bodySize: { width: 10.0, height: 8.0 },
-    pads: [
-      { terminalId: 'gnd', position: { x: -4.0, y: -3.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'trig', position: { x: -4.0, y: -1.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'out', position: { x: 4.0, y: -3.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'rst', position: { x: -4.0, y: 1.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'ctrl', position: { x: -4.0, y: 3.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'thr', position: { x: 4.0, y: 1.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'dis', position: { x: 4.0, y: 3.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'vcc', position: { x: 4.0, y: -1.0 }, shape: 'circle', size: PAD_THT },
-    ],
-  },
+  // ----- ICs, transistors, displays: real packages with datasheet pinouts
+  // live in real-packages.ts (getFootprintDef falls through to them). -----
 
-  // ----- Meters / Probes (small SMD) -----
-  oscilloscope: {
-    bodySize: { width: 3.0, height: 3.0 },
-    pads: [
-      { terminalId: 'p', position: { x: -1.5, y: 0 }, shape: 'circle', size: PAD_SMALL },
-      { terminalId: 'n', position: { x: 1.5, y: 0 }, shape: 'circle', size: PAD_SMALL },
-    ],
-  },
-  voltmeter: {
-    bodySize: { width: 3.0, height: 4.0 },
-    pads: [
-      { terminalId: 'p', position: { x: -1.5, y: 0 }, shape: 'circle', size: PAD_SMALL },
-      { terminalId: 'n', position: { x: 1.5, y: 0 }, shape: 'circle', size: PAD_SMALL },
-    ],
-  },
+  // An ammeter sits IN SERIES — dropping it would cut the circuit. On the
+  // board it is a 2-pin 2.54 mm jumper header: fit a jumper to close the
+  // path, pull it and insert a meter to measure the current.
   ammeter: {
-    bodySize: { width: 3.0, height: 4.0 },
+    bodySize: { width: 5.1, height: 2.6 },
     pads: [
-      { terminalId: 'p', position: { x: -1.5, y: 0 }, shape: 'circle', size: PAD_SMALL },
-      { terminalId: 'n', position: { x: 1.5, y: 0 }, shape: 'circle', size: PAD_SMALL },
+      { terminalId: 'p', position: { x: -1.27, y: 0 }, shape: 'rect', size: { width: 1.7, height: 1.7 }, drill: 1.0, number: '1' },
+      { terminalId: 'n', position: { x: 1.27, y: 0 }, shape: 'oval', size: { width: 1.7, height: 1.7 }, drill: 1.0, number: '2' },
     ],
+    name: 'PinHeader_1x02_P2.54mm (current-measurement jumper)',
+    verified: true,
   },
 
   // ----- MCUs -----
@@ -321,19 +272,6 @@ export const footprintDefs: Record<string, FootprintDef> = {
   // NOTE: sevenSegment keeps its historical 8-pad def (a-g + com). The
   // plugin exposes exactly these 8 terminals, so extra dp/com2 pads would
   // be net-less and inflate the ratsnest (2 unrouted legs on the clock).
-  sevenSegment: {
-    bodySize: { width: 10.0, height: 15.0 },
-    pads: [
-      { terminalId: 'a', position: { x: -4.0, y: -6.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'b', position: { x: 0, y: -6.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'c', position: { x: 4.0, y: -6.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'd', position: { x: 4.0, y: 6.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'e', position: { x: 0, y: 6.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'f', position: { x: -4.0, y: 6.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'g', position: { x: -4.0, y: 0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'com', position: { x: 4.0, y: 0 }, shape: 'circle', size: PAD_THT },
-    ],
-  },
   speaker: {
     bodySize: { width: 8.0, height: 5.0 },
     pads: [
@@ -368,6 +306,9 @@ export const footprintDefs: Record<string, FootprintDef> = {
 export function getFootprintDef(type: string): FootprintDef {
   const explicit = footprintDefs[type];
   if (explicit) return explicit;
+  // real package + datasheet pinout (user-registered footprints above win)
+  const real = realPackageDef(type);
+  if (real) return real;
   if (ANNOTATION_TYPES.has(type)) {
     return { bodySize: { width: 1.0, height: 1.0 }, pads: [], name: 'Annotation' };
   }

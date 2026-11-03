@@ -28,6 +28,7 @@ import type { CircuitComponent, Wire, CircuitDocument } from './types';
 import { getPlugin } from './registry';
 import './components'; // register all built-in plugins (idempotent)
 import { parseSpiceValue as canonicalParseSpiceValue } from './spice';
+import { fromSpiceExpr } from './spice-expr';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Value parsing — handles SPICE engineering suffixes (case-insensitive)
@@ -445,8 +446,23 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
             components.push({
               id, type: 'acVoltage', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
             });
+          } else if (/PULSE\s*\(/i.test(joined)) {
+            // PULSE(V1 V2 TD TR TF PW PER) — high time counts half of each edge
+            const args = (joined.match(/PULSE\s*\(([^)]*)\)/i)?.[1] ?? '').trim().split(/[\s,]+/).map(parseSpiceValue);
+            const [v1 = 0, v2 = 5, , tr = 0, tf = 0, pw = 0.5, per = 1] = args;
+            const plugin = getPlugin('pulseSource');
+            const params: any = {};
+            if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
+            params.low = v1;
+            params.high = v2;
+            params.frequency = per > 0 ? 1 / per : 1;
+            params.duty = per > 0 ? ((pw + (tr + tf) / 2) / per) * 100 : 50;
+            components.push({
+              id, type: 'pulseSource', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
+            });
           } else {
-            const value = parseSpiceValue(tokens[3]);
+            // "V1 a b 5" and "V1 a b DC 5" are the same card
+            const value = parseSpiceValue(tokens[3].toUpperCase() === 'DC' ? (tokens[4] ?? '0') : tokens[3]);
             const plugin = getPlugin('dcVoltage');
             const params: any = {};
             if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
@@ -465,7 +481,7 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
             continue;
           }
           const id = tokens[0];
-          const value = parseSpiceValue(tokens[3]);
+          const value = parseSpiceValue(tokens[3].toUpperCase() === 'DC' ? (tokens[4] ?? '0') : tokens[3]);
           const plugin = getPlugin('currentSource');
           const params: any = {};
           if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
@@ -500,7 +516,7 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
           const plugin = getPlugin(type);
           const params: any = {};
           if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
-          params.expr = expr;
+          params.expr = fromSpiceExpr(expr);
           components.push({
             id, type, position: { x: 0, y: 0 }, rotation: 0, parameters: params,
           });

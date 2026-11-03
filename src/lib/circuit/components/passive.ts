@@ -1,10 +1,23 @@
 // Passive components: resistor, capacitor, inductor.
-// Capacitor and inductor use companion models (backward Euler) for transient analysis.
+// Capacitor and inductor use companion models (backward Euler, trapezoidal or
+// Gear/BDF-2 — the app default) for transient analysis.
 
 import type { ComponentPlugin } from '../types';
 import { drawResistorZigzag, drawCapacitor, drawInductor, drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { trapAlternates, TRAP_RING_ALT_THRESHOLD } from '../integration';
+
+/**
+ * Variable-step BDF-2 coefficients: x'_n ≈ (a0·x_n − a1·x_{n−1} + a2·x_{n−2})/h
+ * with ω = h/h_prev. At a constant step (ω = 1) this is the textbook
+ * (3x_n − 4x_{n−1} + x_{n−2})/(2h). The fixed-step form silently lost its
+ * second order (and its stability margin) whenever the step changed — the
+ * live sim lets the user change dt mid-run.
+ */
+function bdf2(h: number, hPrev: number | undefined): { a0: number; a1: number; a2: number } {
+  const w = hPrev !== undefined && hPrev > 0 ? h / hPrev : 1;
+  return { a0: (1 + 2 * w) / (1 + w), a1: 1 + w, a2: (w * w) / (1 + w) };
+}
 
 // ----- Resistor -----
 const resistor: ComponentPlugin = {
@@ -259,8 +272,9 @@ const capacitor: ComponentPlugin = {
         g = C / dt;
         iEq = (C / dt) * vPrev;
       } else {
-        g = (3 * C) / (2 * dt);
-        iEq = (C * (4 * vPrev - vPrev2)) / (2 * dt);
+        const k = bdf2(dt, st[key + '_hp'] as number | undefined);
+        g = (k.a0 * C) / dt;
+        iEq = (C / dt) * (k.a1 * vPrev - k.a2 * vPrev2);
       }
     } else {
       // Backward Euler (default): G_eq = C/dt, I_eq = (C/dt) * vPrev
@@ -324,9 +338,10 @@ const capacitor: ComponentPlugin = {
       i = (C / dt) * (vCurr - vPrev);
     } else if (used === 'gear') {
       const vPrev2 = st[key + '_v2'] as number | undefined;
+      const k = bdf2(dt, st[key + '_hp'] as number | undefined);
       i = vPrev2 === undefined
         ? (C / dt) * (vCurr - vPrev)
-        : (C / (2 * dt)) * (3 * vCurr - 4 * vPrev + vPrev2);
+        : (C / dt) * (k.a0 * vCurr - k.a1 * vPrev + k.a2 * vPrev2);
     } else {
       i = (C / dt) * (vCurr - vPrev);
     }
@@ -336,6 +351,7 @@ const capacitor: ComponentPlugin = {
     // Gear needs the shifted voltage history (v_{n−2} = old v_{n−1}).
     if (method === 'gear') {
       st[key + '_v2'] = vPrev;
+      st[key + '_hp'] = dt;
     }
     // consume one Euler-fallback step (stamp() only reads the counter — it is
     // re-stamped several times per step by the feedback iteration, so the
@@ -427,8 +443,9 @@ const inductor: ComponentPlugin = {
         g = dt / L;
         iEq = iPrev;
       } else {
-        g = (2 * dt) / (3 * L);
-        iEq = (4 * iPrev - iPrev2) / 3;
+        const k = bdf2(dt, st[key + '_hp'] as number | undefined);
+        g = dt / (k.a0 * L);
+        iEq = (k.a1 * iPrev - k.a2 * iPrev2) / k.a0;
       }
     } else {
       // Backward Euler (default):
@@ -488,9 +505,10 @@ const inductor: ComponentPlugin = {
       }
     } else if (used === 'gear') {
       const iPrev2 = st[key + '_i2'] as number | undefined;
+      const k = bdf2(dt, st[key + '_hp'] as number | undefined);
       iCurr = iPrev2 === undefined
         ? iPrev + (v / L) * dt
-        : (4 * iPrev - iPrev2) / 3 + ((2 * dt) / (3 * L)) * v;
+        : (k.a1 * iPrev - k.a2 * iPrev2) / k.a0 + (dt / (k.a0 * L)) * v;
     } else {
       iCurr = iPrev + (v / L) * dt;
     }
@@ -499,6 +517,7 @@ const inductor: ComponentPlugin = {
     st[key + '_i'] = iCurr;
     if (method === 'gear') {
       st[key + '_i2'] = iPrev;
+      st[key + '_hp'] = dt;
     }
     // shift voltage history for the trap detector: _vp2 keeps v_{n−1}.
     if (method === 'trap') {

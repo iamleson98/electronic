@@ -5,6 +5,8 @@ import type { ComponentPlugin, CircuitComponent } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
+import { thermalVoltage } from '../sim-options';
+import { stampBJT, stepBJT, measureBJT, stampSimpleDiode, stepSimpleDiode, simpleDiodeCurrent } from './advanced-semi';
 import { stampOpamp, stepOpamp, specFromParams, type OpampPins } from './opamp-core';
 
 function idealPins(terminals: { terminalId: string; nodeId: number }[]): OpampPins {
@@ -28,7 +30,7 @@ const diode: ComponentPlugin = {
   type: 'diode',
   name: 'Diode',
   category: 'semiconductor',
-  description: 'Diode with exponential I-V characteristic. Simplified to a threshold model.',
+  description: 'Silicon diode with the Shockley (exponential) I-V curve: Forward Voltage is the drop at 1 mA (1N4148 ≈ 0.7 V), On Resistance the bulk series resistance, Off Resistance a parallel leakage.',
   symbol: '▷',
   nonLinear: true,
   boundingBox: { width: 4, height: 2 },
@@ -37,9 +39,9 @@ const diode: ComponentPlugin = {
     { id: 'k', label: 'K', position: { x: 4, y: 1 } },
   ],
   parameters: [
-    { key: 'forwardV', label: 'Forward Voltage', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.05 },
-    { key: 'onR', label: 'On Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
-    { key: 'offR', label: 'Off Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
+    { key: 'forwardV', label: 'Forward Voltage (at 1 mA)', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.05 },
+    { key: 'onR', label: 'Series Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
+    { key: 'offR', label: 'Leakage Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
   ],
   render(ctx, params, cellSize) {
     ctx.beginPath();
@@ -66,59 +68,37 @@ const diode: ComponentPlugin = {
     ctx.stroke();
   },
   stamp(params, terminals, sys, sim, comp) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
-    const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-    const vf = params.forwardV as number;
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('diode', comp, a, k);
-    const prevOn = st[key] ?? false;
-    void prevOn;
-    // Current-aware threshold model. The on-state companion is a Thevenin
-    // (Vf, onR): its solved terminal voltage is v = Vf + i*onR, so v > Vf
-    // is EXACTLY "forward current is flowing". A voltage hysteresis margin
-    // (v > Vf - 0.1) swallows the small reverse-current signal (the on-state
-    // settles at Vf - i*onR with i < 0) and latches the diode on forever —
-    // which made the rectifier example pass the negative half-cycle at
-    // -5.7V. No margin: the companion fixed point is self-consistent.
-    const on = v > vf;
-    st[key] = on;
-    if (on) {
-      // Forward biased: Vf drop at 'a' in series with R.
-      // Norton: G = 1/R, current source Vf/R from k to a externally
-      // (diode absorbs power, current enters at a externally)
-      const r = Math.max(0.001, params.onR as number);
-      sys.stampConductance(a, k, 1 / r);
-      sys.stampCurrentSource(k, a, vf / r);
-    } else {
-      // reverse biased: leak per the offR parameter (default 10MΩ)
-      const rOff = Math.max(1e3, (params.offR as number) ?? 1e7);
-      sys.stampConductance(a, k, 1 / rOff);
-    }
+    stampSimpleDiode('diode', params, terminals, sys, sim, comp);
+  },
+  step(params, terminals, sim, comp) {
+    stepSimpleDiode('diode', params, terminals, sim, comp);
   },
   getFlowPath() {
     // anode (0,1) through body to cathode (4,1)
     return [{ x: 0, y: 1 }, { x: 4, y: 1 }];
   },
-  measure(params, terminals, sim) {
+  measure(_params, terminals, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-    return [{ label: 'V', value: v.toFixed(3), unit: 'V' }];
+    const i = comp ? simpleDiodeCurrent(comp, sim, a, k) : 0;
+    return [{ label: 'V', value: v.toFixed(3), unit: 'V' }, { label: 'I', value: (i * 1000).toFixed(3), unit: 'mA' }];
   },
 };
 
 // ----- NPN BJT -----
-/** Series resistance of the "on" B-E junction (Ω). Small enough that Vbe
- *  stays at its on-voltage (+1 mV per mA of base current), large enough that
- *  parallel junctions (current mirrors) share current instead of making the
- *  matrix singular. Shared with the PNP (extra.ts). */
-export const BJT_BE_SERIES_R = 1;
+/** Gummel-Poon parameters for the basic BJT parts: β = hFE, and Is set so
+ *  that Vbe = "VBE (on)" at Ic = 1 mA. No Early effect / knee (the simple
+ *  part has no parameters for them). */
+export function simpleBjtModel(hfe: number, vOn: number): Record<string, number> {
+  return { Is: 1e-3 / Math.exp(vOn / thermalVoltage(27)), Bf: Math.max(1, hfe), Br: 1, Vaf: 1e6, Var: 1e6, Ikf: 1e6 };
+}
+
 const npn: ComponentPlugin = {
   type: 'npn',
   name: 'NPN Transistor',
   category: 'semiconductor',
-  description: 'NPN BJT with simple piecewise-linear model. Use as a switch.',
+  description: 'NPN BJT — exponential (Ebers–Moll) junctions: β = hFE, Vbe = VBE(on) at 1 mA, real gm = Ic/Vt and natural saturation. Works as a switch and in linear amplifiers.',
   symbol: 'NPN',
   nonLinear: true,
   boundingBox: { width: 3, height: 4 },
@@ -129,8 +109,7 @@ const npn: ComponentPlugin = {
   ],
   parameters: [
     { key: 'hfe', label: 'DC Gain (hFE)', type: 'number', default: 100, unit: '', min: 1, max: 1000, step: 1 },
-    { key: 'vbe', label: 'VBE (on)', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 1.5, step: 0.05 },
-    { key: 'satV', label: 'Vce(sat)', type: 'number', default: 0.2, unit: 'V', min: 0.01, max: 1, step: 0.05 },
+    { key: 'vbe', label: 'VBE at 1 mA', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 1.5, step: 0.05 },
   ],
   render(ctx, params, cellSize) {
     // base lead
@@ -197,99 +176,19 @@ const npn: ComponentPlugin = {
       { x: 3, y: 4 },
     ];
   },
+  // Exponential junctions (shared Gummel-Poon core). The old model held the
+  // B-E junction at a fixed vbeOn: its transconductance was effectively
+  // infinite (later 100 S through a 1 Ω series R) instead of Ic/Vt ≈ 40 mS at
+  // 1 mA, so every un-degenerated stage — a bypassed common-emitter amp — had
+  // absurd gain and clipped.
   stamp(params, terminals, sys, sim, comp) {
-    const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-    const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
-    const hfe = params.hfe as number;
-    const vbeOn = params.vbe as number;
-    const vceSat = params.satV as number;
-
-    const vbe = sim.nodeVoltage[b] - sim.nodeVoltage[e];
-    const vce = sim.nodeVoltage[c] - sim.nodeVoltage[e];
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('npn', comp, c, b, e);
-    const prevOn = st[key] ?? false;
-    // Previous step's actual base current (through the b-e voltage source).
-    // This is the right signal for "is the external circuit still driving
-    // the base?" — when the button is released, this drops to ~0 even though
-    // the npn's own voltage source holds V_B at vbeOn.
-    const prevIb = (st[key + '_ib'] as number) ?? 0;
-    // Turn-on: Vbe above threshold (external circuit drives the base).
-    // Stay-on: Vbe above threshold (with hysteresis) AND external base
-    // current is still flowing (above 1 nA noise floor).
-    // Turn-off: external base current has dropped to ~0 (e.g., button released).
-    const on = prevOn
-      ? (vbe > vbeOn - 0.1 && prevIb > 1e-9)
-      : (vbe > vbeOn);
-    st[key] = on;
-    if (!on) {
-      // Off: tiny leak so the matrix stays non-singular and the base is
-      // pulled to a defined voltage by the external circuit.
-      sys.stampConductance(c, e, 1e-13);
-      sys.stampConductance(b, e, 1e-13);
-      st[key + '_ib'] = 0;
-      st[key + '_branch'] = -1;
-      return;
-    }
-    // On: the B-E junction is vbeOn behind a tiny series resistance
-    // (Norton form: I_B = (Vbe − vbeOn)/R_BE), and I_C = hfe·I_B is the
-    // matching VCCS. With an open base I_B → 0 and so does I_C — the npn is
-    // "on" in state but conducts nothing, as for a released button. (The
-    // junction used to be an IDEAL voltage source: two transistors sharing
-    // base and emitter — every current mirror — put two ideal sources in
-    // parallel and the matrix went singular.)
-    const gBE = 1 / BJT_BE_SERIES_R;
-    sys.stampConductance(b, e, gBE);
-    sys.stampCurrentSource(e, b, gBE * vbeOn);
-    sys.stampVCCS(c, e, b, e, hfe * gBE);
-    sys.stampCurrentSource(e, c, hfe * gBE * vbeOn);
-    st[key + '_branch'] = -1;
-    // Saturation clamp: only when there's actual collector current to
-    // saturate. Without this guard, the clamp would provide a current path
-    // C→E even when I_B (and thus I_C) is zero — which is the "current flows
-    // when switch is open" bug. The clamp is a Thevenin to VceSat (G in
-    // parallel with Isc = VceSat*G), NOT a conductance to 0V: a bare 100S to
-    // ground forced Vce ≈ Ic/100 (≈1mV @ 100mA) instead of the real ~0.2V.
-    const prevIc = hfe * prevIb;
-    if (prevIc > 1e-9 && vce < vceSat) {
-      const gSat = 100;
-      sys.stampConductance(c, e, gSat);
-      sys.stampCurrentSource(e, c, vceSat * gSat);
-    }
-    // Reverse-Vce protection: if Vce goes negative (collector below emitter),
-    // the B-C junction becomes forward-biased and the transistor enters
-    // reverse-active mode. In a real BJT this would still conduct (with lower
-    // hfe_reverse), but in our simplified model we just clamp Vce ≥ -vceSat
-    // so the collector node can't run away to -700V when the AC signal drives
-    // the base hard. Without this clamp, the simulator can produce insane
-    // voltages like Vc = -705V on a 9V supply — see "Stage 1 amplified" test.
-    if (vce < -vceSat) {
-      // Add a small reverse conductance so Vce can't drop below ~-vceSat.
-      // 10S is enough to absorb the CCCS's reverse current without making
-      // the matrix ill-conditioned.
-      sys.stampConductance(e, c, 10);
-    }
+    stampBJT(simpleBjtModel(params.hfe as number, params.vbe as number), terminals, sys, sim, comp, true);
   },
-  step(params, terminals, sim, instance) {
-    const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-    const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('npn', instance, c, b, e);
-    // External base drive (positive INTO the base) — the turn-off signal.
-    st[key + '_ib'] = st[key]
-      ? (sim.nodeVoltage[b] - sim.nodeVoltage[e] - (params.vbe as number)) / BJT_BE_SERIES_R
-      : 0;
+  step(_params, terminals, sim, instance) {
+    stepBJT(terminals, sim, instance);
   },
-  measure(params, terminals, sim) {
-    const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-    const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
-    return [
-      { label: 'Vbe', value: (sim.nodeVoltage[b] - sim.nodeVoltage[e]).toFixed(3), unit: 'V' },
-      { label: 'Vce', value: (sim.nodeVoltage[c] - sim.nodeVoltage[e]).toFixed(3), unit: 'V' },
-    ];
+  measure(params, terminals, sim, comp) {
+    return measureBJT(simpleBjtModel(params.hfe as number, params.vbe as number), terminals, sim, comp, true);
   },
 };
 
@@ -301,6 +200,7 @@ const opamp: ComponentPlugin = {
   description: 'Ideal op-amp: very high gain, no bandwidth limit, near-zero output resistance. Power terminals omitted — the output is limited to the Max/Min Output voltages (±15 V by default), like a real op-amp on ±15 V rails. Press M to toggle De Morgan alternate body (rectangle form).',
   // smooth output limiting (opamp-core.ts) — Newton re-stamp loop
   nonLinear: true,
+  opampModel: { spec: idealSpec, pins: { inp: 'in+', inn: 'in-', out: 'out' }, rin: 1e6 },
   symbol: 'OP',
   boundingBox: { width: 4, height: 4 },
   terminals: [
@@ -711,7 +611,7 @@ const zener: ComponentPlugin = {
   type: 'zener',
   name: 'Zener Diode',
   category: 'semiconductor',
-  description: 'Zener diode with reverse breakdown voltage. Conducts in reverse when V > Vz.',
+  description: 'Zener diode (Shockley junction with SPICE-style breakdown): Zener Voltage is the reverse drop at Izt = 5 mA, Forward Voltage the forward drop at 1 mA.',
   symbol: 'Z',
   nonLinear: true,
   boundingBox: { width: 4, height: 2 },
@@ -720,10 +620,10 @@ const zener: ComponentPlugin = {
     { id: 'k', label: 'K', position: { x: 4, y: 1 } },
   ],
   parameters: [
-    { key: 'zenerV', label: 'Zener Voltage', type: 'number', default: 3.3, unit: 'V', min: 0.1, max: 100, step: 0.1 },
-    { key: 'forwardV', label: 'Forward Voltage', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.05 },
-    { key: 'onR', label: 'On Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
-    { key: 'offR', label: 'Off Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
+    { key: 'zenerV', label: 'Zener Voltage (at 5 mA)', type: 'number', default: 3.3, unit: 'V', min: 0.1, max: 100, step: 0.1 },
+    { key: 'forwardV', label: 'Forward Voltage (at 1 mA)', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.05 },
+    { key: 'onR', label: 'Series Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
+    { key: 'offR', label: 'Leakage Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
   ],
   render(ctx, params, cellSize) {
     ctx.beginPath();
@@ -758,49 +658,20 @@ const zener: ComponentPlugin = {
     ctx.stroke();
   },
   stamp(params, terminals, sys, sim, comp) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
-    const v = sim.nodeVoltage[a] - sim.nodeVoltage[k]; // V(A) - V(K)
-    const vf = params.forwardV as number;
-    const vz = params.zenerV as number;
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('zener', comp, a, k);
-    const prevMode = st[key] ?? 'off'; // 'off' | 'forward' | 'reverse'
-    void prevMode;
-    // Self-consistent region selection (see diode note): each region's
-    // Thevenin companion makes its own threshold test exactly equivalent to
-    // "current flows in that region's direction", so plain thresholds are
-    // stable fixed points — the ±0.1V hysteresis margins latched reverse
-    // breakdown / forward conduction against reverse load current.
-    let mode: string;
-    if (v > vf) {
-      mode = 'forward';
-    } else if (v < -vz) {
-      mode = 'reverse';
-    } else {
-      mode = 'off';
-    }
-    st[key] = mode;
-    const r = Math.max(0.001, params.onR as number);
-    if (mode === 'forward') {
-      sys.stampConductance(a, k, 1 / r);
-      sys.stampCurrentSource(k, a, vf / r);
-    } else if (mode === 'reverse') {
-      // Reverse breakdown: V(K) - V(A) = Vz, current flows K→A
-      sys.stampConductance(a, k, 1 / r);
-      sys.stampCurrentSource(a, k, vz / r);
-    } else {
-      sys.stampConductance(a, k, 1 / (params.offR as number));
-    }
+    stampSimpleDiode('zener', params, terminals, sys, sim, comp);
+  },
+  step(params, terminals, sim, comp) {
+    stepSimpleDiode('zener', params, terminals, sim, comp);
   },
   getFlowPath() {
     return [{ x: 0, y: 1 }, { x: 4, y: 1 }];
   },
-  measure(params, terminals, sim) {
+  measure(_params, terminals, sim, comp) {
     const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
     const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
-    return [{ label: 'V', value: v.toFixed(3), unit: 'V' }];
+    const i = comp ? simpleDiodeCurrent(comp, sim, a, k) : 0;
+    return [{ label: 'V', value: v.toFixed(3), unit: 'V' }, { label: 'I', value: (i * 1000).toFixed(3), unit: 'mA' }];
   },
 };
 registerPlugin(zener);
