@@ -5,7 +5,8 @@ import type { ComponentPlugin, CircuitComponent } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
-import { BJT_BE_SERIES_R } from './semiconductors';
+import { simpleBjtModel } from './semiconductors';
+import { stampBJT, stepBJT, measureBJT } from './advanced-semi';
 import { stampOpamp, stepOpamp, measureOpamp, acStampOpamp, specFromParams, type OpampPins, type OpampSpec } from './opamp-core';
 
 // ----- PNP BJT (mirror of NPN) -----
@@ -24,8 +25,7 @@ const pnp: ComponentPlugin = {
   ],
   parameters: [
     { key: 'hfe', label: 'DC Gain (hFE)', type: 'number', default: 100, unit: '', min: 1, max: 1000, step: 1 },
-    { key: 'veb', label: 'VEB (on)', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 1.5, step: 0.05 },
-    { key: 'satV', label: 'Vec(sat)', type: 'number', default: 0.2, unit: 'V', min: 0.01, max: 1, step: 0.05 },
+    { key: 'veb', label: 'VEB at 1 mA', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 1.5, step: 0.05 },
   ],
   render(ctx, params, cellSize) {
     // base lead
@@ -89,79 +89,15 @@ const pnp: ComponentPlugin = {
       { x: 3, y: 4 },
     ];
   },
+  // exponential junctions — see the NPN (semiconductors.ts)
   stamp(params, terminals, sys, sim, comp) {
-    const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-    const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
-    const hfe = params.hfe as number;
-    const vebOn = params.veb as number;
-    const vecSat = params.satV as number;
-
-    const veb = sim.nodeVoltage[e] - sim.nodeVoltage[b];
-    const vec = sim.nodeVoltage[e] - sim.nodeVoltage[c];
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('pnp', comp, e, b, c);
-    const prevOn = st[key] ?? false;
-    // Previous step's actual base current (through the e-b voltage source).
-    // Used to detect when external drive is removed (see NPN comment).
-    const prevIb = (st[key + '_ib'] as number) ?? 0;
-    const on = prevOn
-      ? (veb > vebOn - 0.1 && prevIb > 1e-9)
-      : (veb > vebOn);
-    st[key] = on;
-    if (!on) {
-      sys.stampConductance(c, e, 1e-13);
-      sys.stampConductance(b, e, 1e-13);
-      st[key + '_ib'] = 0;
-      st[key + '_branch'] = -1;
-      return;
-    }
-    // On: E-B junction = vebOn behind BJT_BE_SERIES_R (Norton form, see
-    // the NPN) and I_C = hfe·I_B from e→c. When external base drive stops,
-    // I_B → 0, so I_C → 0 even though V_EB stays at vebOn.
-    const gBE = 1 / BJT_BE_SERIES_R;
-    sys.stampConductance(e, b, gBE);
-    sys.stampCurrentSource(b, e, gBE * vebOn);
-    sys.stampVCCS(e, c, e, b, hfe * gBE);
-    sys.stampCurrentSource(c, e, hfe * gBE * vebOn);
-    st[key + '_branch'] = -1;
-    // Saturation clamp: only when there's actual collector current.
-    // Thevenin to Vec(sat) — mirror of the NPN fix: conductance G in
-    // parallel with a current source G·vecSat (injected into the emitter)
-    // holds Vec ≈ vecSat. The previous bare 100S conductance shorted the
-    // clamp to 0V, forcing Vec ≈ Ic/100 (~1mV @ 100mA) instead of ~0.2V.
-    const prevIc = hfe * prevIb;
-    if (prevIc > 1e-9 && vec < vecSat) {
-      const gSat = 100;
-      sys.stampConductance(e, c, gSat);
-      sys.stampCurrentSource(c, e, vecSat * gSat);
-    }
-    // Reverse-Vec protection (mirror of NPN fix): if Vec goes negative
-    // (collector above emitter — PNP reverse-active region), clamp so the
-    // collector node can't run away to hundreds of volts.
-    if (vec < -vecSat) {
-      sys.stampConductance(c, e, 10);
-    }
+    stampBJT(simpleBjtModel(params.hfe as number, params.veb as number), terminals, sys, sim, comp, false);
   },
-  step(params, terminals, sim, instance) {
-    const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-    const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('pnp', instance, e, b, c);
-    // External base drive (positive OUT of the base)
-    st[key + '_ib'] = st[key]
-      ? (sim.nodeVoltage[e] - sim.nodeVoltage[b] - (params.veb as number)) / BJT_BE_SERIES_R
-      : 0;
+  step(_params, terminals, sim, instance) {
+    stepBJT(terminals, sim, instance);
   },
-  measure(params, terminals, sim) {
-    const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-    const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
-    return [
-      { label: 'Veb', value: (sim.nodeVoltage[e] - sim.nodeVoltage[b]).toFixed(3), unit: 'V' },
-      { label: 'Vec', value: (sim.nodeVoltage[e] - sim.nodeVoltage[c]).toFixed(3), unit: 'V' },
-    ];
+  measure(params, terminals, sim, comp) {
+    return measureBJT(simpleBjtModel(params.hfe as number, params.veb as number), terminals, sim, comp, false);
   },
 };
 

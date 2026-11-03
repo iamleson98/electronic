@@ -169,7 +169,8 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
   const rawLines = netlist.split(/\r?\n/);
   const lines: string[] = [];
   for (const raw of rawLines) {
-    const line = raw.trim();
+    // inline comments (LTspice / ngspice ';' and ngspice '$ ') are not tokens
+    const line = raw.replace(/\s;.*$/, '').replace(/\s\$\s.*$/, '').trim();
     if (line.startsWith('+')) {
       if (lines.length > 0) {
         lines[lines.length - 1] += ' ' + line.slice(1).trim();
@@ -281,8 +282,15 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
     }
     if (head === '.model') {
       const name = tokens[1];
-      const type = tokens[2]?.toLowerCase() || '';
-      const paramsStr = tokens.slice(3).join(' ');
+      // ".model Q1 PNP(Is=1f Bf=80)" and ".model Q1 PNP (Is=1f Bf=80)" and
+      // ".model Q1 PNP Is=1f Bf=80" are all the same card. Tokenizing glued
+      // "PNP(Is=1f" together: the type became "pnp(is=1f" (every such PNP
+      // imported as an NPN), the first parameter was lost and the last value
+      // kept its ")".
+      const card = tokens.slice(2).join(' ');
+      const m = /^([A-Za-z]\w*)\s*\(?([\s\S]*?)\)?\s*$/.exec(card);
+      const type = (m?.[1] ?? '').toLowerCase();
+      const paramsStr = (m?.[2] ?? '').replace(/[()]/g, ' ');
       const params = parseModelParams(paramsStr);
       models.set(name.toLowerCase(), { name, type, params });
       continue;
@@ -528,7 +536,7 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
               offset: parseSpiceValue(args[0] || '0'),
               amplitude: parseSpiceValue(args[1] || '1'),
               frequency: parseSpiceValue(args[2] || '1'),
-              phase: parseSpiceValue(args[3] || '0'),
+              phase: parseSpiceValue(args[5] || '0'), // SINE(VO VA FREQ TD THETA PHASE)
             });
           } else if (pulseIdx >= 0) {
             // DC 0 PULSE(...) — create pulse source
@@ -561,7 +569,7 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
             offset: parseSpiceValue(args[0] || '0'),
             amplitude: parseSpiceValue(args[1] || '1'),
             frequency: parseSpiceValue(args[2] || '1'),
-            phase: parseSpiceValue(args[3] || '0'),
+            phase: parseSpiceValue(args[5] || '0'), // SINE(VO VA FREQ TD THETA PHASE)
           });
         } else if (kind.startsWith('PULSE') || kind === 'PULSE') {
           const argsStr = rest.find(t => t.startsWith('('))?.slice(1, -1) || '';
@@ -569,9 +577,12 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
           // PULSE(v1 v2 td tr tf pw per)
           const v1 = parseSpiceValue(args[0] || '0');
           const v2 = parseSpiceValue(args[1] || '5');
+          const tr = parseSpiceValue(args[3] || '0');
+          const tf = parseSpiceValue(args[4] || '0');
           const pw = parseSpiceValue(args[5] || '0.5');
           const per = parseSpiceValue(args[6] || '1');
-          const duty = per > 0 ? (pw / per) * 100 : 50;
+          // the output is high for PW plus half of each edge
+          const duty = per > 0 ? ((pw + (tr + tf) / 2) / per) * 100 : 50;
           const freq = per > 0 ? 1 / per : 1;
           addComponent('pulseSource', name, [
             { terminalId: 'p', node: n1 },
@@ -606,11 +617,32 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
         const modelName = tokens[3];
         const model = models.get(modelName?.toLowerCase());
         allNodes.add(na); allNodes.add(nk);
-        const vf = model?.params['bv'] ? 0.7 : 0.7; // default
-        addComponent('diode', name, [
-          { terminalId: 'a', node: na },
-          { terminalId: 'k', node: nk },
-        ], { forwardV: vf });
+        // forward drop at 1 mA from the model's Is / N (it used to be a
+        // hard-coded 0.7 V, so every LED imported as a silicon diode)
+        const is = model?.params['is'] ?? 1e-14;
+        const nf = model?.params['n'] ?? 1;
+        const vf = +(nf * 0.025852 * Math.log1p(1e-3 / is)).toFixed(3);
+        const rs = model?.params['rs'] ?? 1;
+        const bv = model?.params['bv'];
+        const terms = [{ terminalId: 'a', node: na }, { terminalId: 'k', node: nk }];
+        if (bv !== undefined) addComponent('zener', name, terms, { zenerV: bv, forwardV: vf, onR: rs });
+        else if (vf > 1.4 || /^led/i.test(modelName ?? '')) addComponent('led', name, terms, { forwardV: vf, seriesR: rs });
+        else addComponent('diode', name, terms, { forwardV: vf, onR: rs });
+        break;
+      }
+      case 'E': {
+        // VCVS E<name> n+ n- nc+ nc- gain — with the output referenced to
+        // ground and a large gain it is an op-amp; anything else is skipped
+        const [, np, nn, cp, cn, g] = tokens;
+        const gain = parseSpiceValue(g ?? '0');
+        if (nn === '0' && Math.abs(gain) >= 100) {
+          allNodes.add(np); allNodes.add(cp); allNodes.add(cn);
+          addComponent('opamp', name, [
+            { terminalId: 'out', node: np },
+            { terminalId: 'in+', node: cp },
+            { terminalId: 'in-', node: cn },
+          ], { gain });
+        }
         break;
       }
       case 'Q': {
@@ -625,6 +657,8 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
         // Common BJT params: Bf (hfe), Is, Vaf, Nf, Ikf, Ise, Ne, Br, Var, Nc, Ikr, Isc, Nc, Rb, Rc, Re, Cje, Cjc, Cjs, Mje, Mjc, Mjs, Vje, Vjc, Vjs, Tf, Xtf, Itf, Vtf, Tr)
         const params: Record<string, number> = {
           hfe: model?.params['bf'] ?? 100,
+          // the part's on-voltage: Vbe at Ic = 1 mA for the model's Is
+          [pluginType === 'pnp' ? 'veb' : 'vbe']: +(0.025852 * Math.log1p(1e-3 / (model?.params['is'] ?? 1e-14))).toFixed(3),
           is: model?.params['is'] ?? 1e-14,
           vaf: model?.params['vaf'] ?? 0,
           nf: model?.params['nf'] ?? 1,
@@ -670,7 +704,7 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
           Cgso: model?.params['cgso'] ?? 0,
           Cgdo: model?.params['cgdo'] ?? 0,
           W: model?.params['w'] ?? 100e-6,
-          L: model?.params['l'] ?? 10e-6,
+          L: model?.params['l'] ?? 100e-6, // ngspice DEFL = DEFW = 100 µm → W/L = 1
           Is: model?.params['is'] ?? 1e-14,
           N: model?.params['n'] ?? 1,
           Tox: model?.params['tox'] ?? 4e-9,
@@ -683,6 +717,12 @@ export function parseSpiceNetlist(netlist: string): CircuitDocument {
             params[m[1].toUpperCase()] = parseSpiceValue(m[2]);
           }
         }
+        // …and the keys the part actually reads (the SPICE-named keys above
+        // were never used, so every imported MOSFET ran on defaults):
+        // Id = ½·kp·Vov² ⇔ Level 1 with Kp·W/L
+        params.vth = Math.abs(params.Vto);
+        params.kp = params.Kp * (params.W / params.L);
+        params.lambda = params.Lambda;
         addComponent(pluginType, name, [
           { terminalId: 'd', node: nd },
           { terminalId: 'g', node: ng },

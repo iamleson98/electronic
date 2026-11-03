@@ -20,7 +20,7 @@ import { DEFAULT_LAYER_STACK } from './types';
 import type { CircuitComponent, Wire } from '../circuit/types';
 import { useEditor } from '../circuit/store';
 import { getFootprintDef } from './footprints';
-import { createPCBFromSchematic } from './netlist-sync';
+import { createPCBFromSchematic, rotatePadSize } from './netlist-sync';
 import { runDRC as runDRCCheck, DEFAULT_DRC_CONFIG, drcErrorKey } from './drc';
 import type { DRCError, DRCWaiver, DRCConfig } from './drc';
 import { getManufacturerSpec } from './manufacturer-presets';
@@ -407,7 +407,7 @@ export const usePCB = create<PCBState>((set, get) => ({
         dy: newPos.y - pad.position.y,
         radius: Math.max(pad.size.width, pad.size.height) / 2,
       });
-      return { ...pad, position: newPos };
+      return { ...pad, position: newPos, size: rotatePadSize(padDef.size, newRot) };
     });
     set({
       footprints: s.footprints.map((f) => f.id !== id ? f : {

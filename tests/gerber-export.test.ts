@@ -31,7 +31,7 @@ function footprint(pads: Pad[], side: 'top' | 'bottom' = 'top'): Footprint {
 
 describe('Gerber export', () => {
   it('exportGerberCopper: valid RS-274X header', () => { const g=exportGerberCopper('top',[],[],[],{width:50,height:50,origin:{x:0,y:0}}as any);expect(g).toContain('%FSLAX46Y46*%');expect(g).toContain('%MOMM*%');expect(g.trim().endsWith('M02*')).toBe(true);});
-  it('exportGerberCopper: bottom layer name', () => { const g=exportGerberCopper('bottom',[],[],[],{width:50,height:50,origin:{x:0,y:0}}as any);expect(g).toContain('%LNBOTTOM_COPPER*%');});
+  it('exportGerberCopper: bottom layer name', () => { const g=exportGerberCopper('bottom',[],[],[],{width:50,height:50,origin:{x:0,y:0}}as any);expect(g).toContain('G04 Layer: BOTTOM_COPPER*'); expect(g).not.toContain('%LN');});
   it('exportAllGerbers: produces file set', () => { const files=exportAllGerbers([],[],[],{width:50,height:50,origin:{x:0,y:0}}as any);expect(files.length).toBeGreaterThanOrEqual(5);for(const f of files){expect(f.filename).toBeDefined();expect(f.content.length).toBeGreaterThan(0);}});
 
   // ── Regression: exact-size apertures (was: snapped to a 9-preset table) ──
@@ -142,7 +142,7 @@ describe('Gerber fabrication correctness', () => {
 
   it('the board outline appears only in Edge.Cuts — never on copper, mask or paste', () => {
     const fp = footprint([pad({ id: 'p1', position: { x: 5, y: 5 } })]);
-    const corner = /X0*160000000Y0*90000000D01\*/;
+    const corner = /X0*160000000Y-0*90000000D01\*/; // Y-up: board Y is negated
     expect(exportGerberCopper('top', [fp], [], [], board)).not.toMatch(corner);
     expect(exportGerberX2Copper('top', [fp], [], [], board)).not.toMatch(corner);
     expect(exportGerberSolderMask('top', [fp], board)).not.toMatch(corner);
@@ -153,7 +153,7 @@ describe('Gerber fabrication correctness', () => {
   it('coordinates past 99.999 mm stay within the declared 4.6 format', () => {
     const g = exportGerberCopper('top', [footprint([pad({ id: 'p1', position: { x: 150.5, y: 80 } })])], [], [], board);
     expect(g).toContain('%FSLAX46Y46*%');
-    expect(g).toContain('X0150500000Y0080000000D03*');
+    expect(g).toContain('X0150500000Y-0080000000D03*'); // Y-up: board Y is negated
     for (const m of g.matchAll(/X(-?\d+)Y(-?\d+)D0[123]\*/g)) {
       expect(m[1].replace('-', '').length).toBeLessThanOrEqual(10);
       expect(m[2].replace('-', '').length).toBeLessThanOrEqual(10);

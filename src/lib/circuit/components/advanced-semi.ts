@@ -274,54 +274,74 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
     // same linearization every round and never converged within a step —
     // a purely resistive bias network drifted away from its DC solution.
     stamp(params, terminals, sys, sim, comp) {
-      const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
-      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-      const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
-      const op = gummelPoonOp(params, sim, comp, c, b, e, isNpn, true);
-      const { gcbe, gcbc, gbbe, gbbc, ic, ib, vbe, vbc } = op;
-      const gmin = escalateGmin(sim.newtonIter ?? 0);
-      // Collector current c→e: ic + gcbe·Δvbe + gcbc·Δvbc. The Jacobian is
-      // polarity-symmetric (the PNP's flipped currents and voltages cancel);
-      // only the constant terms carry the polarity sign.
-      sys.stampVCCS(c, e, b, e, gcbe);
-      sys.stampVCCS(c, e, b, c, gcbc);
-      // Base current b→e: ib + gbbe·Δvbe + gbbc·Δvbc
-      sys.stampVCCS(b, e, b, e, gbbe);
-      sys.stampVCCS(b, e, b, c, gbbc);
-      // junction gmin keeps the matrix regular with both junctions off
-      sys.stampConductance(b, e, gmin);
-      sys.stampConductance(b, c, gmin);
-      const sign = isNpn ? 1 : -1;
-      sys.stampCurrentSource(c, e, sign * (ic - gcbe * vbe - gcbc * vbc));
-      sys.stampCurrentSource(b, e, sign * (ib - gbbe * vbe - gbbc * vbc));
+      stampBJT(params, terminals, sys, sim, comp, isNpn);
     },
     step(params, terminals, sim, instance) {
-      const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
-      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-      const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
-      const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = stateKey('bjt', instance, c, b, e);
-      st[key + '_vbe'] = sim.nodeVoltage[b] - sim.nodeVoltage[e];
-      st[key + '_vce'] = sim.nodeVoltage[c] - sim.nodeVoltage[e];
+      stepBJT(terminals, sim, instance);
     },
     getFlowPath() { return [{ x: 4, y: 1 }, { x: 2, y: 3 }, { x: 4, y: 3 }]; },
     measure(params, terminals, sim, comp) {
-      const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
-      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-      const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
-      const vBE = sim.nodeVoltage[b] - sim.nodeVoltage[e];
-      const vCE = sim.nodeVoltage[c] - sim.nodeVoltage[e];
-      // Same model as the stamp, evaluated (unlimited) at the solution;
-      // magnitudes so PNP currents read positive.
-      const op = gummelPoonOp(params, sim, comp, c, b, e, isNpn, false);
-      return [
-        { label: 'Vbe', value: vBE.toFixed(4), unit: 'V' },
-        { label: 'Vce', value: vCE.toFixed(4), unit: 'V' },
-        { label: 'Ic', value: (Math.abs(op.ic) * 1000).toFixed(4), unit: 'mA' },
-        { label: 'Ib', value: (Math.abs(op.ib) * 1000).toFixed(4), unit: 'mA' },
-      ];
+      return measureBJT(params, terminals, sim, comp, isNpn);
     },
   };
+}
+
+type Terminals = { terminalId: string; nodeId: number }[];
+const pins3 = (terminals: Terminals) => ({
+  c: terminals.find((t) => t.terminalId === 'c')!.nodeId,
+  b: terminals.find((t) => t.terminalId === 'b')!.nodeId,
+  e: terminals.find((t) => t.terminalId === 'e')!.nodeId,
+});
+
+/** Newton-linearized Gummel-Poon stamp (shared by the basic NPN/PNP). */
+export function stampBJT(
+  params: Record<string, unknown>, terminals: Terminals, sys: Parameters<NonNullable<ComponentPlugin['stamp']>>[2],
+  sim: SimContext, comp: CircuitComponent | undefined, isNpn: boolean,
+): void {
+  const { c, b, e } = pins3(terminals);
+  const op = gummelPoonOp(params, sim, comp, c, b, e, isNpn, true);
+  const { gcbe, gcbc, gbbe, gbbc, ic, ib, vbe, vbc } = op;
+  const gmin = escalateGmin(sim.newtonIter ?? 0);
+  // Collector current c→e: ic + gcbe·Δvbe + gcbc·Δvbc. The Jacobian is
+  // polarity-symmetric (the PNP's flipped currents and voltages cancel);
+  // only the constant terms carry the polarity sign.
+  sys.stampVCCS(c, e, b, e, gcbe);
+  sys.stampVCCS(c, e, b, c, gcbc);
+  // Base current b→e: ib + gbbe·Δvbe + gbbc·Δvbc
+  sys.stampVCCS(b, e, b, e, gbbe);
+  sys.stampVCCS(b, e, b, c, gbbc);
+  // junction gmin keeps the matrix regular with both junctions off
+  sys.stampConductance(b, e, gmin);
+  sys.stampConductance(b, c, gmin);
+  const sign = isNpn ? 1 : -1;
+  sys.stampCurrentSource(c, e, sign * (ic - gcbe * vbe - gcbc * vbc));
+  sys.stampCurrentSource(b, e, sign * (ib - gbbe * vbe - gbbc * vbc));
+}
+
+/** Record the committed junction voltages (seed for the next step's Newton). */
+export function stepBJT(terminals: Terminals, sim: SimContext, instance: CircuitComponent | undefined): void {
+  const { c, b, e } = pins3(terminals);
+  const st = sim.state.__global ?? (sim.state.__global = {});
+  const key = stateKey('bjt', instance, c, b, e);
+  st[key + '_vbe'] = sim.nodeVoltage[b] - sim.nodeVoltage[e];
+  st[key + '_vce'] = sim.nodeVoltage[c] - sim.nodeVoltage[e];
+}
+
+export function measureBJT(
+  params: Record<string, unknown>, terminals: Terminals, sim: SimContext, comp: CircuitComponent | undefined, isNpn: boolean,
+) {
+  const { c, b, e } = pins3(terminals);
+  const vBE = sim.nodeVoltage[b] - sim.nodeVoltage[e];
+  const vCE = sim.nodeVoltage[c] - sim.nodeVoltage[e];
+  // Same model as the stamp, evaluated (unlimited) at the solution;
+  // magnitudes so PNP currents read positive.
+  const op = gummelPoonOp(params, sim, comp, c, b, e, isNpn, false);
+  return [
+    { label: 'Vbe', value: vBE.toFixed(4), unit: 'V' },
+    { label: 'Vce', value: vCE.toFixed(4), unit: 'V' },
+    { label: 'Ic', value: (Math.abs(op.ic) * 1000).toFixed(4), unit: 'mA' },
+    { label: 'Ib', value: (Math.abs(op.ib) * 1000).toFixed(4), unit: 'mA' },
+  ];
 }
 
 /**

@@ -16,7 +16,7 @@ import {
   cStampVoltageSource, cStampVCCS, cStampVCVS, type Complex,
 } from './complex-solver';
 import { mergeOptions, type SimOptions, type ConvergenceReport, toKelvin } from './sim-options';
-import { thermalVoltage, dcSolveOpts } from './sim-options';
+import { dcSolveOpts } from './sim-options';
 import { stampGenericAC } from './ac-linearize';
 import { runSens as _runSens, type SensConfig, computeACModeSensitivity } from './sensitivity';
 import { stateKey } from './state-keys';
@@ -272,41 +272,6 @@ function buildACSystemAtFrequency(
         const cj = Cjo / Math.pow(denom, M);
         cStampConductance(sys, a, k, { re: 0, im: omega * cj });
       }
-    } else if (comp.type === 'npn' || comp.type === 'pnp') {
-      // Hybrid-pi linearization at the DC operating point.
-      //   gm = Ic/Vt, rpi = β/gm, go = Ic/Vaf
-      // Ic is taken from the actual DC solution: the npn/pnp plugins store the
-      // external base current in `*_ib` state keys, so Ic = hfe * ib.
-      const c = terms.find((t) => t.terminalId === 'c')?.nodeId ?? 0;
-      const e = terms.find((t) => t.terminalId === 'e')?.nodeId ?? 0;
-      const b = terms.find((t) => t.terminalId === 'b')?.nodeId ?? 0;
-      const isNpn = comp.type === 'npn';
-      const st = (dcOp.state as any).__global ?? {};
-      const ibKey = stateKey(isNpn ? 'npn' : 'pnp', comp, isNpn ? c : e, b, isNpn ? e : c) + '_ib';
-      const ib = Math.abs((st[ibKey] as number) ?? 0);
-      const hfe = (comp.parameters.hfe as number) ?? 100;
-      const Ic = ib * hfe;
-      const Vt = thermalVoltage(temp);
-      const gm = Ic / Vt; // no cap — a 10 mA bias legitimately gives ~0.4 S
-      const beta = Math.max(1, hfe);
-      const gpi = gm > 0 ? gm / beta : 0; // input conductance 1/rπ (rπ = β/gm is a RESISTANCE)
-      if (gm > 0) {
-        // input conductance 1/rpi between base and emitter (the old code
-        // stamped rπ OHMS as SIEMENS — an effective short across the b-e
-        // junction that destroyed the AC input impedance)
-        cStampConductance(sys, b, e, { re: gpi, im: 0 });
-        // VCCS: ic = gm·vbe — polarity-symmetric Jacobian: +gm for BOTH NPN
-        // and PNP (the PNP's reversed current direction cancels its reversed
-        // junction polarity), so no sign here.
-        cStampVCCS(sys, c, e, b, e, { re: gm, im: 0 });
-      } else {
-        // Off: keep the base weakly defined (1 MΩ), no channel
-        cStampConductance(sys, b, e, { re: 1e-6, im: 0 });
-      }
-      // output conductance (Early effect) — polarity-symmetric: +go for both
-      const Vaf = Math.abs((comp.parameters.Vaf as number) ?? 100);
-      const go = Ic > 0 ? Ic / Math.max(1, Vaf) : 1e-12;
-      cStampConductance(sys, c, e, { re: go, im: 0 });
     } else if (comp.type === 'nmos' || comp.type === 'pmos') {
       // Linearize: gm = Kp·vov, gds = Id·λ (consistent with the ½·Kp·vov² DC law)
       const d = terms.find((t) => t.terminalId === 'd')?.nodeId ?? 0;

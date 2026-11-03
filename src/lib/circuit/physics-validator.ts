@@ -257,10 +257,13 @@ export function validatePhysics(
     const plugin = plugins.get(comp.type);
     if (!plugin) continue;
     const terms = getTerminalsForComponent(comp, plugin, nodeMap);
-    const st = sim.state.__global ?? {};
-    const key = stateKey(comp.type, comp);
-    const prevIb = (st[key + '_ib'] as number) ?? 0;
-    const ic = Math.abs(compCurrents.get(comp.id) ?? 0);
+    // Base and collector currents from the device model itself (its
+    // measure() evaluates the same junction equations as the stamp).
+    const m = plugin.measure?.(comp.parameters, terms, sim, comp) ?? [];
+    const read = (label: string) => Math.abs(parseFloat(m.find((x) => x.label === label)?.value ?? 'NaN')) / 1000; // mA → A
+    const prevIb = read('Ib');
+    const ic = read('Ic');
+    if (!Number.isFinite(prevIb) || !Number.isFinite(ic)) continue;
     if (prevIb < TOL.current && ic > 0.0001) { // < 1nA base drive but > 0.1mA collector
       violations.push({
         law: 'Transistor Off Law',

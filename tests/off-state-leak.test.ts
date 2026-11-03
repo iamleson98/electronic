@@ -21,7 +21,9 @@ function wire(id: string, f: string, ft: string, t: string, tt: string): Wire {
 }
 function plugins(): Map<string, ComponentPlugin> { return new Map(getAllPlugins().map(p => [p.type, p])); }
 
-const VISIBLE = 1e-12;
+// The canvas draws no current dots below VISIBLE_CURRENT (1 nA). Off-state
+// leakage — gmin floor, a real transistor's I_CEO — is pA … sub-nA.
+const VISIBLE = 1e-9;
 
 describe('OFF-state leak', () => {
   it('NPN switch button OPEN: zero current', () => {

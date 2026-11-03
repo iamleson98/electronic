@@ -296,6 +296,50 @@ describe('transient: dynamics match the closed-form solutions', () => {
     expect(rel(iout, iref / (1 + 2 / beta))).toBeLessThan(0.02);
   });
 
+  it('bypassed common-emitter stage: small-signal gain = −gm·Rc with gm = Ic/Vt', () => {
+    const Rc = 4.7e3;
+    const c = circuit()
+      .part('dcVoltage', 'vcc', { voltage: 12 })
+      .part('resistor', 'rb', { resistance: 1.1e6 })
+      .part('resistor', 'rc', { resistance: Rc })
+      .part('capacitor', 'cin', { capacitance: 10e-6 })
+      .part('acVoltage', 'vin', { amplitude: 1e-3, frequency: 1000 })
+      .part('npn', 'q1', { hfe: 100, vbe: 0.7 })
+      .net('vcc:p', 'rb:a', 'rc:a')
+      .net('rb:b', 'q1:b', 'cin:b')
+      .net('vin:p', 'cin:a')
+      .net('rc:b', 'q1:c')
+      .net('vcc:n', 'vin:n', 'q1:e', 'gnd');
+    const ac = runACAnalysis({ components: c.components, wires: c.wires, fStart: 1000, fStop: 1000, nPoints: 1, sweep: 'lin', sourceId: 'vin', outputNode: 'q1:c' });
+    // bias from the same DC operating point the AC analysis linearizes at
+    const nm = buildNodeMap(c.components, c.wires, plugins(c));
+    const vc = ac.operatingPoint!.nodeVoltage[nm.terminalNode.get('q1:c')!];
+    const ic = (12 - vc) / Rc;
+    expect(ic).toBeGreaterThan(1e-3); // ≈ 1 mA: active region
+    const gm = ic / 0.025852; // 27 °C
+    const g = ac.points[0];
+    // (the old fixed-Vbe junction gave gm ≈ 100 S — thousands of times too much gain)
+    expect(rel(g.magnitude, gm * Rc)).toBeLessThan(0.05);
+    expect(Math.abs(Math.abs(g.phase) - 180)).toBeLessThan(3);
+  });
+
+  it('NPN switch driven hard saturates at a realistic Vce(sat) and passes the load current', () => {
+    const c = circuit()
+      .part('dcVoltage', 'vcc', { voltage: 5 })
+      .part('resistor', 'rl', { resistance: 470 })
+      .part('resistor', 'rb', { resistance: 4.7e3 })
+      .part('npn', 'q1', { hfe: 100, vbe: 0.7 })
+      .net('vcc:p', 'rl:a', 'rb:a')
+      .net('rl:b', 'q1:c')
+      .net('rb:b', 'q1:b')
+      .net('vcc:n', 'q1:e', 'gnd');
+    const s = tran(c, 3, 1e-6);
+    const vce = s.v('q1:c', 2);
+    expect(vce).toBeGreaterThan(0.01);
+    expect(vce).toBeLessThan(0.2);
+    expect(rel((5 - vce) / 470, 5 / 470)).toBeLessThan(0.05);
+  });
+
   it('Wien-bridge oscillator starts on its own and runs at 1/(2πRC)', () => {
     const R = 10e3, C = 10e-9;
     const c = circuit()

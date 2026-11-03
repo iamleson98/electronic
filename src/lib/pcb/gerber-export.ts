@@ -16,6 +16,19 @@ function padApertureBody(pad: Pick<Pad, 'shape' | 'size'>, grow = 0): string {
   return `R,${w.toFixed(4)}X${h.toFixed(4)}`;
 }
 import type { CopperPour } from './copper-pour';
+import { strokeText } from './silk-font';
+
+/**
+ * Board space is Y-DOWN (the editor's screen frame: pin 1 of a DIP at the
+ * top-left, pins numbered counter-clockwise as seen from above). Gerber,
+ * Excellon and pick-and-place files are Y-UP. Every exported Y is negated
+ * (KiCad does the same) — writing board Y unchanged fabricated the MIRROR
+ * IMAGE of the layout, which no part rotation can undo: every IC and
+ * transistor would have been wired backwards.
+ */
+export const fabY = (y: number) => (y === 0 ? 0 : -y);
+/** Editor rotation (+θ = clockwise on screen) → fab rotation (CCW-positive). */
+export const fabRotation = (deg: number) => ((-deg % 360) + 360) % 360;
 
 /**
  * Generate a Gerber file (RS-274X format) for a copper layer.
@@ -50,7 +63,7 @@ export function exportGerberCopper(
   lines.push('%FSLAX46Y46*%');  // Format: 4 integer + 6 decimal digits (2.6 capped boards at 99.999 mm)
   lines.push('%MOMM*%');        // Units: millimeters
   lines.push(`%LPD*%`);         // Layer polarity: dark
-  lines.push(`%LN${layer.toUpperCase()}_COPPER*%`);
+  lines.push(`G04 Layer: ${layer.toUpperCase()}_COPPER*`); // LN (load name) is deprecated since Gerber rev. I4 (2013); CAM tools may reject it
 
   // ── Dynamic aperture allocator ─────────────────────────────────────────
   // Aperture numbers 10..999 are allocated on demand per unique size so
@@ -139,7 +152,7 @@ export function exportGerberCopper(
       if (!padOnLayer(pad, fp, layer)) continue;
       const ap = getPadAp(pad);
       lines.push(`G54D${ap}*`);
-      lines.push(`X${fmt(pad.position.x)}Y${fmt(pad.position.y)}D03*`);
+      lines.push(`X${fmt(pad.position.x)}Y${fmt(fabY(pad.position.y))}D03*`);
     }
   }
 
@@ -149,8 +162,8 @@ export function exportGerberCopper(
     const ap = getCircleAp(trace.width);
     lines.push(`G54D${ap}*`);
     for (const seg of trace.segments) {
-      lines.push(`X${fmt(seg.start.x)}Y${fmt(seg.start.y)}D02*`);
-      lines.push(`X${fmt(seg.end.x)}Y${fmt(seg.end.y)}D01*`);
+      lines.push(`X${fmt(seg.start.x)}Y${fmt(fabY(seg.start.y))}D02*`);
+      lines.push(`X${fmt(seg.end.x)}Y${fmt(fabY(seg.end.y))}D01*`);
     }
   }
 
@@ -158,7 +171,7 @@ export function exportGerberCopper(
   for (const via of vias) {
     const ap = getCircleAp(via.diameter);
     lines.push(`G54D${ap}*`);
-    lines.push(`X${fmt(via.position.x)}Y${fmt(via.position.y)}D03*`);
+    lines.push(`X${fmt(via.position.x)}Y${fmt(fabY(via.position.y))}D03*`);
   }
 
   // Draw copper pours — filled polygon regions as rect aperture flashes
@@ -167,7 +180,7 @@ export function exportGerberCopper(
     for (const run of runs) {
       const ap = getRectAp(run.w, run.h);
       lines.push(`G54D${ap}*`);
-      lines.push(`X${fmt(run.cx)}Y${fmt(run.cy)}D03*`);
+      lines.push(`X${fmt(run.cx)}Y${fmt(fabY(run.cy))}D03*`);
     }
   }
 
@@ -176,7 +189,7 @@ export function exportGerberCopper(
     if (!td.points || td.points.length < 3) continue;
     lines.push('G36*');
     td.points.forEach((p, i) => {
-      lines.push(`X${fmt(p.x)}Y${fmt(p.y)}D0${i === 0 ? 2 : 1}*`);
+      lines.push(`X${fmt(p.x)}Y${fmt(fabY(p.y))}D0${i === 0 ? 2 : 1}*`);
     });
     lines.push('G37*');
   }
@@ -210,7 +223,7 @@ export function exportGerberSolderMask(
   // openings. (This file used %LPC% — clear objects on an empty image erase
   // nothing, so the mask had NO openings and every pad would be covered.)
   lines.push('%LPD*%');
-  lines.push(`%LN${layer.toUpperCase()}_SOLDERMASK*%`);
+  lines.push(`G04 Layer: ${layer.toUpperCase()}_SOLDERMASK*`);
 
   const MASK_EXPANSION = 0.05; // mm per side
   const maskAps = new Map<string, number>();
@@ -233,7 +246,7 @@ export function exportGerberSolderMask(
         lines.push(`%ADD${apNum}${body}*%`);
       }
       lines.push(`G54D${apNum}*`);
-      lines.push(`X${fmt(pad.position.x)}Y${fmt(pad.position.y)}D03*`);
+      lines.push(`X${fmt(pad.position.x)}Y${fmt(fabY(pad.position.y))}D03*`);
     }
   }
 
@@ -261,7 +274,7 @@ export function exportGerberPaste(
   lines.push('%FSLAX46Y46*%');
   lines.push('%MOMM*%');
   lines.push('%LPD*%');
-  lines.push(`%LN${layer.toUpperCase()}_PASTE*%`);
+  lines.push(`G04 Layer: ${layer.toUpperCase()}_PASTE*`);
   let nextAp = 10;
   const apDefs = new Map<string, number>();
   const defs: string[] = [];
@@ -281,7 +294,7 @@ export function exportGerberPaste(
         defs.push(`%ADD${ap}${key}*%`);
       }
       flashes.push(`G54D${ap}*`);
-      flashes.push(`X${fmt(pad.position.x)}Y${fmt(pad.position.y)}D03*`);
+      flashes.push(`X${fmt(pad.position.x)}Y${fmt(fabY(pad.position.y))}D03*`);
     }
   }
   lines.push(...defs);
@@ -305,14 +318,14 @@ export function exportGerberEdgeCuts(board: BoardOutline): string {
     '%FSLAX46Y46*%',
     '%MOMM*%',
     '%LPD*%',
-    '%LNEDGE_CUTS*%',
+    'G04 Layer: EDGE_CUTS*',
     '%ADD10C,0.100*%',
     'G54D10*',
-    `X${fmt(0)}Y${fmt(0)}D02*`,
-    `X${fmt(board.width)}Y${fmt(0)}D01*`,
-    `X${fmt(board.width)}Y${fmt(board.height)}D01*`,
-    `X${fmt(0)}Y${fmt(board.height)}D01*`,
-    `X${fmt(0)}Y${fmt(0)}D01*`,
+    `X${fmt(0)}Y${fmt(fabY(0))}D02*`,
+    `X${fmt(board.width)}Y${fmt(fabY(0))}D01*`,
+    `X${fmt(board.width)}Y${fmt(fabY(board.height))}D01*`,
+    `X${fmt(0)}Y${fmt(fabY(board.height))}D01*`,
+    `X${fmt(0)}Y${fmt(fabY(0))}D01*`,
     'M02*',
   ].join('\n');
 }
@@ -333,8 +346,9 @@ export function exportGerberSilkscreen(
   lines.push('%FSLAX46Y46*%');
   lines.push('%MOMM*%');
   lines.push(`%LPD*%`);
-  lines.push(`%LN${layer.toUpperCase()}_SILKSCREEN*%`);
+  lines.push(`G04 Layer: ${layer.toUpperCase()}_SILKSCREEN*`);
   lines.push('%ADD10C,0.150*%');  // silkscreen line width
+  lines.push('%ADD11C,0.500*%');  // pin-1 dot
   lines.push('G54D10*');
 
   // Draw footprint outlines (rotation-aware) + refdes text position marker.
@@ -353,16 +367,31 @@ export function exportGerberSilkscreen(
     });
     const corners = [rot(-hw, -hh), rot(hw, -hh), rot(hw, hh), rot(-hw, hh)];
     const p0 = corners[0];
-    lines.push(`X${fmt(p0.x)}Y${fmt(p0.y)}D02*`);
+    lines.push(`X${fmt(p0.x)}Y${fmt(fabY(p0.y))}D02*`);
     for (const p of [...corners.slice(1), corners[0]]) {
-      lines.push(`X${fmt(p.x)}Y${fmt(p.y)}D01*`);
+      lines.push(`X${fmt(p.x)}Y${fmt(fabY(p.y))}D01*`);
     }
-    // Refdes marker: short tick at the footprint origin + pin-1 dot so the
-    // assembler can orient the part (previously refdes was not rendered at all).
-    const c = rot(0, 0);
-    const tick = rot(Math.min(hw, 1), 0);
-    lines.push(`X${fmt(c.x)}Y${fmt(c.y)}D02*`);
-    lines.push(`X${fmt(tick.x)}Y${fmt(tick.y)}D01*`);
+    // Reference designator, upright, just above the part (it used to be a
+    // bare tick mark — the assembled board had no designators at all).
+    const top = Math.min(...corners.map((q) => q.y));
+    const label = strokeText(fp.refdes, fp.position.x, top - 0.9, 1.0);
+    for (const stroke of label) {
+      stroke.forEach((p, i) => lines.push(`X${fmt(p.x)}Y${fmt(fabY(p.y))}D0${i === 0 ? 2 : 1}*`));
+    }
+  }
+  // Pin-1 dots, outside the pad, pointing away from the part centre — the
+  // only way an assembler can orient an IC, transistor or polarised part.
+  lines.push('G54D11*');
+  for (const fp of footprints) {
+    if (fp.side !== layer) continue;
+    const pin1 = fp.pads.find((p) => p.number === '1');
+    if (!pin1 || fp.pads.length < 2) continue;
+    let dx = pin1.position.x - fp.position.x, dy = pin1.position.y - fp.position.y;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    dx /= len; dy /= len;
+    const r = Math.max(pin1.size.width, pin1.size.height) / 2 + 0.6;
+    const dot = { x: pin1.position.x + dx * r, y: pin1.position.y + dy * r };
+    lines.push(`X${fmt(dot.x)}Y${fmt(fabY(dot.y))}D03*`);
   }
 
   lines.push('M02*');
@@ -428,7 +457,7 @@ export function exportExcellonDrill(
     const key = Math.round(entry.size * 100);
     const tool = sizeToTool.get(key) ?? 1;
     lines.push(`T${tool}`);
-    lines.push(`X${fmt(entry.x)}Y${fmt(entry.y)}`);
+    lines.push(`X${fmt(entry.x)}Y${fmt(fabY(entry.y))}`);
   }
 
   lines.push('M30');  // End of program
@@ -456,8 +485,9 @@ export function exportPickAndPlace(
   lines.push('Designator,Footprint,PosX,PosY,Rotation,Side,Comment,LCSC Part #');
 
   for (const fp of footprints) {
-    // Rotation is CCW degrees about the footprint origin (KiCad convention).
-    const baseRot = ((fp.rotation % 360) + 360) % 360;
+    // Rotation is CCW degrees about the footprint origin, seen from the top
+    // in the fab's Y-up frame (KiCad / IPC-7351 convention).
+    const baseRot = fabRotation(fp.rotation);
     const name = (fp.footprintName ?? fp.componentType).toUpperCase();
     let correction = 0;
     if (/SOT-23|SOT23|DIODE|SOD-|SMA|SMB|SMC/.test(name)) correction = 180;
@@ -469,7 +499,7 @@ export function exportPickAndPlace(
       fp.refdes,
       fp.footprintName ?? fp.componentType,
       fp.position.x.toFixed(3),
-      fp.position.y.toFixed(3),
+      fabY(fp.position.y).toFixed(3),
       rot.toString(),
       fp.side === 'bottom' ? 'Bottom' : 'Top',
       fp.componentType,
@@ -725,7 +755,7 @@ export function exportGerberX2Copper(
       lines.push(`%TO.N,${pad.net ?? 'unconnected'}*%`);
       const ap = getPadAp(pad);
       lines.push(`G54D${ap}*`);
-      lines.push(`X${fmt(pad.position.x)}Y${fmt(pad.position.y)}D03*`);
+      lines.push(`X${fmt(pad.position.x)}Y${fmt(fabY(pad.position.y))}D03*`);
     }
     lines.push('%TD*%'); // close component attributes
   }
@@ -737,8 +767,8 @@ export function exportGerberX2Copper(
     const ap = getCircleAp(trace.width);
     lines.push(`G54D${ap}*`);
     for (const seg of trace.segments) {
-      lines.push(`X${fmt(seg.start.x)}Y${fmt(seg.start.y)}D02*`);
-      lines.push(`X${fmt(seg.end.x)}Y${fmt(seg.end.y)}D01*`);
+      lines.push(`X${fmt(seg.start.x)}Y${fmt(fabY(seg.start.y))}D02*`);
+      lines.push(`X${fmt(seg.end.x)}Y${fmt(fabY(seg.end.y))}D01*`);
     }
   }
 
@@ -748,7 +778,7 @@ export function exportGerberX2Copper(
     lines.push(`%TO.N,${via.net}*%`);
     const ap = getCircleAp(via.diameter);
     lines.push(`G54D${ap}*`);
-    lines.push(`X${fmt(via.position.x)}Y${fmt(via.position.y)}D03*`);
+    lines.push(`X${fmt(via.position.x)}Y${fmt(fabY(via.position.y))}D03*`);
   }
   lines.push('%TD*%');
 
@@ -759,7 +789,7 @@ export function exportGerberX2Copper(
     for (const run of runs) {
       const ap = getRectAp(run.w, run.h);
       lines.push(`G54D${ap}*`);
-      lines.push(`X${fmt(run.cx)}Y${fmt(run.cy)}D03*`);
+      lines.push(`X${fmt(run.cx)}Y${fmt(fabY(run.cy))}D03*`);
     }
   }
   lines.push('%TD*%');
@@ -769,7 +799,7 @@ export function exportGerberX2Copper(
     if (!td.points || td.points.length < 3) continue;
     lines.push('G36*');
     td.points.forEach((p, i) => {
-      lines.push(`X${fmt(p.x)}Y${fmt(p.y)}D0${i === 0 ? 2 : 1}*`);
+      lines.push(`X${fmt(p.x)}Y${fmt(fabY(p.y))}D0${i === 0 ? 2 : 1}*`);
     });
     lines.push('G37*');
   }

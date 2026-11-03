@@ -192,7 +192,7 @@ function generateRefdes(type: string, id: string): string {
     npn: 'Q', pnp: 'Q', nmos: 'Q', pmos: 'Q',
     dcVoltage: 'BT', acVoltage: 'BT', pulseSource: 'BT', currentSource: 'I',
     ground: 'GND', opamp: 'U', timer555: 'U',
-    oscilloscope: 'TP', voltmeter: 'TP', ammeter: 'TP',
+    ammeter: 'J', // current-measurement jumper header (scope / voltmeter probes are schematic-only)
     arduino: 'U', arduinoReal: 'U', raspberryPi: 'U',
     sevenSegment: 'DSP', speaker: 'SPK', photoresistor: 'LDR',
     junction: 'J',
@@ -796,6 +796,14 @@ export function computeSmartPlacement(
 }
 
 /** Rotate a pad offset by a multiple of 90° around the footprint center. */
+/** Pad extents after rotating the part (90° steps): 90/270 swap W and H.
+ *  (Sizes used to be copied unrotated, so a rectangular pad on a turned
+ *  part was fabricated with its long side the wrong way.) */
+export function rotatePadSize(size: { width: number; height: number }, rotDeg: number): { width: number; height: number } {
+  const quarter = ((Math.round(rotDeg / 90) % 4) + 4) % 4;
+  return quarter % 2 === 1 ? { width: size.height, height: size.width } : { ...size };
+}
+
 function rotatePadOffset(px: number, py: number, rotDeg: number): { x: number; y: number } {
   const rad = (rotDeg * Math.PI) / 180;
   const cos = Math.cos(rad), sin = Math.sin(rad);
@@ -831,12 +839,17 @@ export function generateFootprints(
         terminalId: padDef.terminalId,
         position: { x: pos.x + off.x, y: pos.y + off.y },
         shape: padDef.shape,
-        size: { ...padDef.size },
+        // pads turn with the part: a 90°/270° part swaps each pad's extents
+        size: rotatePadSize(padDef.size, rot),
         layer: padDef.layer ?? 'top' as const,
         // Propagate the drill so THT pad defs (e.g. parametric DIP-14 with
         // 0.8mm drills) keep their through-hole nature on the PCB — the DRC,
         // Gerber/Excellon export and copper pour all read Pad.drill.
         ...(padDef.drill != null ? { drill: padDef.drill } : {}),
+        ...(padDef.number != null ? { number: padDef.number } : {}),
+        ...(padDef.tie ? { tie: true } : {}),
+        ...(padDef.tieTo ? { tieTo: padDef.tieTo } : {}),
+        ...(padDef.note ? { note: padDef.note } : {}),
       };
     });
 
@@ -850,6 +863,8 @@ export function generateFootprints(
       bodySize: { ...fpDef.bodySize },
       pads,
       side: 'top',
+      verified: !!fpDef.verified,
+      ...(fpDef.name ? { footprintName: fpDef.name } : {}),
     };
   });
 }
@@ -885,6 +900,7 @@ export function computeRatsnest(
       padNets.set(termKey, nodeToNetName.get(nodeId)!);
     }
   }
+  applyPinTies(footprints, padNets);
 
   // Build ratsnest: for each net, connect all pads on that net in a minimum spanning tree
   const netsToPads = new Map<string, { padId: string; pos: { x: number; y: number } }[]>();
@@ -943,6 +959,33 @@ export function computeRatsnest(
   return { ratsnest, padNets };
 }
 
+/**
+ * Real-package pins the schematic model does not have (CLK INH, DEI, unused
+ * gate inputs, a spare op-amp) join the net they must be tied to, so the
+ * board is wired the way the real chip needs. `tieTo` names the part's own
+ * terminal (its GND / VCC) or another pin of the same package (`pin7`).
+ * Mutates `padNets` (keys `componentId:terminalId`) and the pads' `net`.
+ */
+export function applyPinTies(footprints: Footprint[], padNets: Map<string, string>): void {
+  for (const fp of footprints) {
+    for (const pad of fp.pads) {
+      if (!pad.tieTo) continue;
+      const key = `${fp.componentId}:${pad.terminalId}`;
+      const targetKey = `${fp.componentId}:${pad.tieTo}`;
+      let net = padNets.get(targetKey);
+      if (!net) {
+        // pin-to-pin tie (spare op-amp IN− ↔ OUT): a local net of its own
+        net = `${fp.refdes}_${pad.tieTo.toUpperCase()}`;
+        padNets.set(targetKey, net);
+        const target = fp.pads.find((p) => p.terminalId === pad.tieTo);
+        if (target) target.net = net;
+      }
+      padNets.set(key, net);
+      pad.net = net;
+    }
+  }
+}
+
 /** Estimate a sensible board size for the given components. */
 export function estimateBoardSize(components: CircuitComponent[]): BoardOutline {
   const physical = components.filter((c) => !isSchematicOnlyType(c.type));
@@ -980,6 +1023,7 @@ export function createPCBFromSchematic(
       if (net) pad.net = net;
     }
   }
+  applyPinTies(footprints, padNets);
 
   // Normalize placement onto the board origin: the separation pass can push
   // components to negative coordinates or right against the estimate-board
