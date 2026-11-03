@@ -232,18 +232,19 @@ describe('scope-panel: ProbePanel render smoke test', () => {
     expect(html).toContain('Decrease volts per division');
     expect(html).toContain('Increase volts per division');
     expect(html).toContain('Decrease vertical offset');
-    expect(html).toContain('Toggle cursor A');
-    expect(html).toContain('Toggle cursor B');
-    expect(html).toContain('Move cursor A left (0.1 div)');
+    // cursors / XY / probe model / math sit behind "More controls" so the
+    // waveform keeps the panel height (they render once expanded)
+    expect(html).toContain('More controls');
+    expect(html).not.toContain('Move cursor A left (0.1 div)');
   });
   it('renders default readouts (1 ms/div timebase, armed trigger)', () => {
     expect(html).toContain('ms/div');
     expect(html).toContain('ARMED');
     expect(html).toContain('CH1');
   });
-  it('renders the cursor hint row and canvas', () => {
-    expect(html).toContain('Enable cursor A/B');
+  it('renders the waveform canvas (filling the panel)', () => {
     expect(html).toContain('Oscilloscope waveform display');
+    expect(html).toMatch(/min-h-\[110px\] flex-1/);
   });
   it('keeps all four tabs and the header buttons intact', () => {
     expect(html).toContain('>scope<');

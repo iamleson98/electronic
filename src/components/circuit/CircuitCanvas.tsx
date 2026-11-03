@@ -10,8 +10,9 @@
 //   only when JSX-relevant data changes (topology edits, running flag, ERC
 //   list, placement draft, ERC tooltip visibility).
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
+import { computeFitView } from './fit-view';
 import { getPlugin } from '@/lib/circuit/registry';
 import { findERCErrorAt } from '@/lib/circuit/schematic-overlays';
 import type { ERCError } from '@/lib/circuit/erc';
@@ -594,8 +595,15 @@ export function CircuitCanvas() {
       return;
     }
     if (dragRef.current) {
-      // History was already pushed at drag start
+      // History was already pushed at drag start. Once the drop is final,
+      // re-route the moved parts' wires that now draw misleadingly (over
+      // another net's pin, through a part) — once, not on every mouse move.
+      const st = useEditor.getState();
+      const ids = dragRef.current.isGroupDrag
+        ? [...st.multiSelection.components]
+        : [dragRef.current.componentId];
       dragRef.current = null;
+      st.tidyWires(ids);
     }
   };
 
@@ -712,30 +720,21 @@ export function CircuitCanvas() {
       window.removeEventListener('circuitlab:zoom-to-component', onZoomToComponent);
     };
   }, [markDirty, viewRef]);
-  const zoomToFit = () => {
+  const zoomToFit = useCallback(() => {
     const view = viewRef.current;
-    const comps = useEditor.getState().components;
-    if (comps.length === 0) { view.zoom = 1; view.pan = { x: 0, y: 0 }; markDirty(); return; }
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const c of comps) {
-      const plugin = getPlugin(c.type);
-      if (!plugin) continue;
-      const bb = plugin.boundingBox;
-      minX = Math.min(minX, c.position.x);
-      minY = Math.min(minY, c.position.y);
-      maxX = Math.max(maxX, c.position.x + bb.width);
-      maxY = Math.max(maxY, c.position.y + bb.height);
-    }
-    if (minX === Infinity) { view.zoom = 1; view.pan = { x: 0, y: 0 }; markDirty(); return; }
-    const w = maxX - minX, h = maxY - minY;
-    const canvasW = view.width || 800, canvasH = view.height || 600;
-    const scaleX = canvasW / (w * 40 + 100); // 40px per grid unit + margin
-    const scaleY = canvasH / (h * 40 + 100);
-    const newZoom = Math.min(4, Math.max(0.4, Math.min(scaleX, scaleY)));
-    view.zoom = newZoom;
-    view.pan = { x: -minX * 40 * newZoom + 50, y: -minY * 40 * newZoom + 50 };
+    const st = useEditor.getState();
+    const fit = computeFitView(st.components, st.wires, st.sheets ?? [], view.width || 800, view.height || 600);
+    view.zoom = fit.zoom;
+    view.pan = fit.pan;
     markDirty();
-  };
+  }, [markDirty, viewRef]);
+
+  // Fit the camera whenever a document is loaded (examples, files, shares).
+  useEffect(() => {
+    const onFit = () => requestAnimationFrame(() => zoomToFit());
+    window.addEventListener('circuitlab:zoom-to-fit', onFit);
+    return () => window.removeEventListener('circuitlab:zoom-to-fit', onFit);
+  }, [zoomToFit]);
 
   // Use extracted keyboard hook
   useCanvasKeyboard({

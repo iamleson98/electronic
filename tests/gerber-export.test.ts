@@ -30,7 +30,7 @@ function footprint(pads: Pad[], side: 'top' | 'bottom' = 'top'): Footprint {
 }
 
 describe('Gerber export', () => {
-  it('exportGerberCopper: valid RS-274X header', () => { const g=exportGerberCopper('top',[],[],[],{width:50,height:50,origin:{x:0,y:0}}as any);expect(g).toContain('%FSLAX26Y26*%');expect(g).toContain('%MOMM*%');expect(g.trim().endsWith('M02*')).toBe(true);});
+  it('exportGerberCopper: valid RS-274X header', () => { const g=exportGerberCopper('top',[],[],[],{width:50,height:50,origin:{x:0,y:0}}as any);expect(g).toContain('%FSLAX46Y46*%');expect(g).toContain('%MOMM*%');expect(g.trim().endsWith('M02*')).toBe(true);});
   it('exportGerberCopper: bottom layer name', () => { const g=exportGerberCopper('bottom',[],[],[],{width:50,height:50,origin:{x:0,y:0}}as any);expect(g).toContain('%LNBOTTOM_COPPER*%');});
   it('exportAllGerbers: produces file set', () => { const files=exportAllGerbers([],[],[],{width:50,height:50,origin:{x:0,y:0}}as any);expect(files.length).toBeGreaterThanOrEqual(5);for(const f of files){expect(f.filename).toBeDefined();expect(f.content.length).toBeGreaterThan(0);}});
 
@@ -61,10 +61,10 @@ describe('Gerber export', () => {
     expect(bottom).toContain('D03*');
   });
 
-  it('coordinates use 8 digits per the FSLAX26Y26 format (2 int + 6 dec)', () => {
+  it('coordinates use 10 digits per the FSLAX46Y46 format (4 int + 6 dec — 2.6 overflowed boards ≥ 100 mm)', () => {
     const g = exportGerberCopper('top', [footprint([pad({ id: 'p1', position: { x: 1.234567, y: 2 } })])], [], [], { width: 50, height: 50 });
     // 1.234567mm → 01234567
-    expect(g).toContain('X01234567');
+    expect(g).toContain('X0001234567');
   });
 
   // ── Regression: Excellon drills ────────────────────────────────────────────
@@ -103,7 +103,60 @@ describe('Gerber coordinate encoding', () => {
   it('negative coordinates keep the minus sign in front of the digits', () => {
     const fp = footprint([pad({ id: 'p1', position: { x: -0.5, y: 2 } })]);
     const g = exportGerberCopper('top', [fp], [], [], { width: 50, height: 50 });
-    expect(g).toContain('X-00500000');
+    expect(g).toContain('X-0000500000');
     expect(g).not.toContain('0-500000');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fabrication correctness (round 4): what a fab house would actually build
+// ─────────────────────────────────────────────────────────────────────────────
+import { exportGerberPaste, exportGerberEdgeCuts, exportGerberX2Copper } from '../src/lib/pcb/gerber-export';
+
+describe('Gerber fabrication correctness', () => {
+  const board = { width: 160, height: 90 } as any;
+
+  it('solder mask is drawn with DARK polarity — the flashes are the openings', () => {
+    const g = exportGerberSolderMask('top', [footprint([pad({ id: 'p1', position: { x: 5, y: 5 } })])], board);
+    // %LPC% on an empty image erases nothing: the mask had NO openings
+    expect(g).not.toContain('%LPC*%');
+    expect(g).toContain('%LPD*%');
+    expect(g).toContain('D03*');
+  });
+
+  it('mask openings follow the pad shape (a SOIC pad is not a 1.7 mm circle)', () => {
+    const soic = pad({ id: 'p1', shape: 'rect', size: { width: 1.5, height: 0.6 }, position: { x: 5, y: 5 } });
+    const g = exportGerberSolderMask('top', [footprint([soic])], board);
+    expect(g).toMatch(/%ADD\d+R,1\.6000X0\.7000\*%/); // +0.05 mm per side
+    expect(g).not.toMatch(/%ADD\d+C,/);
+  });
+
+  it('oval pads use obround apertures on copper, mask and paste', () => {
+    const oval = pad({ id: 'p1', shape: 'oval', size: { width: 2.4, height: 1.6 }, position: { x: 5, y: 5 }, drill: 0 });
+    const fp = footprint([oval]);
+    expect(exportGerberCopper('top', [fp], [], [], board)).toMatch(/%ADD\d+O,2\.4000X1\.6000\*%/);
+    expect(exportGerberX2Copper('top', [fp], [], [], board)).toMatch(/%ADD\d+O,2\.4000X1\.6000\*%/);
+    expect(exportGerberSolderMask('top', [fp], board)).toMatch(/%ADD\d+O,2\.5000X1\.7000\*%/);
+    expect(exportGerberPaste('top', [fp], board)).toMatch(/%ADD\d+O,2\.3000X1\.5000\*%/);
+  });
+
+  it('the board outline appears only in Edge.Cuts — never on copper, mask or paste', () => {
+    const fp = footprint([pad({ id: 'p1', position: { x: 5, y: 5 } })]);
+    const corner = /X0*160000000Y0*90000000D01\*/;
+    expect(exportGerberCopper('top', [fp], [], [], board)).not.toMatch(corner);
+    expect(exportGerberX2Copper('top', [fp], [], [], board)).not.toMatch(corner);
+    expect(exportGerberSolderMask('top', [fp], board)).not.toMatch(corner);
+    expect(exportGerberPaste('top', [fp], board)).not.toMatch(corner);
+    expect(exportGerberEdgeCuts(board)).toMatch(corner);
+  });
+
+  it('coordinates past 99.999 mm stay within the declared 4.6 format', () => {
+    const g = exportGerberCopper('top', [footprint([pad({ id: 'p1', position: { x: 150.5, y: 80 } })])], [], [], board);
+    expect(g).toContain('%FSLAX46Y46*%');
+    expect(g).toContain('X0150500000Y0080000000D03*');
+    for (const m of g.matchAll(/X(-?\d+)Y(-?\d+)D0[123]\*/g)) {
+      expect(m[1].replace('-', '').length).toBeLessThanOrEqual(10);
+      expect(m[2].replace('-', '').length).toBeLessThanOrEqual(10);
+    }
   });
 });

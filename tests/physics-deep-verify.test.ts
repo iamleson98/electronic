@@ -383,7 +383,8 @@ describe('Analytical transients', () => {
     const trace = runSimTrace(doc, 2000, dt, 'C1:a', 'trap'); // 100 ms = 10τ
     expect(trace.length).toBe(2000);
     for (const tOverTau of [0.5, 1, 2, 3, 5]) {
-      const idx = Math.round((tOverTau * tau) / dt);
+      // trace[k] is the state after k+1 steps, i.e. at t = (k+1)·dt
+      const idx = Math.round((tOverTau * tau) / dt) - 1;
       const exact = 5 * (1 - Math.exp(-tOverTau));
       const got = trace[idx];
       // trapezoidal integration at τ/200: < 0.1% discretization error

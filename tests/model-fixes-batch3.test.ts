@@ -378,12 +378,42 @@ describe('Optocoupler CTR transfer + saturation', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('CD4026 first clock edge', () => {
-  it('counts the FIRST rising edge of a clock idling low at power-up', () => {
-    // 1Hz square (idles low at t=0): segment 'b' is lit for count 1.
-    // With the old `initialized` gating the first edge was swallowed and
-    // the count stayed 0 until the SECOND edge.
+  it('does not count a clock that is already HIGH at power-up', () => {
     const comps = [
-      comp('pulseSource', 'CLK', { high: 5, low: 0, frequency: 1, duty: 0.5 }),
+      comp('pulseSource', 'CLK', { high: 5, low: 0, frequency: 1, duty: 50 }), // high until 0.5 s
+      comp('dcVoltage', 'VCC', { voltage: 5 }),
+      comp('cd4026', 'U1', { vcc: 5, maxCount: 10 }),
+      comp('ground', 'GND'),
+    ];
+    const ws = [
+      wire('w1', 'CLK', 'p', 'U1', 'clk'),
+      wire('w2', 'CLK', 'n', 'GND', 'g'),
+      wire('w3', 'VCC', 'p', 'U1', 'vcc'),
+      wire('w4', 'U1', 'gnd', 'GND', 'g'),
+      wire('w7', 'VCC', 'n', 'GND', 'g'),
+    ];
+    const p = plugins();
+    let prev: any;
+    let last: any = null;
+    for (let i = 0; i < 7500; i++) { // to 0.75 s: the clock only FELL (at 0.5 s)
+      const r = simulateStep(comps, ws, p, prev, 1e-4);
+      last = r;
+      prev = { nodeVoltage: r!.sim.nodeVoltage, branchCurrent: r!.sim.branchCurrent, time: r!.sim.time, state: r!.sim.state };
+    }
+    expect((last.sim.state['cd4026_U1'] as any).count).toBe(0);
+  });
+
+  it('counts the FIRST rising edge of a clock idling low at power-up', () => {
+    // 1Hz square that idles LOW for the first half period and rises at
+    // t = 0.5 s (pulseSource outputs `high` while phase < duty, so the
+    // levels are swapped). Segment 'b' is lit for count 1. With the old
+    // `initialized` gating the first edge was swallowed and the count stayed
+    // 0 until the SECOND edge. (The previous fixture used duty: 0.5 — that
+    // is 0.5 %, a clock HIGH at power-up with no edge before t = 1 s; it
+    // only passed because a fictitious power-up "edge" from the solver's
+    // all-zero initial guess was counted.)
+    const comps = [
+      comp('pulseSource', 'CLK', { high: 0, low: 5, frequency: 1, duty: 50 }),
       comp('dcVoltage', 'VCC', { voltage: 5 }),
       comp('cd4026', 'U1', { vcc: 5, maxCount: 10 }),
       comp('resistor', 'RB', { resistance: 1000 }),

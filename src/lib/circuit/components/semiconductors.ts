@@ -5,6 +5,23 @@ import type { ComponentPlugin, CircuitComponent } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
+import { stampOpamp, stepOpamp, specFromParams, type OpampPins } from './opamp-core';
+
+function idealPins(terminals: { terminalId: string; nodeId: number }[]): OpampPins {
+  return {
+    inp: terminals.find((t) => t.terminalId === 'in+')!.nodeId,
+    inn: terminals.find((t) => t.terminalId === 'in-')!.nodeId,
+    out: terminals.find((t) => t.terminalId === 'out')!.nodeId,
+    vcc: 0,
+    vee: 0,
+  };
+}
+/** Ideal op-amp: no pole/slew, ~0 Ω output, limited to [vmin, vmax]. */
+function idealSpec(params: Record<string, any>) {
+  const vmax = typeof params.vmax === 'number' ? params.vmax : 15;
+  const vmin = typeof params.vmin === 'number' ? params.vmin : -15;
+  return specFromParams({ gain: params.gain, rout: 1e-3, swingHigh: 0, swingLow: 0 }, { defVcc: vmax, defVee: vmin });
+}
 
 // ----- Diode -----
 const diode: ComponentPlugin = {
@@ -92,6 +109,11 @@ const diode: ComponentPlugin = {
 };
 
 // ----- NPN BJT -----
+/** Series resistance of the "on" B-E junction (Ω). Small enough that Vbe
+ *  stays at its on-voltage (+1 mV per mA of base current), large enough that
+ *  parallel junctions (current mirrors) share current instead of making the
+ *  matrix singular. Shared with the PNP (extra.ts). */
+export const BJT_BE_SERIES_R = 1;
 const npn: ComponentPlugin = {
   type: 'npn',
   name: 'NPN Transistor',
@@ -210,15 +232,19 @@ const npn: ComponentPlugin = {
       st[key + '_branch'] = -1;
       return;
     }
-    // On: model the B-E junction as a voltage source (Vbe = vbeOn).
-    // The current through this voltage source IS the external base current
-    // — when the button is released, this drops to 0 even though V_B stays
-    // at vbeOn. The CCCS then produces I_C = hfe * I_B = 0, so no collector
-    // current flows. The npn is "on" in state but conducts nothing — which
-    // is exactly the desired behavior for an open base.
-    const ibBranch = sys.stampVoltageSource(b, e, vbeOn);
-    sys.stampCCCS(c, e, ibBranch, hfe);
-    st[key + '_branch'] = ibBranch;
+    // On: the B-E junction is vbeOn behind a tiny series resistance
+    // (Norton form: I_B = (Vbe − vbeOn)/R_BE), and I_C = hfe·I_B is the
+    // matching VCCS. With an open base I_B → 0 and so does I_C — the npn is
+    // "on" in state but conducts nothing, as for a released button. (The
+    // junction used to be an IDEAL voltage source: two transistors sharing
+    // base and emitter — every current mirror — put two ideal sources in
+    // parallel and the matrix went singular.)
+    const gBE = 1 / BJT_BE_SERIES_R;
+    sys.stampConductance(b, e, gBE);
+    sys.stampCurrentSource(e, b, gBE * vbeOn);
+    sys.stampVCCS(c, e, b, e, hfe * gBE);
+    sys.stampCurrentSource(e, c, hfe * gBE * vbeOn);
+    st[key + '_branch'] = -1;
     // Saturation clamp: only when there's actual collector current to
     // saturate. Without this guard, the clamp would provide a current path
     // C→E even when I_B (and thus I_C) is zero — which is the "current flows
@@ -251,24 +277,10 @@ const npn: ComponentPlugin = {
     const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('npn', instance, c, b, e);
-    const branchIdx = st[key + '_branch'] as number;
-    if (branchIdx == null || branchIdx < 0) {
-      st[key + '_ib'] = 0;
-      return;
-    }
-    // sim.branchCurrent[i] corresponds to extra var at index numNonGroundNodes + i.
-    // The branch index from stampVoltageSource is the matrix index of the
-    // extra variable. Convert to sim.branchCurrent index.
-    const numNonGround = sim.nodeVoltage.length - 1;
-    const relIdx = branchIdx - numNonGround;
-    if (relIdx < 0 || relIdx >= sim.branchCurrent.length) {
-      st[key + '_ib'] = 0;
-      return;
-    }
-    // Branch current is positive when conventional current flows from b to e
-    // externally (i.e., INTO the base). That's exactly the external base
-    // drive we need to detect turn-off.
-    st[key + '_ib'] = sim.branchCurrent[relIdx];
+    // External base drive (positive INTO the base) — the turn-off signal.
+    st[key + '_ib'] = st[key]
+      ? (sim.nodeVoltage[b] - sim.nodeVoltage[e] - (params.vbe as number)) / BJT_BE_SERIES_R
+      : 0;
   },
   measure(params, terminals, sim) {
     const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
@@ -286,7 +298,9 @@ const opamp: ComponentPlugin = {
   type: 'opamp',
   name: 'Op-Amp (ideal)',
   category: 'ic',
-  description: 'Ideal op-amp with infinite gain (VCCS model). Power terminals omitted for simplicity. Press M to toggle De Morgan alternate body (rectangle form).',
+  description: 'Ideal op-amp: very high gain, no bandwidth limit, near-zero output resistance. Power terminals omitted — the output is limited to the Max/Min Output voltages (±15 V by default), like a real op-amp on ±15 V rails. Press M to toggle De Morgan alternate body (rectangle form).',
+  // smooth output limiting (opamp-core.ts) — Newton re-stamp loop
+  nonLinear: true,
   symbol: 'OP',
   boundingBox: { width: 4, height: 4 },
   terminals: [
@@ -300,6 +314,8 @@ const opamp: ComponentPlugin = {
   hasAlternateBody: true,
   parameters: [
     { key: 'gain', label: 'Open-loop Gain', type: 'number', default: 1e5, unit: '', min: 1, max: 1e9, step: 100 },
+    { key: 'vmax', label: 'Max Output', type: 'number', default: 15, unit: 'V', min: -1000, max: 1000, step: 0.5 },
+    { key: 'vmin', label: 'Min Output', type: 'number', default: -15, unit: 'V', min: -1000, max: 1000, step: 0.5 },
   ],
   render(ctx, params, cellSize, _sim, instance) {
     // leads (common to both body styles)
@@ -344,16 +360,15 @@ const opamp: ComponentPlugin = {
       drawLabel(ctx, '−', cellSize * 1.5, 3 * cellSize);
     }
   },
-  stamp(params, terminals, sys) {
-    const gain = params.gain as number;
-    const inp = terminals.find((t) => t.terminalId === 'in+')!.nodeId;
-    const inn = terminals.find((t) => t.terminalId === 'in-')!.nodeId;
-    const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
-    // Add high-impedance input bias (1 MΩ to GND) on both input pins.
-    sys.stampConductance(inp, 0, 1e-6);
-    sys.stampConductance(inn, 0, 1e-6);
-    // VCVS: V(out) - V(0) = gain * (V(inp) - V(inn))
-    sys.stampVCVS(out, 0, inp, inn, gain);
+  stamp(params, terminals, sys, sim, comp) {
+    const pins = idealPins(terminals);
+    // high-impedance input bias (1 MΩ to GND) on both input pins
+    sys.stampConductance(pins.inp, 0, 1e-6);
+    sys.stampConductance(pins.inn, 0, 1e-6);
+    stampOpamp(idealSpec(params), pins, sys, sim, stateKey('opampIdeal', comp, pins.out));
+  },
+  step(_params, terminals, sim, comp) {
+    stepOpamp(sim, stateKey('opampIdeal', comp, idealPins(terminals).out));
   },
   measure(params, terminals, sim) {
     const inp = terminals.find((t) => t.terminalId === 'in+')!.nodeId;

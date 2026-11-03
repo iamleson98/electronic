@@ -30,6 +30,7 @@ import { resolveEndpointGridPos } from './endpoint-position';
 import { orthogonalizePath } from './wire-geometry';
 import { planWireRoute, type WireRoutePlan } from './wire-overlap';
 import { rerouteAttachedWires, orthogonalizeDocumentWires } from './wire-reroute';
+import { readabilityPass, routeAllReadable } from './example-wires';
 import { toast } from 'sonner';
 import { validatePhysics, type PhysicsViolation } from './physics-validator';
 import { runFullERC, applyERCExclusions } from './erc';
@@ -262,6 +263,13 @@ interface EditorState {
   completeWire: (to: { componentId: string; terminalId: string }) => void;
   /** Collapse every wire to its straight/L route (drop stored bends). One history entry. */
   straightenWires: () => void;
+  /**
+   * Readable wire routing. `componentIds`: re-route only the wires attached
+   * to those parts whose drawing has become misleading (over another net's
+   * pin, through a body, a fake junction) — run once after a drag. Without
+   * ids: re-route the whole schematic from scratch (the "Tidy wires" command).
+   */
+  tidyWires: (componentIds?: string[]) => void;
   // keyboard placement (a11y)
   startPlacement: (type: string, position: { x: number; y: number }) => void;
   nudgePlacement: (dx: number, dy: number) => void;
@@ -1565,7 +1573,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         const simplified = simplifyPath([startPos, ...orthogonal, endPos]);
         userWaypoints = pathToWaypoints(simplified);
       }
-      plan = planWireRoute(startPos, endPos, s.wires, s.components, s.sheets, userWaypoints);
+      plan = planWireRoute(startPos, endPos, s.wires, s.components, s.sheets, userWaypoints, { from: draft.from, to });
       waypoints = plan.waypoints;
     }
 
@@ -1601,6 +1609,28 @@ export const useEditor = create<EditorState>((set, get) => ({
     }));
     toast.success(`Straightened ${bendy.length} wire${bendy.length === 1 ? '' : 's'}`, {
       description: 'Every wire now takes its direct / L-shaped route.',
+    });
+  },
+
+  tidyWires: (componentIds) => {
+    const s = get();
+    if (s.wires.length === 0) return;
+    if (componentIds) {
+      const ids = new Set(componentIds);
+      const attached = new Set(s.wires.filter((w) => ids.has(w.from.componentId) || ids.has(w.to.componentId)).map((w) => w.id));
+      if (attached.size === 0) return;
+      const next = readabilityPass(s.wires, s.components, s.sheets, attached);
+      if (next.every((w, i) => w === s.wires[i])) return;
+      // No history entry: this completes the drag whose history was pushed
+      // at drag start, so one undo restores the pre-drag layout.
+      set({ wires: next });
+      return;
+    }
+    get().pushHistory();
+    const next = routeAllReadable(s.wires, s.components, s.sheets);
+    set({ wires: next, announcement: `Tidied ${next.length} wire${next.length === 1 ? '' : 's'}.` });
+    toast.success(`Tidied ${next.length} wire${next.length === 1 ? '' : 's'}`, {
+      description: 'No wire runs over another net\'s pin, through a part or on top of another wire.',
     });
   },
 
@@ -1783,6 +1813,11 @@ export const useEditor = create<EditorState>((set, get) => ({
       past: opts?.keepHistory ? s.past : [],
       future: opts?.keepHistory ? s.future : [],
     }));
+    // A newly loaded circuit opens centered and filling the canvas (the
+    // canvas owns the camera; an AI partial apply keeps the user's view).
+    if (!preserve && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('circuitlab:zoom-to-fit'));
+    }
   },
 
   serialize: () => {
@@ -1920,7 +1955,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     };
     let result: { sim: SimContext; branchCurrentSize: number; nodeMap: any } | null = null;
     for (let i = 0; i < subSteps; i++) {
-      result = simulateStep(simComponents, simWires, plugins, prev, dt, simOpts);
+      result = simulateStep(simComponents, simWires, plugins, prev, dt, { ...simOpts, recordTerminalCurrents: i === subSteps - 1 });
       if (!result) break;
       prev.nodeVoltage = result.sim.nodeVoltage;
       prev.branchCurrent = result.sim.branchCurrent;
@@ -1978,32 +2013,19 @@ export const useEditor = create<EditorState>((set, get) => ({
       }
     }
     if (!result) {
-      // Solver failed — diagnose common issues for actionable error messages
+      // Solver failed — name the actual culprit (ERC topology rules) instead
+      // of listing every possible cause
       const hasGround = simComponents.some(c => c.type === 'ground' || c.type === 'powerGND');
-      const vSources = simComponents.filter(c => c.type === 'dcVoltage' || c.type === 'acVoltage');
-      // Check for parallel voltage sources (same node pair)
-      const parallelVSources: string[] = [];
-      for (let i = 0; i < vSources.length; i++) {
-        for (let j = i + 1; j < vSources.length; j++) {
-          // If two V-sources connect to the same pair of nodes, they're parallel
-          const w1 = simWires.filter(w => w.from.componentId === vSources[i].id || w.to.componentId === vSources[i].id);
-          const w2 = simWires.filter(w => w.from.componentId === vSources[j].id || w.to.componentId === vSources[j].id);
-          if (w1.length >= 2 && w2.length >= 2) {
-            // Simplified check: if they share at least one connected node
-            const nodes1 = new Set(w1.flatMap(w => [w.from.componentId, w.to.componentId]));
-            const nodes2 = new Set(w2.flatMap(w => [w.from.componentId, w.to.componentId]));
-            const shared = [...nodes1].filter(n => nodes2.has(n));
-            if (shared.length >= 2) {
-              parallelVSources.push(`${vSources[i].id} & ${vSources[j].id}`);
-            }
-          }
-        }
-      }
+      const topo = runFullERC(simComponents, simWires).errors;
+      const loop = topo.find((e) => e.type === 'voltage_source_loop');
+      const floating = topo.find((e) => e.type === 'no_dc_path');
       let errorMsg: string;
       if (!hasGround) {
         errorMsg = 'Simulation failed: No ground reference found. Add a Ground component to your circuit.';
-      } else if (parallelVSources.length > 0) {
-        errorMsg = `Simulation failed: Conflicting voltage sources (${parallelVSources.join(', ')}). Two voltage sources in parallel with different values cause a singular matrix. Add a small series resistor between them.`;
+      } else if (loop) {
+        errorMsg = `Simulation failed: ${loop.message}.`;
+      } else if (floating) {
+        errorMsg = `Simulation failed: ${floating.message}.`;
       } else {
         errorMsg = 'Simulation failed: Singular matrix. Check for: (1) floating nodes with no DC path to ground, (2) voltage source loops with no series resistance, (3) capacitor-only branches with no DC path. Try adding a 1MΩ resistor from the floating node to ground.';
       }

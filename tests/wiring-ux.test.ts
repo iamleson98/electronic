@@ -29,6 +29,7 @@ import { computeWireCrossingMarks } from '../src/lib/circuit/wire-crossings';
 import { computeDraftPreview } from '../src/components/circuit/wire-draft-preview';
 import { orthogonalizePath, computeFlowDotPositions } from '../src/lib/circuit/wire-geometry';
 import { findWireOverlap, wireGridPath } from '../src/lib/circuit/wire-overlap';
+import { resolveEndpointGridPos } from '../src/lib/circuit/endpoint-position';
 import {
   renderScene,
   createInitialView,
@@ -573,7 +574,7 @@ describe('store: wire 1:1 overlap prevention', () => {
     expect(state().wires[1].waypoints).toEqual([{ x: 16, y: 12 }]);   // vertical-first L
   });
 
-  it('rejects when EVERY straight route overlaps (user must bend manually)', () => {
+  it('routes AROUND when every straight route overlaps (never rejects)', () => {
     reset();
     const r2 = state().addComponent('resistor', { x: 10, y: 5 });      // a=(10,6)
     const r3 = state().addComponent('resistor', { x: 26, y: 5 });      // a=(26,6)
@@ -592,9 +593,14 @@ describe('store: wire 1:1 overlap prevention', () => {
     });
     state().startWire({ componentId: r2, terminalId: 'a' }, { x: 10, y: 6 });
     state().completeWire({ componentId: r3, terminalId: 'a' });
-    expect(state().wires.length).toBe(5);                        // nothing added
-    expect(state().announcement).toContain('overlap');
-    expect(state().past.length).toBe(0);                          // history untouched
+    // The readable router finds a detour instead of rejecting the wire…
+    expect(state().wires.length).toBe(6);
+    const added = state().wires[5];
+    // …that never runs 1:1 on top of the blockers.
+    const s = state();
+    const start = resolveEndpointGridPos(added.from, s.components, s.sheets)!;
+    const end = resolveEndpointGridPos(added.to, s.components, s.sheets)!;
+    expect(findWireOverlap([start, ...(added.waypoints ?? []), end], s.wires.slice(0, 5), s.components, s.sheets)).toBeNull();
   });
 
   it('ALLOWS endpoint-touching series wires (junction, not overlap)', () => {
@@ -635,8 +641,9 @@ describe('store: wire 1:1 overlap prevention', () => {
     reset();
     const v1 = state().addComponent('dcVoltage', { x: 4, y: 6 });      // p=(5,6)
     const r2 = state().addComponent('resistor', { x: 10, y: 5 });      // b=(14,6)
-    state().startWire({ componentId: v1, terminalId: 'p' }, { x: 5, y: 6 });
-    state().completeWire({ componentId: r2, terminalId: 'b' });
+    // Wire 1 injected as a straight y=6 run (geometry fixture: the readable
+    // router itself would take it around r2's body instead).
+    useEditor.setState({ wires: [{ id: 'w1', from: { componentId: v1, terminalId: 'p' }, to: { componentId: r2, terminalId: 'b' } }] });
 
     // Hand-routed wire with REAL corners whose first leg runs along y=6
     // (overlapping wire 1's x 5..14 run). User routes get no fallback

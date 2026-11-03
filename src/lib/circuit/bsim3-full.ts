@@ -27,6 +27,7 @@ import type { ComponentPlugin, ParameterDef } from './types';
 import { registerPlugin } from './registry';
 import { thermalVoltage } from './sim-options';
 import { stateKey } from './state-keys';
+import { stampMosChannel } from './mos-newton';
 
 const VT = thermalVoltage(25); // room temperature thermal voltage
 
@@ -422,26 +423,12 @@ function makeBSIM3Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
       const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
       const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
       const p = buildParams(params);
-      // Read previous-step voltages (Newton-Raphson iteration)
       const st = sim.state.__global ?? (sim.state.__global = {});
       const key = stateKey('bsim3', comp, d, g, s, b);
-      const vGSguess = isNmos ? (st[key + '_vgs'] ?? 2) : -(st[key + '_vgs'] ?? 2);
-      const vDSguess = isNmos ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? 1);
-      const vBSguess = isNmos ? (st[key + '_vbs'] ?? 0) : -(st[key + '_vbs'] ?? 0);
-      // Evaluate the BSIM3 model at the operating point
-      const op = evaluateBSIM3(vGSguess, vDSguess, vBSguess, p);
-      const sign = isNmos ? 1 : -1;
-      // Polarity-symmetric Jacobian (see advanced-semi.ts bjtGPNpn note):
-      // +gm/+gds/+gmb on the matrix for BOTH channels; the channel polarity
-      // lives only in the offset source below.
-      sys.stampVCCS(d, s, g, s, op.gm);
-      // Output conductance: gds between d and s
-      sys.stampConductance(d, s, op.gds);
-      // Body transconductance: gmb — drain current controlled by Vbs
-      sys.stampVCCS(d, s, b, s, op.gmb);
-      // Current source offset (linearization about the operating point)
-      const Ieq = op.id - op.gm * vGSguess - op.gds * vDSguess - op.gmb * vBSguess;
-      sys.stampCurrentSource(d, s, sign * Ieq);
+      // Newton linearization at the current iterate, reverse-mode swap,
+      // step limiting (mos-newton.ts)
+      stampMosChannel(sys, sim, { d, g, s, b }, isNmos, key, (vgs, vds, vbs) => evaluateBSIM3(vgs, vds, vbs, p),
+        { vgs: st[key + '_vgs'], vds: st[key + '_vds'] });
     },
     step: (params, terminals, sim, instance) => {
       const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;

@@ -93,7 +93,10 @@ export function computeDraftPreview(
     path = [start, ...draft.waypoints, ...elbow(last, target)];
     overlap = findWireOverlap(path, wires, components, sheets) != null;
   } else {
-    const plan = planWireRoute(start, target, wires, components, sheets, []);
+    // Snapped to a pin: the exact route the commit will take (full
+    // readability routing). Free cursor: the cheap straight planner.
+    const plan = planWireRoute(start, target, wires, components, sheets, [],
+      snapTarget ? { from: draft.from, to: { componentId: snapTarget.componentId, terminalId: snapTarget.terminalId } } : undefined);
     if (plan.overlap) {
       // Blocked: preview the default L-route in red (the wire that fails).
       path = [start, ...elbow(start, target)];

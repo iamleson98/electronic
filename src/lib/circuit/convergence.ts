@@ -5,9 +5,9 @@
 // the existing solveDC() function is unchanged.
 
 import type { CircuitComponent, ComponentPlugin, Wire, SimContext } from './types';
-import { solveDC, buildNodeMap, getTerminalsForComponent } from './engine';
+import { solveDC, buildNodeMap, getTerminalsForComponent, stampFloatingGmin } from './engine';
 import { createMnaSystem, solveMna } from './solver';
-import { mergeOptions, type SimOptions, type ConvergenceReport, reportOK, reportFail } from './sim-options';
+import { mergeOptions, type SimOptions, type ConvergenceReport, reportOK, reportFail, dcSolveOpts } from './sim-options';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Gmin stepping
@@ -77,7 +77,7 @@ export function solveDCWithGminStepping(
   const attempts: string[] = [];
 
   // 1. Try plain solve first
-  const directResult = solveDC(components, wires, plugins, options.itl1);
+  const directResult = solveDC(components, wires, plugins, options.itl1, dcSolveOpts(options, false));
   if (directResult) {
     return { sim: directResult, report: reportOK(0, 0) };
   }
@@ -94,7 +94,7 @@ export function solveDCWithGminStepping(
   for (let gmin = gminStart; gmin >= gminTarget * 0.999; gmin *= 0.1) {
     const shunted = buildGminShuntedCircuit(components, wires, plugins, gmin);
     if (!shunted) break;
-    const r = solveDC(shunted.components, shunted.wires, plugins, options.itl1);
+    const r = solveDC(shunted.components, shunted.wires, plugins, options.itl1, dcSolveOpts(options, false));
     attempts.push(`gmin stepping @${gmin.toExponential(1)}`);
     if (r) {
       lastShunted = r;
@@ -105,7 +105,7 @@ export function solveDCWithGminStepping(
   }
 
   // 3. Final clean solve at full source values
-  const finalResult = solveDC(components, wires, plugins, options.itl1);
+  const finalResult = solveDC(components, wires, plugins, options.itl1, dcSolveOpts(options, false));
   if (finalResult) {
     attempts.push('final clean solve');
     return { sim: finalResult, report: reportOK(attempts.length, 0) };
@@ -158,7 +158,7 @@ export function solveDCWithSourceStepping(
       }
       return c;
     });
-    const r = solveDC(scaledComponents, wires, plugins, options.itl1);
+    const r = solveDC(scaledComponents, wires, plugins, options.itl1, dcSolveOpts(options, false));
     if (!r) {
       // try a smaller alpha step
       alpha *= 0.5;
@@ -251,6 +251,7 @@ export function solveDCWithPseudoTran(
     // every iteration, so pseudo-transient could never succeed.
     const sys = createMnaSystem(numNonGround, extraBudget);
     sys.nextExtra = numNonGround;
+    stampFloatingGmin(sys, nodeMap);
 
     // Stamp all components
     for (const comp of components) {
@@ -345,7 +346,7 @@ export function solveDCRobust(
   const options = mergeOptions(opts);
 
   // 1. Plain solve
-  const direct = solveDC(components, wires, plugins, options.itl1);
+  const direct = solveDC(components, wires, plugins, options.itl1, dcSolveOpts(options, false));
   if (direct) return { sim: direct, report: reportOK(0, 0) };
 
   // 2. gmin stepping (if enabled)

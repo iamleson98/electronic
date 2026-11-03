@@ -47,7 +47,9 @@ describe('P3: registration & defaults', () => {
     expect(p!.parameters.find(x => x.key === 'gbw')!.default).toBe(1.2e6);
     expect(p!.parameters.find(x => x.key === 'slewRate')!.default).toBe(0.5);
     expect(p!.parameters.find(x => x.key === 'voff')!.default).toBe(3);
-    expect(p!.parameters.find(x => x.key === 'ibias')!.default).toBe(45);
+    // 45 nA typical, flowing OUT of the pins (PNP input stage) — the
+    // parameter is signed, + into the pins
+    expect(p!.parameters.find(x => x.key === 'ibias')!.default).toBe(-45);
     expect(p!.parameters.find(x => x.key === 'rout')!.default).toBe(300);
     expect(p!.parameters.find(x => x.key === 'voutMargin')!.default).toBe(1.4);
   });

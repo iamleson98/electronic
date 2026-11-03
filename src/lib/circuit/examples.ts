@@ -6,7 +6,7 @@
 //   - Components are spaced at least 4 grid units apart
 
 import type { CircuitDocument } from './types';
-import { normalizeExampleWires } from './example-wires';
+import { normalizeExampleWires, relayoutExample, routeAllReadable, localizeGrounds, separateCoincidentPins } from './example-wires';
 import { rawComplexExamples } from './examples-complex';
 import { getPlugin } from './registry';
 import './components';
@@ -1588,7 +1588,10 @@ export const exampleLogicGates = normalizeExampleWires(rawExampleLogicGates);
 export const exampleOpampNonInverting = normalizeExampleWires(rawExampleOpampNonInverting);
 export const exampleLCTank = normalizeExampleWires(rawExampleLCTank);
 export const exampleVCO = normalizeExampleWires(rawExampleVCO);
-export const exampleAudioAmplifier = normalizeExampleWires(rawExampleAudioAmplifier);
+// The hand layout packed 24 parts into 35×20 cells — 8 pairs of parts sat on
+// top of each other, forcing wires through bodies. Spread it out; the
+// readable router draws every wire fresh.
+export const exampleAudioAmplifier = tidyExample(localizeGrounds(separateCoincidentPins(relayoutExample(rawExampleAudioAmplifier, { spread: 1.7 }))));
 
 // ── Complex examples (examples-complex.ts) — normalized like the rest ──────
 export const exampleCeAmplifier = normalizeExampleWires(rawComplexExamples.ceAmplifier);
@@ -1611,7 +1614,14 @@ export const exampleBridgeSupply = normalizeExampleWires(rawComplexExamples.brid
 export const exampleVoltageDoubler = normalizeExampleWires(rawComplexExamples.voltageDoubler);
 export const exampleZenerRegulator = normalizeExampleWires(rawComplexExamples.zenerRegulator);
 export const exampleInductorKickback = normalizeExampleWires(rawComplexExamples.inductorKickback);
-export const exampleSrLatch = normalizeExampleWires(rawComplexExamples.srLatch);
+// The 5 V source sat on top of the Q resistor — move it to free space.
+export const exampleSrLatch = normalizeExampleWires(relayoutExample(rawComplexExamples.srLatch, { moves: { v1: { x: 33, y: 1 } } }));
+
+/** Route every wire of a (re-laid-out) example with the readable router. */
+function tidyExample(input: CircuitDocument): CircuitDocument {
+  const doc = separateCoincidentPins(input);
+  return { ...doc, wires: routeAllReadable(doc.wires, doc.components, doc.sheets ?? []) };
+}
 export const exampleDffCounter = normalizeExampleWires(rawComplexExamples.dffCounter);
 export const exampleHalfAdder = normalizeExampleWires(rawComplexExamples.halfAdder);
 export const exampleWheatstone = normalizeExampleWires(rawComplexExamples.wheatstone);
@@ -1625,7 +1635,7 @@ export const exampleCategories: ExampleCategory[] = [
       { name: 'Emitter Follower (Buffer)', description: 'Common-collector buffer: Vout = Vin − 0.7, high-Z in, low-Z out, unity gain', doc: exampleEmitterFollower },
       { name: 'NPN Current Mirror', description: 'The backbone of analog ICs: Q1 diode-connected sets Vbe, Q2 sinks the same current into its load regardless of load voltage', doc: exampleCurrentMirror },
       { name: 'Class-B Push-Pull Output', description: 'Complementary NPN/PNP emitter followers — see the 0.7V crossover dead zone on the output', doc: examplePushPull },
-      { name: 'Two-Stage Audio Amplifier', description: 'Pre-amp + tone control + class-A emitter-follower power amp driving a speaker (24 components, 37 wires)', doc: exampleAudioAmplifier },
+      { name: 'Two-Stage Audio Amplifier', description: 'Pre-amp + tone control + class-A emitter-follower power amp driving a speaker, with local ground symbols (37 wires)', doc: exampleAudioAmplifier },
     ],
   },
   {

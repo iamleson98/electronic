@@ -13,6 +13,7 @@ import type { ComponentPlugin, SimContext } from '../types';
 import { registerPlugin } from '../registry';
 import { drawLabel } from './draw';
 import { stateKey } from '../state-keys';
+import { stampOpamp, stepOpamp, measureOpamp, acStampOpamp, specFromParams, opampParamDefs, type OpampPins } from './opamp-core';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Expression parser for behavioral sources
@@ -479,11 +480,29 @@ export const vcSwitch: ComponentPlugin = {
 //   We model this with two coupled inductors + a CCCS in each.
 // ─────────────────────────────────────────────────────────────────────────────
 
+function coupledTerms(terminals: { terminalId: string; nodeId: number }[]) {
+  const n = (id: string) => terminals.find((x) => x.terminalId === id)!.nodeId;
+  return { p1: n('p1'), p2: n('p2'), s1: n('s1'), s2: n('s2') };
+}
+/**
+ * L1, L2, M of a coupled pair. Circuits saved before L2/k were simulated
+ * carry a turns `ratio` with L2 left equal to L1: honor that intent by
+ * deriving L2 = L1/ratio² (N1:N2 = √(L1/L2)).
+ */
+function coupledL(params: Record<string, any>) {
+  const L1 = Math.max(1e-12, params.L1 as number);
+  let L2 = Math.max(1e-12, params.L2 as number);
+  const ratio = params.ratio as number | undefined;
+  if (typeof ratio === 'number' && ratio > 0 && ratio !== 1 && params.L2 === params.L1) L2 = L1 / (ratio * ratio);
+  const k = Math.max(0, Math.min(0.9999, (params.k as number) ?? 0.99));
+  return { L1, L2, M: k * Math.sqrt(L1 * L2) };
+}
+
 export const coupledInductor: ComponentPlugin = {
   type: 'coupledInductor',
   name: 'Coupled Inductors (Transformer)',
   category: 'passive',
-  description: 'Two inductors with mutual coupling M = k*sqrt(L1*L2). Primary/secondary with turns ratio.',
+  description: 'Two inductors with mutual coupling M = k·√(L1·L2) (SPICE K element). The turns ratio is √(L1/L2); k < 1 gives leakage inductance (1−k²)·L. Winding currents flow P1→P2 and S1→S2; dotted ends are P1 and S1.',
   symbol: 'T',
   boundingBox: { width: 4, height: 6 },
   terminals: [
@@ -495,8 +514,7 @@ export const coupledInductor: ComponentPlugin = {
   parameters: [
     { key: 'L1', label: 'Primary Inductance', type: 'number', default: 1e-3, unit: 'H', step: 1e-6 },
     { key: 'L2', label: 'Secondary Inductance', type: 'number', default: 1e-3, unit: 'H', step: 1e-6 },
-    { key: 'k', label: 'Coupling Coeff', type: 'number', default: 0.99, min: 0, max: 1, step: 0.01 },
-    { key: 'ratio', label: 'Turns Ratio (N1:N2)', type: 'number', default: 1, min: 0.01, max: 100, step: 0.1 },
+    { key: 'k', label: 'Coupling Coeff', type: 'number', default: 0.99, min: 0, max: 0.9999, step: 0.01 },
   ],
   keywords: ['transformer', 'mutual', 'coupled', 'k'],
   render(ctx, _params, cellSize) {
@@ -527,52 +545,50 @@ export const coupledInductor: ComponentPlugin = {
     ctx.moveTo(2 * cellSize + 4, cellSize); ctx.lineTo(2 * cellSize + 4, 3 * cellSize);
     ctx.stroke();
   },
+  // Backward-Euler companion of [v1; v2] = [L1 M; M L2]·d/dt[i1; i2]:
+  //   [i1; i2] = [i1; i2]_prev + dt·Γ·[v1; v2],  Γ = [L2 −M; −M L1]/(L1·L2 − M²)
+  // (the old stamp was an ideal `ratio` transformer plus primary inductance
+  // — L2 and k were read and discarded).
   stamp(params, terminals, sys, sim, comp) {
-    const p1 = terminals.find((t) => t.terminalId === 'p1')!.nodeId;
-    const p2 = terminals.find((t) => t.terminalId === 'p2')!.nodeId;
-    const s1 = terminals.find((t) => t.terminalId === 's1')!.nodeId;
-    const s2 = terminals.find((t) => t.terminalId === 's2')!.nodeId;
-    const L1 = Math.max(1e-12, params.L1 as number);
-    const L2 = Math.max(1e-12, params.L2 as number);
-    const k = Math.max(0, Math.min(1, params.k as number));
-    const ratio = params.ratio as number;
-    const M = k * Math.sqrt(L1 * L2);
-    void L2; void M;
-    // Ideal transformer: V2 = V1/ratio. The VCVS branch current i flows s1→s2
-    // INSIDE the source; when the secondary delivers power, i < 0. Power
-    // conservation fixes the reflected primary current: I(p1→p2 internal) =
-    // −i·(V2/V1) = −i/ratio. The old comment claimed the reflection was
-    // "implicit in KCL" — it is not: without this CCCS the secondary delivered
-    // power the primary never drew (energy from nothing).
-    const vcvsIdx = sys.stampVCVS(s1, s2, p1, p2, 1 / ratio);
-    if (vcvsIdx >= 0) {
-      sys.stampCCCS(p1, p2, vcvsIdx, -1 / ratio);
-    }
-    // Record the branch index for the primary-current readout
-    const stR = sim.state.__global ?? (sim.state.__global = {});
-    stR[`xfmr_branch_${comp?.id ?? `${p1}_${p2}`}`] = vcvsIdx;
-    // Primary self-/magnetizing inductance (companion model, backward Euler)
+    const t = coupledTerms(terminals);
+    const { L1, L2, M } = coupledL(params);
+    const D = L1 * L2 - M * M;
     const dt = Math.max(sim.dt, 1e-12);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('xfmr', comp, p1, p2, s1, s2);
-    const i1Prev = st[key] ?? 0;
-    const g1 = dt / L1;
-    sys.stampConductance(p1, p2, g1);
-    sys.stampCurrentSource(p1, p2, i1Prev);
-    // Update i1 in step()
+    const key = stateKey('xfmr', comp, t.p1, t.p2, t.s1, t.s2);
+    const i1Prev = (st[key] as number | undefined) ?? 0;
+    const i2Prev = (st[key + '_i2'] as number | undefined) ?? 0;
+    sys.stampConductance(t.p1, t.p2, (dt * L2) / D);
+    sys.stampVCCS(t.p1, t.p2, t.s1, t.s2, (-dt * M) / D);
+    sys.stampCurrentSource(t.p1, t.p2, i1Prev);
+    sys.stampConductance(t.s1, t.s2, (dt * L1) / D);
+    sys.stampVCCS(t.s1, t.s2, t.p1, t.p2, (-dt * M) / D);
+    sys.stampCurrentSource(t.s1, t.s2, i2Prev);
   },
   step(params, terminals, sim, instance) {
-    const p1 = terminals.find((t) => t.terminalId === 'p1')!.nodeId;
-    const p2 = terminals.find((t) => t.terminalId === 'p2')!.nodeId;
-    const s1 = terminals.find((t) => t.terminalId === 's1')!.nodeId;
-    const s2 = terminals.find((t) => t.terminalId === 's2')!.nodeId;
-    const L1 = Math.max(1e-12, params.L1 as number);
+    const t = coupledTerms(terminals);
+    const { L1, L2, M } = coupledL(params);
+    const D = L1 * L2 - M * M;
     const dt = Math.max(sim.dt, 1e-12);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('xfmr', instance, p1, p2, s1, s2);
-    const i1Prev = st[key] ?? 0;
-    const v = sim.nodeVoltage[p1] - sim.nodeVoltage[p2];
-    st[key] = i1Prev + (v / L1) * dt;
+    const key = stateKey('xfmr', instance, t.p1, t.p2, t.s1, t.s2);
+    const v1 = sim.nodeVoltage[t.p1] - sim.nodeVoltage[t.p2];
+    const v2 = sim.nodeVoltage[t.s1] - sim.nodeVoltage[t.s2];
+    st[key] = ((st[key] as number | undefined) ?? 0) + (dt / D) * (L2 * v1 - M * v2);
+    st[key + '_i2'] = ((st[key + '_i2'] as number | undefined) ?? 0) + (dt / D) * (-M * v1 + L1 * v2);
+  },
+  measure(params, terminals, sim, comp) {
+    const t = coupledTerms(terminals);
+    const st = sim.state.__global ?? {};
+    const key = stateKey('xfmr', comp, t.p1, t.p2, t.s1, t.s2);
+    const { L1, L2 } = coupledL(params);
+    return [
+      { label: 'V1', value: (sim.nodeVoltage[t.p1] - sim.nodeVoltage[t.p2]).toFixed(3), unit: 'V' },
+      { label: 'V2', value: (sim.nodeVoltage[t.s1] - sim.nodeVoltage[t.s2]).toFixed(3), unit: 'V' },
+      { label: 'I1', value: (((st[key] as number) ?? 0) * 1000).toFixed(3), unit: 'mA' },
+      { label: 'I2', value: (((st[key + '_i2'] as number) ?? 0) * 1000).toFixed(3), unit: 'mA' },
+      { label: 'N1:N2', value: Math.sqrt(L1 / L2).toFixed(3), unit: '' },
+    ];
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 0, y: 3 }]; },
 };
@@ -1119,11 +1135,24 @@ export const ccvsUser: ComponentPlugin = {
 //             input bias current, offset voltage, CMRR, PSRR, output resistance
 // ─────────────────────────────────────────────────────────────────────────────
 
+function realPins(terminals: { terminalId: string; nodeId: number }[]): OpampPins {
+  return {
+    inp: terminals.find((t) => t.terminalId === 'in+')!.nodeId,
+    inn: terminals.find((t) => t.terminalId === 'in-')!.nodeId,
+    out: terminals.find((t) => t.terminalId === 'out')!.nodeId,
+    vcc: terminals.find((t) => t.terminalId === 'vcc')!.nodeId,
+    vee: terminals.find((t) => t.terminalId === 'vee')!.nodeId,
+  };
+}
+const realSpec = (params: Record<string, any>) => specFromParams(params, { defVcc: 15, defVee: -15 });
+
 export const opampReal: ComponentPlugin = {
   type: 'opampReal',
   name: 'Op-amp (Boyle Macromodel)',
   category: 'ic',
-  description: 'Real op-amp with finite gain, GBW, slew rate, offset, CMRR, output resistance.',
+  description: 'Real op-amp (741-class defaults): finite gain with a GBW dominant pole, slew-rate limit, offset, CMRR, input bias current, Rout with short-circuit current limit, output swing limited by the VCC/VEE rails, quiescent supply current.',
+  // Smooth-limited Newton stamp (opamp-core.ts) — joins the re-stamp loop.
+  nonLinear: true,
   symbol: 'A',
   boundingBox: { width: 6, height: 4 },
   terminals: [
@@ -1133,15 +1162,10 @@ export const opampReal: ComponentPlugin = {
     { id: 'vcc', label: 'VCC', position: { x: 3, y: 0 }, electricalType: 'power_in' },
     { id: 'vee', label: 'VEE', position: { x: 3, y: 4 }, electricalType: 'power_in' },
   ],
-  parameters: [
-    { key: 'gain', label: 'Open-loop Gain', type: 'number', default: 1e5, step: 1000 },
-    { key: 'gbw', label: 'Gain-Bandwidth (Hz)', type: 'number', default: 1e6, step: 10000 },
-    { key: 'slewRate', label: 'Slew Rate (V/µs)', type: 'number', default: 0.5, step: 0.1 },
-    { key: 'voff', label: 'Offset Voltage (mV)', type: 'number', default: 1, step: 0.1 },
-    { key: 'ibias', label: 'Bias Current (nA)', type: 'number', default: 80, step: 5 },
-    { key: 'cmrr', label: 'CMRR (dB)', type: 'number', default: 90, step: 5 },
-    { key: 'rout', label: 'Output Resistance (Ω)', type: 'number', default: 75, step: 5 },
-  ],
+  parameters: opampParamDefs({
+    gain: 1e5, gbw: 1e6, slewRate: 0.5, voffMv: 1, ibiasNa: 80, cmrrDb: 90, rout: 75,
+    swingHigh: 1, swingLow: 1, iLimitMa: 25, iqMa: 1.7,
+  }),
   keywords: ['opamp', 'boyle', 'macromodel', 'real', 'gbw'],
   defaultFootprint: 'DIP-8',
   render(ctx, _params, cellSize) {
@@ -1164,46 +1188,21 @@ export const opampReal: ComponentPlugin = {
     drawLabel(ctx, '-', 2.3 * cellSize, 3 * cellSize);
     drawLabel(ctx, '∞', 3 * cellSize, 2 * cellSize);
   },
-  stamp(params, terminals, sys, sim) {
-    const inp = terminals.find((t) => t.terminalId === 'in+')!.nodeId;
-    const inn = terminals.find((t) => t.terminalId === 'in-')!.nodeId;
-    const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
-    const gain = params.gain as number;
-    const rout = Math.max(1, params.rout as number);
-    const voff = (params.voff as number) / 1000; // mV to V
-    // Thevenin output stage: the VCVS drives an INTERNAL node (a pseudo-node
-    // built from an extra unknown) and rout connects it to the real output.
-    // The old code stamped rout from out to ground in parallel with the VCVS —
-    // the VCVS still pinned V(out) exactly, so rout had no effect whatsoever
-    // (a 75 Ω load didn't change V(out) at all).
-    const internal = sys.addExtra() + 1; // pseudo-node id (extra index + 1)
-    const vcvsIdx = sys.stampVCVS(internal, 0, inp, inn, gain);
-    // Input-referred offset: V(internal) = gain·(v+ − v− + voff). The VCVS
-    // row is V(internal) − gain·(v+ − v−) = z[vcvsIdx]; setting that RHS to
-    // gain·voff folds the offset into the gain equation. (The old code
-    // injected a meaningless voff·gain/1M amp current into the inverting
-    // node, which did nothing when that node was grounded.)
-    if (vcvsIdx >= 0 && voff !== 0) {
-      sys.z[vcvsIdx] += gain * voff;
-    }
-    // Series output resistance between the internal node and the output
-    sys.stampConductance(internal, out, 1 / rout);
-    // Input bias path (prevents floating inputs, like the ideal op-amp)
-    sys.stampConductance(inp, 0, 1e-6);
-    sys.stampConductance(inn, 0, 1e-6);
-    void sim;
+  stamp(params, terminals, sys, sim, comp) {
+    const pins = realPins(terminals);
+    stampOpamp(realSpec(params), pins, sys, sim, stateKey('opampReal', comp, pins.out));
+  },
+  step(_params, terminals, sim, comp) {
+    stepOpamp(sim, stateKey('opampReal', comp, realPins(terminals).out));
+  },
+  acStamp(params, terminals, sys, { dcOp, omega, comp }) {
+    const pins = realPins(terminals);
+    acStampOpamp(realSpec(params), pins, sys, dcOp, omega, stateKey('opampReal', comp, pins.out));
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 3, y: 2 }, { x: 6, y: 2 }]; },
-  measure(params, terminals, sim) {
-    const inp = terminals.find((t) => t.terminalId === 'in+')!.nodeId;
-    const inn = terminals.find((t) => t.terminalId === 'in-')!.nodeId;
-    const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
-    return [
-      { label: 'V+', value: sim.nodeVoltage[inp].toFixed(4), unit: 'V' },
-      { label: 'V-', value: sim.nodeVoltage[inn].toFixed(4), unit: 'V' },
-      { label: 'Vout', value: sim.nodeVoltage[out].toFixed(4), unit: 'V' },
-      { label: 'Gain', value: (params.gain as number).toExponential(2), unit: '' },
-    ];
+  measure(params, terminals, sim, comp) {
+    const pins = realPins(terminals);
+    return measureOpamp(realSpec(params), pins, sim, stateKey('opampReal', comp, pins.out));
   },
 };
 

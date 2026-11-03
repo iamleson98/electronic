@@ -86,6 +86,9 @@ export const hallLinear: ComponentPlugin = {
   type: 'hallLinear',
   name: 'A1302 (Linear Hall Sensor)',
   category: SENSOR,
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Linear ratiometric Hall-effect sensor (A1302-style). Vout = quiescent·Vcc/5 + sensitivity·Vcc/5·B; set the field parameter (mT) to simulate a magnet. 2.5 mV/G = 25 mV/mT, output clamps 0.05V from either rail.',
   symbol: '1302',
   boundingBox: { width: 4, height: 4 },

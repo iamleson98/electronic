@@ -28,6 +28,7 @@
 
 import type { MnaSystem } from '../types';
 import { drawLabel } from './draw';
+import { isPinUnwired } from '../pin-state';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
 
@@ -58,6 +59,9 @@ registerPlugin({
   type: 'cd4027',
   name: 'CD4027 (Dual JK Flip-Flop)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'CD4027 CMOS dual JK flip-flop (both units in one symbol). Rising-edge clock; async active-HIGH SET and RST. J/K: 00 hold, 01 reset, 10 set, 11 toggle.',
   symbol: 'JK',
   boundingBox: { width: 8, height: 8 },
@@ -151,6 +155,9 @@ registerPlugin({
   type: 'cd4017',
   name: 'CD4017 (Decade Counter)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'CD4017 CMOS decade counter with 10 decoded outputs. Counts 0-9 on the CLK rising edge (EN high inhibits the clock). RST is async active-high. CARRY is high for counts 0-4.',
   symbol: '4017',
   boundingBox: { width: 8, height: 10 },
@@ -227,6 +234,9 @@ registerPlugin({
   type: 'cd4060',
   name: 'CD4060 (14-Stage Counter)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'CD4060 14-stage binary ripple counter with internal oscillator. Clock externally through CLK, or leave CLK unwired to use the internal oscillator (oscFreq param). Outputs Q3-Q14 (Q11 not bonded, like the real part). RST async active-high.',
   symbol: '4060',
   boundingBox: { width: 8, height: 12 },
@@ -286,8 +296,9 @@ registerPlugin({
     const clkNow = v(sim, clk);
     if (rstHigh) {
       s.count = 0; // async reset dominates
-    } else if (clk !== 0) {
+    } else if (!isPinUnwired(sim, clk)) {
       // External clock — level-based rising-edge detect (multi-stamp safe).
+      // (A grounded CLK is a clock held low, not "unwired".)
       if (clkNow > thresh && s.clkPrev <= thresh) {
         s.count = (s.count + 1) & 0x3fff; // 14 stages
       }
@@ -329,6 +340,9 @@ registerPlugin({
   type: 'cd4093',
   name: 'CD4093 (NAND Schmitt)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'CD4093 quad 2-input NAND Schmitt trigger (one gate). Output goes LOW only when both inputs are above VT+, HIGH when any input is below VT−, and holds its previous state in between. Eliminates chatter on slowly-changing inputs.',
   symbol: '4093',
   boundingBox: { width: 4, height: 3 },
@@ -433,6 +447,9 @@ registerPlugin({
   type: 'cd4511',
   name: 'CD4511 (BCD→7-Seg)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'CD4511 BCD-to-7-segment latch/decoder/driver. BCD 0-9 decoded onto segments a-g (10-15 blank). LT (active-low) forces all segments on, BI (active-low) blanks them, LE (active-high) latches the current BCD value.',
   symbol: '4511',
   boundingBox: { width: 8, height: 10 },
@@ -514,6 +531,9 @@ registerPlugin({
   type: 'ic7490',
   name: '7490 (Decade Counter)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '7490 decade counter with separate ÷2 (CLKA→QA) and ÷5 (CLKB→QB,QC,QD) sections, falling-edge clocked. R0(1)&R0(2) high resets to 0; R9(1)&R9(2) high presets to 9 (QA=QD=1). Wire QA to CLKB for BCD decade counting.',
   symbol: '490',
   boundingBox: { width: 8, height: 8 },
@@ -606,6 +626,9 @@ registerPlugin({
   type: 'ic74164',
   name: '74164 (Shift Register)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '74164 8-bit serial-in / parallel-out shift register. Serial data (A AND B) enters Q0 on each CLK rising edge and shifts toward Q7. CLR (active-low) asynchronously clears all outputs.',
   symbol: '164',
   boundingBox: { width: 8, height: 10 },
@@ -682,6 +705,9 @@ registerPlugin({
   type: 'ic74245',
   name: '74245 (Bus Transceiver)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '74245 octal bus transceiver. OE (active-low) enables the eight A↔B channels through RON; OE high disables them (ROFF). Each bit is modeled as a bilateral pass switch — DIR is kept for pin fidelity but the channel conducts both ways (linear-model simplification).',
   symbol: '245',
   boundingBox: { width: 8, height: 12 },
@@ -728,14 +754,13 @@ registerPlugin({
     // OE is active low: enabled when below the threshold.
     const enabled = v(sim, pinOf(terminals, 'oe')) < thresh;
     const g = enabled ? 1 / Math.max(0.001, params.ron as number) : 1 / (params.roff as number);
-    // Each bit: bilateral switch between aN and bN. A channel with an
-    // unwired pin (node 0) is left floating — in this node model an unwired
-    // pin is indistinguishable from a grounded one, and grounding a bus line
-    // through RON just for being unwired would be far worse.
+    // Each bit: bilateral switch between aN and bN. Unwired pins float on
+    // their own node, so every channel is stamped — a bus line wired to
+    // ground conducts like the real part.
     for (let i = 0; i < 8; i++) {
       const a = pinOf(terminals, `a${i}`);
       const b = pinOf(terminals, `b${i}`);
-      if (a !== 0 && b !== 0) sys.stampConductance(a, b, g);
+      if (a !== b) sys.stampConductance(a, b, g);
     }
   },
   measure(_params, terminals, sim) {
@@ -756,6 +781,9 @@ registerPlugin({
   type: 'ic74374',
   name: '74374 (Octal D FF)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '74374 octal D flip-flop with tri-state outputs. All eight D inputs latch to Q on the CLK rising edge. OE (active-low) drives the outputs; OE high puts them in high-impedance (leakage only).',
   symbol: '374',
   boundingBox: { width: 8, height: 12 },
@@ -849,6 +877,9 @@ registerPlugin({
   type: 'pll4046',
   name: '74HC4046 (PLL)',
   category: 'logic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '74HC4046 phase-locked loop (behavioral). VCO: f = FMIN + (FMAX−FMIN)·V(VCOIN)/VCC on VCOOUT. Phase detector II charge pump on PCPOUT: sources ICp when SIGIN leads COMPIN, sinks when it lags. INH high disables the VCO. Feed VCOOUT back to COMPIN and filter PCPOUT into VCOIN to close the loop.',
   symbol: 'PLL',
   boundingBox: { width: 8, height: 6 },

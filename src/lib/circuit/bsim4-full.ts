@@ -34,6 +34,7 @@ import type { ComponentPlugin, ParameterDef } from './types';
 import { registerPlugin } from './registry';
 import { thermalVoltage } from './sim-options';
 import { stateKey } from './state-keys';
+import { stampMosChannel } from './mos-newton';
 import {
   BSIM3Params,
   DEFAULT_BSIM3_PARAMS,
@@ -151,7 +152,9 @@ export const DEFAULT_BSIM4_PARAMS: BSIM4Params = {
   // BSIM4 additions
   toxqm: 1.8e-9,         // tunneling oxide (usually = tox)
   igcMod: 1,             // gate tunneling on
-  aigc: 8.0e-4,          // direct-tunneling pre-factor (tuned to ~1 A/cm² at 1V)
+  aigc: 3.9e-9,          // direct-tunneling pre-factor: J = 1 A/cm² at 1 V across
+                         // the 1.8 nm oxide (8e-4 gave ~6e5 A/cm² — 160 A of gate
+                         // current at 5 V)
   bigc: 6.5e9,           // direct-tunneling exponential (1/(V/m))
   pigc: 0.5,             // 50% to channel, 50% to source/drain
   capMod: 1,             // Meyer capacitance model
@@ -715,7 +718,7 @@ const bsim4Params: ParameterDef[] = [
     { label: 'Off', value: '0' },
     { label: 'On', value: '1' },
   ] },
-  { key: 'aigc', label: 'Tunnel A coeff', type: 'number', default: 8.0e-4, min: 0, max: 1, step: 1e-5, unit: 'A/V²' },
+  { key: 'aigc', label: 'Tunnel A coeff', type: 'number', default: 3.9e-9, min: 0, max: 1, step: 1e-10, unit: 'A/V²' },
   { key: 'bigc', label: 'Tunnel B coeff', type: 'number', default: 6.5e9, min: 1e8, max: 1e11, step: 1e8, unit: 'V/m' },
   { key: 'pigc', label: 'Gate→source split', type: 'number', default: 0.5, min: 0, max: 1, step: 0.05, unit: '' },
   { key: 'capMod', label: 'Capacitance model', type: 'select', default: 1, options: [
@@ -827,9 +830,6 @@ function makeBSIM4Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
       // Read previous-step voltages (Newton-Raphson iteration)
       const st = sim.state.__global ?? (sim.state.__global = {});
       const key = stateKey('bsim4', comp, d, g, s, b);
-      const vGSguess = isNmos ? (st[key + '_vgs'] ?? 2) : -(st[key + '_vgs'] ?? 2);
-      const vDSguess = isNmos ? (st[key + '_vds'] ?? 1) : -(st[key + '_vds'] ?? 1);
-      const vBSguess = isNmos ? (st[key + '_vbs'] ?? 0) : -(st[key + '_vbs'] ?? 0);
       // REAL (signed) previous-step terminal voltages for the capacitance
       // companions — the charge Q_old = C·V_old must use the physical node
       // voltages, NOT the flip-world magnitudes (P-channel: sign error in
@@ -837,26 +837,36 @@ function makeBSIM4Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
       const vGSold = (st[key + '_vgs'] as number | undefined) ?? 0;
       const vDSold = (st[key + '_vds'] as number | undefined) ?? (isNmos ? 1 : -1);
       const vBSold = (st[key + '_vbs'] as number | undefined) ?? 0;
-      // Evaluate the BSIM4 model at the operating point
-      const op = evaluateBSIM4(vGSguess, vDSguess, vBSguess, p);
       const sign = isNmos ? 1 : -1;
-
-      // ── Drain current source + small-signal conductances (BSIM3-style) ──
-      // Polarity-symmetric Jacobian (see advanced-semi.ts bjtGPNpn note):
-      // +gm/+gds/+gmb on the matrix for BOTH channels; the channel polarity
-      // lives only in the offset source below.
-      sys.stampVCCS(d, s, g, s, op.gm);
-      sys.stampConductance(d, s, op.gds);
-      sys.stampVCCS(d, s, b, s, op.gmb);
-      const Ieq = op.id - op.gm * vGSguess - op.gds * vDSguess - op.gmb * vBSguess;
-      sys.stampCurrentSource(d, s, sign * Ieq);
+      // ── Drain current: Newton linearization at the current iterate,
+      // reverse-mode swap, step limiting (mos-newton.ts). The full operating
+      // point (capacitances, gate current) is evaluated at the same
+      // forward-mode bias.
+      let op = evaluateBSIM4(0, 0, 0, p);
+      const ch = stampMosChannel(sys, sim, { d, g, s, b }, isNmos, key, (vgs, vds, vbs) => {
+        op = evaluateBSIM4(vgs, vds, vbs, p);
+        return op;
+      }, { vgs: st[key + '_vgs'], vds: st[key + '_vds'] });
+      const finite = (x: number) => (Number.isFinite(x) ? x : 0);
 
       // ── BSIM4 additions ─────────────────────────────────────────────────
-      // Gate tunneling: current flows from gate → source/drain
-      if (p.igcMod && Math.abs(op.igate) > 0) {
-        const pigc = Math.max(0, Math.min(1, p.pigc));
-        sys.stampCurrentSource(g, s, sign * op.igate * pigc);
-        sys.stampCurrentSource(g, d, sign * op.igate * (1 - pigc));
+      // Gate tunneling: current flows from gate → source/drain, split by
+      // pigc. Newton-linearized in Vgs (it used to be a fixed source
+      // evaluated at the iterate — invisible to the Jacobian, so a large
+      // tunneling current pumped the drain node without bound).
+      if (p.igcMod) {
+        const coxqm = EPS_SIO2 / p.toxqm;
+        const ig0 = finite(gateTunnelingCurrent(ch.cGs, ch.cDs, ch.cBs, p, coxqm));
+        const dv = 1e-4;
+        const gIg = Math.max(0, (finite(gateTunnelingCurrent(ch.cGs + dv, ch.cDs, ch.cBs, p, coxqm)) - ig0) / dv);
+        if (ig0 !== 0 || gIg !== 0) {
+          const pigc = Math.max(0, Math.min(1, p.pigc));
+          for (const [node, share] of [[ch.S, pigc], [ch.D, 1 - pigc]] as const) {
+            if (share === 0) continue;
+            sys.stampVCCS(g, node, g, ch.S, share * gIg);
+            sys.stampCurrentSource(g, node, sign * share * (ig0 - gIg * ch.cGs));
+          }
+        }
       }
 
       // Intrinsic Rgate: small conductance from gate to source
@@ -883,11 +893,11 @@ function makeBSIM4Plugin(type: 'nmos' | 'pmos'): ComponentPlugin {
           if (n1 > 0) sys.z[n1 - 1] += gC * vOld;
           if (n2 > 0) sys.z[n2 - 1] -= gC * vOld;
         };
-        stampCap(g, s, op.cgs, vGSold);
-        stampCap(g, d, op.cgd, vGSold - vDSold);
-        stampCap(g, b, op.cgb, vGSold - vBSold);
-        stampCap(b, s, op.cbs, vBSold);
-        stampCap(b, d, op.cbd, vBSold - vDSold);
+        stampCap(g, s, finite(op.cgs), vGSold);
+        stampCap(g, d, finite(op.cgd), vGSold - vDSold);
+        stampCap(g, b, finite(op.cgb), vGSold - vBSold);
+        stampCap(b, s, finite(op.cbs), vBSold);
+        stampCap(b, d, finite(op.cbd), vBSold - vDSold);
       }
     },
     step: (params, terminals, sim, instance) => {

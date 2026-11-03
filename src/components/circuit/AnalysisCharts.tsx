@@ -116,6 +116,7 @@ export function FamilyPlot({ traces, sweepValues, width = 600, height = 250 }: F
       for (let i = 0; i < t.xValues.length; i++) {
         if (t.xValues[i] < xMin) xMin = t.xValues[i];
         if (t.xValues[i] > xMax) xMax = t.xValues[i];
+        if (!Number.isFinite(t.yValues[i])) continue; // failed sweep point
         if (t.yValues[i] < yMin) yMin = t.yValues[i];
         if (t.yValues[i] > yMax) yMax = t.yValues[i];
       }
@@ -138,9 +139,15 @@ export function FamilyPlot({ traces, sweepValues, width = 600, height = 250 }: F
       {/* Traces */}
       {traces.map((trace, ti) => {
         const color = colors[ti % colors.length];
-        const path = Array.from(trace.xValues).map((x, i) =>
-          `${i === 0 ? 'M' : 'L'} ${xScale(x).toFixed(1)} ${yScale(trace.yValues[i]).toFixed(1)}`
-        ).join(' ');
+        // non-finite points (failed sweep solves) break the line into a gap
+        let penDown = false;
+        let path = '';
+        for (let i = 0; i < trace.xValues.length; i++) {
+          const y = trace.yValues[i];
+          if (!Number.isFinite(y)) { penDown = false; continue; }
+          path += `${penDown ? 'L' : 'M'} ${xScale(trace.xValues[i]).toFixed(1)} ${yScale(y).toFixed(1)} `;
+          penDown = true;
+        }
         return <path key={ti} d={path} fill="none" stroke={color} strokeWidth={1.5} opacity={0.85} />;
       })}
       {/* Legend */}

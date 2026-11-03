@@ -9,7 +9,7 @@
 import type { CircuitComponent, ComponentPlugin, Wire, SimContext } from './types';
 import { buildNodeMap, getTerminalsForComponent, solveDC } from './engine';
 import { createMnaSystem, solveMna } from './solver';
-import { mergeOptions, type SimOptions, type ConvergenceReport } from './sim-options';
+import { mergeOptions, type SimOptions, type ConvergenceReport, dcSolveOpts } from './sim-options';
 import { runAC } from './analysis';
 import type { AnalysisResult, RealTrace, ComplexTrace } from './analysis';
 
@@ -42,7 +42,7 @@ export function runSens(
   }
 
   // 1. Solve DC operating point (or AC linearized system at given freq)
-  const dcOp = solveDC(components, wires, plugins, options.itl1);
+  const dcOp = solveDC(components, wires, plugins, options.itl1, dcSolveOpts(options));
   if (!dcOp) {
     return {
       type: 'sens', traces: [], scalars: {},
@@ -83,7 +83,7 @@ export function runSens(
     const modified = components.map((c) =>
       c.id === comp.id ? { ...c, parameters: { ...c.parameters, [config.parameter]: perturbedVal } } : c,
     );
-    const r = solveDC(modified, wires, plugins, options.itl1);
+    const r = solveDC(modified, wires, plugins, options.itl1, dcSolveOpts(options));
     if (!r) continue;
     const vOutPerturbed = r.nodeVoltage[vOutNode];
     // sensitivity = dVout/dParam (absolute)

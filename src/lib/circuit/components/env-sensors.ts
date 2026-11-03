@@ -34,6 +34,7 @@ import type { ComponentPlugin, ComponentCategory, MnaSystem, SimContext } from '
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
+import { isPinUnwired } from '../pin-state';
 
 const SENSOR = 'sensor' as ComponentCategory;
 
@@ -106,6 +107,9 @@ export const adxl335: ComponentPlugin = {
   type: 'adxl335',
   name: 'ADXL335 (3-Axis Accelerometer)',
   category: SENSOR,
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Analog 3-axis accelerometer (ADXL335-style), ratiometric. Each axis output: 1.65·Vcc/3.3 + 0.330·Vcc/3.3·a (V), set accelX/Y/Z in g to simulate tilt/inclination. Zero-g output sits at half supply.',
   symbol: 'ACL',
   boundingBox: { width: 5, height: 5 },
@@ -211,6 +215,9 @@ export const mpu6050: ComponentPlugin = {
   type: 'mpu6050',
   name: 'MPU6050 (6-Axis IMU)',
   category: SENSOR,
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Digital 6-axis gyroscope+accelerometer (MPU-6050-style) on I2C. SDA/SCL are open-drain (wire external pull-ups); AD0 high selects address 0x69, low/floating 0x68. INT is a push-pull output asserted when |accel| ≥ motionThreshold. Set accel (g) and gyro (°/s) to simulate motion.',
   symbol: 'IMU',
   boundingBox: { width: 6, height: 5 },
@@ -513,6 +520,9 @@ export const hcsr04: ComponentPlugin = {
   type: 'hcsr04',
   name: 'HC-SR04 (Ultrasonic Ranger)',
   category: SENSOR,
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Ultrasonic distance ranger (HC-SR04-style). Pulse TRIG ≥10 µs to start a measurement (set `triggered`); ECHO goes high for width = distance/0.0172 µs (≈58 µs/cm round trip) when the target is in the 2–400 cm range. Set distance_cm to simulate the target.',
   symbol: 'US',
   boundingBox: { width: 8, height: 5 },
@@ -692,6 +702,9 @@ export const acs712: ComponentPlugin = {
   type: 'acs712',
   name: 'ACS712 (±5A Current Sensor)',
   category: SENSOR,
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Hall-effect current sensor, ±5 A variant (ACS712ELCTR-05B). REAL current path: IP1↔IP2 is a 1.2 mΩ conductor — wire it in series with the load. VOUT = 2.5·Vcc/5 + 0.185·Vcc/5·I (ratiometric, 1 Ω output), centered at half supply at zero current.',
   symbol: 'ACS',
   boundingBox: { width: 6, height: 4 },
@@ -796,6 +809,9 @@ export const mq2: ComponentPlugin = {
   type: 'mq2',
   name: 'MQ-2 (Gas Sensor)',
   category: SENSOR,
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Flammable-gas sensor (MQ-2-style) with heater. Heater is a real 33 Ω resistor VCC→GND (~150 mA at 5 V). AOUT = Vcc·(0.1 + 0.8·ppm/10000) via 10 kΩ; DOUT is open-collector — pulls LOW (1 kΩ) when ppm ≥ threshold, external pull-up otherwise. Set ppm to simulate gas concentration.',
   symbol: 'GAS',
   boundingBox: { width: 5, height: 5 },
@@ -936,6 +952,9 @@ export const lm565: ComponentPlugin = {
   type: 'lm565',
   name: 'LM565 (Analog PLL)',
   category: 'ic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Analog phase-locked loop (LM565-style). VCO: f0 = 1/(3.7·R·C) on pin-4 square out; the timing resistor is measured electrically at the R pin (falls back to timingR_kΩ when unwired). Sequential phase detector + internal loop filter: demodout (pin 7) is the control voltage. Feed a signal into vin; measure() reports f0, VCO frequency and lock state.',
   symbol: 'PLL',
   boundingBox: { width: 8, height: 6 },
@@ -1033,9 +1052,12 @@ export const lm565: ComponentPlugin = {
     // R pin (the real chip drives its timing resistor with a current source);
     // the previous iterate's pin voltage gives R_ext = V/I. Below/above sane
     // bounds (shorted pin, dangling on a stiff source) the param is used.
-    if (rpin !== 0) sys.stampCurrentSource(gnd, rpin, 0.001);
+    // (no test current into an unwired pin: 1 mA into a floating node would
+    // drive it to ~1e9 V through the leak conductance)
+    const rWired = rpin !== 0 && !isPinUnwired(sim, rpin);
+    if (rWired) sys.stampCurrentSource(gnd, rpin, 0.001);
     let rExt: number | undefined;
-    if (rpin > 0) {
+    if (rWired) {
       const rMeas = v(sim, rpin) / 0.001;
       if (rMeas >= 100 && rMeas <= 1e8) rExt = rMeas;
     }
@@ -1121,7 +1143,7 @@ export const lm565: ComponentPlugin = {
     const vMid = ((params.vpos as number) + (params.vneg as number)) / 2;
     // effective timing R: external measurement when sane, else the param
     let rExt: number | undefined;
-    if (rpin > 0) {
+    if (rpin > 0 && !isPinUnwired(sim, rpin)) {
       const rMeas = v(sim, rpin) / 0.001;
       if (rMeas >= 100 && rMeas <= 1e8) rExt = rMeas;
     }

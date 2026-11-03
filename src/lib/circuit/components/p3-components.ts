@@ -9,35 +9,36 @@ import type { ComponentPlugin, MnaSystem, SimContext } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
+import { stampOpamp, stepOpamp, measureOpamp, acStampOpamp, specFromParams, opampParamDefs, type OpampPins } from './opamp-core';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Op-amp macromodels — LM324, NE5532
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Copied from the P1 makeOpampMacromodel factory with one extra field:
-// `voutMargin` — the top-rail output swing margin. The P1 factory hardcoded
-// 0.5V from either rail, which is wrong for parts like the LM324 (single
-// supply, output only swings to Vcc−1.4V but pulls to within millivolts of
-// V−) or the NE5532 (±13V on ±15V rails). `voutMarginLow` covers the
-// bottom rail and defaults to the symmetric value.
+// Same shared behavioral core as the P1 parts (opamp-core.ts). The swing
+// parameters keep their historical keys (`voutMargin` = headroom to V+,
+// `voutMarginLow` = headroom to V−) so saved circuits load unchanged.
 function makeOpampMacromodel(type: string, name: string, params: {
-  gain: number; gbw: number; slewRate: number; voff: number; ibias: number; cmrr: number; rout: number;
-  vccMin: number; veeMax: number;
-  voutMargin: number;
-  voutMarginLow?: number;
+  gain: number; gbw: number; slewRate: number; voffMv: number; ibiasNa: number; cmrrDb: number; rout: number;
+  swingHigh: number; swingLow: number; iLimitMa: number; iqMa: number;
+  defVcc: number; defVee: number;
 }): ComponentPlugin {
-  const mLow = params.voutMarginLow ?? params.voutMargin;
-  // A single-supply part (veeMax === 0) assumes a 0V V− rail when the pin is
-  // left open; dual-supply parts default to ±15V supplies.
-  const defVee = params.veeMax === 0 ? 0 : -15;
+  const swingKeys = { high: 'voutMargin', low: 'voutMarginLow' };
+  const pinsOf = (terminals: { terminalId: string; nodeId: number }[]): OpampPins => ({
+    inp: terminals.find(t => t.terminalId === 'inp')!.nodeId,
+    inn: terminals.find(t => t.terminalId === 'inn')!.nodeId,
+    out: terminals.find(t => t.terminalId === 'out')!.nodeId,
+    vcc: terminals.find(t => t.terminalId === 'vcc')!.nodeId,
+    vee: terminals.find(t => t.terminalId === 'vee')!.nodeId,
+  });
+  const spec = (p: Record<string, any>) => specFromParams(p, { defVcc: params.defVcc, defVee: params.defVee, swingLow: params.swingLow }, swingKeys);
+  const keyOf = (comp: { id: string } | undefined, out: number) => stateKey(`opamp_${type}`, comp as any, out);
   return {
     type,
     name,
     category: 'ic',
-    description: `${name} — real op-amp macromodel. GBW=${params.gbw}Hz, slew=${params.slewRate}V/µs, CMRR=${params.cmrr}dB, output swings to V+−${params.voutMargin}V.`,
-    // Region-switching stamp (linear/saturated, picked from the previous
-    // iterate) — must join the Newton re-stamp loop or the region lags one
-    // solve behind and pure-opamp circuits mis-converge (see opampRails).
+    description: `${name} op-amp (datasheet-typical): A0=${params.gain.toExponential(0)}, GBW=${params.gbw / 1e6}MHz, SR=${params.slewRate}V/µs, Vos=${params.voffMv}mV, swing V+−${params.swingHigh}V / V−+${params.swingLow}V, Isc=${params.iLimitMa}mA. Dominant pole, slew limiting, rail-limited output, CMRR, bias current and supply current are all simulated.`,
+    // Smooth-limited Newton stamp (opamp-core.ts) — joins the re-stamp loop.
     nonLinear: true,
     symbol: 'A',
     boundingBox: { width: 6, height: 4 },
@@ -48,16 +49,7 @@ function makeOpampMacromodel(type: string, name: string, params: {
       { id: 'vcc', label: 'V+', position: { x: 3, y: 0 }, electricalType: 'power_in' as const },
       { id: 'vee', label: 'V−', position: { x: 3, y: 4 }, electricalType: 'power_in' as const },
     ],
-    parameters: [
-      { key: 'gain', label: 'Open-loop Gain', type: 'number', default: params.gain, step: 1000 },
-      { key: 'gbw', label: 'Gain-Bandwidth (Hz)', type: 'number', default: params.gbw, step: 10000 },
-      { key: 'slewRate', label: 'Slew Rate (V/µs)', type: 'number', default: params.slewRate, step: 0.1 },
-      { key: 'voff', label: 'Offset Voltage (mV)', type: 'number', default: params.voff, step: 0.1 },
-      { key: 'ibias', label: 'Bias Current (nA)', type: 'number', default: params.ibias, step: 5 },
-      { key: 'cmrr', label: 'CMRR (dB)', type: 'number', default: params.cmrr, step: 5 },
-      { key: 'rout', label: 'Output Resistance (Ω)', type: 'number', default: params.rout, step: 5 },
-      { key: 'voutMargin', label: 'Output Swing Margin (V)', type: 'number', default: params.voutMargin, unit: 'V', min: 0, max: 10, step: 0.1 },
-    ],
+    parameters: opampParamDefs(params, swingKeys),
     keywords: ['opamp', 'operational', 'amplifier', type, name.toLowerCase()],
     render(ctx, _p, cellSize) {
       ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
@@ -75,93 +67,37 @@ function makeOpampMacromodel(type: string, name: string, params: {
       ctx.fillText('−', 1.6 * cellSize, 3.3 * cellSize);
     },
     stamp(p, terminals, sys, sim, comp) {
-      const inp = terminals.find(t => t.terminalId === 'inp')!.nodeId;
-      const inn = terminals.find(t => t.terminalId === 'inn')!.nodeId;
-      const out = terminals.find(t => t.terminalId === 'out')!.nodeId;
-      const vcc = terminals.find(t => t.terminalId === 'vcc')!.nodeId;
-      const vee = terminals.find(t => t.terminalId === 'vee')!.nodeId;
-      const Av = p.gain as number;
-      const rOut = Math.max(0.001, p.rout as number);
-      const vOff = (p.voff as number) / 1000; // mV → V
-      const mTop = Math.max(0.05, (p.voutMargin as number) ?? params.voutMargin);
-      // Rail voltages (previous iterate). Unconnected power pins fall back to
-      // the part's typical supplies.
-      const vccV = vcc > 0 ? (sim.nodeVoltage[vcc] ?? 15) : 15;
-      const veeV = vee > 0 ? (sim.nodeVoltage[vee] ?? defVee) : defVee;
-      const vHi = vccV - mTop; // highest achievable output
-      const vLo = veeV + mLow; // lowest achievable output
-      const vPlus = sim.nodeVoltage[inp] ?? 0;
-      const vMinus = sim.nodeVoltage[inn] ?? 0;
-      // Open-loop output prediction from the previous-iterate inputs. It is
-      // used ONLY to pick the operating region: the linear region stamps a
-      // true VCCS (Boyle-style gm model), so the closed-loop fixed point is
-      // reached exactly. The P1 factory's full-gain Thevenin source overshoots
-      // by Av× every iteration and oscillates rail-to-rail in any feedback
-      // circuit, never converging.
-      const vRaw = Av * (vPlus - vMinus + vOff);
-      const st = sim.state.__global ?? (sim.state.__global = {});
-      const key = stateKey(`opamp_${type}`, comp, out);
-      // region: 0 = linear, +1 = saturated high, −1 = saturated low.
-      // Saturation always exits THROUGH the linear region — jumping straight
-      // to the opposite rail re-triggers the overshoot and never settles.
-      let region = (st[key] as number | undefined) ?? 0;
-      if (region === 0) {
-        if (vRaw > vHi) region = 1;
-        else if (vRaw < vLo) region = -1;
-      } else if (region === 1) {
-        if (vRaw < vHi) region = 0;
-      } else {
-        if (vRaw > vLo) region = 0;
-      }
-      st[key] = region;
-      // gmin-style input leak (1GΩ) keeps floating input nets solvable
-      sys.stampConductance(inp, 0, 1e-9);
-      sys.stampConductance(inn, 0, 1e-9);
-      if (out === 0) return; // unconnected output — nothing to drive
-      if (region === 0) {
-        // Linear: I(out) = gm·(V+ − V− + Voff) delivered into 1/rout.
-        // gm·rout = Av reproduces the open-loop gain; the VCCS makes the
-        // closed-loop solve a purely linear (one-shot) problem.
-        // stampVCCS(0, out, inp, inn, gm): current from ground into out =
-        // gm·(V+−V−) — the op-amp output sources the transconductance current.
-        const gm = Av / rOut;
-        sys.stampConductance(out, 0, 1 / rOut);
-        sys.stampVCCS(0, out, inp, inn, gm);
-        sys.stampCurrentSource(0, out, gm * vOff);
-      } else {
-        // Saturated: Thevenin at the rail-limited level through rout (the
-        // series resistance also models output droop under heavy load).
-        const vSat = region > 0 ? vHi : vLo;
-        sys.stampConductance(out, 0, 1 / rOut);
-        sys.stampCurrentSource(0, out, vSat / rOut);
-      }
+      const pins = pinsOf(terminals);
+      stampOpamp(spec(p), pins, sys, sim, keyOf(comp, pins.out));
+    },
+    step(_p, terminals, sim, comp) {
+      stepOpamp(sim, keyOf(comp, pinsOf(terminals).out));
+    },
+    acStamp(p, terminals, sys, { dcOp, omega, comp }) {
+      const pins = pinsOf(terminals);
+      acStampOpamp(spec(p), pins, sys, dcOp, omega, keyOf(comp, pins.out));
     },
     getFlowPath() { return [{ x: 0, y: 2 }, { x: 6, y: 2 }]; },
-    measure(p, terminals, sim) {
-      const inp = terminals.find(t => t.terminalId === 'inp')!.nodeId;
-      const inn = terminals.find(t => t.terminalId === 'inn')!.nodeId;
-      const out = terminals.find(t => t.terminalId === 'out')!.nodeId;
-      return [
-        { label: 'V+', value: (sim.nodeVoltage[inp] ?? 0).toFixed(3), unit: 'V' },
-        { label: 'V−', value: (sim.nodeVoltage[inn] ?? 0).toFixed(3), unit: 'V' },
-        { label: 'Vout', value: (sim.nodeVoltage[out] ?? 0).toFixed(3), unit: 'V' },
-      ];
+    measure(p, terminals, sim, comp) {
+      const pins = pinsOf(terminals);
+      return measureOpamp(spec(p), pins, sim, keyOf(comp, pins.out));
     },
   };
 }
 
-// LM324: single-supply quad op-amp. Output swings to Vcc−1.4V (VOH) and to
-// within ~50mV of V− (VOL, light load) — hence the asymmetric margins.
+// LM324: single-supply quad op-amp (PNP inputs → bias current flows out of
+// the pins). Output swings to Vcc−1.4V (VOH) and within ~5 mV of V− (VOL,
+// light load) — hence the asymmetric headroom. Iq is per amplifier.
 export const lm324 = makeOpampMacromodel('lm324', 'LM324', {
-  gain: 1e5, gbw: 1.2e6, slewRate: 0.5, voff: 3, ibias: 45, cmrr: 85, rout: 300,
-  vccMin: 3, veeMax: 0, voutMargin: 1.4, voutMarginLow: 0.05,
+  gain: 1e5, gbw: 1.2e6, slewRate: 0.5, voffMv: 3, ibiasNa: -45, cmrrDb: 80, rout: 300,
+  swingHigh: 1.4, swingLow: 0.005, iLimitMa: 40, iqMa: 0.175, defVcc: 15, defVee: 0,
 });
 
-// NE5532: audio dual op-amp. ±13V output swing on ±15V rails (symmetric
-// 2V margins), low output impedance.
+// NE5532: low-noise audio dual op-amp. ±13V swing on ±15V rails, strong
+// output stage, 10 MHz GBW / 9 V/µs.
 export const ne5532 = makeOpampMacromodel('ne5532', 'NE5532', {
-  gain: 1e5, gbw: 1e7, slewRate: 9, voff: 0.5, ibias: 200, cmrr: 100, rout: 10,
-  vccMin: 6, veeMax: -6, voutMargin: 2,
+  gain: 1e5, gbw: 1e7, slewRate: 9, voffMv: 0.5, ibiasNa: 200, cmrrDb: 100, rout: 10,
+  swingHigh: 2, swingLow: 2, iLimitMa: 38, iqMa: 4, defVcc: 15, defVee: -15,
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -323,6 +259,9 @@ export const lm1117: ComponentPlugin = {
   type: 'lm1117',
   name: 'LM1117 (LDO Regulator)',
   category: 'ic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '800mA LDO linear regulator. Output selectable 1.8/2.5/3.3/5V, ~1.1V dropout, 5mA quiescent current.',
   symbol: '1117',
   boundingBox: { width: 4, height: 4 },
@@ -366,6 +305,9 @@ export const lt3045: ComponentPlugin = {
   type: 'lt3045',
   name: 'LT3045 (Ultra-Low-Noise LDO)',
   category: 'ic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '500mA ultra-low-noise LDO. Vout = 100µA·RSET in reality — modeled directly as the outputVoltage parameter. 0.35V dropout, 2mA quiescent.',
   symbol: '3045',
   boundingBox: { width: 4, height: 4 },
@@ -536,6 +478,9 @@ export const crd: ComponentPlugin = {
   type: 'crd',
   name: 'Current-Regulator Diode',
   category: 'semiconductor',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Two-terminal current regulator (JFET with gate shorted, 1N5305-style). Regulates at ip once V(AK) exceeds the knee voltage.',
   symbol: 'CRD',
   boundingBox: { width: 4, height: 2 },
@@ -668,6 +613,9 @@ export const mov: ComponentPlugin = {
   type: 'mov',
   name: 'MOV (Varistor)',
   category: 'passive',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Metal-oxide varistor. Bidirectional clamp: below vc it leaks; above vc it conducts hard, limiting the voltage to ≈ vc + I·ron. Used for surge protection.',
   symbol: 'MOV',
   boundingBox: { width: 4, height: 2 },
@@ -730,6 +678,9 @@ export const ssr: ComponentPlugin = {
   type: 'ssr',
   name: 'Solid-State Relay',
   category: 'ic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Solid-state relay: LED input (in+/in−) drives an isolated bidirectional output switch (out1/out2). zeroCross=1 waits for a voltage zero-crossing before closing (stays open at DC).',
   symbol: 'SSR',
   boundingBox: { width: 6, height: 4 },

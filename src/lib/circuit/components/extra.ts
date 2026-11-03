@@ -5,6 +5,8 @@ import type { ComponentPlugin, CircuitComponent } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
+import { BJT_BE_SERIES_R } from './semiconductors';
+import { stampOpamp, stepOpamp, measureOpamp, acStampOpamp, specFromParams, type OpampPins, type OpampSpec } from './opamp-core';
 
 // ----- PNP BJT (mirror of NPN) -----
 const pnp: ComponentPlugin = {
@@ -114,12 +116,15 @@ const pnp: ComponentPlugin = {
       st[key + '_branch'] = -1;
       return;
     }
-    // On: E-B diode (Vsource vebOn) and CCCS from e→c of gain hfe.
-    // When external base drive stops, the branch current → 0, so I_C → 0
-    // even though V_EB stays at vebOn.
-    const ibBranch = sys.stampVoltageSource(e, b, vebOn);
-    sys.stampCCCS(e, c, ibBranch, hfe);
-    st[key + '_branch'] = ibBranch;
+    // On: E-B junction = vebOn behind BJT_BE_SERIES_R (Norton form, see
+    // the NPN) and I_C = hfe·I_B from e→c. When external base drive stops,
+    // I_B → 0, so I_C → 0 even though V_EB stays at vebOn.
+    const gBE = 1 / BJT_BE_SERIES_R;
+    sys.stampConductance(e, b, gBE);
+    sys.stampCurrentSource(b, e, gBE * vebOn);
+    sys.stampVCCS(e, c, e, b, hfe * gBE);
+    sys.stampCurrentSource(c, e, hfe * gBE * vebOn);
+    st[key + '_branch'] = -1;
     // Saturation clamp: only when there's actual collector current.
     // Thevenin to Vec(sat) — mirror of the NPN fix: conductance G in
     // parallel with a current source G·vecSat (injected into the emitter)
@@ -144,18 +149,10 @@ const pnp: ComponentPlugin = {
     const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('pnp', instance, e, b, c);
-    const branchIdx = st[key + '_branch'] as number;
-    if (branchIdx == null || branchIdx < 0) {
-      st[key + '_ib'] = 0;
-      return;
-    }
-    const numNonGround = sim.nodeVoltage.length - 1;
-    const relIdx = branchIdx - numNonGround;
-    if (relIdx < 0 || relIdx >= sim.branchCurrent.length) {
-      st[key + '_ib'] = 0;
-      return;
-    }
-    st[key + '_ib'] = sim.branchCurrent[relIdx];
+    // External base drive (positive OUT of the base)
+    st[key + '_ib'] = st[key]
+      ? (sim.nodeVoltage[e] - sim.nodeVoltage[b] - (params.veb as number)) / BJT_BE_SERIES_R
+      : 0;
   },
   measure(params, terminals, sim) {
     const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
@@ -411,6 +408,20 @@ const pmos: ComponentPlugin = {
   },
 };
 
+function railsPins(terminals: { terminalId: string; nodeId: number }[]): OpampPins {
+  return {
+    inp: terminals.find((t) => t.terminalId === 'in+')!.nodeId,
+    inn: terminals.find((t) => t.terminalId === 'in-')!.nodeId,
+    out: terminals.find((t) => t.terminalId === 'out')!.nodeId,
+    vcc: terminals.find((t) => t.terminalId === 'v+')!.nodeId,
+    vee: terminals.find((t) => t.terminalId === 'v-')!.nodeId,
+  };
+}
+function railsSpec(params: Record<string, any>): OpampSpec {
+  const m = Math.max(0, (params.railMargin as number) ?? 0.5);
+  return specFromParams({ gain: params.gain, rout: params.rout, swingHigh: m, swingLow: m }, { defVcc: 12, defVee: -12 });
+}
+
 // ----- Op-Amp with Power Rails -----
 const opampRails: ComponentPlugin = {
   type: 'opampRails',
@@ -467,82 +478,24 @@ const opampRails: ComponentPlugin = {
     drawLabel(ctx, 'V+', 2 * cellSize + 6, cellSize * 0.3);
     drawLabel(ctx, 'V−', 2 * cellSize + 6, cellSize * 3.7);
   },
+  // Generic rail-limited op-amp on the shared core (opamp-core.ts): finite
+  // gain, Rout, output limited to the ACTUAL rail voltages minus railMargin,
+  // output current drawn from the rails. No pole / slew (an "ideal but
+  // powered" part). Rails default to ±12 V when both power pins are unwired.
   stamp(params, terminals, sys, sim, comp) {
-    const gain = params.gain as number;
-    const railMargin = params.railMargin as number;
-    const rOut = Math.max(0.01, (params.rout as number) ?? 100);
-    const inp = terminals.find((t) => t.terminalId === 'in+')!.nodeId;
-    const inn = terminals.find((t) => t.terminalId === 'in-')!.nodeId;
-    const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
-    const vp = terminals.find((t) => t.terminalId === 'v+')!.nodeId;
-    const vn = terminals.find((t) => t.terminalId === 'v-')!.nodeId;
-    // Determine rails from the V+/V− node voltages. An unconnected pin maps
-    // to node 0 (0 V) in this engine — indistinguishable from a grounded pin
-    // by voltage alone. Heuristic: if BOTH pins sit at node 0, treat them as
-    // unconnected and use the ±12 V defaults; if only one is at node 0 it is
-    // a deliberate ground (e.g. a single-supply op-amp) and must be honored —
-    // the old `|| 12` turned every grounded V− into −12 V.
-    const bothRailsFloating = vp === 0 && vn === 0;
-    const vPlus = bothRailsFloating ? 12 : (sim.nodeVoltage[vp] ?? 12);
-    const vMinus = bothRailsFloating ? -12 : (sim.nodeVoltage[vn] ?? -12);
-    const vHigh = vPlus - railMargin;
-    const vLow = vMinus + railMargin;
-    // Boyle-style macromodel (same structure as the P3 LM324/NE5532):
-    //   linear region  → VCCS gm·(V+ − V−) into out, || 1/rout to ground.
-    //     gm·rout = gain reproduces the open-loop gain, and because the gm
-    //     term is stamped INTO the matrix the closed-loop solve is a purely
-    //     linear one-shot problem — the previous-voltage voltage-source
-    //     stamp diverged rail-to-rail every step in any feedback circuit
-    //     (gain 1e5 × per-step relaxation = oscillator, not amplifier).
-    //   saturated      → Thevenin at the rail-limited level through rout.
-    // Region selection uses the previous-iterate open-loop prediction ONLY
-    // to pick the region; saturation always exits THROUGH the linear region
-    // so the output can never jump straight from one rail to the other.
-    const vRaw = gain * (sim.nodeVoltage[inp] - sim.nodeVoltage[inn]);
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('opampRails', comp, out);
-    let region = (st[key] as number | undefined) ?? 0; // 0 linear, +1 hi, −1 lo
-    if (region === 0) {
-      if (vRaw > vHigh) region = 1;
-      else if (vRaw < vLow) region = -1;
-    } else if (region === 1) {
-      if (vRaw < vHigh) region = 0;
-    } else {
-      if (vRaw > vLow) region = 0;
-    }
-    st[key] = region;
-    // gmin-style input leak (1GΩ) keeps floating input nets solvable
-    sys.stampConductance(inp, 0, 1e-9);
-    sys.stampConductance(inn, 0, 1e-9);
-    if (out === 0) return; // unconnected output — nothing to drive
-    if (region === 0) {
-      // Linear: I(out) = gm·(V+ − V−) delivered into 1/rout.
-      // stampVCCS(0, out, inp, inn, gm): current from ground into out =
-      // gm·(V+−V−) — the op-amp output sources the transconductance current.
-      const gm = gain / rOut;
-      sys.stampConductance(out, 0, 1 / rOut);
-      sys.stampVCCS(0, out, inp, inn, gm);
-    } else {
-      // Saturated: Thevenin at the rail-limited level through rout.
-      const vSat = region > 0 ? vHigh : vLow;
-      sys.stampConductance(out, 0, 1 / rOut);
-      sys.stampCurrentSource(0, out, vSat / rOut);
-    }
-    // Power pins: high-Z
-    sys.stampConductance(vp, 0, 1e-13);
-    sys.stampConductance(vn, 0, 1e-13);
+    const pins = railsPins(terminals);
+    stampOpamp(railsSpec(params), pins, sys, sim, stateKey('opampRails', comp, pins.out));
   },
-  measure(params, terminals, sim) {
-    const inp = terminals.find((t) => t.terminalId === 'in+')!.nodeId;
-    const inn = terminals.find((t) => t.terminalId === 'in-')!.nodeId;
-    const out = terminals.find((t) => t.terminalId === 'out')!.nodeId;
-    const vp = terminals.find((t) => t.terminalId === 'v+')!.nodeId;
-    return [
-      { label: 'V+', value: sim.nodeVoltage[inp].toFixed(3), unit: 'V' },
-      { label: 'V-', value: sim.nodeVoltage[inn].toFixed(3), unit: 'V' },
-      { label: 'Vout', value: sim.nodeVoltage[out].toFixed(3), unit: 'V' },
-      { label: 'Rail+', value: sim.nodeVoltage[vp].toFixed(1), unit: 'V' },
-    ];
+  step(_params, terminals, sim, comp) {
+    stepOpamp(sim, stateKey('opampRails', comp, railsPins(terminals).out));
+  },
+  acStamp(params, terminals, sys, { dcOp, omega, comp }) {
+    const pins = railsPins(terminals);
+    acStampOpamp(railsSpec(params), pins, sys, dcOp, omega, stateKey('opampRails', comp, pins.out));
+  },
+  measure(params, terminals, sim, comp) {
+    const pins = railsPins(terminals);
+    return measureOpamp(railsSpec(params), pins, sim, stateKey('opampRails', comp, pins.out));
   },
 };
 
@@ -568,6 +521,9 @@ const sevenSegment: ComponentPlugin = {
   type: 'sevenSegment',
   name: '7-Segment',
   category: 'io',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '7-segment display with a-g segment inputs (HIGH = on). Common cathode.',
   symbol: '7SEG',
   boundingBox: { width: 4, height: 6 },
@@ -709,6 +665,9 @@ const vco: ComponentPlugin = {
   type: 'vco',
   name: 'VCO',
   category: 'ic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Voltage-controlled oscillator. Output frequency = baseFreq + sensitivity * V(in).',
   symbol: 'VCO',
   boundingBox: { width: 4, height: 3 },
@@ -1189,6 +1148,9 @@ const cd4026: ComponentPlugin = {
   type: 'cd4026',
   name: 'CD4026 Counter',
   category: 'ic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Decade counter with built-in 7-segment decoder. Counts on CLK rising edge, drives a-g outputs directly. CO carries to next stage. Set maxCount=6 for tens digits (0-5), maxCount=10 for ones (0-9).',
   symbol: '4026',
   boundingBox: { width: 6, height: 4 },
@@ -1270,33 +1232,11 @@ const cd4026: ComponentPlugin = {
     const key = cd4026Key(terminals, comp);
     const st = sim.state[key] ?? (sim.state[key] = { count: 0, prevClkV: -1 });
 
-    // Read clock and reset inputs (from previous step's solution)
-    const clkNode = terminals.find((t) => t.terminalId === 'clk')!.nodeId;
-    const rstNode = terminals.find((t) => t.terminalId === 'rst')?.nodeId ?? 0;
-    const clkV = sim.nodeVoltage[clkNode] ?? 0;
-    const rstV = sim.nodeVoltage[rstNode] ?? 0;
-    const clkHigh = clkV > vccV * 0.5;
-    const rstHigh = rstV > vccV * 0.5;
-
-    // Edge detection. The prevClkV === -1 sentinel marks the very FIRST
-    // stamp, which sees all-zero (pre-solve) voltages — record the level and
-    // count no edge. From the second stamp on, voltages are real solver
-    // output and every rising edge counts. (The old `initialized` flag only
-    // latched once the clock exceeded 0.01V, so for a clock idling LOW it
-    // swallowed the FIRST genuine rising edge — every circuit's counter
-    // started one pulse late.)
-    if (st.prevClkV === -1) {
-      st.prevClkV = clkV;
-    } else {
-      const prevClkHigh = st.prevClkV > vccV * 0.5;
-      if (rstHigh) {
-        st.count = 0;
-      } else if (clkHigh && !prevClkHigh) {
-        // Rising edge of clock: increment.
-        st.count = (st.count + 1) % maxCount;
-      }
-      st.prevClkV = clkV;
-    }
+    // The count is advanced in step() from the COMMITTED clock/reset
+    // voltages; stamp() only drives the outputs. (Counting inside stamp()
+    // under the Newton loop re-ran the power-up initialization every round
+    // — the state rollback restores the sentinel — and the last round saw
+    // the solved clock level, swallowing the first rising edge.)
 
     // Drive segment outputs based on current count
     const pattern = SEG_PATTERNS[st.count] ?? [0, 0, 0, 0, 0, 0, 0];
@@ -1316,6 +1256,30 @@ const cd4026: ComponentPlugin = {
     if (coNode !== gnd) {
       sys.stampVoltageSource(coNode, gnd, coHigh ? vccV : 0);
     }
+  },
+  step(params, terminals, sim, comp) {
+    const vccV = params.vcc as number;
+    const maxCount = params.maxCount as number;
+    const key = cd4026Key(terminals, comp);
+    const st = sim.state[key] ?? (sim.state[key] = { count: 0, prevClkV: -1 });
+    const clkNode = terminals.find((t) => t.terminalId === 'clk')!.nodeId;
+    const rstNode = terminals.find((t) => t.terminalId === 'rst')?.nodeId ?? 0;
+    const clkV = sim.nodeVoltage[clkNode] ?? 0;
+    const clkHigh = clkV > vccV * 0.5;
+    const rstHigh = (sim.nodeVoltage[rstNode] ?? 0) > vccV * 0.5;
+    // First committed solution = power-up level: record it, count no edge.
+    if (st.prevClkV === -1) {
+      st.prevClkV = clkV;
+      if (rstHigh) st.count = 0;
+      return;
+    }
+    const prevClkHigh = st.prevClkV > vccV * 0.5;
+    if (rstHigh) {
+      st.count = 0;
+    } else if (clkHigh && !prevClkHigh) {
+      st.count = (st.count + 1) % maxCount; // rising edge
+    }
+    st.prevClkV = clkV;
   },
   measure(params, terminals, sim, comp) {
     const key = cd4026Key(terminals, comp);

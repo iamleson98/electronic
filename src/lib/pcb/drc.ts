@@ -142,9 +142,11 @@ export function runDRC(
     for (const nc of completion.nets) {
       if (!nc.complete) {
         const pad = nc.unconnectedPads[0];
+        // An open net is a broken board: an ERROR (KiCad's default severity
+        // for unconnected items), not a warning.
         errors.push({
           type: 'unrouted',
-          severity: 'warning',
+          severity: 'error',
           message: `Net "${nc.net}" is unrouted (${nc.unconnectedPads.length} of ${nc.padCount} pads unconnected)`,
           position: pad ? { ...pad.position } : { x: 0, y: 0 },
           layer: 'both',

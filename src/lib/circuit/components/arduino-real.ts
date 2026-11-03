@@ -414,6 +414,9 @@ const arduinoReal: ComponentPlugin = {
   type: 'arduinoReal',
   name: 'Arduino (programmable)',
   category: 'mcu',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Arduino-compatible MCU with user-programmable firmware. Write a tiny sketch with pin/wait/goto/if, plus print/println/plot for the Serial Monitor and Serial Plotter.',
   symbol: 'ARD',
   boundingBox: { width: 8, height: 13 },
@@ -483,7 +486,8 @@ const arduinoReal: ComponentPlugin = {
     const clockMode = (params.clockMode as boolean) ?? false;
     const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
     const five = terminals.find((t) => t.terminalId === '5v')!.nodeId;
-    if (five !== gnd) sys.stampVoltageSource(five, gnd, vccV);
+    // regulator output: sources, never sinks (external 5 V may back-feed)
+    stampRegulatorPin(sys, sim, five, gnd, vccV);
 
     // Build pin->node map
     const pinToNode: Record<string, number> = {};
@@ -530,7 +534,7 @@ const arduinoReal: ComponentPlugin = {
         const pin = digitSelectPins[i];
         const node = pinToNode[pin];
         if (node && node !== gnd) {
-          sys.stampVoltageSource(node, gnd, i === activeDigit ? 0 : vccV);
+          stampGpio(sys, node, gnd, i === activeDigit ? 0 : vccV, AVR_GPIO_ROUT);
         }
       }
 
@@ -541,7 +545,7 @@ const arduinoReal: ComponentPlugin = {
         const pin = segPins[i];
         const node = pinToNode[pin];
         if (node && node !== gnd) {
-          sys.stampVoltageSource(node, gnd, pattern[i] ? vccV : 0);
+          stampGpio(sys, node, gnd, pattern[i] ? vccV : 0, AVR_GPIO_ROUT);
         }
       }
 
@@ -613,7 +617,7 @@ const arduinoReal: ComponentPlugin = {
       const term = terminals.find((t) => t.terminalId === pin);
       if (!term) continue;
       if (term.nodeId !== gnd) {
-        sys.stampVoltageSource(term.nodeId, gnd, v as number);
+        stampGpio(sys, term.nodeId, gnd, v as number, AVR_GPIO_ROUT);
       }
     }
     // Inputs (A0, A1, A2): high-Z with weak pull-down
@@ -646,6 +650,7 @@ const arduinoReal: ComponentPlugin = {
 
 // Import registerPlugin lazily to avoid circular dependency
 import { registerPlugin } from '../registry';
+import { stampGpio, stampRegulatorPin, AVR_GPIO_ROUT } from './board-pins';
 
 // Register the programmable Arduino plugin
 registerPlugin(arduinoReal);

@@ -226,7 +226,13 @@ const capacitor: ComponentPlugin = {
     const dt = Math.max(sim.dt, 1e-12);
     let g: number;
     let iEq: number;
-    if (method === 'trap' && !(st[key + '_ring'] > 0)) {
+    // Trapezoidal needs i_{n−1}. On a cold start (live sim, .tran UIC) there
+    // is none: assuming 0 is wrong whenever a source steps at t=0, and trap
+    // never damps that error (it rings as (−1)^n and biases the waveform —
+    // an RC step response came out LESS accurate than Euler). Take the first
+    // step with backward Euler, as SPICE does at every start/breakpoint.
+    const trapReady = st[key + '_i'] !== undefined;
+    if (method === 'trap' && trapReady && !(st[key + '_ring'] > 0)) {
       // Trapezoidal (2nd order): i_n = (2C/dt)(v_n − v_{n−1}) − i_{n−1}
       //   → G = 2C/dt, I_eq = (2C/dt)·vPrev + iPrev
       // iPrev (the previous step's cap current) is stored under `_i` by step().
@@ -235,7 +241,8 @@ const capacitor: ComponentPlugin = {
       iEq = g * vPrev + iPrev;
       st[key + '_used'] = 'trap';
     } else if (method === 'trap') {
-      // Trapezoidal ringing guard: the detector in step() counted a sustained
+      // First step (no history yet), or the trapezoidal ringing guard: the
+      // detector in step() counted a sustained
       // (−1)^n alternation of the cap current — fall back to backward Euler
       // for this step (L-stable, kills the sampling mode). The `_ring`
       // counter is decremented once per step by step().
@@ -397,7 +404,10 @@ const inductor: ComponentPlugin = {
     const dt = Math.max(sim.dt, 1e-12);
     let g: number;
     let iEq: number;
-    if (method === 'trap' && !(st[key + '_ring'] > 0)) {
+    // Trapezoidal needs v_{n−1}; on a cold start take one backward-Euler
+    // step first (see the capacitor).
+    const trapReady = st[key + '_vp'] !== undefined;
+    if (method === 'trap' && trapReady && !(st[key + '_ring'] > 0)) {
       // Trapezoidal: i_n = i_{n−1} + (dt/2L)(v_n + v_{n−1})
       //   → Norton: G = dt/(2L), I_eq = iPrev + (dt/2L)·vPrev (source a→b)
       const vPrev = (st[key + '_vp'] as number | undefined) ?? 0;
@@ -405,7 +415,7 @@ const inductor: ComponentPlugin = {
       iEq = iPrev + g * vPrev;
       st[key + '_used'] = 'trap';
     } else if (method === 'trap') {
-      // Ringing guard fallback — backward Euler companion (see capacitor).
+      // First step or ringing-guard fallback — backward Euler companion.
       g = dt / L;
       iEq = iPrev;
       st[key + '_used'] = 'euler';

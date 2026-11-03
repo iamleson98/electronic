@@ -3,6 +3,8 @@ import type { ComponentPlugin } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
+import { isPinUnwired } from '../pin-state';
+import { limitStep, junctionVCrit, shockleyCompanion, thermalVoltage } from '../nonlinear';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TL431 — Adjustable shunt voltage reference
@@ -62,6 +64,18 @@ export const tl431: ComponentPlugin = {
       if (vRef > refV) on = true;
     }
     st[key] = on;
+    // Internal bias: the part draws its minimum cathode current I_KA(min)
+    // whenever it has headroom (smooth in V_KA). A cathode resistor too
+    // large to supply it leaves the output out of regulation — the classic
+    // TL431 design mistake — instead of regulating on zero current.
+    const vka = (sim.nodeVoltage[c] ?? 0) - (sim.nodeVoltage[a] ?? 0);
+    const iMin = Math.max(0, (params.minI as number) ?? 0);
+    if (iMin > 0 && vka > 0) {
+      const e = Math.exp(-vka / 0.25);
+      const gb = (iMin / 0.25) * e;
+      sys.stampConductance(c, a, gb);
+      sys.stampCurrentSource(c, a, iMin * (1 - e) - gb * vka);
+    }
     if (on) {
       // I(c→a) = gm·(Vref − Va) − gm·refV
       sys.stampVCCS(c, a, ref, a, gm);
@@ -80,6 +94,9 @@ export const lm385: ComponentPlugin = {
   type: 'lm385',
   name: 'LM385 (1.2V Ref)',
   category: 'ic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Micropower voltage reference diode. Regulates at 1.235V when forward biased.',
   symbol: 'REF',
   boundingBox: { width: 4, height: 2 },
@@ -141,6 +158,9 @@ export const adc: ComponentPlugin = {
   type: 'adc',
   name: 'ADC (4-bit MSBs of 8-bit)',
   category: 'mcu',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '8-bit ADC core, exposing the 4 most-significant bits (D7-D4). Reads analog voltage on VIN against VREF and outputs the top nibble of the 8-bit code.',
   symbol: 'ADC',
   boundingBox: { width: 6, height: 5 },
@@ -170,11 +190,9 @@ export const adc: ComponentPlugin = {
     const vinNode = terminals.find(t => t.terminalId === 'vin')!.nodeId;
     const vrefNode = terminals.find(t => t.terminalId === 'vref')!.nodeId;
     const vin = sim.nodeVoltage[vinNode] ?? 0;
-    // An unconnected terminal maps to node 0 and reads 0 V — the `?? vccV`
-    // fallback could never fire. Detect the unconnected VREF explicitly and
-    // default it to VCC (an unconnected VREF previously read 0 V, saturating
-    // the converter to 255).
-    const vref = vrefNode !== 0 ? (sim.nodeVoltage[vrefNode] ?? vccV) : vccV;
+    // An unwired VREF defaults to VCC (it would otherwise read 0 V and
+    // saturate the converter to 255); a VREF wired to ground stays 0 V.
+    const vref = isPinUnwired(sim, vrefNode) ? vccV : (sim.nodeVoltage[vrefNode] ?? vccV);
     // Convert analog voltage to 8-bit value
     const ratio = Math.max(0, Math.min(1, vin / Math.max(0.001, vref)));
     const digitalValue = Math.round(ratio * 255);
@@ -199,6 +217,9 @@ export const dac: ComponentPlugin = {
   type: 'dac',
   name: 'DAC (4-bit)',
   category: 'mcu',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '4-bit digital-to-analog converter. 4 digital inputs (D3-D0) → analog output voltage (code/15 × VREF).',
   symbol: 'DAC',
   boundingBox: { width: 6, height: 5 },
@@ -354,6 +375,9 @@ export const lm336: ComponentPlugin = {
   type: 'lm336',
   name: 'LM336 (2.5V Ref)',
   category: 'ic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Micropower 2.5V precision voltage reference diode. Regulates at 2.49V when reverse-biased.',
   symbol: 'Z',
   boundingBox: { width: 4, height: 2 },
@@ -423,6 +447,9 @@ export const icl8069: ComponentPlugin = {
   type: 'icl8069',
   name: 'ICL8069 (1.2V Ref)',
   category: 'ic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: '1.2V micropower voltage reference diode. Low-noise, low-drift bandgap reference.',
   symbol: 'Z',
   boundingBox: { width: 4, height: 2 },
@@ -491,7 +518,7 @@ export const stepperMotor: ComponentPlugin = {
   type: 'stepperMotor',
   name: 'Stepper Motor (Bipolar)',
   category: 'io',
-  description: 'Bipolar 2-coil stepper motor. Energize A+/A- then B+/B- in sequence to rotate. Winding = resistor + inductor.',
+  description: 'Bipolar 2-coil stepper motor. Each winding is a series R–L (current rises with τ = L/R); the rotor follows the winding current vector, advancing 360°/steps-per-rev per full step (A+ → B+ → A− → B− turns it forward, the reverse sequence backward).',
   symbol: 'M',
   boundingBox: { width: 6, height: 6 },
   terminals: [
@@ -521,38 +548,71 @@ export const stepperMotor: ComponentPlugin = {
     ctx.moveTo(3.7 * cellSize, 2 * cellSize); ctx.lineTo(6 * cellSize, 3 * cellSize);
     ctx.stroke();
   },
-  stamp(params, terminals, sys, _sim) {
-    const ap = terminals.find(t => t.terminalId === 'ap')!.nodeId;
-    const an = terminals.find(t => t.terminalId === 'an')!.nodeId;
-    const bp = terminals.find(t => t.terminalId === 'bp')!.nodeId;
-    const bn = terminals.find(t => t.terminalId === 'bn')!.nodeId;
-    const r = Math.max(0.001, params.resistance as number);
-    // Both windings are just resistors (DC steady state)
-    sys.stampConductance(ap, an, 1 / r);
-    sys.stampConductance(bp, bn, 1 / r);
+  // Each winding: series R–L, backward-Euler companion
+  //   v = R·i + L·(i − iPrev)/dt  →  i = g·(v + (L/dt)·iPrev),  g = 1/(R + L/dt)
+  stamp(params, terminals, sys, sim, comp) {
+    const pins = stepperPins(terminals);
+    const { g, ld } = stepperCompanion(params, sim.dt);
+    const st = stepperState(sim, comp);
+    // history term carries current in the winding's own direction (+ → −)
+    sys.stampConductance(pins.ap, pins.an, g);
+    sys.stampCurrentSource(pins.ap, pins.an, g * ld * st.iA);
+    sys.stampConductance(pins.bp, pins.bn, g);
+    sys.stampCurrentSource(pins.bp, pins.bn, g * ld * st.iB);
   },
-  measure(params, terminals, sim) {
-    const ap = terminals.find(t => t.terminalId === 'ap')!.nodeId;
-    const an = terminals.find(t => t.terminalId === 'an')!.nodeId;
-    const bp = terminals.find(t => t.terminalId === 'bp')!.nodeId;
-    const bn = terminals.find(t => t.terminalId === 'bn')!.nodeId;
-    const vA = (sim.nodeVoltage[ap] ?? 0) - (sim.nodeVoltage[an] ?? 0);
-    const vB = (sim.nodeVoltage[bp] ?? 0) - (sim.nodeVoltage[bn] ?? 0);
-    const r = Math.max(0.001, params.resistance as number);
-    const iA = vA / r;
-    const iB = vB / r;
+  step(params, terminals, sim, comp) {
+    const pins = stepperPins(terminals);
+    const { g, ld } = stepperCompanion(params, sim.dt);
+    const st = stepperState(sim, comp);
+    const v = (n: number) => sim.nodeVoltage[n] ?? 0;
+    st.iA = g * (v(pins.ap) - v(pins.an) + ld * st.iA);
+    st.iB = g * (v(pins.bp) - v(pins.bn) + ld * st.iB);
+    // Rotor alignment: it follows the electrical angle of the current
+    // vector (full-step drive: 0°, 90°, 180°, 270° electrical). Unwrapped so
+    // the direction of rotation follows the energization sequence. With the
+    // windings (nearly) unpowered the detent torque holds the rotor.
+    if (Math.hypot(st.iA, st.iB) > 1e-3) {
+      const th = Math.atan2(st.iB, st.iA);
+      if (st.thLast === undefined) st.thLast = th;
+      let d = th - st.thLast;
+      if (d > Math.PI) d -= 2 * Math.PI;
+      if (d < -Math.PI) d += 2 * Math.PI;
+      st.thE += d;
+      st.thLast = th;
+    }
+  },
+  measure(params, terminals, sim, comp) {
+    const st = stepperState(sim, comp);
+    const spr = Math.max(4, params.stepsPerRev as number);
+    const pv = (id: string) => sim.nodeVoltage[terminals.find(t => t.terminalId === id)?.nodeId ?? 0] ?? 0;
+    // one electrical turn = 4 full steps
+    const steps = Math.round((st.thE / (Math.PI / 2)) * 1000) / 1000;
+    const deg = steps * (360 / spr);
     return [
-      { label: 'V_A', value: vA.toFixed(2), unit: 'V' },
-      { label: 'V_B', value: vB.toFixed(2), unit: 'V' },
-      { label: 'I_A', value: (iA * 1000).toFixed(0), unit: 'mA' },
-      { label: 'I_B', value: (iB * 1000).toFixed(0), unit: 'mA' },
+      { label: 'V_A', value: (pv('ap') - pv('an')).toFixed(2), unit: 'V' },
+      { label: 'V_B', value: (pv('bp') - pv('bn')).toFixed(2), unit: 'V' },
+      { label: 'I_A', value: (st.iA * 1000).toFixed(1), unit: 'mA' },
+      { label: 'I_B', value: (st.iB * 1000).toFixed(1), unit: 'mA' },
+      { label: 'Steps', value: steps.toFixed(0), unit: '' },
+      { label: 'Angle', value: deg.toFixed(1), unit: '°' },
     ];
   },
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Servo Motor — PWM-controlled
-// ─────────────────────────────────────────────────────────────────────────────
+function stepperPins(terminals: { terminalId: string; nodeId: number }[]) {
+  const n = (id: string) => terminals.find(t => t.terminalId === id)!.nodeId;
+  return { ap: n('ap'), an: n('an'), bp: n('bp'), bn: n('bn') };
+}
+function stepperCompanion(params: Record<string, any>, dt: number) {
+  const R = Math.max(0.001, params.resistance as number);
+  const L = Math.max(1e-9, params.inductance as number);
+  const ld = L / Math.max(dt, 1e-12);
+  return { g: 1 / (R + ld), ld };
+}
+function stepperState(sim: { state: Record<string, any> }, comp?: { id: string }) {
+  const k = 'stepper_' + (comp?.id ?? '?');
+  return (sim.state[k] ??= { iA: 0, iB: 0, thE: 0, thLast: undefined }) as { iA: number; iB: number; thE: number; thLast?: number };
+}
 
 export const servoMotor: ComponentPlugin = {
   type: 'servoMotor',
@@ -617,7 +677,9 @@ export const photodiode: ComponentPlugin = {
   type: 'photodiode',
   name: 'Photodiode',
   category: 'semiconductor',
-  description: 'Photodiode (photoconductive mode). Reverse-biased; light generates current proportional to illuminance. Set illuminance in lux.',
+  description: 'Photodiode: photocurrent source in parallel with the PN junction. Reverse-biased (photoconductive) it delivers I = R·E·A; unbiased into a high-impedance load (photovoltaic) the junction clamps the open-circuit voltage (~0.4 V at 1 klux). Dark current is the reverse leakage at 10 V.',
+  // Shockley junction — Newton re-stamp loop
+  nonLinear: true,
   symbol: 'PD',
   boundingBox: { width: 4, height: 2 },
   terminals: [
@@ -628,9 +690,11 @@ export const photodiode: ComponentPlugin = {
     { key: 'responsivity', label: 'Responsivity', type: 'number', default: 0.5, unit: 'A/W', min: 0.01, max: 2, step: 0.01 },
     { key: 'illuminance', label: 'Illuminance', type: 'number', default: 1000, unit: 'lux', min: 0, max: 100000, step: 10 },
     { key: 'activeArea', label: 'Active Area', type: 'number', default: 7.45e-6, unit: 'm²', min: 1e-9, max: 1e-3, step: 1e-7 },
-    { key: 'darkCurrent', label: 'Dark Current', type: 'number', default: 2e-9, unit: 'A', min: 0, max: 1e-6, step: 1e-10 },
+    { key: 'darkCurrent', label: 'Dark Current (@10 V reverse)', type: 'number', default: 2e-9, unit: 'A', min: 0, max: 1e-6, step: 1e-10 },
+    { key: 'Is', label: 'Junction Saturation Current', type: 'number', default: 1e-12, unit: 'A', min: 1e-18, max: 1e-6, step: 1e-13 },
+    { key: 'N', label: 'Emission Coefficient', type: 'number', default: 1, min: 0.5, max: 3, step: 0.05 },
   ],
-  keywords: ['photodiode', 'light', 'optical', 'sensor'],
+  keywords: ['photodiode', 'light', 'optical', 'sensor', 'photovoltaic', 'bpw34'],
   render(ctx, _params, cellSize) {
     ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -677,14 +741,38 @@ export const photodiode: ComponentPlugin = {
     // (1000 lux → 5.5 mA instead of the physical 5.5 µA).
     const irradiance = lux / 683;
     const photocurrent = responsivity * irradiance * area;
-    const dark = params.darkCurrent as number;
-    const totalCurrent = photocurrent + dark;
-    // High impedance when not conducting — add parallel leak so node isn't floating
-    sys.stampConductance(a, k, 1e-9);
-    sys.stampCurrentSource(k, a, totalCurrent);
-    // Record state for measure
+    // Reverse leakage: the rated dark current at 10 V reverse bias, as a
+    // linear conductance (it is zero at 0 V — the old model injected it as
+    // a constant current even unbiased).
+    const gLeak = Math.max(1e-12, (params.darkCurrent as number) / 10);
+    sys.stampConductance(a, k, gLeak);
+    // photocurrent: generated inside, flows cathode → anode
+    sys.stampCurrentSource(k, a, photocurrent);
+    // PN junction in parallel (Shockley, Newton-limited) — clamps the
+    // photovoltaic open-circuit voltage at Vt·ln(Iph/Is). Without it an
+    // unloaded photodiode charged to I/gleak: kilovolts.
+    const Is = Math.max(1e-18, (params.Is as number) ?? 1e-12);
+    const nVt = Math.max(0.1, (params.N as number) ?? 1) * thermalVoltage(sim.temp ?? 27);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    st[stateKey('pd', comp, a, k)] = { photocurrent: totalCurrent, lux };
+    const key = stateKey('pd', comp, a, k);
+    const mem = sim.newtonMemory;
+    const vRaw = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[k] ?? 0);
+    const vOld = mem?.[key + '_v'] ?? (st[key + '_v'] as number | undefined) ?? 0;
+    const v = limitStep(vRaw, vOld, nVt, junctionVCrit(nVt, Is));
+    if (mem) {
+      mem[key + '_v'] = v;
+      if (Math.abs(v - vRaw) > 1e-9) mem.__limited = (mem.__limited ?? 0) + 1;
+    }
+    const { g, iEq } = shockleyCompanion(v, Is, nVt, 1e-12);
+    sys.stampConductance(a, k, g);
+    sys.stampCurrentSource(a, k, iEq);
+    st[key] = { photocurrent, lux };
+  },
+  step(_params, terminals, sim, comp) {
+    const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
+    const k = terminals.find(t => t.terminalId === 'k')!.nodeId;
+    const st = sim.state.__global ?? (sim.state.__global = {});
+    st[stateKey('pd', comp, a, k) + '_v'] = (sim.nodeVoltage[a] ?? 0) - (sim.nodeVoltage[k] ?? 0);
   },
   measure(params, terminals, sim, comp) {
     const a = terminals.find(t => t.terminalId === 'a')!.nodeId;
@@ -898,6 +986,9 @@ export const crystalOscillator: ComponentPlugin = {
   type: 'crystalOscillator',
   name: 'Crystal Oscillator (Active, 4-pin)',
   category: 'ic',
+  // stamp decides from node voltages (region / logic level) — must join the
+  // Newton re-stamp loop or the decision lags one timestep
+  nonLinear: true,
   description: 'Active 4-pin crystal oscillator module. Self-contained: VCC/GND + output + enable. Generates a square wave at the rated frequency.',
   symbol: 'OSC',
   boundingBox: { width: 6, height: 4 },

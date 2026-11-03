@@ -2,6 +2,19 @@
 // Generates industry-standard manufacturing files from the PCB layout.
 
 import type { Footprint, Trace, Via, BoardOutline, Pad } from './types';
+
+/**
+ * Standard aperture template for a pad, grown (or shrunk) by `grow` mm per
+ * side: C (circle), R (rectangle) or O (obround — oval pads; they used to be
+ * fabricated as rectangles). Returns the template body for %ADDnn<body>*%.
+ */
+function padApertureBody(pad: Pick<Pad, 'shape' | 'size'>, grow = 0): string {
+  const w = Math.max(0.01, pad.size.width + 2 * grow);
+  const h = Math.max(0.01, pad.size.height + 2 * grow);
+  if (pad.shape === 'circle') return `C,${Math.max(w, h).toFixed(4)}`;
+  if (pad.shape === 'oval') return `O,${w.toFixed(4)}X${h.toFixed(4)}`;
+  return `R,${w.toFixed(4)}X${h.toFixed(4)}`;
+}
 import type { CopperPour } from './copper-pour';
 
 /**
@@ -29,12 +42,12 @@ export function exportGerberCopper(
     // Sign-aware X26Y26 coordinate (2 int + 6 dec digits). A naive
     // padStart would inject a zero BETWEEN the minus sign and the digits
     // for small negative coordinates (e.g. -0.5mm → "0-500000").
-    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(8, '0');
+    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(10, '0');
     return n < 0 ? `-${mag}` : mag;
   };
 
   // Header
-  lines.push('%FSLAX26Y26*%');  // Format: 2 integer + 6 decimal digits
+  lines.push('%FSLAX46Y46*%');  // Format: 4 integer + 6 decimal digits (2.6 capped boards at 99.999 mm)
   lines.push('%MOMM*%');        // Units: millimeters
   lines.push(`%LPD*%`);         // Layer polarity: dark
   lines.push(`%LN${layer.toUpperCase()}_COPPER*%`);
@@ -66,6 +79,19 @@ export function exportGerberCopper(
     }
     return ap;
   };
+  const bodyAps = new Map<string, number>();
+  const getPadAp = (pad: Pad): number => {
+    const body = padApertureBody(pad);
+    if (body.startsWith('C,')) return getCircleAp(parseFloat(body.slice(2)));
+    if (body.startsWith('R,')) return getRectAp(pad.size.width, pad.size.height);
+    let ap = bodyAps.get(body);
+    if (ap === undefined) {
+      ap = nextAp++;
+      bodyAps.set(body, ap);
+      apDefs.push(`%ADD${ap}${body}*%`);
+    }
+    return ap;
+  };
 
   // Reserve the outline aperture up-front (D10) so the numbering is stable
   const outlineAp = getCircleAp(0.15);
@@ -79,8 +105,7 @@ export function exportGerberCopper(
   for (const fp of footprints) {
     for (const pad of fp.pads) {
       if (!padOnLayer(pad, fp, layer)) continue;
-      if (pad.shape === 'circle') getCircleAp(Math.max(pad.size.width, pad.size.height));
-      else getRectAp(pad.size.width, pad.size.height);
+      getPadAp(pad);
     }
   }
   for (const trace of traces) {
@@ -103,21 +128,16 @@ export function exportGerberCopper(
   // Emit all aperture definitions (must precede their first use)
   lines.push(...apDefs);
 
-  // Draw board outline
-  lines.push(`G54D${outlineAp}*`);
-  lines.push(`X${fmt(0)}Y${fmt(0)}D02*`);
-  lines.push(`X${fmt(board.width)}Y${fmt(0)}D01*`);
-  lines.push(`X${fmt(board.width)}Y${fmt(board.height)}D01*`);
-  lines.push(`X${fmt(0)}Y${fmt(board.height)}D01*`);
-  lines.push(`X${fmt(0)}Y${fmt(0)}D01*`);
+  // The board outline is NOT drawn on copper (it lives in Edge.Cuts only):
+  // a copper line on the board edge is milled through by the fab — exposed,
+  // burred copper that violates every copper-to-edge rule.
+  void outlineAp;
 
   // Draw pads
   for (const fp of footprints) {
     for (const pad of fp.pads) {
       if (!padOnLayer(pad, fp, layer)) continue;
-      const ap = pad.shape === 'circle'
-        ? getCircleAp(Math.max(pad.size.width, pad.size.height))
-        : getRectAp(pad.size.width, pad.size.height);
+      const ap = getPadAp(pad);
       lines.push(`G54D${ap}*`);
       lines.push(`X${fmt(pad.position.x)}Y${fmt(pad.position.y)}D03*`);
     }
@@ -173,48 +193,51 @@ export function exportGerberCopper(
 export function exportGerberSolderMask(
   layer: 'top' | 'bottom',
   footprints: Footprint[],
-  board: BoardOutline,
+  _board: BoardOutline,
 ): string {
   const lines: string[] = [];
   const fmt = (n: number) => {
     // Sign-aware X26Y26 coordinate (2 int + 6 dec digits). A naive
     // padStart would inject a zero BETWEEN the minus sign and the digits
     // for small negative coordinates (e.g. -0.5mm → "0-500000").
-    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(8, '0');
+    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(10, '0');
     return n < 0 ? `-${mag}` : mag;
   };
 
-  lines.push('%FSLAX26Y26*%');
+  lines.push('%FSLAX46Y46*%');
   lines.push('%MOMM*%');
-  lines.push('%LPC*%');  // Clear polarity (solder mask is negative)
+  // Dark polarity: on a solder-mask layer the drawn image IS the set of
+  // openings. (This file used %LPC% — clear objects on an empty image erase
+  // nothing, so the mask had NO openings and every pad would be covered.)
+  lines.push('%LPD*%');
   lines.push(`%LN${layer.toUpperCase()}_SOLDERMASK*%`);
 
+  const MASK_EXPANSION = 0.05; // mm per side
+  const maskAps = new Map<string, number>();
+  let nextMaskAp = 10;
   // Open solder mask openings at each pad (slightly larger than pad).
   // THT pads need openings on BOTH mask layers (the hole spans the board);
   // SMD pads only on their own side.
   for (const fp of footprints) {
     for (const pad of fp.pads) {
       if ((pad.drill ?? 0) <= 0 && pad.layer !== layer && fp.side !== layer) continue;
-      const r = Math.max(pad.size.width, pad.size.height) / 2 + 0.1; // 0.1mm expansion
-      // Aperture numbers: 10 + round(diameter in 0.01mm units). Max diameter
-      // is bounded by the board size, so 10..~10010 — well within Gerber's
-      // 3-digit D-code range for any realistic pad. (The old formula could
-      // collide with the D50 outline aperture.)
-      const apNum = 10 + Math.round(r * 2 * 100);
-      lines.push(`%ADD${apNum}C,${(r * 2).toFixed(3)}*%`);
+      // Opening = the pad's own shape grown by the mask expansion. (Every
+      // opening used to be a circle of the pad's LARGEST dimension: a
+      // 1.5×0.6 mm SOIC pad got a 1.7 mm hole overlapping its neighbours —
+      // no solder dam, bridged pins.)
+      const body = padApertureBody(pad, MASK_EXPANSION);
+      let apNum = maskAps.get(body);
+      if (apNum === undefined) {
+        apNum = nextMaskAp++;
+        maskAps.set(body, apNum);
+        lines.push(`%ADD${apNum}${body}*%`);
+      }
       lines.push(`G54D${apNum}*`);
       lines.push(`X${fmt(pad.position.x)}Y${fmt(pad.position.y)}D03*`);
     }
   }
 
-  // Board outline as mask area
-  lines.push('%ADD900C,0.150*%');
-  lines.push('G54D900*');
-  lines.push(`X${fmt(0)}Y${fmt(0)}D02*`);
-  lines.push(`X${fmt(board.width)}Y${fmt(0)}D01*`);
-  lines.push(`X${fmt(board.width)}Y${fmt(board.height)}D01*`);
-  lines.push(`X${fmt(0)}Y${fmt(board.height)}D01*`);
-  lines.push(`X${fmt(0)}Y${fmt(0)}D01*`);
+  // (no outline: a mask-layer draw is an OPENING — Edge.Cuts carries it)
 
   lines.push('M02*');
   return lines.join('\n');
@@ -228,14 +251,14 @@ export function exportGerberSolderMask(
 export function exportGerberPaste(
   layer: 'top' | 'bottom',
   footprints: Footprint[],
-  board: BoardOutline,
+  _board: BoardOutline,
 ): string {
   const lines: string[] = [];
   const fmt = (n: number) => {
-    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(8, '0');
+    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(10, '0');
     return n < 0 ? `-${mag}` : mag;
   };
-  lines.push('%FSLAX26Y26*%');
+  lines.push('%FSLAX46Y46*%');
   lines.push('%MOMM*%');
   lines.push('%LPD*%');
   lines.push(`%LN${layer.toUpperCase()}_PASTE*%`);
@@ -250,12 +273,12 @@ export function exportGerberPaste(
       // shrink ~10% per side for stencil relief
       const w = Math.max(0.1, pad.size.width - 0.1);
       const h = Math.max(0.1, pad.size.height - 0.1);
-      const key = pad.shape === 'circle' ? `C${w.toFixed(3)}` : `R${w.toFixed(3)}x${h.toFixed(3)}`;
+      const key = padApertureBody({ shape: pad.shape, size: { width: w, height: h } });
       let ap = apDefs.get(key);
       if (ap === undefined) {
         ap = nextAp++;
         apDefs.set(key, ap);
-        defs.push(pad.shape === 'circle' ? `%ADD${ap}C,${w.toFixed(3)}*%` : `%ADD${ap}R,${w.toFixed(3)}X${h.toFixed(3)}*%`);
+        defs.push(`%ADD${ap}${key}*%`);
       }
       flashes.push(`G54D${ap}*`);
       flashes.push(`X${fmt(pad.position.x)}Y${fmt(pad.position.y)}D03*`);
@@ -263,14 +286,8 @@ export function exportGerberPaste(
   }
   lines.push(...defs);
   lines.push(...flashes);
-  // board outline for registration
-  lines.push('%ADD900C,0.150*%');
-  lines.push('G54D900*');
-  lines.push(`X${fmt(0)}Y${fmt(0)}D02*`);
-  lines.push(`X${fmt(board.width)}Y${fmt(0)}D01*`);
-  lines.push(`X${fmt(board.width)}Y${fmt(board.height)}D01*`);
-  lines.push(`X${fmt(0)}Y${fmt(board.height)}D01*`);
-  lines.push(`X${fmt(0)}Y${fmt(0)}D01*`);
+  // (no outline: a paste-layer draw is a stencil APERTURE — it would print
+  // solder paste along the whole board edge; Edge.Cuts carries the outline)
   lines.push('M02*');
   return lines.join('\n');
 }
@@ -281,11 +298,11 @@ export function exportGerberPaste(
  */
 export function exportGerberEdgeCuts(board: BoardOutline): string {
   const fmt = (n: number) => {
-    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(8, '0');
+    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(10, '0');
     return n < 0 ? `-${mag}` : mag;
   };
   return [
-    '%FSLAX26Y26*%',
+    '%FSLAX46Y46*%',
     '%MOMM*%',
     '%LPD*%',
     '%LNEDGE_CUTS*%',
@@ -309,11 +326,11 @@ export function exportGerberSilkscreen(
     // Sign-aware X26Y26 coordinate (2 int + 6 dec digits). A naive
     // padStart would inject a zero BETWEEN the minus sign and the digits
     // for small negative coordinates (e.g. -0.5mm → "0-500000").
-    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(8, '0');
+    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(10, '0');
     return n < 0 ? `-${mag}` : mag;
   };
 
-  lines.push('%FSLAX26Y26*%');
+  lines.push('%FSLAX46Y46*%');
   lines.push('%MOMM*%');
   lines.push(`%LPD*%`);
   lines.push(`%LN${layer.toUpperCase()}_SILKSCREEN*%`);
@@ -604,7 +621,7 @@ export function exportGerberX2Copper(
     // Sign-aware X26Y26 coordinate (2 int + 6 dec digits). A naive
     // padStart would inject a zero BETWEEN the minus sign and the digits
     // for small negative coordinates (e.g. -0.5mm → "0-500000").
-    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(8, '0');
+    const mag = (Math.abs(n) * 1e6).toFixed(0).padStart(10, '0');
     return n < 0 ? `-${mag}` : mag;
   };
 
@@ -622,7 +639,7 @@ export function exportGerberX2Copper(
   lines.push('%TF.FilePolarity,Positive*%');
   lines.push('%TF.SameCoordinates*%');
   lines.push('%MOMM*%');
-  lines.push('%FSLAX26Y26*%');
+  lines.push('%FSLAX46Y46*%');
   lines.push('%LPD*%');
 
   // Aperture attributes
@@ -655,14 +672,26 @@ export function exportGerberX2Copper(
     }
     return ap;
   };
+  const bodyAps = new Map<string, number>();
+  const getPadAp = (pad: Pad): number => {
+    const body = padApertureBody(pad);
+    if (body.startsWith('C,')) return getCircleAp(parseFloat(body.slice(2)));
+    if (body.startsWith('R,')) return getRectAp(pad.size.width, pad.size.height);
+    let ap = bodyAps.get(body);
+    if (ap === undefined) {
+      ap = nextAp++;
+      bodyAps.set(body, ap);
+      apDefs.push(`%ADD${ap}${body}*%`);
+    }
+    return ap;
+  };
   const outlineAp = getCircleAp(0.15);
 
   // Pre-scan: allocate all apertures before emitting definitions (def-before-use)
   for (const fp of footprints) {
     for (const pad of fp.pads) {
       if ((pad.drill ?? 0) <= 0 && pad.layer !== layer && fp.side !== layer) continue;
-      if (pad.shape === 'circle') getCircleAp(Math.max(pad.size.width, pad.size.height));
-      else getRectAp(pad.size.width, pad.size.height);
+      getPadAp(pad);
     }
   }
   for (const trace of traces) {
@@ -680,14 +709,9 @@ export function exportGerberX2Copper(
   }
   lines.push(...apDefs);
 
-  // Board outline
-  lines.push('%TO.N,*%'); // no net for outline
-  lines.push(`G54D${outlineAp}*`);
-  lines.push(`X${fmt(0)}Y${fmt(0)}D02*`);
-  lines.push(`X${fmt(board.width)}Y${fmt(0)}D01*`);
-  lines.push(`X${fmt(board.width)}Y${fmt(board.height)}D01*`);
-  lines.push(`X${fmt(0)}Y${fmt(board.height)}D01*`);
-  lines.push(`X${fmt(0)}Y${fmt(0)}D01*`);
+  // No board outline on copper (Edge.Cuts carries it; a copper line on the
+  // edge is milled through by the fab).
+  void outlineAp;
 
   // Pads — with component attributes
   for (const fp of footprints) {
@@ -699,9 +723,7 @@ export function exportGerberX2Copper(
       if ((pad.drill ?? 0) <= 0 && pad.layer !== layer && fp.side !== layer) continue;
       // Net attribute
       lines.push(`%TO.N,${pad.net ?? 'unconnected'}*%`);
-      const ap = pad.shape === 'circle'
-        ? getCircleAp(Math.max(pad.size.width, pad.size.height))
-        : getRectAp(pad.size.width, pad.size.height);
+      const ap = getPadAp(pad);
       lines.push(`G54D${ap}*`);
       lines.push(`X${fmt(pad.position.x)}Y${fmt(pad.position.y)}D03*`);
     }

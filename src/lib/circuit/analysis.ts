@@ -9,14 +9,15 @@
 // imported and reused — NOT modified.
 
 import type { CircuitComponent, ComponentPlugin, Wire, SimContext } from './types';
-import { simulateStep, solveDC, buildNodeMap, getTerminalsForComponent, computeComponentCurrents } from './engine';
+import { simulateStep, solveDC, buildNodeMap, getTerminalsForComponent, computeComponentCurrents, stampFloatingGmin } from './engine';
 import { createMnaSystem, solveMna } from './solver';
 import {
   createComplexMnaSystem, solveComplexMna, cStampConductance, cStampCurrentSource,
   cStampVoltageSource, cStampVCCS, cStampVCVS, type Complex,
 } from './complex-solver';
 import { mergeOptions, type SimOptions, type ConvergenceReport, toKelvin } from './sim-options';
-import { thermalVoltage } from './sim-options';
+import { thermalVoltage, dcSolveOpts } from './sim-options';
+import { stampGenericAC } from './ac-linearize';
 import { runSens as _runSens, type SensConfig, computeACModeSensitivity } from './sensitivity';
 import { stateKey } from './state-keys';
 
@@ -341,13 +342,20 @@ function buildACSystemAtFrequency(
       cStampConductance(sys, d, s, { re: gds, im: 0 });
       // gate is high impedance
       cStampConductance(sys, g, s, { re: 1e-6, im: 0 });
-    } else if (comp.type === 'opamp' || comp.type === 'opampRails') {
+    } else if (comp.type === 'opamp') {
       // Ideal op-amp: VCVS with the plugin's open-loop gain (was hardcoded 1e6)
       const inn = terms.find((t) => t.terminalId === 'in-')?.nodeId ?? 0;
       const inp = terms.find((t) => t.terminalId === 'in+')?.nodeId ?? 0;
       const out = terms.find((t) => t.terminalId === 'out')?.nodeId ?? 0;
       const gain = (comp.parameters.gain as number) ?? 1e5;
       cStampVCVS(sys, out, 0, inp, inn, { re: gain, im: 0 });
+    } else if (plugin.acStamp) {
+      // frequency-dependent small-signal model supplied by the plugin
+      plugin.acStamp(comp.parameters, terms, sys, { dcOp, omega, comp });
+    } else {
+      // Every other part: its Newton stamp at the DC operating point (these
+      // used to be skipped — open circuits in every AC/noise/TF/PZ result).
+      stampGenericAC(comp, plugin, terms, sys, dcOp, omega);
     }
   }
 
@@ -390,7 +398,7 @@ export function runAC(
   const options = mergeOptions(opts);
 
   // 1. Compute DC operating point (linearization point)
-  const dcOp = solveDC(components, wires, plugins, options.itl1);
+  const dcOp = solveDC(components, wires, plugins, options.itl1, dcSolveOpts(options));
   if (!dcOp) {
     return {
       type: 'ac', traces: [], scalars: {}, report: {
@@ -549,14 +557,18 @@ export function runDCSweep(
     ? buildSweepValues(config.nested.vStart, config.nested.vStop, config.nested.vStep)
     : [];
 
+  let failedPoints = 0;
   const solveAt = (overrides: Record<string, number>): number => {
     const modifiedComponents = components.map((c) => {
       const v = overrides[c.id];
       if (v === undefined) return c;
+      // An acVoltage's DC level is its `offset` (it ignores `voltage`).
+      if (c.type === 'acVoltage') return { ...c, parameters: { ...c.parameters, offset: v } };
       return { ...c, parameters: { ...c.parameters, voltage: v, current: v } };
     });
-    const result = solveDC(modifiedComponents, wires, plugins, options.itl1);
-    if (!result) return 0;
+    const result = solveDC(modifiedComponents, wires, plugins, options.itl1, dcSolveOpts(options));
+    // A point that does not converge is a gap (NaN), never a fake 0 V.
+    if (!result) { failedPoints++; return NaN; }
     if (!config.outputNode) return 0;
     const nodeMap = buildNodeMap(modifiedComponents, wires, plugins);
     for (const [key, nodeId] of nodeMap.terminalNode) {
@@ -604,7 +616,12 @@ export function runDCSweep(
     type: 'dc',
     traces,
     scalars: {},
-    report: { converged: true, iterations: vValues.length * Math.max(1, nestedValues.length), finalDelta: 0, attempts: [] },
+    report: {
+      converged: failedPoints === 0,
+      iterations: vValues.length * Math.max(1, nestedValues.length),
+      finalDelta: 0,
+      attempts: failedPoints === 0 ? [] : [`${failedPoints} sweep point(s) failed to converge (plotted as gaps)`],
+    },
     durationMs: performance.now() - start,
   };
 }
@@ -637,7 +654,7 @@ export function runTF(
   // small-signal analysis: gain = dVout/dVin linearized at the OP, not the
   // large-signal Vout(1V)/1V. Forcing the input to 1V re-biased every diode /
   // BJT / MOS stage and gave wrong gain on any nonlinear circuit).
-  const dcOp = solveDC(components, wires, plugins, options.itl1);
+  const dcOp = solveDC(components, wires, plugins, options.itl1, dcSolveOpts(options));
   if (!dcOp) {
     return { type: 'tf', traces: [], scalars: {}, report: { converged: false, iterations: 0, attempts: [] }, durationMs: performance.now() - start };
   }
@@ -753,7 +770,7 @@ export function runTF(
       to: { componentId: groundComp.id, terminalId: 'g' },
     });
   }
-  const routOp = solveDC(routComponents, routWires, plugins, options.itl1);
+  const routOp = solveDC(routComponents, routWires, plugins, options.itl1, dcSolveOpts(options));
   let rout = 0;
   if (routOp) {
     const routNodeMap = buildNodeMap(routComponents, routWires, plugins);
@@ -800,7 +817,7 @@ export function runPZ(
   // G = DC conductance MNA (resistors, linearized semis, source rows),
   // C = dynamic MNA (capacitors as C, inductors as 1/L in the dual block).
   // Zeros = finite zeros of H(s) fitted from the exact AC response.
-  const dcOp = solveDC(components, wires, plugins, options.itl1);
+  const dcOp = solveDC(components, wires, plugins, options.itl1, dcSolveOpts(options));
   if (!dcOp) {
     return { type: 'pz', traces: [], scalars: {}, report: { converged: false, iterations: 0, attempts: [] }, durationMs: performance.now() - start };
   }
@@ -906,6 +923,7 @@ function computeDescriptorPoles(
   const maxExtras = components.length * 4 + 8 + declaredExtras;
   const sys = createMnaSystem(numNodes - 1, maxExtras);
   sys.nextExtra = numNodes - 1;
+  stampFloatingGmin(sys, nodeMap);
   // Inductor branch rows, in stamp order (parallel with the G stamp loop).
   const inductorBranchRows: number[] = [];
   const inductorLs: number[] = [];
@@ -1556,7 +1574,7 @@ export function runNoise(
   const options = mergeOptions(opts);
 
   // Compute DC operating point (bias currents for shot noise).
-  const dcOp = solveDC(components, wires, plugins, options.itl1);
+  const dcOp = solveDC(components, wires, plugins, options.itl1, dcSolveOpts(options));
   if (!dcOp) {
     return { type: 'noise', traces: [], scalars: {}, report: { converged: false, iterations: 0, attempts: [] }, durationMs: performance.now() - start };
   }
@@ -1775,7 +1793,7 @@ export function runDisto(
   // the input around the operating point and measuring the harmonic content of
   // the output via transient simulation + FFT. This is slower but accurate.
 
-  const dcOp = solveDC(components, wires, plugins, options.itl1);
+  const dcOp = solveDC(components, wires, plugins, options.itl1, dcSolveOpts(options));
   if (!dcOp) {
     return { type: 'disto', traces: [], scalars: {}, report: { converged: false, iterations: 0, attempts: [] }, durationMs: performance.now() - start };
   }
@@ -1785,10 +1803,21 @@ export function runDisto(
   const hd3 = new Float64Array(freqs.length);
   const thd = new Float64Array(freqs.length);
 
-  const inputComp = components.find((c) => c.id === config.inputSourceId);
-  if (!inputComp) {
+  const userInput = components.find((c) => c.id === config.inputSourceId);
+  if (!userInput) {
     return { type: 'disto', traces: [], scalars: {}, report: { converged: false, iterations: 0, attempts: [], failure: 'no_input_source' as any, message: `Input source ${config.inputSourceId} not found` } as any, durationMs: performance.now() - start };
   }
+
+  // Drive a private copy of the input source — the caller's component (often
+  // live editor state) must never be mutated by an analysis.
+  const inputComp: CircuitComponent = { ...userInput, parameters: { ...userInput.parameters } };
+  components = components.map((c) => (c === userInput ? inputComp : c));
+  // The tone rides on the source's DC bias (the operating point was solved
+  // with it). Replacing a dcVoltage's value with a bare sine, or zeroing an
+  // acVoltage's offset, collapsed the bias mid-analysis.
+  const biasV = inputComp.type === 'acVoltage'
+    ? ((inputComp.parameters.offset as number) ?? 0)
+    : ((inputComp.parameters.voltage as number) ?? 0);
 
   const outputNodeName = config.outputNode;
   // Pristine copy of the DC operating point — each frequency's transient must
@@ -1801,6 +1830,7 @@ export function runDisto(
     state: dcOp.state,
     dt: dcOp.dt,
   };
+  const pristineState = structuredClone(dcOp.state);
   // For each frequency, run a short transient sim + FFT to measure HD2/HD3
   for (let i = 0; i < freqs.length; i++) {
     const f1 = freqs[i];
@@ -1816,12 +1846,14 @@ export function runDisto(
     // Save original input source parameters
     const origParams = { ...inputComp.parameters };
 
-    // Reset the transient state for this frequency
+    // Reset the transient state for this frequency — including the plugin
+    // state (capacitor/inductor history), which the previous frequency's
+    // transient advanced in place.
     const tranPrev: SimContext = {
       nodeVoltage: Float64Array.from(dcOpPristine.nodeVoltage),
       branchCurrent: Float64Array.from(dcOpPristine.branchCurrent),
       time: 0,
-      state: dcOpPristine.state,
+      state: structuredClone(pristineState),
       dt: dcOpPristine.dt,
     };
 
@@ -1834,17 +1866,18 @@ export function runDisto(
       // `voltage`; acVoltage reads `amplitude/frequency/offset/phase`; setting
       // `voltage` alone did nothing for those two types.
       if (inputComp.type === 'dcVoltage' || inputComp.type === 'pulseSource') {
-        inputComp.parameters.voltage = amplitude * Math.sin(2 * Math.PI * f1 * t);
+        inputComp.parameters.voltage = biasV + amplitude * Math.sin(2 * Math.PI * f1 * t);
       } else if (inputComp.type === 'acVoltage') {
         inputComp.parameters.amplitude = amplitude;
         inputComp.parameters.frequency = f1;
-        inputComp.parameters.offset = 0;
+        inputComp.parameters.offset = biasV;
         inputComp.parameters.phase = 0;
       }
       // Run a single step
       const sim = simulateStep(components, wires, plugins, tranPrev, tStep, {
-        initialConditions: options.initialConditions,
         nodeSets: options.nodeSets,
+        method: options.method,
+        temp: options.temp,
       });
       if (sim) {
         // Read output node voltage (nodeVoltage is node-id indexed: 0 = ground)
@@ -2151,7 +2184,7 @@ export function runTran(
   }
 
   // Solve DC operating point first
-  const dcResult = solveDC(components, wires, plugins, options.itl1);
+  const dcResult = solveDC(components, wires, plugins, options.itl1, dcSolveOpts(options));
   if (!dcResult) {
     return {
       type: 'tran',
@@ -2200,6 +2233,7 @@ function runTranSteps(
 
   let simState = prevSeed;
   let stepCount = 0;
+  let failedAt: number | null = null;
   const maxSteps = Math.min(Math.ceil(tStop / tStep), 100000);
 
   for (let i = 0; i < maxSteps; i++) {
@@ -2221,8 +2255,9 @@ function runTranSteps(
       // used) always runs backward Euler (standard SPICE behavior),
       // transient steps honor the user's trap/gear choice.
       method: options.method,
+      temp: options.temp,
     });
-    if (!result) break;
+    if (!result) { failedAt = (i + 1) * tStep; break; }
     simState = result.sim;
     stepCount++;
     // Sample the final state at t = tStop (previously the last solve result
@@ -2259,11 +2294,14 @@ function runTranSteps(
       finalTime: simState.time,
       ...(trapRingCount !== undefined ? { trapRings: trapRingCount } : {}),
     },
+    // A step that fails to solve aborts the run; the traces stop there.
+    // Report it instead of claiming convergence over a truncated waveform.
     report: {
-      converged: true,
+      converged: failedAt === null,
       iterations: stepCount,
       finalDelta: 0,
-      attempts: [],
+      attempts: failedAt === null ? [] : [`transient step failed at t=${failedAt.toPrecision(4)}s`],
+      ...(failedAt === null ? {} : { failure: 'singular_matrix' as const, message: `Transient solve failed at t=${failedAt.toPrecision(4)}s; traces end there.` }),
       ...(trapRingCount !== undefined ? { trapRings: trapRingCount } : {}),
     },
     durationMs: performance.now() - start,
@@ -2287,7 +2325,7 @@ export function runOp(
 ): AnalysisResult {
   const start = performance.now();
   const options = mergeOptions(opts);
-  const dc = solveDC(components, wires, plugins, options.itl1);
+  const dc = solveDC(components, wires, plugins, options.itl1, dcSolveOpts(options));
 
   if (!dc) {
     return {

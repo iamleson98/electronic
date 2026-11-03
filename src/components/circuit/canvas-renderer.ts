@@ -516,7 +516,13 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
     ctx.lineWidth = isSelected ? 3.5 : (isHover ? 3 : (isOnActiveNode ? 2.5 : 2));
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+    // Net focus: while a wire is hovered or selected, its whole net is
+    // highlighted and every other net fades back, so one connection can be
+    // traced through a busy schematic.
+    const dimmed = activeNodeId != null && !isOnActiveNode && !isSelected && !isHover;
+    if (dimmed) ctx.globalAlpha = 0.28;
     strokeWirePathWithHops(ctx, path, crossingMarks.get(wire.id), gridToScreen);
+    if (dimmed) ctx.globalAlpha = 1;
 
     // Virtual-keyboard focus ring for wires (a11y)
     if (isSelected) {

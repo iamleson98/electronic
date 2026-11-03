@@ -354,8 +354,11 @@ describe('complex board: hand-built mixed-signal MCU board (29 components)', () 
     const t0 = performance.now();
     const { footprints, ratsnest, padNets, board } = createPCBFromSchematic(components, wires);
 
-    // Placement sanity.
-    expect(footprints.length).toBe(components.length);
+    // Placement sanity: every physical part gets a footprint (ground
+    // symbols are schematic-only — no stray GND pad on the board).
+    const physical = components.filter((c) => c.type !== 'ground');
+    expect(footprints.length).toBe(physical.length);
+    expect(new Set(footprints.map((f) => f.refdes)).size).toBe(footprints.length);
     expect(board.width).toBeGreaterThanOrEqual(40);
     expect(board.height).toBeGreaterThanOrEqual(30);
     expect(board.width / board.height).toBeLessThanOrEqual(1.8);
@@ -478,8 +481,9 @@ describe('complex board: placement quality (congestion-aware clustered placement
     const { positions, rotations, stats } = computeSmartPlacement(
       components, wires, 120, 90,
     );
-    expect(positions.size).toBe(components.length);
-    expect(rotations.size).toBe(components.length);
+    const physicalCount = components.filter((c) => c.type !== 'ground').length;
+    expect(positions.size).toBe(physicalCount);
+    expect(rotations.size).toBe(physicalCount);
     // Congestion re-relaxation is bounded (no oscillation).
     expect(stats.congestionReRelaxations).toBeLessThanOrEqual(2);
     expect(stats.maxDemandRatio).toBeGreaterThan(0);

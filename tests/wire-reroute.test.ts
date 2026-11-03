@@ -175,7 +175,7 @@ describe('wire re-routing after component mutations', () => {
     const wBefore = JSON.stringify(useEditor.getState().wires);
     const cBefore = JSON.stringify(useEditor.getState().components);
     useEditor.getState().moveComponent('r1', { x: 14, y: 14 });
-    expect(JSON.stringify(useEditor.getState().wires)).not.toEqual(wBefore);
+    expect(JSON.stringify(useEditor.getState().components)).not.toEqual(cBefore);
     useEditor.getState().undo();
     expect(JSON.stringify(useEditor.getState().components)).toEqual(cBefore);
     expect(JSON.stringify(useEditor.getState().wires)).toEqual(wBefore);

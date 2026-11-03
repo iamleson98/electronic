@@ -170,14 +170,21 @@ export function tempScaleResistance(r0: number, tc1: number, tc2: number, tCelsi
 }
 
 /**
- * Scale a saturation current Is for temperature:
- *   Is(T) = Is(Tnom) * exp((T-Tnom)/Tnom * (Eg/kT) * (some factor))
- * Simplified: Is(T) = Is0 * 2^((T-Tnom)/10)
+ * Scale a junction saturation current for temperature (SPICE / ngspice):
+ *   Is(T) = Is(Tnom) · (T/Tnom)^(XTI/N) · exp((T/Tnom − 1) · Eg / (N·Vt(T)))
+ * with silicon defaults Eg = 1.11 eV, XTI = 3. The old "doubles every 10 °C"
+ * rule ignored N and under-scaled Is, so a diode's forward voltage ROSE with
+ * temperature (real silicon falls ≈ 2 mV/°C).
  */
-export function tempScaleIs(is0: number, tCelsius: number, tnomCelsius: number): number {
-  // doubling every 10°C is a rough rule-of-thumb (Ngspice uses proper Eg formula)
-  const dt = tCelsius - tnomCelsius;
-  return is0 * Math.pow(2, dt / 10);
+export function tempScaleIs(
+  is0: number, tCelsius: number, tnomCelsius: number,
+  n = 1, eg = 1.11, xti = 3,
+): number {
+  const T = toKelvin(tCelsius);
+  const Tn = toKelvin(tnomCelsius);
+  const ratio = T / Tn;
+  const vt = thermalVoltage(tCelsius);
+  return is0 * Math.pow(ratio, xti / n) * Math.exp((ratio - 1) * eg / (n * vt));
 }
 
 /**
@@ -188,4 +195,15 @@ export function tempScaleIs(is0: number, tCelsius: number, tnomCelsius: number):
 export function thermalVoltage(tCelsius: number): number {
   const T = toKelvin(tCelsius);
   return 1.380649e-23 * T / 1.602176634e-19;
+}
+
+/**
+ * solveDC options carrying the analysis temperature and .NODESET hints into
+ * the DC operating point. Without these every analysis biased its devices at
+ * 27 °C regardless of SimOptions.temp (a .temp sweep returned identical
+ * curves). `robust` enables the gmin/source-stepping fallbacks SPICE applies
+ * automatically when plain Newton fails.
+ */
+export function dcSolveOpts(o: SimOptions, robust = true) {
+  return { robust, simOptions: { temp: o.temp, nodeSets: o.nodeSets } };
 }
