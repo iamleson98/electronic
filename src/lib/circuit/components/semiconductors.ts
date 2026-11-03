@@ -109,6 +109,11 @@ const diode: ComponentPlugin = {
 };
 
 // ----- NPN BJT -----
+/** Series resistance of the "on" B-E junction (Ω). Small enough that Vbe
+ *  stays at its on-voltage (+1 mV per mA of base current), large enough that
+ *  parallel junctions (current mirrors) share current instead of making the
+ *  matrix singular. Shared with the PNP (extra.ts). */
+export const BJT_BE_SERIES_R = 1;
 const npn: ComponentPlugin = {
   type: 'npn',
   name: 'NPN Transistor',
@@ -227,15 +232,19 @@ const npn: ComponentPlugin = {
       st[key + '_branch'] = -1;
       return;
     }
-    // On: model the B-E junction as a voltage source (Vbe = vbeOn).
-    // The current through this voltage source IS the external base current
-    // — when the button is released, this drops to 0 even though V_B stays
-    // at vbeOn. The CCCS then produces I_C = hfe * I_B = 0, so no collector
-    // current flows. The npn is "on" in state but conducts nothing — which
-    // is exactly the desired behavior for an open base.
-    const ibBranch = sys.stampVoltageSource(b, e, vbeOn);
-    sys.stampCCCS(c, e, ibBranch, hfe);
-    st[key + '_branch'] = ibBranch;
+    // On: the B-E junction is vbeOn behind a tiny series resistance
+    // (Norton form: I_B = (Vbe − vbeOn)/R_BE), and I_C = hfe·I_B is the
+    // matching VCCS. With an open base I_B → 0 and so does I_C — the npn is
+    // "on" in state but conducts nothing, as for a released button. (The
+    // junction used to be an IDEAL voltage source: two transistors sharing
+    // base and emitter — every current mirror — put two ideal sources in
+    // parallel and the matrix went singular.)
+    const gBE = 1 / BJT_BE_SERIES_R;
+    sys.stampConductance(b, e, gBE);
+    sys.stampCurrentSource(e, b, gBE * vbeOn);
+    sys.stampVCCS(c, e, b, e, hfe * gBE);
+    sys.stampCurrentSource(e, c, hfe * gBE * vbeOn);
+    st[key + '_branch'] = -1;
     // Saturation clamp: only when there's actual collector current to
     // saturate. Without this guard, the clamp would provide a current path
     // C→E even when I_B (and thus I_C) is zero — which is the "current flows
@@ -268,24 +277,10 @@ const npn: ComponentPlugin = {
     const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('npn', instance, c, b, e);
-    const branchIdx = st[key + '_branch'] as number;
-    if (branchIdx == null || branchIdx < 0) {
-      st[key + '_ib'] = 0;
-      return;
-    }
-    // sim.branchCurrent[i] corresponds to extra var at index numNonGroundNodes + i.
-    // The branch index from stampVoltageSource is the matrix index of the
-    // extra variable. Convert to sim.branchCurrent index.
-    const numNonGround = sim.nodeVoltage.length - 1;
-    const relIdx = branchIdx - numNonGround;
-    if (relIdx < 0 || relIdx >= sim.branchCurrent.length) {
-      st[key + '_ib'] = 0;
-      return;
-    }
-    // Branch current is positive when conventional current flows from b to e
-    // externally (i.e., INTO the base). That's exactly the external base
-    // drive we need to detect turn-off.
-    st[key + '_ib'] = sim.branchCurrent[relIdx];
+    // External base drive (positive INTO the base) — the turn-off signal.
+    st[key + '_ib'] = st[key]
+      ? (sim.nodeVoltage[b] - sim.nodeVoltage[e] - (params.vbe as number)) / BJT_BE_SERIES_R
+      : 0;
   },
   measure(params, terminals, sim) {
     const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;

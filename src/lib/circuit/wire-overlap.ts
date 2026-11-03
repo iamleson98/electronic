@@ -15,6 +15,78 @@
 
 import type { CircuitComponent, HierarchicalSheet, Vec2, Wire } from './types';
 import { resolveEndpointGridPos } from './endpoint-position';
+import { buildNodeMap } from './engine';
+import { getPlugin } from './registry';
+import { routeSchematicWire, evaluateRoute, createRouteField, type RouteContext, type RouteNets } from './schematic-router';
+
+type Endpoint = { componentId: string; terminalId: string };
+
+/**
+ * Routing context over a document: net lookup (net labels and power
+ * symbols included, via the simulator's node map) and rendered wire paths.
+ */
+export function makeRouteContext(
+  components: CircuitComponent[],
+  wires: Wire[],
+  sheets: HierarchicalSheet[],
+): RouteContext {
+  const plugins = new Map<string, NonNullable<ReturnType<typeof getPlugin>>>();
+  for (const c of components) {
+    const p = getPlugin(c.type);
+    if (p) plugins.set(c.type, p);
+  }
+  const nm = buildNodeMap(components, wires, plugins);
+  return {
+    components, wires, sheets,
+    netOf: (k) => nm.terminalNode.get(k) ?? `pin:${k}`,
+    pathOf: (w) => wireGridPath(w, components, sheets),
+  };
+}
+
+/**
+ * Best readable route for a wire between two pins: the classic straight /
+ * L / Z candidates when they are clean, otherwise the readability router
+ * (schematic-router.ts). Returns null when no legal route exists.
+ */
+export function bestReadableRoute(
+  start: Vec2, end: Vec2, endpoints: { from: Endpoint; to: Endpoint },
+  ctx: RouteContext, exclude?: Set<string>,
+  /** always run the search (it may find a cheaper shared trunk) */
+  thorough = false,
+): Vec2[] | null {
+  const nets: RouteNets = {
+    own: new Set([
+      ctx.netOf(`${endpoints.from.componentId}:${endpoints.from.terminalId}`),
+      ctx.netOf(`${endpoints.to.componentId}:${endpoints.to.terminalId}`),
+    ]),
+    exclude,
+  };
+  let best: Vec2[] | null = null;
+  let bestCost = Infinity;
+  const cands = routeCandidates(start, end);
+  // one obstacle field shared by every candidate and the search
+  const field = createRouteField(ctx, nets, [start, end, ...cands.flat()]);
+  for (const wps of cands) {
+    // [] means "the renderer's default" — score its actual geometry
+    const geom = wps.length === 0 && Math.abs(start.x - end.x) > 1e-3 && Math.abs(start.y - end.y) > 1e-3
+      ? [{ x: end.x, y: start.y }] : wps;
+    const c = evaluateRoute(start, geom, end, ctx, nets, true, field);
+    if (c < bestCost) { best = wps; bestCost = c; }
+  }
+  // A clean candidate within one bend of the theoretical minimum (pure
+  // Manhattan length) cannot be beaten meaningfully — skip the search.
+  const manhattan = 2 * (Math.abs(start.x - end.x) + Math.abs(start.y - end.y));
+  if (!thorough && Number.isFinite(bestCost) && bestCost <= manhattan * 1.6 + 6) return best;
+  const searched = routeSchematicWire(start, end, ctx, nets, field);
+  if (searched) {
+    // non-strict: the search may cross a body only to free a trapped pin
+    const c = evaluateRoute(start, searched, end, ctx, nets, false, field);
+    // A clean straight candidate wins ties: only take the searched route
+    // when it is meaningfully better (or the candidates are all illegal).
+    if (c < bestCost - 2) { best = searched; bestCost = c; }
+  }
+  return Number.isFinite(bestCost) ? best : null;
+}
 
 /** A detected 1:1 overlap between a candidate wire and an existing wire. */
 export interface OverlapHit {
@@ -191,6 +263,7 @@ export function planWireRoute(
   components: CircuitComponent[],
   sheets: HierarchicalSheet[],
   userWaypoints: Vec2[] = [],
+  endpoints?: { from: Endpoint; to: Endpoint },
 ): WireRoutePlan {
   // User-routed: honor the bends exactly.
   if (userWaypoints.length > 0) {
@@ -199,6 +272,12 @@ export function planWireRoute(
     return { waypoints: userWaypoints, overlap: hit != null };
   }
 
+  // Pin-to-pin: readability-aware routing — never over another net's pin,
+  // never through a body, never a fake junction; straight when clean.
+  if (endpoints) {
+    const route = bestReadableRoute(start, end, endpoints, makeRouteContext(components, wires, sheets));
+    if (route) return { waypoints: route, overlap: false };
+  }
   for (const wps of routeCandidates(start, end)) {
     const path = dedupePoints([start, ...wps, end]);
     if (findWireOverlap(path, wires, components, sheets) == null) {

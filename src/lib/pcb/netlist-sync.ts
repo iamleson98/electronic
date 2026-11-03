@@ -35,7 +35,7 @@ import type { CircuitComponent, Wire, Vec2 } from '../circuit/types';
 import { getPlugin } from '../circuit/registry';
 import { buildNodeMap } from '../circuit/engine';
 import type { Footprint, Pad, Ratsnest, BoardOutline } from './types';
-import { getFootprintDef } from './footprints';
+import { getFootprintDef, isSchematicOnlyType } from './footprints';
 import { DEFAULT_DRC_CONFIG } from './drc';
 import { DEFAULT_AUTOROUTE_OPTIONS } from './auto-router';
 
@@ -146,6 +146,44 @@ function footprintHalfExtents(type: string): { hw: number; hh: number; padCount:
   return { hw: maxX, hh: maxY, padCount: def.pads.length };
 }
 
+/**
+ * Unique reference designators for the board: the schematic's own refdes
+ * when it has one (so PCB, BOM and schematic agree), otherwise the type
+ * prefix + the lowest free number. (Designators used to be prefix + the
+ * id's trailing digits, so parts with non-numeric ids — `ic_ht`, `seg_mo` —
+ * all came out as a bare "U" / "DSP": duplicate designators in the BOM and
+ * pick-and-place files.)
+ */
+export function assignRefdes(components: CircuitComponent[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const used = new Set<string>();
+  for (const c of components) {
+    if (c.refdes && !used.has(c.refdes)) { out.set(c.id, c.refdes); used.add(c.refdes); }
+  }
+  // ids ending in a number (r1, q2) keep that number…
+  for (const c of components) {
+    if (out.has(c.id)) continue;
+    const base = generateRefdes(c.type, c.id);
+    if (base !== refdesPrefix(c.type) && !used.has(base)) { out.set(c.id, base); used.add(base); }
+  }
+  // …and the rest take the lowest free number for their prefix
+  const next = new Map<string, number>();
+  for (const c of components) {
+    if (out.has(c.id)) continue;
+    const prefix = refdesPrefix(c.type);
+    let n = next.get(prefix) ?? 1;
+    while (used.has(`${prefix}${n}`)) n++;
+    next.set(prefix, n + 1);
+    out.set(c.id, `${prefix}${n}`);
+    used.add(`${prefix}${n}`);
+  }
+  return out;
+}
+
+function refdesPrefix(type: string): string {
+  return generateRefdes(type, '');
+}
+
 /** Generate a reference designator from component type and id */
 function generateRefdes(type: string, id: string): string {
   const prefixMap: Record<string, string> = {
@@ -163,6 +201,18 @@ function generateRefdes(type: string, id: string): string {
   const numMatch = id.match(/\d+$/);
   const num = numMatch ? numMatch[0] : '';
   return `${prefix}${num}`;
+}
+
+/**
+ * Which axis to separate two overlapping parts along: the one they are
+ * arranged on — center offset measured in units of their combined extents.
+ * ("Smallest overlap" was used before: a display placed BELOW its counter in
+ * the schematic, but closer than the parts are tall, overlaps less sideways,
+ * so it was pushed beside the counter — rows of a schematic collapsed into
+ * one scrambled strip.)
+ */
+function separateAlongX(dx: number, dy: number, sumHw: number, sumHh: number): boolean {
+  return Math.abs(dx) / Math.max(sumHw, 1e-6) >= Math.abs(dy) / Math.max(sumHh, 1e-6);
 }
 
 /**
@@ -192,11 +242,16 @@ export function computeSmartPlacement(
     clusteredComponents: 0,
     anchoredComponents: 0,
   };
+  // nets are built from EVERY symbol (grounds and labels join nets), but
+  // only physical parts are placed
+  const allComponents = components;
+  components = components.filter((c) => !isSchematicOnlyType(c.type));
   if (components.length === 0) return { positions, rotations, stats };
+  const physicalIds = new Set(components.map((c) => c.id));
 
   // ── connectivity graph ──────────────────────────────────────────────────
   const plugins = new Map<string, any>();
-  for (const c of components) {
+  for (const c of allComponents) {
     const p = getPlugin(c.type);
     if (p) plugins.set(c.type, p);
   }
@@ -206,10 +261,11 @@ export function computeSmartPlacement(
   const netComps = new Map<number, Set<string>>();
   const netTerminals = new Map<number, { compId: string; terminalId: string }[]>();
   if (wires.length > 0) {
-    const nodeMap = buildNodeMap(components, wires, plugins);
+    const nodeMap = buildNodeMap(allComponents, wires, plugins);
     for (const [termKey, nodeId] of nodeMap.terminalNode) {
       const ci = termKey.indexOf(':');
       const compId = ci >= 0 ? termKey.slice(0, ci) : termKey;
+      if (!physicalIds.has(compId)) continue;
       const terminalId = ci >= 0 ? termKey.slice(ci + 1) : '';
       if (!netComps.has(nodeId)) {
         netComps.set(nodeId, new Set());
@@ -354,18 +410,26 @@ export function computeSmartPlacement(
   // weighted component↔component edges (empty when the schematic has no
   // wires); intra-cluster edges get boosted attraction so modules stay
   // together on the final board
-  const compEdges = edges
-    .map((e) => {
-      const a = byId.get(e.a);
-      const b = byId.get(e.b);
-      if (!a || !b) return null;
-      let w = e.w;
-      if (hasClusters && clusterOf.get(e.a) !== undefined && clusterOf.get(e.a) === clusterOf.get(e.b)) {
-        w *= CLUSTER_ATT_BOOST;
-      }
-      return { a, b, w };
-    })
-    .filter((e): e is { a: PlacementComp; b: PlacementComp; w: number } => e !== null);
+  // ONE edge per component pair (weights summed): the attraction step cap
+  // must apply per pair. Per-net edges let a counter and the display it
+  // drives over 7 nets pull with 7× the capped step — far stronger than the
+  // overlap repulsion — so connected rows collapsed onto each other and
+  // legalization then smeared them into one scrambled strip.
+  const pairEdges = new Map<string, { a: PlacementComp; b: PlacementComp; w: number }>();
+  for (const e of edges) {
+    const a = byId.get(e.a);
+    const b = byId.get(e.b);
+    if (!a || !b) continue;
+    let w = e.w;
+    if (hasClusters && clusterOf.get(e.a) !== undefined && clusterOf.get(e.a) === clusterOf.get(e.b)) {
+      w *= CLUSTER_ATT_BOOST;
+    }
+    const key = `${e.a}\u0000${e.b}`;
+    const prev = pairEdges.get(key);
+    if (prev) prev.w += w;
+    else pairEdges.set(key, { a, b, w });
+  }
+  const compEdges = Array.from(pairEdges.values());
   if (edges.length === 0) {
     // no connectivity info — keep the schematic-scaled layout (still better
     // than a naive grid: relative positions are meaningful)
@@ -418,10 +482,10 @@ export function computeSmartPlacement(
         const ox = A.hw + B.hw + gap - Math.abs(dx);
         const oy = A.hh + B.hh + gap - Math.abs(dy);
         if (ox > 0 && oy > 0) {
-          // push along the axis with the smaller violation (repulsion
+          // push along the axis the parts are ARRANGED on (repulsion
           // strength scales with the congestion multiplier)
           const push = 0.35;
-          if (ox < oy) {
+          if (separateAlongX(dx, dy, A.hw + B.hw, A.hh + B.hh)) {
             const s = (dx >= 0 ? 1 : -1) * Math.min(ox * push, 1.5 * mult);
             acc(A.comp.id, -s, 0); acc(B.comp.id, s, 0);
           } else {
@@ -708,7 +772,7 @@ export function computeSmartPlacement(
           const oy = ea.hh + eb.hh + gap - Math.abs(dy);
           if (ox <= 0 || oy <= 0) continue;
           moved = true;
-          if (ox < oy) {
+          if (separateAlongX(dx, dy, ea.hw + eb.hw, ea.hh + eb.hh)) {
             const s = dx >= 0 ? 1 : -1;
             const half = ox / 2 + 0.1;
             positions.set(A.comp.id, { x: pa.x - s * half, y: pa.y });
@@ -751,11 +815,13 @@ export function generateFootprints(
 ): Footprint[] {
   const { positions, rotations } = computeSmartPlacement(components, wires, boardWidth, boardHeight);
 
-  return components.map((comp) => {
+  const physical = components.filter((comp) => !isSchematicOnlyType(comp.type));
+  const refdesOf = assignRefdes(physical);
+  return physical.map((comp) => {
     const pos = positions.get(comp.id) ?? { x: boardWidth / 2, y: boardHeight / 2 };
     const rot = rotations.get(comp.id) ?? 0;
     const fpDef = getFootprintDef(comp.type);
-    const refdes = generateRefdes(comp.type, comp.id);
+    const refdes = refdesOf.get(comp.id)!;
 
     const pads: Pad[] = fpDef.pads.map((padDef) => {
       const off = rotatePadOffset(padDef.position.x, padDef.position.y, rot);
@@ -879,9 +945,10 @@ export function computeRatsnest(
 
 /** Estimate a sensible board size for the given components. */
 export function estimateBoardSize(components: CircuitComponent[]): BoardOutline {
-  if (components.length === 0) return { width: 80, height: 60 };
+  const physical = components.filter((c) => !isSchematicOnlyType(c.type));
+  if (physical.length === 0) return { width: 80, height: 60 };
   let totalArea = 0;
-  for (const comp of components) {
+  for (const comp of physical) {
     const ext = footprintHalfExtents(comp.type);
     totalArea += (2 * ext.hw + PLACE_GAP) * (2 * ext.hh + PLACE_GAP);
   }

@@ -138,12 +138,23 @@ describe('P1 remaining: Convergence error suggestions', () => {
     s.setRunning(false);
   });
 
-  it('store source contains parallel V-source detection', async () => {
-    const fs = await import('fs/promises');
-    const source = await fs.readFile('./src/lib/circuit/store.ts', 'utf-8');
-    expect(source).toContain('parallelVSources');
-    expect(source).toContain('floating nodes');
-    expect(source).toContain('series resistance');
+  it('parallel voltage sources: the error names the loop and the fix', async () => {
+    const { useEditor } = await import('../src/lib/circuit/store');
+    const s = () => useEditor.getState();
+    const comp = (id: string, type: string, parameters: Record<string, number>) =>
+      ({ id, type, position: { x: 0, y: 0 }, rotation: 0, parameters }) as any;
+    const w = (id: string, a: string, ta: string, b: string, tb: string) =>
+      ({ id, from: { componentId: a, terminalId: ta }, to: { componentId: b, terminalId: tb } });
+    s().loadDocument({
+      version: 1,
+      components: [comp('v1', 'dcVoltage', { voltage: 5 }), comp('v2', 'dcVoltage', { voltage: 3 }), comp('r1', 'resistor', { resistance: 1000 }), comp('g', 'ground', {})],
+      wires: [w('a', 'v1', 'p', 'v2', 'p'), w('b', 'v1', 'n', 'v2', 'n'), w('c', 'v1', 'n', 'g', 'g'), w('d', 'v1', 'p', 'r1', 'a'), w('e', 'r1', 'b', 'g', 'g')],
+    });
+    s().setRunning(true);
+    s().step();
+    expect(s().simError).toMatch(/v2 closes a loop of voltage sources/);
+    expect(s().simError).toContain('series resistance');
+    s().setRunning(false);
   });
 });
 

@@ -271,14 +271,13 @@ describe('store: app-layer fixes', () => {
     expect(wire.from.componentId).toBe(v1);
     expect(wire.to.componentId).toBe(r1);
     expect(wire.to.terminalId).toBe('a');
-    // The smart router's waypoints (when produced) must END near the ROTATED
-    // 'a' pin position, not the unrotated one. Resistor bb is 4x2 with pins at
-    // (0,1)/(4,1); after 90° rotation pin 'a' orbits the (2,1) center to
-    // (2,-1) rel → absolute (12,5).
+    // The route must END on the ROTATED 'a' pin position, not the unrotated
+    // one: its last leg is axis-aligned with (12,5). Resistor bb is 4x2 with
+    // pins at (0,1)/(4,1); after 90° rotation pin 'a' orbits the (2,1)
+    // center to (2,-1) rel → absolute (12,5).
     if (wire.waypoints && wire.waypoints.length > 0) {
       const lastWp = wire.waypoints[wire.waypoints.length - 1];
-      expect(Math.abs(lastWp.x - 12)).toBeLessThanOrEqual(1);
-      expect(Math.abs(lastWp.y - 5)).toBeLessThanOrEqual(1);
+      expect(lastWp.x === 12 || lastWp.y === 5).toBe(true);
     }
   });
 });

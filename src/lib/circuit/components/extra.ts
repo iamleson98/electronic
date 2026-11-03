@@ -5,6 +5,7 @@ import type { ComponentPlugin, CircuitComponent } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
+import { BJT_BE_SERIES_R } from './semiconductors';
 import { stampOpamp, stepOpamp, measureOpamp, acStampOpamp, specFromParams, type OpampPins, type OpampSpec } from './opamp-core';
 
 // ----- PNP BJT (mirror of NPN) -----
@@ -115,12 +116,15 @@ const pnp: ComponentPlugin = {
       st[key + '_branch'] = -1;
       return;
     }
-    // On: E-B diode (Vsource vebOn) and CCCS from e→c of gain hfe.
-    // When external base drive stops, the branch current → 0, so I_C → 0
-    // even though V_EB stays at vebOn.
-    const ibBranch = sys.stampVoltageSource(e, b, vebOn);
-    sys.stampCCCS(e, c, ibBranch, hfe);
-    st[key + '_branch'] = ibBranch;
+    // On: E-B junction = vebOn behind BJT_BE_SERIES_R (Norton form, see
+    // the NPN) and I_C = hfe·I_B from e→c. When external base drive stops,
+    // I_B → 0, so I_C → 0 even though V_EB stays at vebOn.
+    const gBE = 1 / BJT_BE_SERIES_R;
+    sys.stampConductance(e, b, gBE);
+    sys.stampCurrentSource(b, e, gBE * vebOn);
+    sys.stampVCCS(e, c, e, b, hfe * gBE);
+    sys.stampCurrentSource(c, e, hfe * gBE * vebOn);
+    st[key + '_branch'] = -1;
     // Saturation clamp: only when there's actual collector current.
     // Thevenin to Vec(sat) — mirror of the NPN fix: conductance G in
     // parallel with a current source G·vecSat (injected into the emitter)
@@ -145,18 +149,10 @@ const pnp: ComponentPlugin = {
     const c = terminals.find((t) => t.terminalId === 'c')!.nodeId;
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('pnp', instance, e, b, c);
-    const branchIdx = st[key + '_branch'] as number;
-    if (branchIdx == null || branchIdx < 0) {
-      st[key + '_ib'] = 0;
-      return;
-    }
-    const numNonGround = sim.nodeVoltage.length - 1;
-    const relIdx = branchIdx - numNonGround;
-    if (relIdx < 0 || relIdx >= sim.branchCurrent.length) {
-      st[key + '_ib'] = 0;
-      return;
-    }
-    st[key + '_ib'] = sim.branchCurrent[relIdx];
+    // External base drive (positive OUT of the base)
+    st[key + '_ib'] = st[key]
+      ? (sim.nodeVoltage[e] - sim.nodeVoltage[b] - (params.veb as number)) / BJT_BE_SERIES_R
+      : 0;
   },
   measure(params, terminals, sim) {
     const e = terminals.find((t) => t.terminalId === 'e')!.nodeId;

@@ -10,10 +10,13 @@
 //   7. Two labels with same name but different net classes
 //   8. Unused multi-unit components (only some units placed)
 //   9. Bus-to-net conflicts
+//  10. Voltage-source loops (ideal sources / inductors shorted or in parallel)
+//  11. Nets with no DC path to ground (reached only through capacitors)
 
 import type { CircuitComponent, PinElecType, Wire, NoConnectMarker, ComponentPlugin } from './types';
 import { getPlugin } from './registry';
 import { buildNodeMap, getTerminalsForComponent } from './engine';
+import { terminalPos } from './endpoint-position';
 
 export interface ERCError {
   type:
@@ -27,7 +30,9 @@ export interface ERCError {
     | 'label_net_class_conflict'
     | 'unused_unit'
     | 'bus_net_conflict'
-    | 'no_connect_on_connected_pin';
+    | 'no_connect_on_connected_pin'
+    | 'voltage_source_loop'
+    | 'no_dc_path';
   severity: 'error' | 'warning' | 'info';
   message: string;
   componentId: string;
@@ -251,6 +256,11 @@ function pinConflict(a: PinElecType, b: PinElecType): Conflict {
 // Main ERC engine
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Ideal two-terminal voltage sources, plus inductors (shorts at DC). */
+const VSOURCE_LIKE = new Set(['dcVoltage', 'acVoltage', 'pulseSource', 'inductor']);
+/** Parts that are open at DC (no conduction between their pins). */
+const DC_OPEN = new Set(['capacitor', 'currentSource']);
+
 export function runFullERC(
   components: CircuitComponent[],
   wires: Wire[],
@@ -290,7 +300,7 @@ export function runFullERC(
             message: `${comp.refdes ?? comp.id}.${term.id} has both a wire and a No-Connect marker`,
             componentId: comp.id,
             terminalId: term.id,
-            position: { x: comp.position.x + term.position.x, y: comp.position.y + term.position.y },
+            position: terminalPos(comp, term, plugin),
             exclusionKey: `nc-on-connected:${comp.id}:${term.id}`,
           });
         }
@@ -309,7 +319,7 @@ export function runFullERC(
           message: `${comp.refdes ?? comp.id}.${term.id} (${elecType}) is unconnected`,
           componentId: comp.id,
           terminalId: term.id,
-          position: { x: comp.position.x + term.position.x, y: comp.position.y + term.position.y },
+          position: terminalPos(comp, term, plugin),
           exclusionKey: `unconnected:${comp.id}:${term.id}`,
         });
       }
@@ -358,7 +368,7 @@ export function runFullERC(
             message: `Pin conflict on net (node ${node}): ${list[i].refdes}.${list[i].termId} (${list[i].elecType}) ↔ ${list[j].refdes}.${list[j].termId} (${list[j].elecType})`,
             componentId: list[i].compId,
             terminalId: list[i].termId,
-            position: { x: list[i].comp.position.x + (list[i].term?.position.x ?? 0), y: list[i].comp.position.y + (list[i].term?.position.y ?? 0) },
+            position: list[i].term ? terminalPos(list[i].comp, list[i].term, plugins.get(list[i].comp.type)!) : list[i].comp.position,
             refs: [{ componentId: list[j].compId, terminalId: list[j].termId }],
             exclusionKey: `pinconflict:${list[i].compId}:${list[i].termId}:${list[j].compId}:${list[j].termId}`,
           });
@@ -434,7 +444,91 @@ export function runFullERC(
     }
   }
 
-  // Check 7: Wire endpoints unconnected (one end is in the air)
+  // Check 7: voltage-source loops. Ideal voltage sources (and inductors,
+  // which are shorts at DC) that close a loop — a source shorted by a wire,
+  // two sources in parallel — have no unique solution: the simulator reports
+  // a singular matrix. Name the part that closes the loop.
+  {
+    const parent = new Map<number, number>();
+    const find = (x: number): number => {
+      let r = x;
+      while (parent.has(r) && parent.get(r) !== r) r = parent.get(r)!;
+      parent.set(x, r);
+      return r;
+    };
+    for (const comp of components) {
+      if (!VSOURCE_LIKE.has(comp.type)) continue;
+      const plugin = plugins.get(comp.type);
+      if (!plugin) continue;
+      const [ta, tb] = plugin.terminals;
+      const na = nodeMap.terminalNode.get(`${comp.id}:${ta.id}`);
+      const nb = nodeMap.terminalNode.get(`${comp.id}:${tb.id}`);
+      if (na === undefined || nb === undefined) continue;
+      const ra = find(na), rb = find(nb);
+      if (ra === rb) {
+        const what = na === nb ? 'is shorted (both terminals on the same net)' : 'closes a loop of voltage sources / inductors';
+        errors.push({
+          type: 'voltage_source_loop',
+          severity: 'error',
+          message: `${comp.refdes ?? comp.id} ${what} — add series resistance or remove the short`,
+          componentId: comp.id,
+          terminalId: ta.id,
+          position: terminalPos(comp, ta, plugin),
+          exclusionKey: `vloop:${comp.id}`,
+        });
+      } else {
+        parent.set(ra, rb);
+      }
+    }
+  }
+
+  // Check 8: nets with no DC path to ground — every connection to them goes
+  // through a capacitor (or nothing), so their DC voltage is undefined.
+  // Every other part is treated as conducting between all of its pins, so
+  // this only ever under-reports (never flags a net that has a real path).
+  if (hasGround) {
+    const parent = new Map<number, number>();
+    const find = (x: number): number => {
+      let r = x;
+      while (parent.has(r) && parent.get(r) !== r) r = parent.get(r)!;
+      parent.set(x, r);
+      return r;
+    };
+    const union = (a: number, b: number) => { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb); };
+    for (const comp of components) {
+      if (DC_OPEN.has(comp.type)) continue;
+      const plugin = plugins.get(comp.type);
+      if (!plugin) continue;
+      const nodes = plugin.terminals
+        .map((t) => nodeMap.terminalNode.get(`${comp.id}:${t.id}`))
+        .filter((n): n is number => n !== undefined);
+      for (let i = 1; i < nodes.length; i++) union(nodes[0], nodes[i]);
+    }
+    const reported = new Set<number>();
+    for (const comp of components) {
+      if (comp.type !== 'capacitor') continue;
+      const plugin = plugins.get(comp.type);
+      if (!plugin) continue;
+      for (const t of plugin.terminals) {
+        const n = nodeMap.terminalNode.get(`${comp.id}:${t.id}`);
+        if (n === undefined || n === 0) continue;
+        const root = find(n);
+        if (root === find(0) || reported.has(root)) continue;
+        reported.add(root);
+        errors.push({
+          type: 'no_dc_path',
+          severity: 'warning',
+          message: `${comp.refdes ?? comp.id}.${t.id} sits on a net with no DC path to ground (only capacitors reach it) — its DC voltage is undefined; add a high-value resistor (e.g. 1 MΩ) to ground`,
+          componentId: comp.id,
+          terminalId: t.id,
+          position: terminalPos(comp, t, plugin),
+          exclusionKey: `nodc:${comp.id}:${t.id}`,
+        });
+      }
+    }
+  }
+
+  // Check 9: Wire endpoints unconnected (one end is in the air)
   for (const wire of wires) {
     // both ends are always "connected" to terminals in our model, so this check is N/A
     // (it would only fire if we had free-floating wire segments, which we don't model)

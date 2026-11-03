@@ -379,8 +379,9 @@ export function ProbePanel() {
               )}
             </div>
 
-            {/* Live measurements */}
-            <div className="min-h-0 flex-1 overflow-y-auto">
+            {/* Live measurements — the scope keeps most of the height (the
+                full list is also on the Measurements tab) */}
+            <div className="min-h-0 flex-[1_1_0%] overflow-y-auto">
               <div className="p-2">
                 {!hasCircuit ? (
                   <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
@@ -948,18 +949,45 @@ function ScopeTab({ traces, realTraceCount, mathChannels, setMathChannels, scope
     [selected],
   );
 
+  const [showMore, setShowMore] = useState(false);
+
   return (
-    <div className="border-b border-slate-800 p-2">
+    <div className="flex min-h-[180px] flex-[3_1_0%] flex-col overflow-hidden p-2">
       <div className="mb-1 flex items-center justify-between px-1">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
           <BarChart3 size={10} className="mr-1 inline" />
           Waveform {(a.enabled || b.enabled) && '· Cursors ON'}
         </span>
-        <span className="text-[10px] text-slate-500">{traces.length} channel{traces.length !== 1 ? 's' : ''}</span>
+        <span className="flex items-center gap-2 text-[10px] text-slate-500">
+          {traces.length} channel{traces.length !== 1 ? 's' : ''}
+          <button
+            type="button"
+            onClick={() => setShowMore((v) => !v)}
+            aria-expanded={showMore}
+            className="cursor-pointer rounded px-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+            title="Cursors, XY mode, probe model and math channels"
+          >
+            {showMore ? 'Fewer controls ▴' : 'More controls ▾'}
+          </button>
+        </span>
       </div>
 
-      {/* Compact scope toolbar */}
-      <div className="mb-1.5 space-y-1">
+      {/* Waveform first — it fills the panel height (it used to sit, fixed at
+      // 192 px, BELOW four control rows and was clipped out of view). */}
+      <div className="relative min-h-[110px] flex-1 rounded-md border border-slate-800 bg-[#0a0f1c]">
+        <canvas
+          ref={canvasRef}
+          className="h-full w-full touch-none"
+          aria-label="Oscilloscope waveform display"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        />
+      </div>
+
+      {/* Controls: the two essential rows; the rest behind "More controls" */}
+      <div className="mt-1.5 shrink-0 space-y-1">
         {/* Row 1: timebase + trigger status */}
         <div className="flex flex-wrap items-center gap-1">
           <span className="text-[9px] uppercase tracking-wider text-slate-500">Time</span>
@@ -1029,6 +1057,8 @@ function ScopeTab({ traces, realTraceCount, mathChannels, setMathChannels, scope
           <ToolBtn label="Increase vertical offset" onClick={() => stepOffset(1)} disabled={!selected}>+</ToolBtn>
         </div>
 
+        {showMore && (
+          <>
         {/* Row 3: A/B cursors + XY + probe */}
         <div className="flex flex-wrap items-center gap-1">
           <span className="text-[9px] uppercase tracking-wider text-slate-500">Cursors</span>
@@ -1059,23 +1089,12 @@ function ScopeTab({ traces, realTraceCount, mathChannels, setMathChannels, scope
           mathChannels={mathChannels}
           setMathChannels={setMathChannels}
         />
+          </>
+        )}
       </div>
 
-      {/* Graticule canvas: 10 × 8 divisions, pointer-draggable A/B cursors */}
-      <div className="relative h-48 rounded-md border border-slate-800 bg-[#0a0f1c]">
-        <canvas
-          ref={canvasRef}
-          className="h-full w-full touch-none"
-          aria-label="Oscilloscope waveform display"
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
-        />
-      </div>
-
-      {/* Cursor readout row */}
-      <div className="mt-1 rounded border border-slate-800 bg-slate-800/40 px-2 py-1 font-mono text-[10px]">
+      {/* Cursor readout row (only while a cursor is on) */}
+      {(a.enabled || b.enabled) && <div className="mt-1 rounded border border-slate-800 bg-slate-800/40 px-2 py-1 font-mono text-[10px]">
         {cursorData ? (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
             {selected && <span style={{ color: selected.color }}>{selected.label}</span>}
@@ -1094,7 +1113,8 @@ function ScopeTab({ traces, realTraceCount, mathChannels, setMathChannels, scope
         ) : (
           <span className="text-slate-500">Enable cursor A/B to measure Δt, 1/Δt and voltages</span>
         )}
-      </div>
+      </div>}
+
 
       {/* Measurements row (selected channel) */}
       {scopeConfig.showMeasurements && measurements.length > 0 && (

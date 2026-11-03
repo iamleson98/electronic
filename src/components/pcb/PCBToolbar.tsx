@@ -130,7 +130,8 @@ export function PCBToolbar() {
       return;
     }
     importFromSchematic(components, wires);
-    toast.success(`Imported ${components.length} components from schematic`);
+    // count board parts — ground/power symbols and labels are schematic-only
+    toast.success(`Imported ${usePCB.getState().footprints.length} parts from schematic`);
   };
 
   const handleExportJSON = () => {

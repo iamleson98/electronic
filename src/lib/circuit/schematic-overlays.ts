@@ -16,6 +16,7 @@
 
 import type { ERCError } from './erc';
 import type { CircuitComponent, TerminalDef, Vec2, Wire } from './types';
+import { computeJunctionPoints } from './wire-junctions';
 import { getPlugin } from './registry';
 import { terminalPos } from './endpoint-position';
 
@@ -128,30 +129,12 @@ export function drawAutoJunctions(
   gridToScreen: (gx: number, gy: number) => Vec2,
   hoveredTerminal?: { componentId: string; terminalId: string; pos: Vec2 } | null,
 ): void {
-  // Group all wire endpoints by their grid coordinate.
-  // A junction dot is drawn only when ≥3 wires meet at the same point
-  // (2 wires = a pass-through, no dot needed; the wire already represents it).
-  const groups = new Map<string, Junction>();
-
-  for (const wire of wires) {
-    for (const end of [wire.from, wire.to]) {
-      const comp = components.find((c) => c.id === end.componentId);
-      if (!comp) continue;
-      const plugin = getPlugin(comp.type);
-      if (!plugin) continue;
-      const term = plugin.terminals.find((t) => t.id === end.terminalId);
-      if (!term) continue;
-      const pos = getTerminalPos(comp, term);
-      const key = `${pos.x.toFixed(3)},${pos.y.toFixed(3)}`;
-      const g = groups.get(key);
-      if (g) g.count++;
-      else groups.set(key, { x: pos.x, y: pos.y, count: 1 });
-    }
-  }
+  // Junctions from the rendered geometry (wire-junctions.ts): wherever
+  // same-net copper meets in ≥3 directions (pins count as one).
+  const groups = computeJunctionPoints(components, wires).map((p) => ({ x: p.x, y: p.y, count: 3 }));
 
   // Draw a filled dot at each junction where ≥3 wires meet.
-  for (const g of groups.values()) {
-    if (g.count < 3) continue;
+  for (const g of groups) {
     const sp = gridToScreen(g.x, g.y);
     const isHot = hoveredTerminal &&
       Math.abs(hoveredTerminal.pos.x - g.x) < 0.5 &&

@@ -8,7 +8,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { HelpCircle, Keyboard, BookOpen, Lightbulb, Code, Sparkles, GraduationCap, Search } from 'lucide-react';
-import { exampleCategories, type ExampleEntry } from '@/lib/circuit/examples';
+import type { ExampleEntry } from '@/lib/circuit/examples';
+import { useExampleLibrary } from './use-example-library';
 import { exportSchematicSVG } from '@/lib/circuit/schematic-plot';
 import { useEditor } from '@/lib/circuit/store';
 import {
@@ -253,6 +254,8 @@ function ExamplesGallery() {
   const loadDocument = useEditor((s) => s.loadDocument);
   const clear = useEditor((s) => s.clear);
 
+  const lib = useExampleLibrary();
+  const exampleCategories = useMemo(() => lib?.exampleCategories ?? [], [lib]);
   // Pre-compute SVG thumbnails once per category (deterministic from examples.ts)
   const thumbnails = useMemo(() => {
     const map = new Map<string, string>();
@@ -269,7 +272,7 @@ function ExamplesGallery() {
       }
     }
     return map;
-  }, []);
+  }, [exampleCategories]);
 
   const handleLoad = (ex: ExampleEntry) => {
     clear();

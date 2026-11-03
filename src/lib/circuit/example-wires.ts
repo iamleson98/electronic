@@ -28,7 +28,8 @@
 
 import type { CircuitDocument, CircuitComponent, HierarchicalSheet, Vec2, Wire } from './types';
 import { resolveEndpointGridPos } from './endpoint-position';
-import { routeCandidates } from './wire-overlap';
+import { routeCandidates, makeRouteContext, bestReadableRoute } from './wire-overlap';
+import { evaluateRoute, updateContextWire } from './schematic-router';
 import { buildNodeMap } from './engine';
 import { getPlugin } from './registry';
 import type { ComponentPlugin } from './types';
@@ -277,7 +278,8 @@ function withinBounds(path: Vec2[], b: BodyRect): boolean {
  * corner-sparse, different-net-overlap-free straight-wire style. Returns a
  * NEW document (input untouched); wire endpoints are preserved verbatim.
  */
-export function normalizeExampleWires(doc: CircuitDocument): CircuitDocument {
+export function normalizeExampleWires(input: CircuitDocument): CircuitDocument {
+  const doc = separateCoincidentPins(input);
   const components = doc.components ?? [];
   const sheets: HierarchicalSheet[] = doc.sheets ?? [];
   if (!doc.wires || doc.wires.length === 0) return doc;
@@ -426,7 +428,272 @@ export function normalizeExampleWires(doc: CircuitDocument): CircuitDocument {
     newWires[i] = next;
   }
 
-  return { ...doc, wires: newWires };
+  return { ...doc, wires: readabilityPass(newWires, components, sheets) };
+}
+
+/**
+ * Layout fix-ups for hand-authored example documents: `spread` scales every
+ * component position around the origin (parts placed on top of each other
+ * get room; the arrangement and the topology are unchanged) and `moves`
+ * relocates individual parts. Wires whose endpoints moved lose their
+ * hand-drawn bends — normalizeExampleWires routes them fresh.
+ */
+export function relayoutExample(
+  doc: CircuitDocument,
+  opts: { spread?: number; moves?: Record<string, Vec2> },
+): CircuitDocument {
+  const k = opts.spread ?? 1;
+  const moved = new Set<string>();
+  const components = doc.components.map((c) => {
+    let position = k === 1 ? c.position : { x: Math.round(c.position.x * k), y: Math.round(c.position.y * k) };
+    if (opts.moves?.[c.id]) position = opts.moves[c.id];
+    if (position.x !== c.position.x || position.y !== c.position.y) moved.add(c.id);
+    return { ...c, position };
+  });
+  const wires = doc.wires.map((w) => {
+    if (!moved.has(w.from.componentId) && !moved.has(w.to.componentId)) return w;
+    const next = { ...w };
+    delete next.waypoints;
+    return next;
+  });
+  return { ...doc, components, wires };
+}
+
+/**
+ * Pins of DIFFERENT nets on the same grid point draw as a connection that
+ * does not exist (a source's + pin on a ground pin reads as a short). Move
+ * the part with fewer pins to the nearest spot where none of its pins land
+ * on another part's pin and its body overlaps no other body; its wires lose
+ * their old routes and are re-routed by the normal pipeline.
+ */
+export function separateCoincidentPins(doc: CircuitDocument): CircuitDocument {
+  if (!doc.wires || doc.wires.length === 0) return doc;
+  const plugins = new Map<string, ComponentPlugin>();
+  for (const c of doc.components) { const p = getPlugin(c.type); if (p) plugins.set(c.type, p); }
+  const nm = buildNodeMap(doc.components, doc.wires, plugins);
+  const sheets = doc.sheets ?? [];
+  let components = doc.components.map((c) => ({ ...c }));
+  const pinsOf = (c: CircuitComponent) => (plugins.get(c.type)?.terminals ?? []).map((t) => ({
+    key: `${c.id}:${t.id}`,
+    p: resolveEndpointGridPos({ componentId: c.id, terminalId: t.id }, components, sheets),
+  }));
+  const net = (key: string) => nm.terminalNode.get(key);
+  const moved = new Set<string>();
+  for (let guard = 0; guard < 20; guard++) {
+    // first remaining conflict
+    const at = new Map<string, { comp: CircuitComponent; key: string }[]>();
+    for (const c of components) {
+      for (const { key, p } of pinsOf(c)) {
+        if (!p) continue;
+        const k = `${p.x},${p.y}`;
+        const list = at.get(k) ?? [];
+        list.push({ comp: c, key });
+        at.set(k, list);
+      }
+    }
+    let pair: [CircuitComponent, CircuitComponent] | null = null;
+    for (const list of at.values()) {
+      for (let i = 0; i < list.length && !pair; i++) {
+        for (let j = i + 1; j < list.length && !pair; j++) {
+          if (list[i].comp.id !== list[j].comp.id && net(list[i].key) !== net(list[j].key)) pair = [list[i].comp, list[j].comp];
+        }
+      }
+      if (pair) break;
+    }
+    if (!pair) break;
+    const pinCount = (c: CircuitComponent) => plugins.get(c.type)?.terminals.length ?? 0;
+    const mover = pinCount(pair[0]) <= pinCount(pair[1]) ? pair[0] : pair[1];
+    const others = components.filter((c) => c.id !== mover.id);
+    const otherPins = new Set(others.flatMap((c) => pinsOf(c)).filter((x) => x.p).map((x) => `${x.p!.x},${x.p!.y}`));
+    const rects = bodyRects(others);
+    const pl = plugins.get(mover.type)!;
+    const fits = (pos: Vec2) => {
+      const trial = { ...mover, position: pos };
+      const r = { x0: pos.x, y0: pos.y, x1: pos.x + pl.boundingBox.width, y1: pos.y + pl.boundingBox.height };
+      if (rects.some((o) => r.x0 < o.x1 && r.x1 > o.x0 && r.y0 < o.y1 && r.y1 > o.y0)) return false;
+      return pl.terminals.every((t) => {
+        const p = resolveEndpointGridPos({ componentId: mover.id, terminalId: t.id }, [...others, trial], sheets);
+        return !p || !otherPins.has(`${p.x},${p.y}`);
+      });
+    };
+    let best: Vec2 | null = null;
+    for (let d = 1; d <= 6 && !best; d++) {
+      for (const [dx, dy] of [[0, d], [0, -d], [d, 0], [-d, 0], [d, d], [-d, d], [d, -d], [-d, -d]]) {
+        const pos = { x: mover.position.x + dx, y: mover.position.y + dy };
+        if (fits(pos)) { best = pos; break; }
+      }
+    }
+    if (!best) break;
+    components = components.map((c) => (c.id === mover.id ? { ...c, position: best! } : c));
+    moved.add(mover.id);
+  }
+  if (moved.size === 0) return doc;
+  const wires = doc.wires.map((w) => {
+    if (!moved.has(w.from.componentId) && !moved.has(w.to.componentId)) return w;
+    const next = { ...w };
+    delete next.waypoints;
+    return next;
+  });
+  return { ...doc, components, wires };
+}
+
+/**
+ * Local ground symbols: every wire that runs from a part's pin to a shared
+ * ground symbol is replaced by a ground symbol placed right at that pin —
+ * the way real schematics draw ground. One ground symbol per circuit forces
+ * a ground bus that crosses half the drawing; local symbols remove those
+ * crossings without changing connectivity (all ground symbols are node 0).
+ * A pin keeps its bus wire when there is no free spot next to it.
+ */
+export function localizeGrounds(doc: CircuitDocument): CircuitDocument {
+  const byId = new Map(doc.components.map((c) => [c.id, c]));
+  const isGround = (id: string) => byId.get(id)?.type === 'ground';
+  const gplug = getPlugin('ground');
+  if (!gplug) return doc;
+  const rects = bodyRects(doc.components.filter((c) => c.type !== 'ground'));
+  const pins: Vec2[] = [];
+  for (const c of doc.components) {
+    if (c.type === 'ground') continue;
+    const pl = getPlugin(c.type);
+    if (!pl) continue;
+    for (const t of pl.terminals) {
+      const p = resolveEndpointGridPos({ componentId: c.id, terminalId: t.id }, doc.components, doc.sheets ?? []);
+      if (p) pins.push(p);
+    }
+  }
+  const taken: BodyRect[] = [];
+  const free = (box: BodyRect, lead: [Vec2, Vec2], pin: Vec2) => {
+    const hit = (r: BodyRect) => box.x0 < r.x1 + 1 && box.x1 > r.x0 - 1 && box.y0 < r.y1 + 1 && box.y1 > r.y0 - 1;
+    if (rects.some(hit) || taken.some(hit)) return false;
+    if (rects.some((r) => segIntersectsRect(lead[0], lead[1], r))) return false;
+    // the lead and the symbol must not touch any other pin
+    return !pins.some((q) => {
+      if (q.x === pin.x && q.y === pin.y) return false;
+      const onLead = Math.min(lead[0].x, lead[1].x) <= q.x && q.x <= Math.max(lead[0].x, lead[1].x)
+        && Math.min(lead[0].y, lead[1].y) <= q.y && q.y <= Math.max(lead[0].y, lead[1].y);
+      const inBox = q.x >= box.x0 - 1 && q.x <= box.x1 + 1 && q.y >= box.y0 - 1 && q.y <= box.y1 + 1;
+      return onLead || inBox;
+    });
+  };
+  const added: CircuitComponent[] = [];
+  let n = 0;
+  const wires = doc.wires.map((w) => {
+    const gFrom = isGround(w.from.componentId), gTo = isGround(w.to.componentId);
+    if (gFrom === gTo) return w;
+    const pinRef = gFrom ? w.to : w.from;
+    const owner = byId.get(pinRef.componentId);
+    const pl = owner && getPlugin(owner.type);
+    const pin = resolveEndpointGridPos(pinRef, doc.components, doc.sheets ?? []);
+    if (!owner || !pl || !pin) return w;
+    // pins on the TOP edge would need the ground symbol drawn upside down
+    if (pin.y <= owner.position.y) return w;
+    const side = pin.x <= owner.position.x ? -1 : pin.x >= owner.position.x + pl.boundingBox.width ? 1 : 0;
+    const spots: Vec2[] = [];
+    for (let d = 1; d <= 3; d++) spots.push({ x: pin.x, y: pin.y + d });
+    if (side !== 0) for (let d = 0; d <= 2; d++) spots.push({ x: pin.x + 2 * side, y: pin.y + 1 + d });
+    for (const t of spots) {
+      const box = { x0: t.x - 1, y0: t.y, x1: t.x + 1, y1: t.y + 2 };
+      if (!free(box, [pin, { x: t.x, y: pin.y }], pin) || !free(box, [{ x: t.x, y: pin.y }, t], pin)) continue;
+      const id = `gnd_l${++n}`;
+      added.push({ id, type: 'ground', position: { x: t.x - 1, y: t.y }, rotation: 0, parameters: {} } as CircuitComponent);
+      taken.push(box);
+      const gref = { componentId: id, terminalId: 'g' };
+      const next: Wire = gFrom ? { ...w, from: gref } : { ...w, to: gref };
+      delete next.waypoints;
+      return next;
+    }
+    return w;
+  });
+  // shared ground symbols nothing connects to any more are dropped
+  const before = new Set(doc.wires.flatMap((w) => [w.from.componentId, w.to.componentId]));
+  const used = new Set(wires.flatMap((w) => [w.from.componentId, w.to.componentId]));
+  const components = [
+    ...doc.components.filter((c) => c.type !== 'ground' || used.has(c.id) || !before.has(c.id)),
+    ...added,
+  ];
+  return { ...doc, components, wires };
+}
+
+/**
+ * Route EVERY wire with the readable router, longest first (later wires
+ * join the trunks the long ones lay down). Used by "Tidy wires" and for
+ * example layouts whose hand-drawn routes were discarded.
+ */
+export function routeAllReadable(wires: Wire[], components: CircuitComponent[], sheets: HierarchicalSheet[]): Wire[] {
+  const len = (w: Wire) => {
+    const a = resolveEndpointGridPos(w.from, components, sheets);
+    const b = resolveEndpointGridPos(w.to, components, sheets);
+    return a && b ? Math.abs(a.x - b.x) + Math.abs(a.y - b.y) : 0;
+  };
+  const order = wires.map((w, i) => ({ i, l: len(w) })).sort((p, q) => q.l - p.l).map((p) => p.i);
+  // start from no routes at all: each wire sees only the ones routed before it
+  const out: Wire[] = wires.map((w) => { const b = { ...w }; delete b.waypoints; return b; });
+  const placed: Wire[] = [];
+  for (const i of order) {
+    const w = out[i];
+    const from = resolveEndpointGridPos(w.from, components, sheets);
+    const to = resolveEndpointGridPos(w.to, components, sheets);
+    if (from && to) {
+      // nets come from the FULL wire list (connectivity), obstacles from the
+      // wires already placed
+      const ctx = makeRouteContext(components, out, sheets);
+      ctx.wires = placed.slice();
+      const route = bestReadableRoute(from, to, { from: w.from, to: w.to }, ctx, undefined, true);
+      if (route && route.length > 0) out[i] = { ...w, waypoints: route.map((p) => ({ x: p.x, y: p.y })) };
+    }
+    placed.push(out[i]);
+  }
+  // anything still misleading (e.g. an early wire crossed by nothing yet
+  // but now overlapped) gets the standard fix-up
+  return readabilityPass(out, components, sheets);
+}
+
+/**
+ * Phase E — readability: re-route every wire whose drawing would mislead
+ * (passes over another net's pin, runs through a component body, ends on
+ * or turns on another net's wire, overlaps another net). Clean wires keep
+ * their authored route; offenders get the readable router's route.
+ * Two passes: a re-route can free space another offender needs.
+ */
+export function readabilityPass(
+  wires: Wire[], components: CircuitComponent[], sheets: HierarchicalSheet[],
+  only?: Set<string>,
+): Wire[] {
+  // untouched wires keep their object identity (cheap change detection)
+  const out = wires.slice();
+  // Pass 2 revisits only wires pass 1 could not fix: a re-route treats every
+  // other wire as an obstacle, so it never creates a new violation.
+  let todo: Set<string> | undefined = only;
+  for (let pass = 0; pass < 2; pass++) {
+    let changed = false;
+    const unfixed = new Set<string>();
+    // one context (and one geometry snapshot) per pass, updated per re-route
+    const ctx = makeRouteContext(components, out.slice(), sheets);
+    for (let i = 0; i < out.length; i++) {
+      const w = out[i];
+      if (todo && !todo.has(w.id)) continue;
+      const from = resolveEndpointGridPos(w.from, components, sheets);
+      const to = resolveEndpointGridPos(w.to, components, sheets);
+      if (!from || !to) continue;
+      const exclude = new Set([w.id]);
+      const own = new Set([ctx.netOf(`${w.from.componentId}:${w.from.terminalId}`), ctx.netOf(`${w.to.componentId}:${w.to.terminalId}`)]);
+      const current = w.waypoints && w.waypoints.length > 0
+        ? w.waypoints
+        : (Math.abs(from.x - to.x) > 1e-3 && Math.abs(from.y - to.y) > 1e-3 ? [{ x: to.x, y: from.y }] : []);
+      if (Number.isFinite(evaluateRoute(from, current, to, ctx, { own, exclude }))) continue;
+      const route = bestReadableRoute(from, to, { from: w.from, to: w.to }, ctx, exclude);
+      if (!route) { unfixed.add(w.id); continue; }
+      const next: Wire = { ...w };
+      if (route.length > 0) next.waypoints = route.map((p) => ({ x: p.x, y: p.y }));
+      else delete next.waypoints;
+      out[i] = next;
+      updateContextWire(ctx, next);
+      changed = true;
+    }
+    if (!changed || unfixed.size === 0) break;
+    todo = unfixed;
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

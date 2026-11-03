@@ -30,14 +30,22 @@ const DIP_ROW_SPAN = 5.0; // 2×2.5
  *  fits with 0.2mm to spare. */
 const PAD_DIP = { width: 1.6, height: 1.6 };
 
-/** Annotation-only types — logical, never physical. No pads on the PCB. */
+/** Annotation-only types — logical, never physical. No pads on the PCB.
+ *  `ground` (the classic ground symbol) and `junction` (a wire dot) belong
+ *  here too: they used to get a through-hole pad each, so every ground
+ *  symbol put a stray GND pad on the board and a "ground" line in the BOM. */
 const ANNOTATION_TYPES = new Set([
   'netLabel', 'globalLabel', 'hierLabel', 'busLabel', 'busVectorLabel',
   'noConnect', 'textLabel', 'busEntry', 'bus', 'powerFlag', 'hierSheet',
   'powerGND', 'powerAGND', 'powerVCC', 'power5V', 'power3V3', 'power1V8',
   'power2V5', 'power12V', 'powerMinus12V', 'powerMinus5V', 'powerAVDD',
-  'powerVBAT', 'customPower',
+  'powerVBAT', 'customPower', 'ground', 'junction',
 ]);
+
+/** Schematic-only symbol: shapes the netlist, never becomes a PCB part. */
+export function isSchematicOnlyType(type: string): boolean {
+  return ANNOTATION_TYPES.has(type);
+}
 
 /**
  * Generate a DIP-style footprint from a component plugin's REAL terminal
@@ -227,12 +235,6 @@ export const footprintDefs: Record<string, FootprintDef> = {
     pads: [
       { terminalId: 'p', position: { x: 0, y: -4.0 }, shape: 'circle', size: PAD_THT },
       { terminalId: 'n', position: { x: 0, y: 4.0 }, shape: 'circle', size: PAD_THT },
-    ],
-  },
-  ground: {
-    bodySize: { width: 3.0, height: 3.0 },
-    pads: [
-      { terminalId: 'g', position: { x: 0, y: 0 }, shape: 'circle', size: PAD_THT },
     ],
   },
 

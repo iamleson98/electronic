@@ -1,6 +1,7 @@
 import type { CircuitComponent, Wire, CircuitDocument, ComponentPlugin } from './types';
 import { solveDC, buildNodeMap, getTerminalsForComponent, computeComponentCurrents, simulateStep } from './engine';
 import { partDatabase } from '../pcb/part-database';
+import { isSchematicOnlyType } from '../pcb/footprints';
 
 export interface BomLine { refdes: string; quantity: number; type: string; value: string; mpn: string | null; manufacturer: string | null; description: string | null; package: string | null; digikeyPN: string | null; mouserPN: string | null; unitPrice: number | null; extendedPrice: number | null; datasheet: string | null; }
 export interface BomResult { lines: BomLine[]; totalQuantity: number; totalCost: number; matchedCount: number; unmatchedCount: number; }
@@ -30,7 +31,8 @@ function lookupPart(comp: CircuitComponent): any | null {
 export function generateBOM(doc: CircuitDocument): BomResult { return generateBOMFromComponents(doc.components); }
 export function generateBOMFromComponents(components: CircuitComponent[]): BomResult {
   const groups = new Map<string, CircuitComponent[]>();
-  for (const c of components) { const key = `${c.type}:${getValueString(c)}`; if (!groups.has(key)) groups.set(key, []); groups.get(key)!.push(c); }
+  // ground / power symbols, net labels, junction dots: nothing to buy
+  for (const c of components) { if (isSchematicOnlyType(c.type)) continue; const key = `${c.type}:${getValueString(c)}`; if (!groups.has(key)) groups.set(key, []); groups.get(key)!.push(c); }
   const lines: BomLine[] = []; let totalQ = 0, totalC = 0, matched = 0;
   for (const [key, comps] of groups) {
     const [type, value] = key.split(':'); const refdes = comps.map(c => c.refdes ?? c.id).join(', '); const qty = comps.length;

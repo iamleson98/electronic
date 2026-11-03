@@ -98,8 +98,8 @@ export function Toolbar() {
     }
     toast.info(`"${t}" tool is not implemented yet — use the Component palette instead`);
   };
-  const straightenWires = useEditor((s) => s.straightenWires);
-  const hasBendyWires = useEditor((s) => s.wires.some((w) => w.waypoints && w.waypoints.length > 0));
+  const tidyWires = useEditor((s) => s.tidyWires);
+  const hasWires = useEditor((s) => s.wires.length > 0);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const schImportInputRef = useRef<HTMLInputElement | null>(null);
@@ -264,7 +264,7 @@ export function Toolbar() {
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="flex items-center gap-0.5 border-b border-slate-800 bg-slate-900 px-2 py-1.5 overflow-hidden">
+      <div className="flex items-center gap-0.5 border-b border-slate-800 bg-slate-900 px-2 py-1.5 overflow-x-auto overflow-y-hidden">
         {/* Brand — compact, no text on narrow screens */}
         <div className="mr-1 flex shrink-0 items-center gap-2 pr-2">
           <div className="flex h-6 w-6 items-center justify-center rounded bg-linear-to-br from-cyan-400 to-emerald-500 text-slate-900">
@@ -323,7 +323,7 @@ export function Toolbar() {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => step()} disabled={running}>
+            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => step()} disabled={running} aria-label="Single step">
               <SkipForward size={14} />
             </Button>
           </TooltipTrigger>
@@ -331,7 +331,7 @@ export function Toolbar() {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => reset()} disabled={running}>
+            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => reset()} disabled={running} aria-label="Reset simulation">
               <RotateCcw size={14} />
             </Button>
           </TooltipTrigger>
@@ -342,7 +342,7 @@ export function Toolbar() {
         <div className="mx-0.5 h-5 w-px shrink-0 bg-slate-700" />
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => undo()} disabled={past === 0 || running}>
+            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => undo()} disabled={past === 0 || running} aria-label="Undo">
               <Undo2 size={14} />
             </Button>
           </TooltipTrigger>
@@ -350,7 +350,7 @@ export function Toolbar() {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => redo()} disabled={future === 0 || running}>
+            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={() => redo()} disabled={future === 0 || running} aria-label="Redo">
               <Redo2 size={14} />
             </Button>
           </TooltipTrigger>
@@ -362,15 +362,15 @@ export function Toolbar() {
               size="sm"
               variant="ghost"
               className="h-7 w-7 p-0"
-              onClick={() => straightenWires()}
-              disabled={!hasBendyWires || running}
-              aria-label="Straighten wires"
+              onClick={() => tidyWires()}
+              disabled={!hasWires || running}
+              aria-label="Tidy wires"
             >
               <Spline size={14} />
             </Button>
           </TooltipTrigger>
           <TooltipContent>
-            {running ? 'Pause to straighten' : 'Straighten wires — collapse every wire to its direct / L-shaped route'}
+            {running ? 'Pause to tidy wires' : 'Tidy wires — re-route every wire so none runs over another pin, through a part or on top of another wire'}
           </TooltipContent>
         </Tooltip>
 
@@ -393,7 +393,7 @@ export function Toolbar() {
         </div>
 
         {/* ─── TERTIARY CONTROLS (visible on lg+ screens) ─── */}
-        <div className="hidden lg:flex items-center gap-1">
+        <div className="flex items-center gap-1">
           <div className="mx-0.5 h-5 w-px shrink-0 bg-slate-700" />
           {/* Examples dialog (searchable accordion of categories) */}
           <ExamplesDialogButton loadDocument={loadDocument} disabled={running} />
@@ -401,9 +401,9 @@ export function Toolbar() {
           {/* Simulate menu */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="ghost" className="h-7 px-2" disabled={running}>
+              <Button size="sm" variant="ghost" className="h-7 px-2" disabled={running} aria-label="Simulate" title="Simulate">
                 <Activity size={14} />
-                <span className="ml-1 hidden 2xl:inline">Simulate</span>
+                <span className="ml-1 hidden xl:inline">Simulate</span>
                 <ChevronDown size={10} className="ml-0.5" />
               </Button>
             </DropdownMenuTrigger>
@@ -447,9 +447,9 @@ export function Toolbar() {
           {/* Inspect menu */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="ghost" className="h-7 px-2" disabled={running}>
+              <Button size="sm" variant="ghost" className="h-7 px-2" disabled={running} aria-label="Inspect" title="Inspect">
                 <Network size={14} />
-                <span className="ml-1 hidden 2xl:inline">Inspect</span>
+                <span className="ml-1 hidden xl:inline">Inspect</span>
                 <ChevronDown size={10} className="ml-0.5" />
               </Button>
             </DropdownMenuTrigger>
@@ -485,9 +485,9 @@ export function Toolbar() {
           {/* Tools menu */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="ghost" className="h-7 px-2" disabled={running}>
+              <Button size="sm" variant="ghost" className="h-7 px-2" disabled={running} aria-label="Tools" title="Tools">
                 <Pencil size={14} />
-                <span className="ml-1 hidden 2xl:inline">Tools</span>
+                <span className="ml-1 hidden xl:inline">Tools</span>
                 <ChevronDown size={10} className="ml-0.5" />
               </Button>
             </DropdownMenuTrigger>
@@ -549,9 +549,9 @@ export function Toolbar() {
           {/* Plot/Export menu */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button size="sm" variant="ghost" className="h-7 px-2" disabled={running}>
+              <Button size="sm" variant="ghost" className="h-7 px-2" disabled={running} aria-label="Export" title="Export">
                 <FileDown size={14} />
-                <span className="ml-1 hidden 2xl:inline">Export</span>
+                <span className="ml-1 hidden xl:inline">Export</span>
                 <ChevronDown size={10} className="ml-0.5" />
               </Button>
             </DropdownMenuTrigger>
@@ -592,7 +592,7 @@ export function Toolbar() {
         {/* ─── "MORE" DROPDOWN (always visible — contains all secondary actions) ─── */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button size="sm" variant="ghost" className="h-7 w-7 p-0">
+            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" aria-label="More actions" title="More actions">
               <Settings2 size={14} />
             </Button>
           </DropdownMenuTrigger>
@@ -781,9 +781,9 @@ function ExamplesDialogButton({
   const [open, setOpen] = useState(false);
   return (
     <>
-      <Button size="sm" variant="ghost" className="h-7 px-2" disabled={disabled} onClick={() => setOpen(true)}>
+      <Button size="sm" variant="ghost" className="h-7 px-2" disabled={disabled} onClick={() => setOpen(true)} aria-label="Examples" title="Example circuits">
         <FileText size={14} />
-        <span className="ml-1 hidden 2xl:inline">Examples</span>
+        <span className="ml-1 hidden xl:inline">Examples</span>
       </Button>
       <ExamplesDialog open={open} onOpenChange={setOpen} loadDocument={loadDocument} />
     </>

@@ -6,20 +6,16 @@ import type { Footprint, Trace, Via, Pad, Ratsnest } from './types';
 import type { CircuitComponent, Wire, ComponentPlugin } from '../circuit/types';
 import { getPlugin } from '../circuit/registry';
 import { buildNodeMap } from '../circuit/engine';
+import { isSchematicOnlyType } from './footprints';
 
 /**
- * Annotation-only component types (net labels, power symbols, no-connects…).
- * They shape the LOGICAL netlist but have no physical pads on the PCB —
- * exactly like KiCad treats hidden power-symbol pins — so their terminals are
- * excluded from the schematic-side pad counts.
+ * Annotation-only component types (net labels, power/ground symbols,
+ * no-connects…) shape the LOGICAL netlist but have no physical pads on the
+ * PCB — exactly like KiCad treats hidden power-symbol pins — so their
+ * terminals are excluded from the schematic-side pad counts. One list,
+ * shared with footprint generation (footprints.ts).
  */
-const LOGICAL_ONLY_TYPES = new Set([
-  'netLabel', 'globalLabel', 'hierLabel', 'busLabel', 'busVectorLabel',
-  'noConnect', 'textLabel', 'busEntry', 'bus', 'powerFlag', 'hierSheet',
-  'powerGND', 'powerAGND', 'powerVCC', 'power5V', 'power3V3', 'power1V8',
-  'power2V5', 'power12V', 'powerMinus12V', 'powerMinus5V', 'powerAVDD',
-  'powerVBAT', 'customPower',
-]);
+const LOGICAL_ONLY_TYPES = { has: isSchematicOnlyType };
 
 export interface NetlistVerifyResult {
   ok: boolean;
@@ -131,7 +127,7 @@ export function verifyNetlist(
   }
 
   // 4. Check component count
-  const schematicComponentIds = new Set(schematicComponents.map((c) => c.id));
+  const schematicComponentIds = new Set(schematicComponents.filter((c) => !isSchematicOnlyType(c.type)).map((c) => c.id));
   const pcbComponentIds = new Set(pcbFootprints.map((f) => f.componentId));
   for (const id of schematicComponentIds) {
     if (!pcbComponentIds.has(id)) {
@@ -142,8 +138,9 @@ export function verifyNetlist(
       });
     }
   }
+  const allSchematicIds = new Set(schematicComponents.map((c) => c.id));
   for (const id of pcbComponentIds) {
-    if (!schematicComponentIds.has(id)) {
+    if (!allSchematicIds.has(id)) {
       errors.push({
         message: `Footprint for component "${id}" in PCB but not in schematic`,
         severity: 'warning',

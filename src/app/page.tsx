@@ -326,13 +326,13 @@ export default function Home() {
                   <ResizableHandle withHandle />
                   <ResizablePanel defaultSize={72} minSize={40}>
                     <ResizablePanelGroup direction="vertical">
-                      <ResizablePanel defaultSize={75} minSize={30}>
+                      <ResizablePanel defaultSize={68} minSize={30}>
                         <main aria-label="Circuit canvas" className="h-full min-h-0">
                           <CircuitCanvas />
                         </main>
                       </ResizablePanel>
                       <ResizableHandle withHandle />
-                      <ResizablePanel defaultSize={25} minSize={12}>
+                      <ResizablePanel defaultSize={32} minSize={14}>
                         <ProbePanel />
                       </ResizablePanel>
                     </ResizablePanelGroup>

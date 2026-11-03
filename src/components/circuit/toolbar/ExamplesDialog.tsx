@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion';
 import { Search, Zap } from 'lucide-react';
-import { exampleCategories, examples } from '@/lib/circuit/examples';
+import { useExampleLibrary } from '../use-example-library';
 import type { CircuitDocument } from '@/lib/circuit/types';
 
 export function ExamplesDialog({
@@ -28,6 +28,9 @@ export function ExamplesDialog({
   loadDocument: (doc: CircuitDocument) => void;
 }) {
   const [query, setQuery] = useState('');
+  const lib = useExampleLibrary(open);
+  const exampleCategories = useMemo(() => lib?.exampleCategories ?? [], [lib]);
+  const examples = lib?.examples ?? [];
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -40,7 +43,7 @@ export function ExamplesDialog({
         return { label: cat.label, examples: hits, matchCount: hits.length };
       })
       .filter(cat => cat.matchCount > 0);
-  }, [query]);
+  }, [query, exampleCategories]);
 
   const totalMatches = filtered.reduce((a, c) => a + c.matchCount, 0);
 
@@ -80,7 +83,8 @@ export function ExamplesDialog({
         </DialogHeader>
 
         <div className="overflow-y-auto flex-1 px-6 pb-4">
-          <Accordion type="multiple" defaultValue={defaultValue} className="divide-y divide-slate-800">
+          {!lib && <div className="py-6 text-center text-sm text-slate-400">Loading examples…</div>}
+          <Accordion key={`${lib ? 'ready' : 'loading'}|${query.trim() ? filtered.map(c => c.label).join(',') : 'browse'}`} type="multiple" defaultValue={defaultValue} className="divide-y divide-slate-800">
             {filtered.map(cat => (
               <AccordionItem key={cat.label} value={cat.label} className="border-b-0">
                 <AccordionTrigger className="py-3 text-slate-200 hover:no-underline group">

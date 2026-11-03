@@ -775,7 +775,7 @@ describe('AI audit: server-executed PCB tools run the real pipeline', () => {
     const imp = await TOOLS_BY_NAME.get('pcb.importFromSchematic')!.execute({}, ctx) as any;
     expect(imp.ok).toBe(true);
     expect(ctx.pcb).toBeDefined();
-    expect(ctx.pcb!.footprints.length).toBe(4); // ground has no footprint... footprints = non-annotation comps? At least the 3 real ones.
+    expect(ctx.pcb!.footprints.length).toBe(3); // the ground symbol is schematic-only: V1, R1, LED1
     expect(imp.result.footprints).toBeGreaterThanOrEqual(3);
     expect(imp.result.board.width).toBeGreaterThan(0);
 
