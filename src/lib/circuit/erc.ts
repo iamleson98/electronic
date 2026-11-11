@@ -32,7 +32,9 @@ export interface ERCError {
     | 'bus_net_conflict'
     | 'no_connect_on_connected_pin'
     | 'voltage_source_loop'
-    | 'no_dc_path';
+    | 'no_dc_path'
+    /** simulated stress above a datasheet absolute maximum (stress-check.ts) */
+    | 'component_overstress';
   severity: 'error' | 'warning' | 'info';
   message: string;
   componentId: string;

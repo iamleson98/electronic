@@ -300,11 +300,11 @@ describe('555 Astable example — oscillator under every method', () => {
       let maxILed = 0;
       for (const h of out.history) {
         maxOut = Math.max(maxOut, h[outNode]);
-        maxILed = Math.max(maxILed, (h[outNode] - h[ledNode]) / 220);
+        maxILed = Math.max(maxILed, (h[outNode] - h[ledNode]) / 120);
       }
-      // the astable output swings to the rail and drives ≈ (5 − 2)/220 Ω
-      // through its current-limiting resistor into the LED
-      expect(maxOut).toBeGreaterThan(4.5);
+      // NE555 datasheet: VOH ≈ Vcc − 1 V (4 V at 5 V), so the output swings to
+      // ≈ 3.9 V and drives ≈ (3.9 − 2.2 V green)/(120 Ω + Rs) through its resistor
+      expect(maxOut).toBeGreaterThan(3.7);
       expect(maxILed).toBeGreaterThan(0.012);
       expect(maxILed).toBeLessThan(0.016);
     });

@@ -65,41 +65,57 @@ export interface BatchResult {
   durationMs: number;
 }
 
-export function runBatch(
+/** Result of analysing ONE sweep point (pure; safe to run on any thread). */
+export interface BatchPointResult {
+  converged: boolean;
+  outValue: number;
+  /** traces already renamed `${name} @ ${value}` */
+  traces: RealTrace[];
+}
+
+export function runBatchPoint(
   components: CircuitComponent[],
   wires: Wire[],
   plugins: Map<string, ComponentPlugin>,
   config: BatchConfig,
+  sv: SweepValue,
   opts?: Partial<SimOptions>,
+): BatchPointResult {
+  // clone components with the swept parameter modified
+  const modified = components.map((c) =>
+    c.id === config.componentId
+      ? { ...c, parameters: { ...c.parameters, [sv.name]: sv.value } }
+      : c,
+  );
+  const result: AnalysisResult = runAnalysis(modified, wires, plugins, config.inner, opts);
+  if (!result.report.converged) return { converged: false, outValue: 0, traces: [] };
+  const outValue = extractOutputValue(result, config.outputNode);
+  const traces: RealTrace[] = [];
+  for (const tr of result.traces) {
+    if ('yValues' in tr) {
+      const rt = tr as RealTrace;
+      traces.push({ ...rt, name: `${rt.name} @ ${sv.value}` });
+    }
+  }
+  return { converged: true, outValue, traces };
+}
+
+/** Assemble a BatchResult from per-point results (index-aligned with sweepValues). */
+export function assembleBatchResult(
+  config: BatchConfig,
+  sweepValues: SweepValue[],
+  points: Array<BatchPointResult | null | undefined>,
+  durationMs: number,
 ): BatchResult {
-  const start = performance.now();
-  const sweepValues = generateSweepValues(config, components, wires, plugins);
   const traces: RealTrace[] = [];
   const tracedSweepValues: SweepValue[] = [];
   const outputValues: number[] = [];
-
-  for (const sv of sweepValues) {
-    // clone components with the swept parameter modified
-    const modified = components.map((c) =>
-      c.id === config.componentId
-        ? { ...c, parameters: { ...c.parameters, [sv.name]: sv.value } }
-        : c,
-    );
-    const result: AnalysisResult = runAnalysis(modified, wires, plugins, config.inner, opts);
-    if (!result.report.converged) continue;
-    // extract output value
-    const outValue = extractOutputValue(result, config.outputNode);
-    outputValues.push(outValue);
-    let pushedAnyTrace = false;
-    // push the result trace with sweep value in name
-    for (const tr of result.traces) {
-      if ('yValues' in tr) {
-        const rt = tr as RealTrace;
-        traces.push({ ...rt, name: `${rt.name} @ ${sv.value}` });
-        pushedAnyTrace = true;
-      }
-    }
-    if (pushedAnyTrace) tracedSweepValues.push(sv);
+  for (let i = 0; i < sweepValues.length; i++) {
+    const pt = points[i];
+    if (!pt || !pt.converged) continue;
+    outputValues.push(pt.outValue);
+    for (const tr of pt.traces) traces.push(tr);
+    if (pt.traces.length > 0) tracedSweepValues.push(sweepValues[i]);
   }
 
   // statistics for Monte Carlo
@@ -112,17 +128,34 @@ export function runBatch(
     stats = { min, max, mean, std: Math.sqrt(variance) };
   }
 
-  return {
-    type: config.type,
-    traces,
-    sweepValues,
-    tracedSweepValues,
-    stats,
-    durationMs: performance.now() - start,
-  };
+  return { type: config.type, traces, sweepValues, tracedSweepValues, stats, durationMs };
 }
 
-function generateSweepValues(config: BatchConfig, components: CircuitComponent[], wires: Wire[], plugins: Map<string, ComponentPlugin>): SweepValue[] {
+export interface BatchRunOptions {
+  onProgress?: (done: number, total: number) => void;
+  shouldCancel?: () => boolean;
+}
+
+export function runBatch(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  config: BatchConfig,
+  opts?: Partial<SimOptions>,
+  runOpts?: BatchRunOptions,
+): BatchResult {
+  const start = performance.now();
+  const sweepValues = generateSweepValues(config, components, wires, plugins);
+  const points: BatchPointResult[] = [];
+  for (const sv of sweepValues) {
+    if (runOpts?.shouldCancel?.()) break;
+    points.push(runBatchPoint(components, wires, plugins, config, sv, opts));
+    runOpts?.onProgress?.(points.length, sweepValues.length);
+  }
+  return assembleBatchResult(config, sweepValues, points, performance.now() - start);
+}
+
+export function generateSweepValues(config: BatchConfig, components: CircuitComponent[], wires: Wire[], plugins: Map<string, ComponentPlugin>): SweepValue[] {
   const values: SweepValue[] = [];
   if (config.type === 'step') {
     if (config.list) {

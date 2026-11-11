@@ -354,7 +354,9 @@ describe('Bug 3 — copper pours are exported to the Gerbers', () => {
 
   it('X1: pour geometry lands on its copper layer as exact rect-run flashes', () => {
     // 4×2mm board, no obstacles → full fill: 8 cols × 4 rows of 0.5mm cells
-    const pour = generateCopperPour('top', 'GND', [], [], [], tinyBoard, 0.3);
+    // legacy geometry: 0.5mm cells, no edge inset (the default pour is now inset
+    // 0.3mm from the outline on a 0.25mm grid)
+    const pour = generateCopperPour('top', 'GND', [], [], [], tinyBoard, 0.3, { cellSize: 0.5, edgeClearance: 0 });
     expect(pour.cells.length).toBe(32);
 
     const files = exportAllGerbers([], [], [], tinyBoard, [pour]);
@@ -373,7 +375,9 @@ describe('Bug 3 — copper pours are exported to the Gerbers', () => {
   });
 
   it('X1 pours export as plain copper (no net attributes — noted design decision)', () => {
-    const pour = generateCopperPour('top', 'GND', [], [], [], tinyBoard, 0.3);
+    // legacy geometry: 0.5mm cells, no edge inset (the default pour is now inset
+    // 0.3mm from the outline on a 0.25mm grid)
+    const pour = generateCopperPour('top', 'GND', [], [], [], tinyBoard, 0.3, { cellSize: 0.5, edgeClearance: 0 });
     const files = exportAllGerbers([], [], [], tinyBoard, [pour]);
     const top = files.find((f) => f.filename === 'top_copper.gbr')!.content;
     expect(top).toContain('D03*');
@@ -381,7 +385,9 @@ describe('Bug 3 — copper pours are exported to the Gerbers', () => {
   });
 
   it('X2: pour exports WITH its net attribute on the correct layer', () => {
-    const pour = generateCopperPour('top', 'GND', [], [], [], tinyBoard, 0.3);
+    // legacy geometry: 0.5mm cells, no edge inset (the default pour is now inset
+    // 0.3mm from the outline on a 0.25mm grid)
+    const pour = generateCopperPour('top', 'GND', [], [], [], tinyBoard, 0.3, { cellSize: 0.5, edgeClearance: 0 });
     const files = exportAllGerbersX2([], [], [], tinyBoard, [pour]);
     const top = files.find((f) => f.filename === 'top_copper.gbr')!.content;
     const bottom = files.find((f) => f.filename === 'bottom_copper.gbr')!.content;

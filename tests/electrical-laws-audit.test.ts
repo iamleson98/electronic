@@ -436,7 +436,7 @@ describe('LM7805 / LM317 dropout physics', () => {
     const dc = solveDC(comps, ws, plugins());
     expect(dc).not.toBeNull();
     const vout = nodeOfDC(dc, comps, ws, 'U1', 'out');
-    expect(vout).toBeCloseTo(3.0, 1); // 5 − 2
+    expect(vout).toBeCloseTo(3.3, 1); // LM317 datasheet dropout ≈ 1.7 V → 5 − 1.7
   });
 });
 

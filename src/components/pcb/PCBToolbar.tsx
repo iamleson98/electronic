@@ -196,7 +196,11 @@ export function PCBToolbar() {
     const s = usePCB.getState();
     const netClasses = s.netClasses.map((c) => ({ id: c.name, ...c }));
     const pre = fabPreflight(s.footprints, s.traces, s.vias, s.ratsnest, s.board, s.drcConfig, netClasses, s.drcWaivers);
-    if (pre.ok) toast.success(`${what} exported — DRC clean, all nets routed`);
+    if (pre.ok) {
+      // Only claim "clean" when there are truly no findings at all.
+      if (pre.warnings === 0) toast.success(`${what} exported — DRC clean, all nets routed`);
+      else toast.success(`${what} exported — no fab-blocking violations, all nets routed (${pre.warnings} non-blocking warning${pre.warnings > 1 ? 's' : ''} — not DRC clean, run DRC to review)`, { duration: 8000 });
+    }
     else toast.warning(`${what} exported, but: ${pre.summary}`, { duration: 10000 });
   };
 
@@ -210,6 +214,10 @@ export function PCBToolbar() {
     const files = exportAllGerbersX2(s.footprints, s.traces, s.vias, s.board, s.copperPours, {
       layers: [...s.layerStack.layers],
       teardrops: s.teardrops,
+      // JLCPCB / Protel extensions (.GTL .GBL .GTS .GBS .GTO .GBO .GTP .GBP .GKO), PTH + NPTH
+      // drills, JLC CPL (per-part `cplRotationOffset` read from the schematic parameters)
+      naming: 'protel',
+      components: useEditor.getState().components,
     });
     for (const file of files) {
       const blob = new Blob([file.content], { type: 'text/plain' });
@@ -225,7 +233,7 @@ export function PCBToolbar() {
 
   const handleBOMExport = () => {
     const s = usePCB.getState();
-    const csv = exportBOM(s.footprints);
+    const csv = exportBOM(s.footprints, useEditor.getState().components);
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

@@ -250,7 +250,8 @@ describe('P3: NE5532 op-amp macromodel', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('P3: LM311 comparator', () => {
   // V+ = 5V, V− = 0V, 10k pull-up to 5V. STROBE wired high (not asserted).
-  function lm311Circuit(strobeToGnd: boolean) {
+  // Datasheet (LM311/LM393): OUT is LOW when V(−) > V(+), released (pulled high) when V(+) > V(−).
+  function lm311Circuit(strobeToGnd: boolean, inverted = false) {
     const components = [
       comp('dcVoltage', 'V1', [0, 0], { voltage: 5 }),
       comp('lm311', 'U1', [6, 0]),
@@ -260,8 +261,8 @@ describe('P3: LM311 comparator', () => {
     const wires = [
       wire('w1', 'V1', 'p', 'U1', 'vcc'),
       wire('w2', 'V1', 'n', 'GND', 'g'),
-      wire('w3', 'V1', 'p', 'U1', 'inp'), // V+ = 5V
-      wire('w4', 'GND', 'g', 'U1', 'inn'), // V− = 0V
+      wire('w3', 'V1', 'p', 'U1', inverted ? 'inn' : 'inp'), // 5V on V− (inverted) or V+
+      wire('w4', 'GND', 'g', 'U1', inverted ? 'inp' : 'inn'), // 0V on the other input
       wire('w5', 'V1', 'p', 'R1', 'a'), // pull-up from 5V
       wire('w6', 'R1', 'b', 'U1', 'out'),
       wire('w7', 'GND', 'g', 'U1', 'gnd'),
@@ -272,15 +273,20 @@ describe('P3: LM311 comparator', () => {
     return solveWithNodes(components, wires);
   }
 
-  it('pulls the output LOW when V+ > V− (strobe inactive)', () => {
+  it('releases the output (pulled HIGH) when V+ > V− (strobe inactive)', () => {
     const { v } = lm311Circuit(false);
+    expect(v('U1:out')).toBeGreaterThan(4.5);
+  });
+
+  it('pulls the output LOW when V− > V+ (strobe inactive)', () => {
+    const { v } = lm311Circuit(false, true);
     const vout = v('U1:out');
     expect(vout).toBeLessThan(0.5); // saturated output transistor (~0.2V)
     expect(vout).toBeGreaterThan(0);
   });
 
   it('strobe low forces the output off — pulled HIGH by the pull-up', () => {
-    const { v } = lm311Circuit(true);
+    const { v } = lm311Circuit(true, true); // V− > V+ would pull low; strobe overrides
     const vout = v('U1:out');
     expect(vout).toBeGreaterThan(4.5); // floats up to the 5V rail
   });
@@ -316,14 +322,15 @@ describe('P3: LM393 comparator', () => {
     return solveWithNodes(components, wires);
   }
 
-  it('pulls the output LOW when V+ > V−', () => {
+  // LM393 datasheet: output transistor ON (LOW) when V(−) > V(+).
+  it('releases the output (pulled HIGH) when V+ > V−', () => {
     const { v } = lm393Circuit(true);
-    expect(v('U1:out')).toBeLessThan(0.5);
+    expect(v('U1:out')).toBeGreaterThan(4.5);
   });
 
-  it('releases the output (pulled HIGH) when V+ < V−', () => {
+  it('pulls the output LOW when V− > V+', () => {
     const { v } = lm393Circuit(false);
-    expect(v('U1:out')).toBeGreaterThan(4.5);
+    expect(v('U1:out')).toBeLessThan(0.5);
   });
 });
 

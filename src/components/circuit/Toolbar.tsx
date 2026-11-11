@@ -7,7 +7,7 @@ import {
   Play, Pause, SkipForward, Save, Upload, Trash2, Undo2, Redo2, Gauge, Zap,
   FileText, ChevronDown, Settings2, Database, FileCode, Boxes, ShieldCheck,
   Search, FileDown, Network, Layers, BookOpen, Wand2, Ruler, Pencil, Spline,
-  Activity, Sliders, Sigma, Waves, ChevronRight, ChevronLeft, RotateCcw, Library,
+  Activity, Flame, Sliders, Sigma, Waves, ChevronRight, ChevronLeft, RotateCcw, Library,
 } from 'lucide-react';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
@@ -31,7 +31,7 @@ import {
   SettingsDialog,
 } from './SchematicDialogs';
 import {
-  AnalysisDialog, OptionsDialog, MeasurementDialog, BatchSweepDialog, StimuliEditorDialog,
+  AnalysisDialog, OptionsDialog, MeasurementDialog, BatchSweepDialog, StimuliEditorDialog, StressCheckDialog,
 } from './AnalysisDialogs';
 import {
   exportSchematicSVG, exportSchematicPNG, exportSchematicPDF,
@@ -122,6 +122,7 @@ export function Toolbar() {
   const [showMeasurement, setShowMeasurement] = useState(false);
   const [showBatchSweep, setShowBatchSweep] = useState(false);
   const [showStimuliEditor, setShowStimuliEditor] = useState(false);
+  const [showStress, setShowStress] = useState(false);
   // Track camera so SaveViewDialog gets current pan/zoom
   const [camera, setCamera] = useState({ x: 0, y: 0, zoom: 1 });
 
@@ -420,6 +421,10 @@ export function Toolbar() {
               <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
                 onClick={() => setShowMeasurement(true)}>
                 <Sigma size={14} className="mr-2" /> Measurements (.meas)
+              </DropdownMenuItem>
+              <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
+                onClick={() => setShowStress(true)}>
+                <Flame size={14} className="mr-2" /> Component Stress Check (derating)
               </DropdownMenuItem>
               <DropdownMenuItem className="text-slate-200 hover:bg-slate-800 cursor-pointer"
                 onClick={() => setShowStimuliEditor(true)}>
@@ -765,6 +770,7 @@ export function Toolbar() {
       <MeasurementDialog open={showMeasurement} onClose={() => setShowMeasurement(false)} />
       <BatchSweepDialog open={showBatchSweep} onClose={() => setShowBatchSweep(false)} />
       <StimuliEditorDialog open={showStimuliEditor} onClose={() => setShowStimuliEditor(false)} />
+      <StressCheckDialog open={showStress} onClose={() => setShowStress(false)} />
     </TooltipProvider>
   );
 }

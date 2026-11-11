@@ -70,6 +70,7 @@ export function OptionsDialog({ open, onClose }: { open: boolean; onClose: () =>
             <Param label="tstop (s)" value={simOptions.tstop} step={1e-3} onChange={(v) => setSimOptions({ tstop: v })} />
             <Param label="tstart (s)" value={simOptions.tstart} step={1e-3} onChange={(v) => setSimOptions({ tstart: v })} />
             <Param label="tmax (s)" value={simOptions.tmax} step={1e-4} onChange={(v) => setSimOptions({ tmax: v })} />
+            <Param label="stress derating (%)" value={Math.round((simOptions.stressDerating ?? 1) * 100)} step={5} onChange={(v) => setSimOptions({ stressDerating: Number.isFinite(v) ? Math.min(100, Math.max(1, v)) / 100 : 1 })} />
           </div>
           <div>
             <Label className="text-slate-300">Integration Method</Label>

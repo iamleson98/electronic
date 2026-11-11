@@ -79,7 +79,7 @@ export const lm317: ComponentPlugin = {
   // stamp decides from node voltages (region / logic level) — must join the
   // Newton re-stamp loop or the decision lags one timestep
   nonLinear: true,
-  description: 'Adjustable positive voltage regulator. Output = 1.25 * (1 + R2/R1).',
+  description: 'Adjustable positive voltage regulator. Holds V(OUT) − V(ADJ) = 1.25 V, so Vout = 1.25·(1 + R2/R1) + Iadj·R2 (Iadj ≈ 50 µA flows out of ADJ). Dropout ≈ 1.7 V, current limit ≈ 1.5 A.',
   symbol: '317',
   boundingBox: { width: 4, height: 4 },
   terminals: [
@@ -88,8 +88,14 @@ export const lm317: ComponentPlugin = {
     { id: 'out', label: 'OUT', position: { x: 4, y: 1 } },
   ],
   parameters: [
-    { key: 'outputV', label: 'Output Voltage', type: 'number', default: 3.3, unit: 'V', min: 1.25, max: 37, step: 0.1 },
-    { key: 'ron', label: 'On Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 100, step: 0.01 },
+    // DEPRECATED: the real LM317 output is set by the R1/R2 divider on ADJ,
+    // not by a parameter. Kept (hidden) only so old saved circuits load.
+    { key: 'outputV', label: 'Output Voltage (deprecated, ignored)', type: 'number', default: 3.3, unit: 'V', min: 1.25, max: 37, step: 0.1, deprecated: true },
+    { key: 'ron', label: 'Output Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 100, step: 0.01 },
+    { key: 'vref', label: 'Reference (OUT−ADJ)', type: 'number', default: 1.25, unit: 'V', min: 1.2, max: 1.3, step: 0.01 },
+    { key: 'iadj', label: 'ADJ Pin Current', type: 'number', default: 50e-6, unit: 'A', min: 0, max: 100e-6, step: 1e-6 },
+    { key: 'dropoutV', label: 'Dropout Voltage', type: 'number', default: 1.7, unit: 'V', min: 0.5, max: 4, step: 0.1 },
+    { key: 'ilimit', label: 'Current Limit', type: 'number', default: 1.5, unit: 'A', min: 0.1, max: 10, step: 0.1 },
   ],
   keywords: ['regulator', '317', 'adjustable', 'power'],
   render(ctx, _params, cellSize) {
@@ -101,20 +107,44 @@ export const lm317: ComponentPlugin = {
   },
   stamp(params, terminals, sys, sim) {
     const vin = terminals.find(t => t.terminalId === 'in')!.nodeId;
-    const gnd = 0; // adj is the reference; for simplicity use ground
+    const adj = terminals.find(t => t.terminalId === 'adj')!.nodeId;
     const vout = terminals.find(t => t.terminalId === 'out')!.nodeId;
-    const outV = params.outputV as number;
-    const r = Math.max(0.001, params.ron as number);
-    const vIn = sim.nodeVoltage[vin] ?? 0;
-    if (vIn > outV + 2) {
-      sys.stampConductance(vout, gnd, 1 / r);
-      sys.stampCurrentSource(gnd, vout, outV / r);
+    const num = (k: string, d: number) => (typeof params[k] === 'number' && Number.isFinite(params[k]) ? params[k] as number : d);
+    const r = Math.max(0.001, num('ron', 0.1));
+    const vref = num('vref', 1.25);
+    const iadj = num('iadj', 50e-6);
+    const dropout = num('dropoutV', 1.7);
+    const ilim = Math.max(0.01, num('ilimit', 1.5));
+    const g = 1 / r;
+    // ADJ pin: Iadj flows OUT of the pin (drawn from IN) into the external R2.
+    // A 10 MΩ bleed to ground keeps an unwired ADJ from floating to kilovolts
+    // (it then simply reads high and the part falls into dropout).
+    sys.stampConductance(adj, 0, 1e-7);
+    // Pass element (IN → OUT): I = g·(Vtarget − Vout), Vtarget = V(ADJ)+Vref
+    // while in regulation, or V(IN) − dropout when headroom runs out.
+    const vI = sim.nodeVoltage[vin] ?? 0;
+    const vA = sim.nodeVoltage[adj] ?? 0;
+    const vO = sim.nodeVoltage[vout] ?? 0;
+    // Iadj only flows once the part has headroom (an unpowered 317 draws nothing)
+    const powered = Math.min(1, Math.max(0, (vI - vA - 1.5) / 1));
+    if (iadj > 0 && powered > 0 && adj !== vin) sys.stampCurrentSource(vin, adj, iadj * powered);
+    const regTarget = vA + vref;
+    const dropTarget = vI - dropout;
+    if (dropTarget < regTarget) {
+      // dropout: series element tracking Vin − dropout
+      sys.stampConductance(vin, vout, g);
+      sys.stampCurrentSource(vout, vin, dropout * g);
+      return;
+    }
+    const iReg = g * (regTarget - vO);
+    if (iReg > ilim) {
+      // current limit: constant-current foldback
+      sys.stampCurrentSource(vin, vout, ilim);
+      sys.stampConductance(vout, vin, 1e-9);
     } else {
-      // Dropout: Vout ≈ Vin − Vdropout − I·ron (a real LM317 in dropout
-      // tracks its input minus the dropout, never ABOVE the setpoint).
-      const dropout = 2; // LM317 datasheet dropout ≈ 2–3 V
-      sys.stampConductance(vin, vout, 1 / r);
-      sys.stampCurrentSource(vout, vin, dropout / r);
+      // Norton form of the regulating pass element (control: ADJ, sense: OUT)
+      sys.stampVCCS(vin, vout, adj, vout, g);
+      sys.stampCurrentSource(vin, vout, g * vref);
     }
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },

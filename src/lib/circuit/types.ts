@@ -16,6 +16,8 @@ export interface ParameterDef {
   step?: number;
   options?: { label: string; value: string }[];
   description?: string;
+  /** legacy parameter kept so old saved circuits load; hidden from the properties panel and ignored by the model */
+  deprecated?: boolean;
 }
 
 export type ComponentCategory =
@@ -614,6 +616,20 @@ export interface ComponentPlugin {
   feedback?: boolean;
 
   /**
+   * stamp() only writes persistent state IDEMPOTENTLY (same inputs → same
+   * writes, no counters/latches/history advance). When every stamping part in
+   * a circuit is pure, the engine skips the per-step plugin-state snapshot /
+   * rollback used for gmin retries and Newton re-stamps.
+   */
+  pureStamp?: boolean;
+  /**
+   * With pureStamp: `sim.state.__global` key prefixes this plugin owns whose
+   * stamp-time writes are idempotent — excluded from the Newton rollback
+   * snapshot (keeps rollback cost independent of the number of passives).
+   */
+  pureStatePrefixes?: string[];
+
+  /**
    * Declare that this component's stamp is a linearization whose operating
    * point depends on the CURRENT step's node voltages (diodes, BJTs, MOSFETs,
    * zeners, comparators — anything that classifies a region from V or
@@ -639,6 +655,42 @@ export interface ComponentPlugin {
     /** extra input resistance to ground the plugin stamps besides the core's 1 GΩ */
     rin?: number;
   };
+  /**
+   * Optional datasheet absolute-maximum ratings for the stress check
+   * (stress-check.ts, PSpice "Smoke" style). Return undefined / empty for a
+   * part with no known ratings — the check emits nothing rather than guess.
+   */
+  ratings?: (params: Record<string, any>) => PartRatings | undefined;
+}
+
+/** Terminal-pair voltage limit: V(plus) − V(minus) ≤ max, and ≥ −reverse. */
+export interface VoltageRating {
+  label: string;
+  plus: string;
+  minus: string;
+  /** limit in the +direction (V). Omit when that direction is unrestricted. */
+  max?: number;
+  /** limit in the −direction (V, positive number). Omit when unrestricted. */
+  reverse?: number;
+  note?: string;
+}
+
+/** |current into terminal| ≤ max (A). */
+export interface CurrentRating {
+  label: string;
+  terminal: string;
+  max: number;
+  note?: string;
+}
+
+/** Datasheet absolute maxima of one part. */
+export interface PartRatings {
+  /** human-readable part identity, e.g. "2N7000" (shown in the table) */
+  part?: string;
+  voltages?: VoltageRating[];
+  currents?: CurrentRating[];
+  /** continuous dissipation limit (W) = Σ V·I into all terminals */
+  power?: { max: number; label?: string; note?: string; /** free-air limit when `max` assumes a heatsink */ freeAir?: number };
 }
 
 // ----- MNA system interface -----

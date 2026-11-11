@@ -40,7 +40,8 @@ describe('bend cost (minimal corners)', () => {
   it('LED + Resistor: ≤ 16 segments (baseline 26 — the staircase offender; real 1206 pads)', () => {
     const { result } = routeExample('LED + Resistor');
     expect(result.stats.failed).toBe(0);
-    expect(totalSegments(result)).toBeLessThanOrEqual(16);
+    // (22: the supply is now a real 2.54 mm input header whose pads sit 2.54 mm apart, not a 8 mm symbol)
+    expect(totalSegments(result)).toBeLessThanOrEqual(22);
     // every segment is still 45°/90° (aesthetics contract from v2)
     for (const t of result.traces) {
       for (const s of t.segments) {
@@ -169,10 +170,13 @@ describe('open-space bias', () => {
 // ── 4. Congestion history — no pass escalation on dense boards ─────────────
 
 describe('congestion history + pass stability', () => {
-  it('555 Timer Clock routes 100% in ≤ 2 passes (no bias-noise escalation)', () => {
+  it('555 Timer Clock routes 100% in ≤ 3 passes (no bias-noise escalation)', () => {
     const { result } = routeExample('555 Timer Clock (HH:MM:SS)');
     expect(result.stats.failed).toBe(0);
-    expect(result.stats.passes).toBeLessThanOrEqual(2);
+    // Was ≤ 2. Vias may no longer sit in/next to through-hole pads or inside
+    // pads (a via in a DIP pin hole is a fab defect), which costs this dense
+    // board one extra rip-up pass; routing is still 100%.
+    expect(result.stats.passes).toBeLessThanOrEqual(3);
   });
 
   it('Digital Clock routes 100% with bounded vias and reports viaReductions', () => {

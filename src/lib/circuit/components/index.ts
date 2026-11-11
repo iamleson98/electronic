@@ -36,3 +36,5 @@ import './hall-sensors';
 import './env-sensors';
 // Register human-IO, displays, wireless modules, ESP32 devkit
 import './io-display';
+import '../spice-devices';
+import './ratings';

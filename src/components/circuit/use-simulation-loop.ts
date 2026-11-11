@@ -9,6 +9,8 @@
 
 import { useEffect, useRef } from 'react';
 import { useEditor } from '@/lib/circuit/store';
+import { flattenForSim } from '@/lib/circuit/live-step';
+import { resolveBackend, startLiveSim, stopLiveSim } from '@/lib/circuit/live-sim-controller';
 
 export function useSimulationLoop(running: boolean, step: () => void) {
   const flowPhaseRef = useRef(0);
@@ -16,6 +18,22 @@ export function useSimulationLoop(running: boolean, step: () => void) {
   useEffect(() => {
     if (!running) return;
     let raf = 0;
+
+    // Off-main-thread path: the worker owns the engine and pushes snapshots;
+    // this loop only advances the flow-dot phase. Falls back to the
+    // main-thread loop below when no worker can be created.
+    const st0 = useEditor.getState();
+    const backend = resolveBackend(st0.simBackend, flattenForSim(st0).components);
+    if (backend === 'worker' && startLiveSim()) {
+      const flowLoop = () => {
+        const simSpeed = useEditor.getState().speed;
+        flowPhaseRef.current += 0.012 * Math.max(0.5, Math.min(4, simSpeed));
+        raf = requestAnimationFrame(flowLoop);
+      };
+      raf = requestAnimationFrame(flowLoop);
+      return () => { cancelAnimationFrame(raf); stopLiveSim(); };
+    }
+
     let lastSimTime = performance.now();
     const SIM_INTERVAL = 16; // ms between simulation steps (~60Hz)
 

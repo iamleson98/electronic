@@ -15,14 +15,20 @@
 //   DIP     2.54 mm pitch, 7.62 mm row span, Ø1.6 pad / Ø0.8 drill, pin 1 square
 //   TO-92   inline 1.27 mm pitch, 1.05 × 1.5 oval pads, Ø0.75 drill
 //   TO-220  vertical, 2.54 mm pitch, 1.9 × 2.0 oval pads, Ø1.1 drill
+//   SOT-23  EXACTLY KiCad Package_TO_SOT_SMD:SOT-23 (kicad-footprints master):
+//           pad 1 at (-0.9375, -0.95), pad 2 at (-0.9375, +0.95), pad 3 alone
+//           at (+0.9375, 0); 1.475 × 0.6 mm pads (board Y is down, as in
+//           KiCad). Same orientation as KiCad's, so KiCad-based JLCPCB
+//           rotation databases (kicad-jlcpcb-tools, JLCKicadTools) apply.
 
 import type { FootprintDef, FootprintPadDef } from './types';
+import { discretePartFor, KICAD_FOOTPRINT, type DiscretePart } from '../circuit/part-presets';
 
 /** `to`: the part's own terminal (or `pin<N>`) whose net this pin joins */
 type PinFn = string | { tie: string; to?: string } | { nc: string };
 
 interface Pinout {
-  pkg: 'DIP' | 'TO-92' | 'TO-220' | '7SEG-10';
+  pkg: 'DIP' | 'TO-92' | 'TO-220' | 'SOT-23' | '7SEG-10';
   pins: number;
   part: string;
   /** datasheet pin number → schematic terminal id, or an extra pad */
@@ -46,6 +52,8 @@ function pinPos(p: Pinout, i: number): { x: number; y: number } {
     case 'DIP': return dipPos(i, p.pins);
     case 'TO-92': return { x: (i - 2) * 1.27, y: 0 };
     case 'TO-220': return { x: (i - 2) * 2.54, y: 0 };
+    // KiCad SOT-23: pins 1,2 down the left column, pin 3 alone on the right
+    case 'SOT-23': return i === 3 ? { x: 0.9375, y: 0 } : { x: -0.9375, y: i === 1 ? -0.95 : 0.95 };
     case '7SEG-10':
       // 0.56″ display: pins 1–5 along the bottom (left → right), 6–10 along
       // the top (right → left), rows 15.24 mm apart
@@ -63,7 +71,9 @@ function buildDef(p: Pinout): FootprintDef {
     let drill = 0.8;
     if (p.pkg === 'TO-92') { size = { width: 1.05, height: 1.5 }; shape = i === 1 ? 'rect' : 'oval'; drill = 0.75; }
     if (p.pkg === 'TO-220') { size = { width: 1.9, height: 2.0 }; shape = i === 1 ? 'rect' : 'oval'; drill = 1.1; }
-    const pad: FootprintPadDef = { terminalId: typeof fn === 'string' ? fn : `pin${i}`, position, shape, size, drill, number: String(i) };
+    // SMD: no drill
+    if (p.pkg === 'SOT-23') { size = { width: 1.475, height: 0.6 }; shape = 'rect'; drill = 0; }
+    const pad: FootprintPadDef = { terminalId: typeof fn === 'string' ? fn : `pin${i}`, position, shape, size, ...(drill > 0 ? { drill } : {}), number: String(i) };
     if (typeof fn !== 'string') {
       if ('tie' in fn) { pad.tie = true; pad.note = fn.tie; if (fn.to) pad.tieTo = fn.to; } else { pad.note = fn.nc; }
     }
@@ -73,6 +83,7 @@ function buildDef(p: Pinout): FootprintDef {
     ? { width: 6.35, height: (p.pins / 2) * DIP_PITCH + 0.5 }
     : p.pkg === 'TO-92' ? { width: 4.8, height: 3.8 }
     : p.pkg === 'TO-220' ? { width: 10.0, height: 4.5 }
+    : p.pkg === 'SOT-23' ? { width: 1.3, height: 2.9 }
     : { width: 12.5, height: 19.0 };
   const pkgName = p.pkg === 'DIP' ? `DIP-${p.pins}` : p.pkg === '7SEG-10' ? '7-segment 0.56″ (10-pin)' : p.pkg;
   return { bodySize: body, pads, name: `${p.part} (${pkgName})`, verified: true };
@@ -124,16 +135,40 @@ function single741(part: string, pins: { inp: string; inn: string; out: string; 
     },
   };
 }
-/** channel A of a dual op-amp / comparator (LM358, TL072, NE5532, LM393) */
+/**
+ * Unused op-amp channel termination — the universally safe one: the spare
+ * amp is a voltage follower (IN− tied to its own OUT) with IN+ tied to the
+ * USED amp's IN+ pin, which is inside the common-mode range by construction.
+ * (Tying IN+ to V− breaks parts whose common-mode range excludes the
+ * negative rail — TL072 / NE5532 — and can latch up or phase-reverse.)
+ */
+const parkedAmp = (n: string, inpPin: number, innPin: number, outPin: number, usedInp: number) => ({
+  [inpPin]: { tie: `unused amp ${n} IN+ — tied to the used amp's IN+ (pin ${usedInp}), inside the common-mode range`, to: 'pin' + usedInp },
+  [innPin]: { tie: `unused amp ${n} IN− — tied to its own OUT (pin ${outPin}): a parked voltage follower`, to: 'pin' + outPin },
+  [outPin]: { nc: `unused amp ${n} output (follower output, leave open)` },
+}) as Record<number, PinFn>;
+
+/** unused comparator: open-collector output left open, both inputs at V−
+ *  (GND) — the datasheet recommendation (no floating high-impedance inputs,
+ *  and no tie of IN− to an open output). */
+const parkedComparator = (n: string, inpPin: number, innPin: number, outPin: number, gnd: string) => ({
+  [inpPin]: { tie: `unused comparator ${n} IN+ — tied to V−/GND`, to: gnd },
+  [innPin]: { tie: `unused comparator ${n} IN− — tied to V−/GND`, to: gnd },
+  [outPin]: { nc: `unused comparator ${n} output (open collector) — leave open` },
+}) as Record<number, PinFn>;
+
+/** channel A of a dual op-amp (LM358, TL072, NE5532) */
 function dualA(part: string, vn: string): Pinout {
   return {
     pkg: 'DIP', pins: 8, part,
-    map: {
-      1: 'out', 2: 'inn', 3: 'inp', 4: vn, 8: 'vcc',
-      5: { tie: 'unused channel B IN+ — tied to the negative supply', to: vn },
-      6: { tie: 'unused channel B IN− — tied to OUT B (pin 7): a parked follower', to: 'pin7' },
-      7: { nc: 'unused channel B output' },
-    },
+    map: { 1: 'out', 2: 'inn', 3: 'inp', 4: vn, 8: 'vcc', ...parkedAmp('B', 5, 6, 7, 3) },
+  };
+}
+/** channel A of a dual comparator (LM393 / LM2903) */
+function dualComparatorA(part: string, gnd: string): Pinout {
+  return {
+    pkg: 'DIP', pins: 8, part,
+    map: { 1: 'out', 2: 'inn', 3: 'inp', 4: gnd, 8: 'vcc', ...parkedComparator('B', 5, 6, 7, gnd) },
   };
 }
 
@@ -158,24 +193,17 @@ export const REAL_PINOUTS: Record<string, Pinout> = {
   lm358: dualA('LM358', 'vee'),
   tl072: dualA('TL072', 'vee'),
   ne5532: dualA('NE5532', 'vee'),
-  lm393: dualA('LM393', 'gnd'),
+  lm393: dualComparatorA('LM393', 'gnd'),
   lm324: {
     pkg: 'DIP', pins: 14, part: 'LM324',
     map: {
       1: 'out', 2: 'inn', 3: 'inp', 4: 'vcc', 11: 'vee',
-      5: { tie: 'unused amp 2 IN+ — tied to V−', to: 'vee' }, 6: { tie: 'unused amp 2 IN− — tied to OUT 2 (pin 7)', to: 'pin7' }, 7: ncOut('amp 2'),
-      8: ncOut('amp 3'), 9: { tie: 'unused amp 3 IN− — tied to OUT 3 (pin 8)', to: 'pin8' }, 10: { tie: 'unused amp 3 IN+ — tied to V−', to: 'vee' },
-      12: { tie: 'unused amp 4 IN+ — tied to V−', to: 'vee' }, 13: { tie: 'unused amp 4 IN− — tied to OUT 4 (pin 14)', to: 'pin14' }, 14: ncOut('amp 4'),
+      ...parkedAmp('2', 5, 6, 7, 3), ...parkedAmp('3', 10, 9, 8, 3), ...parkedAmp('4', 12, 13, 14, 3),
     },
   },
   lm7805: { pkg: 'TO-220', pins: 3, part: 'LM7805', map: { 1: 'in', 2: 'gnd', 3: 'out' } },
   lm317: { pkg: 'TO-220', pins: 3, part: 'LM317', map: { 1: 'adj', 2: 'out', 3: 'in' } },
   tl431: { pkg: 'TO-92', pins: 3, part: 'TL431', map: { 1: 'ref', 2: 'a', 3: 'c' } },
-  npn: { pkg: 'TO-92', pins: 3, part: '2N3904', map: { 1: 'e', 2: 'b', 3: 'c' } },
-  bjtGPNpn: { pkg: 'TO-92', pins: 3, part: '2N3904', map: { 1: 'e', 2: 'b', 3: 'c' } },
-  pnp: { pkg: 'TO-92', pins: 3, part: '2N3906', map: { 1: 'e', 2: 'b', 3: 'c' } },
-  bjtGPPnp: { pkg: 'TO-92', pins: 3, part: '2N3906', map: { 1: 'e', 2: 'b', 3: 'c' } },
-  nmos: { pkg: 'TO-92', pins: 3, part: '2N7000', map: { 1: 's', 2: 'g', 3: 'd' } },
   sevenSegment: {
     pkg: '7SEG-10', pins: 10, part: '5161AS common-cathode',
     map: { 1: 'e', 2: 'd', 3: 'com', 4: 'c', 5: { nc: 'decimal point — leave open' }, 6: 'b', 7: 'a', 8: 'com', 9: 'f', 10: 'g' },
@@ -228,15 +256,80 @@ export const REAL_PINOUTS: Record<string, Pinout> = {
   schmitt_not: hex1('74HC14'),
 };
 
+/** Gummel-Poon / Level-1 plugin types share the physical part lists of the basic parts. */
+const DISCRETE_ALIAS: Record<string, 'npn' | 'pnp' | 'nmos' | 'pmos'> = {
+  npn: 'npn', bjtGPNpn: 'npn',
+  pnp: 'pnp', bjtGPPnp: 'pnp',
+  nmos: 'nmos', mosLevel1N: 'nmos',
+  pmos: 'pmos', mosLevel1P: 'pmos',
+};
+
+/** The physical part (package + datasheet pin order) for a transistor component. */
+export function discreteFor(type: string, partName?: unknown): DiscretePart | undefined {
+  const base = DISCRETE_ALIAS[type];
+  return base ? discretePartFor(base, partName) : undefined;
+}
+
+function discretePinout(d: DiscretePart): Pinout {
+  return { pkg: d.pkg, pins: 3, part: d.part, map: { ...d.map } };
+}
+
+/** The Pinout for a component type (+ chosen discrete part name, if any). */
+function pinoutFor(type: string, partName?: unknown): Pinout | undefined {
+  const d = discreteFor(type, partName);
+  return d ? discretePinout(d) : REAL_PINOUTS[type];
+}
+
 const cache = new Map<string, FootprintDef>();
 
-/** Real-package footprint for `type`, or null when the part has no verified pinout. */
-export function realPackageDef(type: string): FootprintDef | null {
-  const p = REAL_PINOUTS[type];
+/**
+ * Real-package footprint, or null when the part has no verified pinout.
+ * Transistors resolve per PART (`parameters.part`): a BC547 (C-B-E) and a
+ * 2N3904 (E-B-C) share a symbol but not a pinout, so pad numbers follow the
+ * datasheet of the chosen part.
+ */
+export function realPackageDef(type: string, partName?: unknown): FootprintDef | null {
+  const p = pinoutFor(type, partName);
   if (!p) return null;
-  let d = cache.get(type);
-  if (!d) { d = buildDef(p); cache.set(type, d); }
+  const key = `${type}|${p.part}`;
+  let d = cache.get(key);
+  if (!d) { d = buildDef(p); cache.set(key, d); }
   return d;
+}
+
+export interface RealPackageInfo {
+  /** short package name for BOMs: 'DIP-8', 'TO-92', 'SOT-23', 'TO-220' */
+  pkg: string;
+  /** KiCad standard-library footprint id, or null when not verified */
+  kicad: string | null;
+  part: string;
+}
+
+/** Package name + KiCad footprint id of the real package `realPackageDef` returns. */
+export function realPackageInfo(type: string, partName?: unknown): RealPackageInfo | null {
+  const p = pinoutFor(type, partName);
+  if (!p) return null;
+  if (p.pkg === 'DIP') {
+    const ok = p.pins === 8 || p.pins === 14 || p.pins === 16 || p.pins === 18 || p.pins === 20 || p.pins === 24 || p.pins === 28;
+    return { pkg: `DIP-${p.pins}`, kicad: ok ? `Package_DIP:DIP-${p.pins}_W7.62mm` : null, part: p.part };
+  }
+  if (p.pkg === '7SEG-10') return { pkg: '7SEG-10', kicad: null, part: p.part };
+  return { pkg: p.pkg, kicad: KICAD_FOOTPRINT[p.pkg], part: p.part };
+}
+
+/**
+ * Datasheet pad number for each of a component's schematic terminals, or
+ * null when the type has no verified pinout. (Terminals that map to no pad
+ * are absent — e.g. the Level-1 MOSFET's bulk terminal.)
+ */
+export function padNumbersFor(type: string, partName?: unknown): Record<string, string> | null {
+  const def = realPackageDef(type, partName);
+  if (!def) return null;
+  const out: Record<string, string> = {};
+  for (const pad of def.pads) {
+    if (pad.number != null && !pad.terminalId.startsWith('pin')) out[pad.terminalId] = pad.number;
+  }
+  return out;
 }
 
 export { dipPos, DIP_PITCH, DIP_SPAN };

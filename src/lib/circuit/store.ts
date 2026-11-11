@@ -5,6 +5,7 @@
 
 'use client';
 
+import { partPreset } from './discrete-presets';
 import { create } from 'zustand';
 import type {
   CircuitComponent,
@@ -23,7 +24,7 @@ import type {
 } from './types';
 import { DEFAULT_PAGE_SETUP, DEFAULT_TITLE_BLOCK } from './types';
 import { getPlugin } from './registry';
-import { simulateStep, getTerminalsForComponent } from './engine';
+import { pluginsFor, subStepsForFrame, runFrameSubSteps, describeSimFailure, scopeSampleValue, flattenForSim, type SimBackend } from './live-step';
 import { cleanupComponentState } from './memory';
 import { pathToWaypoints, simplifyPath } from './smart-wire-router';
 import { resolveEndpointGridPos } from './endpoint-position';
@@ -36,10 +37,12 @@ import { validatePhysics, type PhysicsViolation } from './physics-validator';
 import { runFullERC, applyERCExclusions } from './erc';
 import { snapshotSheet, flattenHierarchy } from './hierarchy';
 import { runAnalysis as runAnalysisEngine, type AnalysisConfig, type AnalysisResult } from './analysis';
+import { runBatchParallel, type ParallelOptions } from './parallel-batch';
 import { runBatch as runBatchEngine, type BatchConfig, type BatchResult } from './batch-runner';
 import { execMeas, type MeasCommand, type RealTrace as MeasRealTrace, type MeasResult } from './measurement';
 import { solveDCRobust as solveDCRobustEngine } from './convergence';
 import { DEFAULT_OPTIONS, type SimOptions, type ConvergenceReport } from './sim-options';
+import { runStressAnalysis, clampDerating, type StressReport } from './stress-check';
 import './components'; // register all built-in plugins
 
 // ===== ERC (Electrical Rule Check) =====
@@ -312,6 +315,9 @@ interface EditorState {
   setRunning: (running: boolean) => void;
   setSimError: (msg: string | null) => void;
   setSpeed: (s: number) => void;
+  /** Live-sim backend: 'auto' (worker for big circuits), 'main', or 'worker'. */
+  simBackend: SimBackend;
+  setSimBackend: (b: SimBackend) => void;
   setDt: (dt: number) => void;
   step: () => void;
   reset: () => void;
@@ -334,12 +340,22 @@ interface EditorState {
   runAnalysis: (config: AnalysisConfig) => AnalysisResult;
   /** run a batch sweep (.step / .mc / .worst) */
   runBatch: (config: BatchConfig) => BatchResult;
+  /** Parallel (worker-pool) batch run with progress + cancel; serial fallback without Workers. */
+  runBatchAsync: (config: BatchConfig, opts?: ParallelOptions) => Promise<BatchResult>;
   /** run a .meas post-process on a trace */
   runMeasurement: (cmd: MeasCommand, trace: MeasRealTrace) => MeasResult;
   /** update sim options (reltol, gmin, method, temp, etc.) */
   setSimOptions: (patch: Partial<SimOptions>) => void;
   /** robust DC operating point using convergence aids */
   solveDCRobust: () => { sim: SimContext | null; report: ConvergenceReport };
+  /** last component-stress report (datasheet abs-max check) — null until run */
+  stressReport: StressReport | null;
+  /**
+   * Simulate (DC, plus transient to simOptions.tstop when `tran`) on private
+   * copies and compare each part's stress with its datasheet absolute maxima.
+   * Failing parts get canvas markers (type 'component_overstress' in ercErrors).
+   */
+  runStressCheck: (opts?: { mode?: 'dc' | 'tran'; derating?: number }) => StressReport;
   /** named simulation profiles (analysis config + sim options + probes) */
   simProfiles: { id: string; name: string; analysis: AnalysisConfig; simOptions: SimOptions; probes: string[] }[];
   /** save the current analysis setup as a named profile */
@@ -706,9 +722,13 @@ export const useEditor = create<EditorState>((set, get) => ({
       }
     }
     set((s) => ({
-      components: s.components.map((c) =>
-        c.id === id ? { ...c, parameters: { ...c.parameters, [key]: value } } : c,
-      ),
+      components: s.components.map((c) => {
+        if (c.id !== id) return c;
+        // Picking a discrete part loads its datasheet electrical parameters
+        // (the user can still tweak them afterwards).
+        const preset = key === 'part' ? partPreset(c.type, value) : undefined;
+        return { ...c, parameters: { ...c.parameters, ...(preset ?? {}), [key]: value } };
+      }),
     }));
   },
 
@@ -1855,6 +1875,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
   setSimError: (msg: string | null) => set({ simError: msg }),
   setSpeed: (speed) => set({ speed }),
+  simBackend: 'auto',
+  setSimBackend: (b) => set({ simBackend: b }),
   setDt: (dt) => set({ dt }),
   setEmbedMode: (on) => set({ embedMode: on }),
 
@@ -1884,33 +1906,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     // simulating. We do this on every step so sub-sheet edits are picked up
     // immediately. The flattened components have prefixed IDs (e.g. "amp.R1")
     // so they don't collide with the active sheet's IDs.
-    let simComponents = s.components;
-    let simWires = s.wires;
-    let usingHierarchy = false;
-    if (s.activeSheet || s.sheets.length > 0) {
-      usingHierarchy = true;
-      // Save the current sheet back into childSheets so flattenHierarchy sees it
-      let childSheets = s.childSheets;
-      if (s.activeSheet) {
-        childSheets = {
-          ...childSheets,
-          [s.activeSheet]: snapshotSheet(s.components, s.wires, s.sheets),
-        };
-      }
-      // Build root document from either the active root state or the saved __root__
-      const rootDoc = s.activeSheet
-        ? (childSheets as any).__root__ ?? { version: 1 as const, components: [], wires: [], sheets: [] }
-        : { version: 1 as const, components: s.components, wires: s.wires, sheets: s.sheets };
-      const flat = flattenHierarchy(rootDoc as any, childSheets as any);
-      simComponents = flat.components;
-      simWires = flat.wires;
-    }
-
-    const plugins = new Map<string, any>();
-    for (const c of simComponents) {
-      const p = getPlugin(c.type);
-      if (p) plugins.set(c.type, p);
-    }
+    const { components: simComponents, wires: simWires, usingHierarchy } = flattenForSim(s);
+    const plugins = pluginsFor(simComponents);
     // Keep a persistent state map across steps so capacitors/inductors/555 remember their state
     const persistentState = s.simContext?.state ?? {};
     const prev = s.simContext
@@ -1925,24 +1922,17 @@ export const useEditor = create<EditorState>((set, get) => ({
     // For speed >= 1: run floor(speed) sub-steps per frame (e.g., 4x = 4 steps)
     // For speed < 1: run 1 step every Nth frame, where N = ceil(1/speed)
     //   This is tracked via simStepCounter in the store state
-    const speed = s.speed;
     // Guard: speed <= 0 (reachable via the AI chat's unvalidated setSpeed)
-    // would freeze the sim forever — 1/0 = Infinity and the modulo check
-    // below never passes.
-    if (!(speed > 0)) return;
+    // would freeze the sim forever, so it is rejected (-1).
     let subSteps: number;
-    if (speed >= 1) {
-      subSteps = Math.max(1, Math.floor(speed));
+    if (s.speed >= 1 || !(s.speed > 0)) {
+      subSteps = subStepsForFrame(s.speed, 0);
     } else {
-      // Sub-real-time: skip steps to slow down the simulation
-      const skipInterval = Math.ceil(1 / speed); // e.g., 0.5x → skip every 2nd frame
       const stepCount = (s as any).__stepCount ?? 0;
       (s as any).__stepCount = stepCount + 1;
-      if (stepCount % skipInterval !== 0) {
-        return; // skip this frame to slow down
-      }
-      subSteps = 1;
+      subSteps = subStepsForFrame(s.speed, stepCount);
     }
+    if (subSteps <= 0) return; // invalid speed, or skipped frame (sub-real-time)
     const dt = s.dt;
     // Build simOptions from the editor's settings (temperature, .IC, .NODESET,
     // integration method, UIC flag). Previously temp/uic were dropped here so
@@ -1953,82 +1943,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       method: s.simOptions?.method ?? 'gear',
       temp: s.simOptions?.temp ?? 27,
     };
-    let result: { sim: SimContext; branchCurrentSize: number; nodeMap: any } | null = null;
-    for (let i = 0; i < subSteps; i++) {
-      result = simulateStep(simComponents, simWires, plugins, prev, dt, { ...simOpts, recordTerminalCurrents: i === subSteps - 1 });
-      if (!result) break;
-      prev.nodeVoltage = result.sim.nodeVoltage;
-      prev.branchCurrent = result.sim.branchCurrent;
-      prev.time = result.sim.time;
-      prev.state = result.sim.state;
-
-      // Digital fast-forward: advance sim.time toward the next clock edge.
-      // Handles two types of clock sources:
-      //   1. pulseSource (crystal) — when no capacitors/inductors present
-      //   2. timer555 in astable mode — computes output from sim.time + R/C params
-      // Without fast-forward, a 1Hz clock would take ~10000 steps per cycle.
-      const hasCapacitor = simComponents.some(c => c.type === 'capacitor' || c.type === 'inductor');
-      const hasPulseSource = simComponents.some(c => c.type === 'pulseSource');
-      const hasArduino = simComponents.some(c => c.type === 'arduinoReal' || c.type === 'arduino');
-      const hasAstable555 = simComponents.some(c =>
-        c.type === 'timer555' && (c.parameters.astable as boolean) === true);
-
-      // Compute the minimum clock frequency across all digital clock sources
-      let minFreq = Infinity;
-
-      // Pulse sources
-      if (hasPulseSource && !hasCapacitor && !hasArduino) {
-        for (const c of simComponents) {
-          if (c.type === 'pulseSource') {
-            const f = c.parameters.frequency as number;
-            if (f > 0 && f < minFreq) minFreq = f;
-          }
-        }
-      }
-
-      // Astable 555 timers: frequency = 1 / (0.693 * (R1 + 2*R2) * C)
-      if (hasAstable555) {
-        for (const c of simComponents) {
-          if (c.type === 'timer555' && (c.parameters.astable as boolean) === true) {
-            const r1 = (c.parameters.r1 as number) || 47000;
-            const r2 = (c.parameters.r2 as number) || 47000;
-            const cap = (c.parameters.c as number) || 1e-5;
-            const period = 0.693 * (r1 + 2 * r2) * cap;
-            const f = 1 / period;
-            if (f > 0 && f < minFreq) minFreq = f;
-          }
-        }
-      }
-
-      if (minFreq !== Infinity && minFreq > 0) {
-        const currentTime = result.sim.time;
-        const phase = (currentTime * minFreq) % 1;
-        const timeToRisingEdge = (1.0 - phase) / minFreq;
-        const advance = Math.min(0.016, timeToRisingEdge + 0.001);
-        if (advance > dt) {
-          const newTime = currentTime + advance;
-          prev.time = newTime;
-          result.sim.time = newTime;
-        }
-      }
-    }
+    const result = runFrameSubSteps(simComponents, simWires, plugins, prev, dt, simOpts, subSteps);
     if (!result) {
-      // Solver failed — name the actual culprit (ERC topology rules) instead
-      // of listing every possible cause
-      const hasGround = simComponents.some(c => c.type === 'ground' || c.type === 'powerGND');
-      const topo = runFullERC(simComponents, simWires).errors;
-      const loop = topo.find((e) => e.type === 'voltage_source_loop');
-      const floating = topo.find((e) => e.type === 'no_dc_path');
-      let errorMsg: string;
-      if (!hasGround) {
-        errorMsg = 'Simulation failed: No ground reference found. Add a Ground component to your circuit.';
-      } else if (loop) {
-        errorMsg = `Simulation failed: ${loop.message}.`;
-      } else if (floating) {
-        errorMsg = `Simulation failed: ${floating.message}.`;
-      } else {
-        errorMsg = 'Simulation failed: Singular matrix. Check for: (1) floating nodes with no DC path to ground, (2) voltage source loops with no series resistance, (3) capacitor-only branches with no DC path. Try adding a 1MΩ resistor from the floating node to ground.';
-      }
+      // Solver failed — name the actual culprit (ERC topology rules)
+      const errorMsg = describeSimFailure(simComponents, simWires);
       set({ running: false, paused: true, simError: errorMsg });
       return;
     }
@@ -2040,9 +1958,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (comp.type !== 'oscilloscope') continue;
       const plugin = plugins.get('oscilloscope');
       if (!plugin) continue;
-      const terminals = getTerminalsForComponent(comp, plugin, result.nodeMap);
-      const measurements = plugin.measure(comp.parameters, terminals, result.sim, comp);
-      const v = parseFloat(measurements[0]?.value ?? '0');
+      const v = scopeSampleValue(comp, plugin, result.nodeMap, result.sim);
       // .PRINT directive: if printNodes is set, log matching node voltages to console
       if (s.simOptions.printNodes && s.simOptions.printNodes.length > 0) {
         for (const termKey of s.simOptions.printNodes) {
@@ -2123,6 +2039,63 @@ export const useEditor = create<EditorState>((set, get) => ({
   // ── Advanced analysis ──────────────────────────────────────────────────────
   lastAnalysisResult: null,
   simOptions: { ...DEFAULT_OPTIONS },
+  stressReport: null,
+
+  runStressCheck: (opts) => {
+    const s = get();
+    // same flattening the ERC uses, so hierarchical sheets are stress-checked too
+    let comps = s.components;
+    let wires = s.wires;
+    if (s.activeSheet || s.sheets.length > 0) {
+      let childSheets = s.childSheets;
+      if (s.activeSheet) {
+        childSheets = { ...childSheets, [s.activeSheet]: snapshotSheet(s.components, s.wires, s.sheets) };
+      }
+      const rootDoc = s.activeSheet
+        ? (childSheets as any).__root__ ?? { version: 1 as const, components: [], wires: [], sheets: [] }
+        : { version: 1 as const, components: s.components, wires: s.wires, sheets: s.sheets };
+      const flat = flattenHierarchy(rootDoc as any, childSheets as any);
+      comps = flat.components;
+      wires = flat.wires;
+    }
+    const plugins = new Map<string, any>();
+    for (const c of comps) {
+      const p = getPlugin(c.type);
+      if (p) plugins.set(c.type, p);
+    }
+    const o = s.simOptions;
+    const report = runStressAnalysis(comps, wires, plugins, {
+      mode: opts?.mode ?? (o.tstop > 0 ? 'tran' : 'dc'),
+      derating: clampDerating(opts?.derating ?? o.stressDerating),
+      tStop: o.tstop, tStep: o.tstep, method: o.method, temp: o.temp,
+    });
+    // canvas markers: one per failing / warning part, reusing the ERC marker layer
+    const byId = new Map(s.components.map((c) => [c.id, c]));
+    const markers: ERCError[] = [];
+    const seen = new Set<string>();
+    for (const r of report.rows) {
+      if (r.status === 'ok' || seen.has(r.componentId)) continue;
+      const comp = byId.get(r.componentId);
+      const plugin = comp && getPlugin(comp.type);
+      if (!comp || !plugin) continue;
+      seen.add(r.componentId);
+      const bb = plugin.boundingBox;
+      markers.push({
+        type: 'component_overstress',
+        severity: r.status === 'fail' ? 'error' : 'warning',
+        message: `${r.ref}: ${r.metric} ${r.value.toPrecision(3)} ${r.unit} ${r.status === 'fail' ? 'exceeds' : 'is above the derated limit of'} ${(r.status === 'fail' ? r.rating : r.deratedLimit).toPrecision(3)} ${r.unit} (${(r.ratio * 100).toFixed(0)}% of abs max)`,
+        componentId: comp.id,
+        terminalId: '',
+        position: { x: comp.position.x + bb.width / 2, y: comp.position.y + bb.height / 2 },
+        exclusionKey: `overstress:${comp.id}`,
+      });
+    }
+    set((st) => ({
+      stressReport: report,
+      ercErrors: [...st.ercErrors.filter((e) => e.type !== 'component_overstress'), ...markers],
+    }));
+    return report;
+  },
 
   runAnalysis: (config) => {
     const s = get();
@@ -2144,6 +2117,11 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (p) plugins.set(c.type, p);
     }
     return runBatchEngine(s.components, s.wires, plugins, config, s.simOptions);
+  },
+
+  runBatchAsync: (config, opts) => {
+    const s = get();
+    return runBatchParallel(s.components, s.wires, pluginsFor(s.components), config, s.simOptions, opts);
   },
 
   runMeasurement: (cmd, trace) => {

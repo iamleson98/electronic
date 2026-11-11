@@ -95,6 +95,10 @@ export interface AutoRouteOptions {
   keepouts: RouterKeepout[];
   /** rip-up/reroute passes (1 = single pass, no rip-up escalation) */
   maxPasses: number;
+  /** allow a via inside a same-net SMD pad (default false: via-in-pad needs
+   *  filled/capped vias, which a quick-prototype fab does not do). Vias are
+   *  never placed in/near through-hole pads or foreign pads. */
+  allowViaInPad?: boolean;
 }
 
 export const DEFAULT_AUTOROUTE_OPTIONS: AutoRouteOptions = {
@@ -126,6 +130,8 @@ const OPEN_SPACE_BIAS_CAP = 6;
  *  failed legs mark their corridor so other nets route around the jam,
  *  leaving it clear for the retry on a later pass. */
 const HIST_INCREMENT_MM = 1.5;
+/** min drilled-hole web (matches the DRC hole_to_hole rule) */
+const VIA_HOLE_TO_HOLE_MIN = 0.25;
 const HIST_MAX_MM = 12;
 
 export interface AutoRouteResult {
@@ -543,6 +549,9 @@ class Router {
   private netNames: string[] = [];
   private netNameToIdx = new Map<string, number>();
   private maxViaR = 0;
+  /** every pad's copper + drill: via sites must keep clear of ALL of them */
+  private padSites: { item: CopperItem; net: number; tht: boolean; x: number; y: number; drill: number }[] = [];
+  private holeSites: { x: number; y: number; drill: number }[] = [];
 
   // A* scratch (allocated once)
   private readonly gScore: Float32Array;
@@ -700,11 +709,13 @@ class Router {
           ? circleItem(net, pad.position.x, pad.position.y, Math.max(pad.size.width, pad.size.height) / 2)
           : rectItem(net, pad.position.x, pad.position.y, pad.size.width / 2, pad.size.height / 2);
         this.insertItem(item, padLayers);
+        this.padSites.push({ item, net, tht: isTht, x: pad.position.x, y: pad.position.y, drill: pad.drill ?? 0 });
       }
     }
 
     // vias
     for (const via of existingVias) {
+      this.holeSites.push({ x: via.position.x, y: via.position.y, drill: via.drill });
       const net = via.net ? this.netIndex(via.net) : NET_HARD;
       this.insertItem(circleItem(net, via.position.x, via.position.y, via.diameter / 2), allLayers);
     }
@@ -844,11 +855,37 @@ class Router {
     return this.layerIndexes[layer].pointClear(px, py, net, need, this.items);
   }
 
+  /**
+   * May a via (copper radius viaR, drill viaDrill) go at (x,y)? Never inside
+   * or within clearance of a pad's copper — through-hole pins especially (a
+   * via dropped in a DIP pin's hole is a manufacturing defect) — except a
+   * same-net SMD pad when via-in-pad is explicitly allowed. Also keeps the
+   * hole-to-hole web >= fab minimum to every pad hole / existing via hole.
+   */
+  private viaSiteOk(x: number, y: number, net: number, viaR: number, viaDrill: number): boolean {
+    const clr = this.clearanceOf(net);
+    for (const p of this.padSites) {
+      if (Math.abs(p.x - x) > 12 || Math.abs(p.y - y) > 12) continue;
+      // Foreign pads: full clearance. Same-net pads: copper must not overlap
+      // the pad (via-in-pad) but needs no clearance to its own net.
+      if (distPointItem(x, y, p.item) < viaR + (p.net === net ? 0.02 : clr) - 1e-9) {
+        if (this.options.allowViaInPad && !p.tht && p.net === net) continue;
+        return false;
+      }
+      if (p.drill > 0 && Math.hypot(p.x - x, p.y - y) - p.drill / 2 - viaDrill / 2 < VIA_HOLE_TO_HOLE_MIN) return false;
+    }
+    for (const h of this.holeSites) {
+      if (Math.hypot(h.x - x, h.y - y) - h.drill / 2 - viaDrill / 2 < VIA_HOLE_TO_HOLE_MIN) return false;
+    }
+    return true;
+  }
+
   private astar(leg: RouteLeg, viaCostMm: number, slack: number): Int32Array | null {
     const { cols, rows, layerCount } = this;
     const net = leg.net;
     const halfW = this.widthOf(net) / 2;
     const viaR = this.netViaDia[net] / 2;
+    const viaDrillA = this.netViaDrill[net];
 
     const srcCol = Math.min(cols - 1, Math.max(0, Math.round(leg.fromPt.x / this.grid)));
     const srcRow = Math.min(rows - 1, Math.max(0, Math.round(leg.fromPt.y / this.grid)));
@@ -969,6 +1006,7 @@ class Router {
           if (this.closedGen[nIdx] === gen) continue;
           if (!this.cellClear(curCol, curRow, curLayer, net, viaR, slack)) continue;
           if (!this.cellClear(curCol, curRow, l, net, viaR, slack)) continue;
+          if (!this.viaSiteOk(curCol * this.grid, curRow * this.grid, net, viaR, viaDrillA)) continue;
           const tentative = this.gScore[cur] + viaCostMm;
           if (this.gGen[nIdx] !== gen || tentative < this.gScore[nIdx]) {
             this.gGen[nIdx] = gen;
@@ -1197,6 +1235,15 @@ class Router {
       }
     }
     for (const v of vias) {
+      if (!this.viaSiteOk(v.position.x, v.position.y, net, v.diameter / 2, v.drill)) return null;
+      for (const c of this.committed) {
+        for (const o of c.vias) {
+          if (Math.hypot(o.position.x - v.position.x, o.position.y - v.position.y) - o.drill / 2 - v.drill / 2 < VIA_HOLE_TO_HOLE_MIN) return null;
+        }
+      }
+      for (const l of vias) {
+        if (l !== v && Math.hypot(l.position.x - v.position.x, l.position.y - v.position.y) - l.drill / 2 - v.drill / 2 < VIA_HOLE_TO_HOLE_MIN) return null;
+      }
       for (let l = 0; l < this.layerCount; l++) {
         if (!this.layerIndexes[l].pointClear(v.position.x, v.position.y, net, clearance + v.diameter / 2 + 1e-6, this.items)) {
           return null;

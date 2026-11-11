@@ -86,7 +86,8 @@ describe('placement keeps the schematic arrangement', () => {
     expect(r.stats.failed).toBe(0);
     // real CD4026 / 5161AS pinouts scramble the segment order between chip and
     // display, so traces must cross (the old invented pinouts needed fewer)
-    expect(r.stats.vias).toBeLessThanOrEqual(90);
+    // (+ headroom for the real 2.54 mm power-input header that replaced the 5×10 mm source symbol)
+    expect(r.stats.vias).toBeLessThanOrEqual(105);
   });
 });
 
@@ -97,7 +98,11 @@ describe('every physical part keeps all its pins on the board', () => {
       if (isSchematicOnlyType(p.type)) continue;
       const def = getFootprintDef(p.type);
       const pads = new Set(def.pads.map((x) => x.terminalId));
-      const missing = p.terminals.map((t) => t.id).filter((id) => !pads.has(id));
+      // Level-1 MOSFETs have a bulk terminal; the real 3-pin discrete parts (TO-92 /
+      // SOT-23 / TO-220, per-part pinouts) tie the body to the source inside the package,
+      // so 'b' has no pad by design.
+      const internal = p.type === 'mosLevel1N' || p.type === 'mosLevel1P' ? new Set(['b']) : new Set<string>();
+      const missing = p.terminals.map((t) => t.id).filter((id) => !pads.has(id) && !internal.has(id));
       // a real package may have pins the model lacks — each must say what to do with it
       const extra = def.pads.filter((x) => !p.terminals.some((t) => t.id === x.terminalId) && !x.note).map((x) => x.terminalId);
       if (missing.length || extra.length) bad.push(`${p.type}: missing [${missing}] unexplained extra [${extra}]`);

@@ -79,6 +79,11 @@ export interface ACAnalysisConfig {
   outputNode?: string;
   /** output reference node (default = ground) */
   outputRef?: string;
+  /**
+   * Additional probe nodes ("componentId:terminalId" keys) solved in the same sweep —
+   * one extra ComplexTrace named `V(<key>)` each. Avoids re-running the whole sweep per node.
+   */
+  extraOutputs?: string[];
 }
 
 /**
@@ -117,9 +122,14 @@ function buildACSystemAtFrequency(
   const maxExtras = components.length * 4 + 8;
   const sys = createComplexMnaSystem(numNodes - 1, maxExtras);
 
-  // 1. Stamp gmin to all nodes (conductance to ground)
+  // 1. Stamp a tiny shunt to ground on every node (singularity guard only). ngspice's AC
+  // analysis does not shunt nodes at 1e-12 S; with a 1e-12 S shunt a crystal's series-LC
+  // node (net admittance ~1e-9 S at resonance) already shifts the dip depth by ~1 %
+  // and the loaded Q by ~5 %. 1e-15 S is below any physical conductance in a design
+  // and still keeps the complex LU regular.
+  const nodeShunt = Math.min(gmin, 1e-15);
   for (let n = 1; n < numNodes; n++) {
-    cStampConductance(sys, n, 0, { re: gmin, im: 0 });
+    cStampConductance(sys, n, 0, { re: nodeShunt, im: 0 });
   }
 
   // 2. Stamp each component's small-signal admittance
@@ -396,6 +406,8 @@ export function runAC(
   const traces: ComplexTrace[] = [];
   const outputXValues = new Float64Array(freqs.length);
   const outputYValues = new Float64Array(2 * freqs.length);
+  const extraNodes = (config.extraOutputs ?? []).map((key) => ({ key, node: probeNodeMap.terminalNode.get(key) ?? 0 }));
+  const extraY = extraNodes.map(() => new Float64Array(2 * freqs.length));
 
   for (let i = 0; i < freqs.length; i++) {
     const f = freqs[i];
@@ -413,6 +425,11 @@ export function runAC(
     const vDiff = { re: vOut.re - vRef.re, im: vOut.im - vRef.im };
     outputYValues[2 * i] = vDiff.re;
     outputYValues[2 * i + 1] = vDiff.im;
+    extraNodes.forEach((en, k) => {
+      const z = en.node > 0 ? x[en.node - 1] : { re: 0, im: 0 };
+      extraY[k][2 * i] = z.re - vRef.re;
+      extraY[k][2 * i + 1] = z.im - vRef.im;
+    });
   }
 
   traces.push({
@@ -421,6 +438,9 @@ export function runAC(
     yValues: outputYValues,
     xLabel: 'Frequency (Hz)',
     yLabel: 'Voltage (V)',
+  });
+  extraNodes.forEach((en, k) => {
+    traces.push({ name: `V(${en.key})`, xValues: outputXValues, yValues: extraY[k], xLabel: 'Frequency (Hz)', yLabel: 'Voltage (V)' });
   });
 
   return {

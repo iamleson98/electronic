@@ -104,7 +104,7 @@ export const deratingCheckTool: Tool = {
           push(label, comp.type, `power@${tAmb}°C`, p, pRated, 'W', pLim, partRating != null ? 'part' : 'generic');
         } else if (comp.type === 'capacitor') {
           const v = Math.abs(vOf('a') - vOf('b'));
-          const partRating = comp.parameters.voltageRating as number | undefined;
+          const partRating = (comp.parameters.ratedVoltage ?? comp.parameters.voltageRating) as number | undefined;
           const vRated = (partRating ?? GENERIC_RATINGS.capacitorVoltage) * mlccTempFactor;
           push(label, comp.type, `voltage@${tAmb}°C`, v, vRated, 'V', vLim, partRating != null ? 'part' : 'generic');
         } else if (comp.type === 'led') {

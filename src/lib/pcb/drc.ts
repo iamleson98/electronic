@@ -47,6 +47,8 @@ export interface DRCConfig {
   minSilkClearance: number;
   /** maximum differential-pair length skew in mm (default 0.5) */
   maxDiffSkew?: number;
+  /** copper-to-board-edge clearance in mm (default 0.3) */
+  edgeClearance?: number;
 }
 
 /** Minimum substrate web between two drilled holes (KiCad hole_to_hole
@@ -246,7 +248,7 @@ export function runDRC(
         };
         errors.push({
           type: minDist < 0 ? 'short' : 'clearance',
-          severity: minDist < 0 ? 'error' : 'warning',
+          severity: 'error',
           message: minDist < 0
             ? `Short circuit between nets "${a.net}" and "${b.net}"`
             : `Clearance violation: ${minDist.toFixed(3)}mm < ${requiredClearance.toFixed(3)}mm`,
@@ -282,7 +284,7 @@ export function runDRC(
       if (minDist < padClearance) {
         errors.push({
           type: minDist < 0 ? 'short' : 'clearance',
-          severity: minDist < 0 ? 'error' : 'warning',
+          severity: 'error',
           message: minDist < 0
             ? `Short: trace "${seg.net}" overlaps pad "${pad.id}"`
             : `Clearance: trace "${seg.net}" too close to pad "${pad.id}"`,
@@ -310,7 +312,7 @@ export function runDRC(
       if (minDist < requiredClearance) {
         errors.push({
           type: minDist < 0 ? 'short' : 'clearance',
-          severity: minDist < 0 ? 'error' : 'warning',
+          severity: 'error',
           message: minDist < 0
             ? `Short: via "${via.net}" overlaps trace "${seg.net}"`
             : `Clearance: via "${via.net}" too close to trace "${seg.net}"`,
@@ -341,7 +343,7 @@ export function runDRC(
       if (minDist < requiredClearance) {
         errors.push({
           type: minDist < 0 ? 'short' : 'clearance',
-          severity: minDist < 0 ? 'error' : 'warning',
+          severity: 'error',
           message: minDist < 0
             ? `Short: via "${via.net}" overlaps pad "${pad.id}"`
             : `Clearance: via "${via.net}" too close to pad "${pad.id}"`,
@@ -365,7 +367,7 @@ export function runDRC(
       if (minDist < requiredClearance) {
         errors.push({
           type: minDist < 0 ? 'short' : 'clearance',
-          severity: minDist < 0 ? 'error' : 'warning',
+          severity: 'error',
           message: minDist < 0
             ? `Short: vias "${a.net}" and "${b.net}" overlap`
             : `Clearance: vias "${a.net}" and "${b.net}" too close`,
@@ -403,7 +405,7 @@ export function runDRC(
       if (minDist < requiredClearance) {
         errors.push({
           type: minDist < 0 ? 'short' : 'clearance',
-          severity: minDist < 0 ? 'error' : 'warning',
+          severity: 'error',
           message: minDist < 0
             ? `Short: pads "${a.id}" and "${b.id}" overlap`
             : `Clearance: pads "${a.id}" and "${b.id}" too close`,
@@ -418,18 +420,22 @@ export function runDRC(
   //    Previously ONLY trace endpoints were checked — a footprint dragged
   //    (or a board shrunk) past the edge kept its pads/vias outside the
   //    outline with a clean DRC (Task 6-b probe: 0 errors).
+  // Copper extents are tested, not centre lines: a 1.0mm trace centred 0.4mm
+  // from the edge has copper 0.1mm OUTSIDE the board.
+  const outsideTraces = new Set<string>();
   for (const seg of copperSegs) {
-    const points = [seg.start, seg.end];
-    for (const p of points) {
-      if (p.x < 0 || p.x > board.width || p.y < 0 || p.y > board.height) {
-        errors.push({
-          type: 'outside_board',
-          severity: 'error',
-          message: `Trace on net "${seg.net}" is outside board boundary`,
-          position: p,
-          layer: seg.layer,
-        });
-      }
+    const hw = seg.width / 2;
+    const x0 = Math.min(seg.start.x, seg.end.x) - hw, x1 = Math.max(seg.start.x, seg.end.x) + hw;
+    const y0 = Math.min(seg.start.y, seg.end.y) - hw, y1 = Math.max(seg.start.y, seg.end.y) + hw;
+    if (x0 < 0 || x1 > board.width || y0 < 0 || y1 > board.height) {
+      outsideTraces.add(seg.source);
+      errors.push({
+        type: 'outside_board',
+        severity: 'error',
+        message: `Trace on net "${seg.net}" is outside board boundary`,
+        position: { x: (seg.start.x + seg.end.x) / 2, y: (seg.start.y + seg.end.y) / 2 },
+        layer: seg.layer,
+      });
     }
   }
   for (const fp of footprints) {
@@ -478,21 +484,21 @@ export function runDRC(
   //     drilled holes must exceed ~0.25mm of substrate or the drill can
   //     crack the web between them (KiCad hole_to_hole parity).
   const HOLES: { x: number; y: number; r: number; label: string }[] = [];
-  for (const via of vias) HOLES.push({ x: via.position.x, y: via.position.y, r: via.drill / 2, label: `via "${via.net}"` });
+  for (const via of vias) HOLES.push({ x: via.position.x, y: via.position.y, r: via.drill / 2, label: `via "${via.net}" #${via.id}` });
   for (const fp of footprints) {
     for (const pad of fp.pads) {
-      if ((pad.drill ?? 0) > 0) HOLES.push({ x: pad.position.x, y: pad.position.y, r: pad.drill! / 2, label: `pad "${pad.id}"` });
+      if ((pad.drill ?? 0) > 0) HOLES.push({ x: pad.position.x, y: pad.position.y, r: pad.drill! / 2, label: `pad "${pad.id}" @${fp.id}` });
     }
   }
   for (let i = 0; i < HOLES.length; i++) {
     for (let j = i + 1; j < HOLES.length; j++) {
       const a = HOLES[i], b = HOLES[j];
-      if (a.label === b.label) continue;
+      if (a.label === b.label) continue; // the same hole
       const dist = Math.hypot(a.x - b.x, a.y - b.y) - a.r - b.r;
       if (dist < HOLE_TO_HOLE_MIN) {
         errors.push({
           type: 'hole_to_hole',
-          severity: 'warning',
+          severity: 'error',
           message: `Hole-to-hole ${dist.toFixed(3)}mm < ${HOLE_TO_HOLE_MIN}mm (${a.label} ↔ ${b.label})`,
           position: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
           layer: 'both',
@@ -506,7 +512,7 @@ export function runDRC(
     if (via.drill < config.minDrillSize) {
       errors.push({
         type: 'min_drill',
-        severity: 'warning',
+        severity: 'error',
         message: `Via drill ${via.drill.toFixed(3)}mm < minimum ${config.minDrillSize}mm`,
         position: via.position,
         layer: 'both',
@@ -517,7 +523,7 @@ export function runDRC(
     if (annularRing < config.minAnnularRing) {
       errors.push({
         type: 'annular_ring',
-        severity: 'warning',
+        severity: 'error',
         message: `Via annular ring ${annularRing.toFixed(3)}mm < minimum ${config.minAnnularRing}mm`,
         position: via.position,
         layer: 'both',
@@ -533,12 +539,13 @@ export function runDRC(
     for (const pad of fp.pads) {
       const drillDiameter = pad.drill && pad.drill > 0 ? pad.drill : 0;
       if (drillDiameter <= 0) continue;
+      if (pad.plated === false) continue; // NPTH mounting hole: no copper, no annular ring
       const padDiameter = Math.min(pad.size.width, pad.size.height);
       const ring = (padDiameter - drillDiameter) / 2;
       if (ring < config.minAnnularRing) {
         errors.push({
           type: 'annular_ring',
-          severity: 'warning',
+          severity: 'error',
           message: `Pad ${pad.id} annular ring ${ring.toFixed(3)}mm < minimum ${config.minAnnularRing}mm`,
           position: pad.position,
           layer: pad.layer,
@@ -573,17 +580,20 @@ export function runDRC(
     }
   }
 
-  // 9c. Soldermask sliver: adjacent SMD mask openings whose web is thinner
-  // than minSilkClearance will lift during reflow.
+  // 9c. Soldermask sliver: adjacent mask openings (pad + 0.05mm expansion)
+  // whose web is thinner than minSilkClearance lift during reflow. Uses the
+  // real pad geometry (rect/oval = rect, circle = circle), same-side only
+  // (THT openings exist on both sides).
   {
-    const openings: { x: number; y: number; r: number }[] = [];
+    const MASK_EXP = 0.05;
+    const openings: { x: number; y: number; w: number; h: number; circle: boolean; layer: CopperLayer; tht: boolean }[] = [];
     for (const fp of footprints) {
       for (const pad of fp.pads) {
         if ((pad.drill ?? 0) > 0) continue;
         openings.push({
-          x: pad.position.x,
-          y: pad.position.y,
-          r: Math.max(pad.size.width, pad.size.height) / 2 + 0.05,
+          x: pad.position.x, y: pad.position.y,
+          w: pad.size.width + 2 * MASK_EXP, h: pad.size.height + 2 * MASK_EXP,
+          circle: pad.shape === 'circle', layer: pad.layer, tht: false,
         });
       }
     }
@@ -591,7 +601,16 @@ export function runDRC(
       for (let j = i + 1; j < openings.length; j++) {
         const a = openings[i];
         const b = openings[j];
-        const web = Math.hypot(a.x - b.x, a.y - b.y) - a.r - b.r;
+        if (a.layer !== b.layer) continue;
+        let web: number;
+        if (a.circle && b.circle) {
+          web = Math.hypot(a.x - b.x, a.y - b.y) - Math.max(a.w, a.h) / 2 - Math.max(b.w, b.h) / 2;
+        } else if (a.circle || b.circle) {
+          const c = a.circle ? a : b, r = a.circle ? b : a;
+          web = pointToRectDistance({ x: c.x, y: c.y }, { x: r.x, y: r.y }, { width: r.w, height: r.h }) - Math.max(c.w, c.h) / 2;
+        } else {
+          web = rectToRectDistance({ x: a.x, y: a.y }, { width: a.w, height: a.h }, { x: b.x, y: b.y }, { width: b.w, height: b.h });
+        }
         if (web >= 0 && web < config.minSilkClearance) {
           errors.push({
             type: 'silk_over_pad',
@@ -616,7 +635,7 @@ export function runDRC(
       const midSeg = trace.segments[Math.floor(trace.segments.length / 2)];
       errors.push({
         type: 'min_width',
-        severity: 'warning',
+        severity: 'error',
         message: `Trace on net "${trace.net}" width ${trace.width.toFixed(3)}mm < minimum ${requiredWidth.toFixed(3)}mm${netToClass.has(trace.net) ? ` (NetClass: ${netToClass.get(trace.net)!.name})` : ''}`,
         position: midSeg ? { x: (midSeg.start.x + midSeg.end.x) / 2, y: (midSeg.start.y + midSeg.end.y) / 2 } : { x: 0, y: 0 },
         layer: trace.layer,
@@ -649,39 +668,58 @@ export function runDRC(
     }
   }
 
-  // 10c. Copper-to-board-edge clearance (IPC/KiCad: keep copper ~0.3mm
-  // inside the routed edge so milling does not expose it).
+  // 10c. Copper-to-board-edge clearance (IPC/KiCad: keep copper >= the edge
+  // clearance rule inside the routed edge so milling does not expose it).
+  // Uses the real copper extents: trace half-width and pad rect/circle size.
   {
-    const edgeClear = 0.3;
-    const nearEdge = (p: { x: number; y: number }) =>
-      p.x < edgeClear || p.y < edgeClear ||
-      p.x > board.width - edgeClear || p.y > board.height - edgeClear;
-    for (const trace of traces) {
-      for (const seg of trace.segments) {
-        if (nearEdge(seg.start) || nearEdge(seg.end)) {
-          errors.push({
-            type: 'outside_board',
-            severity: 'warning',
-            message: `Copper within ${edgeClear}mm of board edge on net "${trace.net}" (milling clearance)`,
-            position: { x: (seg.start.x + seg.end.x) / 2, y: (seg.start.y + seg.end.y) / 2 },
-            layer: trace.layer,
-          });
-          break;
-        }
+    const edgeClear = config.edgeClearance ?? 0.3;
+    const violates = (x0: number, y0: number, x1: number, y1: number) =>
+      x0 < edgeClear - 1e-9 || y0 < edgeClear - 1e-9 ||
+      x1 > board.width - edgeClear + 1e-9 || y1 > board.height - edgeClear + 1e-9;
+    const reported = new Set<string>();
+    for (const seg of copperSegs) {
+      if (outsideTraces.has(seg.source) || reported.has(seg.source)) continue;
+      const hw = seg.width / 2;
+      if (violates(Math.min(seg.start.x, seg.end.x) - hw, Math.min(seg.start.y, seg.end.y) - hw,
+        Math.max(seg.start.x, seg.end.x) + hw, Math.max(seg.start.y, seg.end.y) + hw)) {
+        reported.add(seg.source);
+        errors.push({
+          type: 'outside_board',
+          severity: 'error',
+          message: `Copper within ${edgeClear}mm of board edge on net "${seg.net}" (milling clearance)`,
+          position: { x: (seg.start.x + seg.end.x) / 2, y: (seg.start.y + seg.end.y) / 2 },
+          layer: seg.layer,
+        });
       }
     }
     for (const fp of footprints) {
       for (const pad of fp.pads) {
-        if (nearEdge(pad.position)) {
+        const hw = pad.size.width / 2, hh = pad.size.height / 2;
+        const out = pad.position.x - hw < 0 || pad.position.x + hw > board.width
+          || pad.position.y - hh < 0 || pad.position.y + hh > board.height;
+        if (out) continue; // already reported as outside_board above
+        if (violates(pad.position.x - hw, pad.position.y - hh, pad.position.x + hw, pad.position.y + hh)) {
           errors.push({
             type: 'outside_board',
-            severity: 'warning',
-            message: `Pad ${pad.id} of ${fp.refdes} within ${edgeClear}mm of board edge`,
+            severity: 'error',
+            message: `Pad ${pad.id} of ${fp.refdes} copper within ${edgeClear}mm of board edge`,
             position: pad.position,
             layer: pad.layer,
           });
           break;
         }
+      }
+    }
+    for (const via of vias) {
+      const r = via.diameter / 2;
+      const out = via.position.x - r < 0 || via.position.x + r > board.width
+        || via.position.y - r < 0 || via.position.y + r > board.height;
+      if (!out && violates(via.position.x - r, via.position.y - r, via.position.x + r, via.position.y + r)) {
+        errors.push({
+          type: 'outside_board', severity: 'error',
+          message: `Via on net "${via.net}" copper within ${edgeClear}mm of board edge`,
+          position: { ...via.position }, layer: 'both',
+        });
       }
     }
   }
@@ -719,29 +757,40 @@ export function runDRC(
     }
   }
 
-  // 11. Check courtyard overlap (components too close). Rotation-aware:
-  // 90/270° parts swap w/h (previously axis-aligned, false +/- on rotated).
-  const courtyardSize = (fp: { bodySize: { width: number; height: number }; rotation: number }) => {
+  // 11. Courtyard overlap (IPC-7351): courtyard = union bbox of the body AND
+  // every pad, plus the courtyard excess (minCourtyard/2 per side; 0.25mm at
+  // the 0.5mm default = the IPC nominal). Two courtyards must not overlap.
+  // (The old check used body bbox only: a DIP body is +/-3.175mm but its pads
+  // reach +/-4.61mm, so touching pads passed.) Rotation-aware: 90/270 swap w/h.
+  const courtyardRect = (fp: Footprint) => {
     const rot = ((fp.rotation % 360) + 360) % 360;
-    return rot === 90 || rot === 270
-      ? { w: fp.bodySize.height, h: fp.bodySize.width }
-      : { w: fp.bodySize.width, h: fp.bodySize.height };
+    const swap = rot === 90 || rot === 270;
+    const bw = swap ? fp.bodySize.height : fp.bodySize.width;
+    const bh = swap ? fp.bodySize.width : fp.bodySize.height;
+    let x0 = fp.position.x - bw / 2, x1 = fp.position.x + bw / 2;
+    let y0 = fp.position.y - bh / 2, y1 = fp.position.y + bh / 2;
+    for (const pad of fp.pads) {
+      x0 = Math.min(x0, pad.position.x - pad.size.width / 2);
+      x1 = Math.max(x1, pad.position.x + pad.size.width / 2);
+      y0 = Math.min(y0, pad.position.y - pad.size.height / 2);
+      y1 = Math.max(y1, pad.position.y + pad.size.height / 2);
+    }
+    const ex = config.minCourtyard / 2;
+    return { x0: x0 - ex, y0: y0 - ex, x1: x1 + ex, y1: y1 + ex };
   };
+  const courtyards = footprints.map(courtyardRect);
   for (let i = 0; i < footprints.length; i++) {
     for (let j = i + 1; j < footprints.length; j++) {
       const a = footprints[i];
       const b = footprints[j];
-      const dx = Math.abs(a.position.x - b.position.x);
-      const dy = Math.abs(a.position.y - b.position.y);
-      const sa = courtyardSize(a);
-      const sb = courtyardSize(b);
-      const minDx = (sa.w + sb.w) / 2 + config.minCourtyard;
-      const minDy = (sa.h + sb.h) / 2 + config.minCourtyard;
-      if (dx < minDx && dy < minDy) {
+      const ca = courtyards[i], cb = courtyards[j];
+      const ox = Math.min(ca.x1, cb.x1) - Math.max(ca.x0, cb.x0);
+      const oy = Math.min(ca.y1, cb.y1) - Math.max(ca.y0, cb.y0);
+      if (ox > 1e-9 && oy > 1e-9) {
         errors.push({
           type: 'courtyard',
           severity: 'warning',
-          message: `Courtyard overlap: ${a.refdes} and ${b.refdes} too close (${dx.toFixed(1)}×${dy.toFixed(1)}mm)`,
+          message: `Courtyard overlap: ${a.refdes} and ${b.refdes} too close (${ox.toFixed(2)}×${oy.toFixed(2)}mm overlap)`,
           position: { x: (a.position.x + b.position.x) / 2, y: (a.position.y + b.position.y) / 2 },
           layer: 'both',
         });
@@ -884,7 +933,7 @@ export function runDRC(
       if (annularRing < minRing) {
         errors.push({
           type: 'annular_ring',
-          severity: 'warning',
+          severity: 'error',
           message: `${via.type} via annular ring ${annularRing.toFixed(3)}mm < minimum ${minRing}mm for HDI vias`,
           position: via.position,
           layer: 'both',

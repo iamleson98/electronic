@@ -75,7 +75,7 @@ describe('X2 bundle parity', () => {
   it('ships paste + edge-cuts + drill map + job file like X1', () => {
     const files = exportAllGerbersX2([], [], [], { width: 50, height: 40 });
     const names = files.map((f) => f.filename);
-    for (const need of ['top_paste.gbr', 'bottom_paste.gbr', 'edge_cuts.gbr', 'drill_map.txt', 'job.gbrjob', 'top_copper.gbr', 'drill.drl', 'pick_and_place.csv']) {
+    for (const need of ['top_paste.gbr', 'bottom_paste.gbr', 'edge_cuts.gbr', 'drill_map.txt', 'job.gbrjob', 'top_copper.gbr', 'drill-PTH.drl', 'pick_and_place.csv']) {
       expect(names, need).toContain(need);
     }
   });

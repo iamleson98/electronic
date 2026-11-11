@@ -15,6 +15,8 @@ export function SimStatusBar() {
   const simContext = useEditor((s) => s.simContext);
   const components = useEditor((s) => s.components);
   const wires = useEditor((s) => s.wires);
+  const simBackend = useEditor((s) => s.simBackend);
+  const setSimBackend = useEditor((s) => s.setSimBackend);
   const [fps, setFps] = useState(0);
   // Read the persisted sound preference lazily (one read; the value only
   // changes through the toggle handler).
@@ -78,6 +80,15 @@ export function SimStatusBar() {
         t={simTime >= 1 ? `${simTime.toFixed(3)}s` : `${(simTime * 1000).toFixed(1)}ms`}
       </span>
       <span>{running ? `${speed}× speed` : 'paused'}</span>
+      <button
+        type="button"
+        data-testid="sim-backend-toggle"
+        className="rounded border border-slate-700 px-1.5 py-0.5 hover:text-slate-300"
+        title="Where the live simulation runs: auto = background thread for circuits over 150 parts, main = UI thread, worker = always background thread. Applies on next Play."
+        onClick={() => setSimBackend(simBackend === 'auto' ? 'worker' : simBackend === 'worker' ? 'main' : 'auto')}
+      >
+        sim: {simBackend}
+      </button>
       <span className={fps > 30 ? 'text-emerald-400' : fps > 15 ? 'text-amber-400' : 'text-rose-400'}>
         {fps} fps
       </span>

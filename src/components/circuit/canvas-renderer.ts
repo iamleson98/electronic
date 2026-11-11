@@ -1174,8 +1174,11 @@ export function renderScene(ctx: CanvasRenderingContext2D, scene: RenderScene): 
   }
 
   // ---- ERC error markers (drawn last so they're on top of everything) ----
-  if (!running && ercErrors.length > 0) {
-    drawERCMarkers(ercErrors, ctx, gridToScreen, view.hoveredERC);
+  // Stress-check markers (overstressed parts) stay visible while the sim runs —
+  // they describe the simulated result, not the netlist topology.
+  const ercToDraw = running ? ercErrors.filter((e) => e.type === 'component_overstress') : ercErrors;
+  if (ercToDraw.length > 0) {
+    drawERCMarkers(ercToDraw, ctx, gridToScreen, view.hoveredERC);
   }
 
   // ---- DC bias annotations (node voltages at each terminal) ----

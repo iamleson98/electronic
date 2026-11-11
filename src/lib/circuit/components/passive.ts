@@ -2,10 +2,34 @@
 // Capacitor and inductor use companion models (backward Euler, trapezoidal or
 // Gear/BDF-2 — the app default) for transient analysis.
 
+import { termNode } from '../terminal-lookup';
 import type { ComponentPlugin } from '../types';
 import { drawResistorZigzag, drawCapacitor, drawInductor, drawLabel } from './draw';
 import { registerPlugin } from '../registry';
 import { trapAlternates, TRAP_RING_ALT_THRESHOLD } from '../integration';
+
+/** Precomputed state-dictionary key strings per component (no per-stamp concat). */
+interface StateKeys { _i: string; _i2: string; _v2: string; _hp: string; _ring: string; _used: string; _alt: string; _vp: string; _vp2: string }
+function makeKeys(key: string): StateKeys {
+  return { _i: key + '_i', _i2: key + '_i2', _v2: key + '_v2', _hp: key + '_hp', _ring: key + '_ring',
+    _used: key + '_used', _alt: key + '_alt', _vp: key + '_vp', _vp2: key + '_vp2' };
+}
+const capKeyCache = new Map<string, StateKeys & { key: string }>();
+const indKeyCache = new Map<string, StateKeys & { key: string }>();
+function keysFor(cache: Map<string, StateKeys & { key: string }>, prefix: string, comp: { id: string } | undefined, a: number, b: number) {
+  const id = comp?.id;
+  const cacheKey = id ?? `${a}_${b}`;
+  let k = cache.get(cacheKey);
+  if (!k) {
+    if (cache.size > 200000) cache.clear();
+    const key = `${prefix}_${cacheKey}`;
+    k = { key, ...makeKeys(key) };
+    cache.set(cacheKey, k);
+  }
+  return k;
+}
+const capKeys = (comp: { id: string } | undefined, a: number, b: number) => keysFor(capKeyCache, 'cap', comp, a, b);
+const indKeys = (comp: { id: string } | undefined, a: number, b: number) => keysFor(indKeyCache, 'ind', comp, a, b);
 
 /**
  * Variable-step BDF-2 coefficients: x'_n ≈ (a0·x_n − a1·x_{n−1} + a2·x_{n−2})/h
@@ -22,6 +46,7 @@ function bdf2(h: number, hPrev: number | undefined): { a0: number; a1: number; a
 // ----- Resistor -----
 const resistor: ComponentPlugin = {
   type: 'resistor',
+  pureStamp: true,
   name: 'Resistor',
   category: 'passive',
   description: 'Linear resistor. V = I·R.',
@@ -33,6 +58,7 @@ const resistor: ComponentPlugin = {
   ],
   parameters: [
     { key: 'resistance', label: 'Resistance', type: 'number', default: 1000, unit: 'Ω', min: 0.001, max: 1e9, step: 1 },
+    { key: 'powerRating', label: 'Power Rating', type: 'number', default: 0.25, unit: 'W', min: 0.01, max: 1000, step: 0.05, description: 'Absolute-maximum dissipation for the stress check (1206 chip = 0.25 W, 1/8 W axial = 0.125 W, 1/4 W axial = 0.25 W).' },
   ],
   render(ctx, params, cellSize) {
     const len = 4 * cellSize;
@@ -50,8 +76,8 @@ const resistor: ComponentPlugin = {
   stamp(params, terminals, sys) {
     const r = Math.max(1e-9, params.resistance as number);
     const g = 1 / r;
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const b = termNode(terminals, 'b', 1);
     sys.stampConductance(a, b, g);
   },
   getFlowPath() {
@@ -62,8 +88,8 @@ const resistor: ComponentPlugin = {
     ];
   },
   measure(params, terminals, sim) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const b = termNode(terminals, 'b', 1);
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
     const r = params.resistance as number;
     const i = v / r;
@@ -148,6 +174,8 @@ export function capacitorChargeVisuals(v: number, i: number, time: number): Capa
 
 const capacitor: ComponentPlugin = {
   type: 'capacitor',
+  pureStamp: true,
+  pureStatePrefixes: ['cap_'],
   name: 'Capacitor',
   category: 'passive',
   description: 'Linear capacitor. Q = C·V. Uses companion model for transient analysis.',
@@ -160,6 +188,8 @@ const capacitor: ComponentPlugin = {
   parameters: [
     { key: 'capacitance', label: 'Capacitance', type: 'number', default: 1e-6, unit: 'F', min: 1e-15, max: 1, step: 1e-9 },
     { key: 'initialV', label: 'Initial Voltage', type: 'number', default: 0, unit: 'V', min: -1000, max: 1000, step: 0.1 },
+    { key: 'ratedVoltage', label: 'Rated Voltage', type: 'number', default: 50, unit: 'V', min: 1, max: 10000, step: 1, description: 'Absolute-maximum working voltage for the stress check.' },
+    { key: 'polarized', label: 'Polarized (electrolytic / tantalum)', type: 'boolean', default: false, description: 'Terminal A is +. Reverse bias above ~0.5 V fails the stress check.' },
   ],
   render(ctx, params, cellSize, sim, instance) {
     ctx.beginPath();
@@ -227,11 +257,11 @@ const capacitor: ComponentPlugin = {
   },
   stamp(params, terminals, sys, sim, comp) {
     const C = Math.max(1e-15, params.capacitance as number);
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const b = termNode(terminals, 'b', 1);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `cap_${comp?.id ?? `${a}_${b}`}`;
-    const vPrev = st[key] ?? (params.initialV as number);
+    const K = capKeys(comp, a, b);
+    const vPrev = st[K.key] ?? (params.initialV as number);
     const method = sim.method ?? 'euler';
     // companion models — see integration.ts for the derivations.
     // The Norton source injects I_eq INTO node a (positive plate), same
@@ -244,15 +274,15 @@ const capacitor: ComponentPlugin = {
     // never damps that error (it rings as (−1)^n and biases the waveform —
     // an RC step response came out LESS accurate than Euler). Take the first
     // step with backward Euler, as SPICE does at every start/breakpoint.
-    const trapReady = st[key + '_i'] !== undefined;
-    if (method === 'trap' && trapReady && !(st[key + '_ring'] > 0)) {
+    const trapReady = st[K._i] !== undefined;
+    if (method === 'trap' && trapReady && !(st[K._ring] > 0)) {
       // Trapezoidal (2nd order): i_n = (2C/dt)(v_n − v_{n−1}) − i_{n−1}
       //   → G = 2C/dt, I_eq = (2C/dt)·vPrev + iPrev
       // iPrev (the previous step's cap current) is stored under `_i` by step().
-      const iPrev = (st[key + '_i'] as number | undefined) ?? 0;
+      const iPrev = (st[K._i] as number | undefined) ?? 0;
       g = (2 * C) / dt;
       iEq = g * vPrev + iPrev;
-      st[key + '_used'] = 'trap';
+      st[K._used] = 'trap';
     } else if (method === 'trap') {
       // First step (no history yet), or the trapezoidal ringing guard: the
       // detector in step() counted a sustained
@@ -261,18 +291,18 @@ const capacitor: ComponentPlugin = {
       // counter is decremented once per step by step().
       g = C / dt;
       iEq = (C / dt) * vPrev;
-      st[key + '_used'] = 'euler';
+      st[K._used] = 'euler';
     } else if (method === 'gear') {
       // Gear/BDF-2: i_n = C(3v_n − 4v_{n−1} + v_{n−2})/(2dt)
       //   → G = 3C/(2dt), I_eq = C(4vPrev − vPrev2)/(2dt)
       // Needs two steps of history; the first step falls back to Euler
       // (standard SPICE practice — start at order 1, then ramp up).
-      const vPrev2 = st[key + '_v2'] as number | undefined;
+      const vPrev2 = st[K._v2] as number | undefined;
       if (vPrev2 === undefined) {
         g = C / dt;
         iEq = (C / dt) * vPrev;
       } else {
-        const k = bdf2(dt, st[key + '_hp'] as number | undefined);
+        const k = bdf2(dt, st[K._hp] as number | undefined);
         g = (k.a0 * C) / dt;
         iEq = (C / dt) * (k.a1 * vPrev - k.a2 * vPrev2);
       }
@@ -297,35 +327,35 @@ const capacitor: ComponentPlugin = {
   },
   step(params, terminals, sim, comp) {
     const C = Math.max(1e-15, params.capacitance as number);
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const b = termNode(terminals, 'b', 1);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `cap_${comp?.id ?? `${a}_${b}`}`;
+    const K = capKeys(comp, a, b);
     const method = sim.method ?? 'euler';
     const dt = Math.max(sim.dt, 1e-12);
-    const vPrev = st[key] ?? (params.initialV as number);
+    const vPrev = st[K.key] ?? (params.initialV as number);
     const vCurr = sim.nodeVoltage[a] - sim.nodeVoltage[b];
     // Compute the ACTUAL current that flowed during this step (BEFORE updating
     // vPrev). This is stored under `_i` and doubles as the trapezoidal
     // method's iPrev for the next step — the two quantities are identical.
-    const used = method === 'trap' ? (st[key + '_used'] as 'trap' | 'euler' | undefined) ?? 'trap' : method;
+    const used = method === 'trap' ? (st[K._used] as 'trap' | 'euler' | undefined) ?? 'trap' : method;
     let i: number;
     if (used === 'trap') {
-      const iPrev = (st[key + '_i'] as number | undefined) ?? 0;
+      const iPrev = (st[K._i] as number | undefined) ?? 0;
       i = ((2 * C) / dt) * (vCurr - vPrev) - iPrev;
       // ── Trapezoidal ringing guard ──────────────────────────────────────
       // Sustained sign alternation of the current differences = the (−1)^n
       // sampling mode. A smooth signal alternates at most once (at an
       // extremum), so TRAP_RING_ALT_THRESHOLD consecutive alternations are
       // unambiguous ringing. Trip → the next two stamps fall back to Euler.
-      const iPrev2 = st[key + '_i2'] as number | undefined;
+      const iPrev2 = st[K._i2] as number | undefined;
       if (iPrev2 !== undefined) {
-        const altKey = key + '_alt';
+        const altKey = K._alt;
         if (trapAlternates(i, iPrev, iPrev2, 1e-12, 1e-3)) {
           const alt = ((st[altKey] as number | undefined) ?? 0) + 1;
           st[altKey] = alt;
           if (alt >= TRAP_RING_ALT_THRESHOLD) {
-            st[key + '_ring'] = 2;                 // 2 Euler-fallback steps
+            st[K._ring] = 2;                 // 2 Euler-fallback steps
             st[altKey] = 0;
             st.__trapRingCount = ((st.__trapRingCount as number | undefined) ?? 0) + 1;
           }
@@ -337,8 +367,8 @@ const capacitor: ComponentPlugin = {
       // Euler fallback step (ringing guard) — plain companion current.
       i = (C / dt) * (vCurr - vPrev);
     } else if (used === 'gear') {
-      const vPrev2 = st[key + '_v2'] as number | undefined;
-      const k = bdf2(dt, st[key + '_hp'] as number | undefined);
+      const vPrev2 = st[K._v2] as number | undefined;
+      const k = bdf2(dt, st[K._hp] as number | undefined);
       i = vPrev2 === undefined
         ? (C / dt) * (vCurr - vPrev)
         : (C / dt) * (k.a0 * vCurr - k.a1 * vPrev + k.a2 * vPrev2);
@@ -346,26 +376,26 @@ const capacitor: ComponentPlugin = {
       i = (C / dt) * (vCurr - vPrev);
     }
     // shift history: _i2 keeps i_{n−1} (trap detector), _i keeps i_n.
-    st[key + '_i2'] = st[key + '_i'];
-    st[key + '_i'] = i;
+    st[K._i2] = st[K._i];
+    st[K._i] = i;
     // Gear needs the shifted voltage history (v_{n−2} = old v_{n−1}).
     if (method === 'gear') {
-      st[key + '_v2'] = vPrev;
-      st[key + '_hp'] = dt;
+      st[K._v2] = vPrev;
+      st[K._hp] = dt;
     }
     // consume one Euler-fallback step (stamp() only reads the counter — it is
     // re-stamped several times per step by the feedback iteration, so the
     // countdown must happen exactly once, here).
     if (method === 'trap') {
-      const ring = st[key + '_ring'] as number | undefined;
-      if (ring !== undefined && ring > 0) st[key + '_ring'] = ring - 1;
+      const ring = st[K._ring] as number | undefined;
+      if (ring !== undefined && ring > 0) st[K._ring] = ring - 1;
     }
     // Now update vPrev for the next step's stamp()
-    st[key] = vCurr;
+    st[K.key] = vCurr;
   },
   measure(params, terminals, sim) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const b = termNode(terminals, 'b', 1);
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
     return [{ label: 'V', value: v.toFixed(3), unit: 'V' }];
   },
@@ -383,6 +413,8 @@ function formatC(c: number): string {
 // ----- Inductor -----
 const inductor: ComponentPlugin = {
   type: 'inductor',
+  pureStamp: true,
+  pureStatePrefixes: ['ind_'],
   name: 'Inductor',
   category: 'passive',
   description: 'Linear inductor. V = L·dI/dt. Uses companion model for transient analysis.',
@@ -409,41 +441,41 @@ const inductor: ComponentPlugin = {
   },
   stamp(params, terminals, sys, sim, comp) {
     const L = Math.max(1e-12, params.inductance as number);
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const b = termNode(terminals, 'b', 1);
     const st = sim.state.__global ?? (sim.state.__global = {});
     // Use component ID for unique key — parallel inductors between the same
     // node pair must have independent state (different currents).
-    const key = `ind_${comp?.id ?? `${a}_${b}`}`;
-    const iPrev = st[key] ?? (params.initialI as number);
+    const K = indKeys(comp, a, b);
+    const iPrev = st[K.key] ?? (params.initialI as number);
     const method = sim.method ?? 'euler';
     const dt = Math.max(sim.dt, 1e-12);
     let g: number;
     let iEq: number;
     // Trapezoidal needs v_{n−1}; on a cold start take one backward-Euler
     // step first (see the capacitor).
-    const trapReady = st[key + '_vp'] !== undefined;
-    if (method === 'trap' && trapReady && !(st[key + '_ring'] > 0)) {
+    const trapReady = st[K._vp] !== undefined;
+    if (method === 'trap' && trapReady && !(st[K._ring] > 0)) {
       // Trapezoidal: i_n = i_{n−1} + (dt/2L)(v_n + v_{n−1})
       //   → Norton: G = dt/(2L), I_eq = iPrev + (dt/2L)·vPrev (source a→b)
-      const vPrev = (st[key + '_vp'] as number | undefined) ?? 0;
+      const vPrev = (st[K._vp] as number | undefined) ?? 0;
       g = dt / (2 * L);
       iEq = iPrev + g * vPrev;
-      st[key + '_used'] = 'trap';
+      st[K._used] = 'trap';
     } else if (method === 'trap') {
       // First step or ringing-guard fallback — backward Euler companion.
       g = dt / L;
       iEq = iPrev;
-      st[key + '_used'] = 'euler';
+      st[K._used] = 'euler';
     } else if (method === 'gear') {
       // Gear/BDF-2: i_n = (4i_{n−1} − i_{n−2})/3 + (2dt/3L)·v_n
       // First step (no i_{n−2} yet) falls back to Euler.
-      const iPrev2 = st[key + '_i2'] as number | undefined;
+      const iPrev2 = st[K._i2] as number | undefined;
       if (iPrev2 === undefined) {
         g = dt / L;
         iEq = iPrev;
       } else {
-        const k = bdf2(dt, st[key + '_hp'] as number | undefined);
+        const k = bdf2(dt, st[K._hp] as number | undefined);
         g = dt / (k.a0 * L);
         iEq = (k.a1 * iPrev - k.a2 * iPrev2) / k.a0;
       }
@@ -468,34 +500,34 @@ const inductor: ComponentPlugin = {
   },
   step(params, terminals, sim, comp) {
     const L = Math.max(1e-12, params.inductance as number);
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const b = termNode(terminals, 'b', 1);
     const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = `ind_${comp?.id ?? `${a}_${b}`}`;
+    const K = indKeys(comp, a, b);
     const method = sim.method ?? 'euler';
     const dt = Math.max(sim.dt, 1e-12);
-    const iPrev = st[key] ?? (params.initialI as number);
+    const iPrev = st[K.key] ?? (params.initialI as number);
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[b];
     // Integrate the inductor current with the selected method. The stored
     // `_i` (this step's current) doubles as the readout for current displays
     // and, for Gear, `_i2` keeps i_{n−2}; `_vp` keeps v_{n−1} for trapezoidal.
-    const used = method === 'trap' ? (st[key + '_used'] as 'trap' | 'euler' | undefined) ?? 'trap' : method;
+    const used = method === 'trap' ? (st[K._used] as 'trap' | 'euler' | undefined) ?? 'trap' : method;
     let iCurr: number;
     if (used === 'trap') {
-      const vPrev = (st[key + '_vp'] as number | undefined) ?? 0;
+      const vPrev = (st[K._vp] as number | undefined) ?? 0;
       iCurr = iPrev + (dt / (2 * L)) * (v + vPrev);
       // ── Trapezoidal ringing guard (dual of the capacitor's) ──────────────
       // Ringing on an inductor appears in the VOLTAGE across it (the current
       // integrates smoothly). Watch the voltage history for sustained sign
       // alternation of consecutive differences.
-      const vPrev2 = st[key + '_vp2'] as number | undefined;
+      const vPrev2 = st[K._vp2] as number | undefined;
       if (vPrev2 !== undefined) {
-        const altKey = key + '_alt';
+        const altKey = K._alt;
         if (trapAlternates(v, vPrev, vPrev2, 1e-6, 1e-3)) {
           const alt = ((st[altKey] as number | undefined) ?? 0) + 1;
           st[altKey] = alt;
           if (alt >= TRAP_RING_ALT_THRESHOLD) {
-            st[key + '_ring'] = 2;               // 2 Euler-fallback steps
+            st[K._ring] = 2;               // 2 Euler-fallback steps
             st[altKey] = 0;
             st.__trapRingCount = ((st.__trapRingCount as number | undefined) ?? 0) + 1;
           }
@@ -504,8 +536,8 @@ const inductor: ComponentPlugin = {
         }
       }
     } else if (used === 'gear') {
-      const iPrev2 = st[key + '_i2'] as number | undefined;
-      const k = bdf2(dt, st[key + '_hp'] as number | undefined);
+      const iPrev2 = st[K._i2] as number | undefined;
+      const k = bdf2(dt, st[K._hp] as number | undefined);
       iCurr = iPrev2 === undefined
         ? iPrev + (v / L) * dt
         : (k.a1 * iPrev - k.a2 * iPrev2) / k.a0 + (dt / (k.a0 * L)) * v;
@@ -514,27 +546,27 @@ const inductor: ComponentPlugin = {
     }
     // Store the current BEFORE updating iPrev.
     // I = iCurr (the inductor's state variable IS its current)
-    st[key + '_i'] = iCurr;
+    st[K._i] = iCurr;
     if (method === 'gear') {
-      st[key + '_i2'] = iPrev;
-      st[key + '_hp'] = dt;
+      st[K._i2] = iPrev;
+      st[K._hp] = dt;
     }
     // shift voltage history for the trap detector: _vp2 keeps v_{n−1}.
     if (method === 'trap') {
-      st[key + '_vp2'] = st[key + '_vp'];
+      st[K._vp2] = st[K._vp];
     }
-    st[key + '_vp'] = v;
+    st[K._vp] = v;
     // consume one Euler-fallback step (see the capacitor's step()).
     if (method === 'trap') {
-      const ring = st[key + '_ring'] as number | undefined;
-      if (ring !== undefined && ring > 0) st[key + '_ring'] = ring - 1;
+      const ring = st[K._ring] as number | undefined;
+      if (ring !== undefined && ring > 0) st[K._ring] = ring - 1;
     }
     // Now update iPrev for the next step's stamp()
-    st[key] = iCurr;
+    st[K.key] = iCurr;
   },
   measure(params, terminals, sim, comp) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const b = termNode(terminals, 'b', 1);
     const st = sim.state.__global ?? {};
     // step() stores the current under `ind_${compId}` — the old node-pair key
     // never matched, so the readout was always stuck at 0.
@@ -558,6 +590,7 @@ function formatL(l: number): string {
 // ----- Ground -----
 const ground: ComponentPlugin = {
   type: 'ground',
+  pureStamp: true,
   name: 'Ground',
   category: 'source',
   description: 'Reference 0V node. Required for any circuit.',
@@ -588,6 +621,7 @@ const ground: ComponentPlugin = {
 // ----- Wire / Node (just a junction dot) -----
 const junction: ComponentPlugin = {
   type: 'junction',
+  pureStamp: true,
   name: 'Junction',
   category: 'passive',
   description: 'Visual wire junction. Connects all attached terminals electrically.',

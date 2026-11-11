@@ -12,7 +12,7 @@ export interface CopperPour {
   /** cell size in mm */
   cellSize: number;
   /** thermal relief pads (same-net pads that need spoke connections) */
-  thermalPads?: { pos: { x: number; y: number }; spokeWidth: number; padRadius: number }[];
+  thermalPads?: { pos: { x: number; y: number }; spokeWidth: number; padRadius: number; /** cardinal spokes that reach filled copper */ spokes?: number }[];
   /** zone priority — higher wins where pours overlap (default 0) */
   priority?: number;
   /** thermal spoke width in mm (default 0.3) */
@@ -21,22 +21,54 @@ export interface CopperPour {
   clearance?: number;
   /** remove isolated islands with no same-net connection (default true) */
   removeIslands?: boolean;
+  /** inset of the pour from the board outline in mm (default 0.3) */
+  edgeClearance?: number;
+}
+
+type Pt = { x: number; y: number };
+type Rect = { x0: number; y0: number; x1: number; y1: number };
+
+function rectRectDist(a: Rect, b: Rect): number {
+  const dx = Math.max(0, a.x0 - b.x1, b.x0 - a.x1);
+  const dy = Math.max(0, a.y0 - b.y1, b.y0 - a.y1);
+  return Math.hypot(dx, dy);
+}
+function pointRectDist(p: Pt, r: Rect): number {
+  return Math.hypot(Math.max(0, r.x0 - p.x, p.x - r.x1), Math.max(0, r.y0 - p.y, p.y - r.y1));
+}
+function segsIntersect(a: Pt, b: Pt, c: Pt, d: Pt): boolean {
+  const o = (p: Pt, q: Pt, r: Pt) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  const d1 = o(a, b, c), d2 = o(a, b, d), d3 = o(c, d, a), d4 = o(c, d, b);
+  return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0));
+}
+/** exact distance between a segment and an axis-aligned rect (0 if they touch) */
+function segRectDist(a: Pt, b: Pt, r: Rect): number {
+  const inside = (p: Pt) => p.x >= r.x0 && p.x <= r.x1 && p.y >= r.y0 && p.y <= r.y1;
+  if (inside(a) || inside(b)) return 0;
+  const c: Pt[] = [{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }];
+  let best = Math.min(pointRectDist(a, r), pointRectDist(b, r));
+  for (let i = 0; i < 4; i++) {
+    const e0 = c[i], e1 = c[(i + 1) % 4];
+    if (segsIntersect(a, b, e0, e1)) return 0;
+    best = Math.min(best, pointToSegDist(e0.x, e0.y, a.x, a.y, b.x, b.y));
+  }
+  return best;
 }
 
 /**
  * Generate a copper pour on a layer for a given net.
- * Fills the entire board area except around pads/traces on different nets.
- * Same-net pads get a thermal relief pattern (4 spokes) instead of being
- * fully covered, so they can be soldered without thermal mass issues.
  *
- * @param layer Which copper layer to pour on
- * @param net The net name for the pour (e.g. "GND")
- * @param footprints All footprints on the board
- * @param traces All traces on the board
- * @param vias All vias on the board
- * @param board Board dimensions
- * @param clearance Clearance around non-net features in mm
- * @param options.thermalRelief When true, same-net pads get a 4-spoke thermal relief pattern
+ * Raster fill on a `cellSize` grid (0.25 mm). Every cell is tested by its FULL
+ * extent (the cell rectangle against the exact obstacle shape), so the real
+ * gap between poured copper and any foreign-net copper is >= `clearance`
+ * (the old centre-only test left only ~0.05 mm with a 0.3 mm rule). The pour
+ * is inset from the board outline by `edgeClearance`. Same-net pads get four
+ * cardinal thermal spokes that start inside the pad copper and cross the
+ * relief gap into filled cells, so the exported pour overlaps the pad. Fill
+ * that is not 4-connected to same-net copper (spokes, same-net traces/vias)
+ * is removed as an island.
+ *
+ * Options: `thermalRelief: false` = direct (solid) connection to same-net pads.
  */
 export function generateCopperPour(
   layer: CopperLayer,
@@ -46,242 +78,185 @@ export function generateCopperPour(
   vias: Via[],
   board: BoardOutline,
   clearance: number = 0.3,
-  options: { thermalRelief?: boolean; priority?: number; spokeWidth?: number; removeIslands?: boolean; keepouts?: { rect: { x: number; y: number; width: number; height: number }; layers: 'all' | string[]; polygon?: { x: number; y: number }[] }[] } = {},
+  options: { thermalRelief?: boolean; priority?: number; spokeWidth?: number; removeIslands?: boolean; edgeClearance?: number; cellSize?: number; keepouts?: { rect: { x: number; y: number; width: number; height: number }; layers: 'all' | string[]; polygon?: { x: number; y: number }[] }[] } = {},
 ): CopperPour {
-  const cellSize = 0.5; // mm per cell
+  const cellSize = options.cellSize ?? 0.25; // mm per cell
+  const edge = options.edgeClearance ?? 0.3;
+  const spokeW = options.spokeWidth ?? 0.3;
+  const thermalGap = 0.3;
+  const thermalRelief = options.thermalRelief ?? true; // default on
   const cols = Math.ceil(board.width / cellSize);
   const rows = Math.ceil(board.height / cellSize);
-  const thermalPads: { pos: { x: number; y: number }; spokeWidth: number; padRadius: number }[] = [];
-  const thermalRelief = options.thermalRelief ?? true; // default on
+  const N = cols * rows;
+  const idx = (c: number, r: number) => r * cols + c;
+  const cellRect = (c: number, r: number): Rect => ({ x0: c * cellSize, y0: r * cellSize, x1: (c + 1) * cellSize, y1: (r + 1) * cellSize });
+  const eps = 1e-9;
 
-  // Collect features to avoid (different net, same layer)
-  interface AvoidFeature {
-    pos: { x: number; y: number };
-    radius: number;
-  }
-  const avoidPoints: AvoidFeature[] = [];
+  const foreign = new Uint8Array(N);   // violates clearance / edge / keepout
+  const gap = new Uint8Array(N);       // inside a same-net pad's thermal gap
+  const spoke = new Uint8Array(N);     // on a thermal spoke
+  const anchor = new Uint8Array(N);    // overlaps same-net copper
 
-  // Same-net pads (need thermal relief: keep a small gap around the pad,
-  // then add 4 spokes connecting the pad to the pour)
-  const sameNetPads: { pos: { x: number; y: number }; radius: number }[] = [];
-
-  // Pads — same net get thermal relief, different net get clearance.
-  // THT pads (drill > 0) have copper on BOTH layers and must be avoided on
-  // both; SMD pads only on their own side.
-  for (const fp of footprints) {
-    for (const pad of fp.pads) {
-      if ((pad.drill ?? 0) <= 0 && pad.layer !== layer && fp.side !== layer) continue;
-      const padR = Math.max(pad.size.width, pad.size.height) / 2;
-      if (pad.net === net) {
-        // Same net — thermal relief: avoid pad + small gap, but add spokes
-        const gapR = padR + 0.3; // 0.3mm gap, then spokes
-        avoidPoints.push({ pos: pad.position, radius: gapR });
-        if (thermalRelief) {
-          sameNetPads.push({ pos: pad.position, radius: padR });
-          thermalPads.push({
-            pos: pad.position,
-            spokeWidth: 0.3, // 0.3mm wide spokes
-            padRadius: padR,
-          });
-        }
-      } else {
-        // Different net — clearance
-        avoidPoints.push({ pos: pad.position, radius: padR + clearance });
-      }
+  /** visit cells whose rect could be within `reach` of bbox, mark where dist(cellRect) < limit */
+  const mark = (arr: Uint8Array, bb: Rect, reach: number, distFn: (r: Rect) => number, limit: number) => {
+    const c0 = Math.max(0, Math.floor((bb.x0 - reach) / cellSize));
+    const c1 = Math.min(cols - 1, Math.floor((bb.x1 + reach) / cellSize));
+    const r0 = Math.max(0, Math.floor((bb.y0 - reach) / cellSize));
+    const r1 = Math.min(rows - 1, Math.floor((bb.y1 + reach) / cellSize));
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+      if (distFn(cellRect(c, r)) < limit - eps) arr[idx(c, r)] = 1;
     }
-  }
-
-  // Vias on different nets
-  for (const via of vias) {
-    if (via.net === net) continue;
-    avoidPoints.push({ pos: via.position, radius: via.diameter / 2 + clearance });
-  }
-
-  // Trace segments on different nets
-  interface AvoidSeg {
-    start: { x: number; y: number };
-    end: { x: number; y: number };
-    width: number;
-  }
-  const avoidSegs: AvoidSeg[] = [];
-  for (const trace of traces) {
-    if (trace.layer !== layer) continue;
-    if (trace.net === net) continue;
-    for (const seg of trace.segments) {
-      avoidSegs.push({
-        start: seg.start,
-        end: seg.end,
-        width: seg.width / 2 + clearance,
-      });
+  };
+  const padRect = (pad: Pad): Rect => ({
+    x0: pad.position.x - pad.size.width / 2, y0: pad.position.y - pad.size.height / 2,
+    x1: pad.position.x + pad.size.width / 2, y1: pad.position.y + pad.size.height / 2,
+  });
+  /** distance from a cell rect to a pad's copper (circle exact, others by bbox) */
+  const padDist = (pad: Pad) => {
+    if (pad.shape === 'circle') {
+      const rad = Math.max(pad.size.width, pad.size.height) / 2;
+      return (r: Rect) => pointRectDist(pad.position, r) - rad;
     }
-  }
-
-  // Keepouts (rect + polygon) on this layer carve the pour.
-  const keepoutRects: { x: number; y: number; width: number; height: number }[] = [];
-  const keepoutPolys: { x: number; y: number }[][] = [];
-  for (const k of (options as { keepouts?: { rect: { x: number; y: number; width: number; height: number }; layers: 'all' | string[]; polygon?: { x: number; y: number }[] }[] }).keepouts ?? []) {
-    if (k.layers !== 'all' && !(k.layers as string[]).includes(layer)) continue;
-    if (k.polygon && k.polygon.length >= 3) keepoutPolys.push(k.polygon);
-    else keepoutRects.push(k.rect);
-  }
-  const inKeepout = (x: number, y: number): boolean => {
-    for (const r of keepoutRects) {
-      if (x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height) return true;
-    }
-    for (const poly of keepoutPolys) {
-      let inside = false;
-      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-        const xi = poly[i].x, yi = poly[i].y;
-        const xj = poly[j].x, yj = poly[j].y;
-        if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
-      }
-      if (inside) return true;
-    }
-    return false;
+    const pr = padRect(pad);
+    return (r: Rect) => rectRectDist(r, pr);
   };
 
-  // Build a set of "spoke cells" — cells that should be filled even though
-  // they're inside the thermal relief gap (because they're on a spoke).
-  // Spokes are 4 line segments from the pad center outward in cardinal directions,
-  // each 0.3mm wide, length = gap distance (0.3mm here).
-  const spokeCells = new Set<string>();
-  for (const sp of sameNetPads) {
-    const gap = 0.3;
-    const spokeLen = gap + 0.2; // slight overlap with pour
-    // 4 cardinal spokes (N, S, E, W)
-    const spokes = [
-      { dx: 0, dy: 1 }, { dx: 0, dy: -1 },
-      { dx: 1, dy: 0 }, { dx: -1, dy: 0 },
-    ];
-    for (const s of spokes) {
-      // Walk along the spoke from padRadius to padRadius + spokeLen
-      const steps = Math.ceil(spokeLen / (cellSize * 0.25));
-      for (let i = 0; i <= steps; i++) {
-        const t = (i / steps) * spokeLen + sp.radius;
-        const px = sp.pos.x + s.dx * t;
-        const py = sp.pos.y + s.dy * t;
-        // Mark cells within spokeWidth of (px, py)
-        const r = 0.15; // half of spokeWidth
-        const minCol = Math.floor((px - r) / cellSize);
-        const maxCol = Math.ceil((px + r) / cellSize);
-        const minRow = Math.floor((py - r) / cellSize);
-        const maxRow = Math.ceil((py + r) / cellSize);
-        for (let row = minRow; row <= maxRow; row++) {
-          for (let col = minCol; col <= maxCol; col++) {
-            const cx = (col + 0.5) * cellSize;
-            const cy = (row + 0.5) * cellSize;
-            if (Math.hypot(cx - px, cy - py) < r) {
-              spokeCells.add(`${col},${row}`);
-            }
-          }
-        }
+  // Board edge inset: the cell must lie fully inside the outline minus edge clearance.
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const cr = cellRect(c, r);
+    if (cr.x0 < edge - eps || cr.y0 < edge - eps || cr.x1 > board.width - edge + eps || cr.y1 > board.height - edge + eps) foreign[idx(c, r)] = 1;
+  }
+
+  const sameNetPads: Pad[] = [];
+  for (const fp of footprints) {
+    for (const pad of fp.pads) {
+      // THT pads have copper on every layer; SMD only on their own side.
+      if ((pad.drill ?? 0) <= 0 && pad.layer !== layer) continue;
+      const rad = pad.shape === 'circle' ? Math.max(pad.size.width, pad.size.height) / 2 : 0;
+      const bb = padRect(pad);
+      if (pad.net === net) {
+        sameNetPads.push(pad);
+        mark(anchor, bb, rad + eps, padDist(pad), 1e-6);
+        if (thermalRelief) mark(gap, bb, thermalGap + rad, padDist(pad), thermalGap);
+      } else {
+        mark(foreign, bb, clearance + rad, padDist(pad), clearance);
       }
     }
   }
-
-  // Fill grid cells
-  const filledCells: { col: number; row: number }[] = [];
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const cx = (col + 0.5) * cellSize;
-      const cy = (row + 0.5) * cellSize;
-
-      // If this is a spoke cell, fill it (thermal relief connection)
-      if (spokeCells.has(`${col},${row}`)) {
-        filledCells.push({ col, row });
-        continue;
-      }
-
-      // Check if too close to any avoid point
-      let avoid = false;
-      for (const ap of avoidPoints) {
-        const dx = cx - ap.pos.x;
-        const dy = cy - ap.pos.y;
-        if (dx * dx + dy * dy < ap.radius * ap.radius) {
-          avoid = true;
-          break;
-        }
-      }
-      if (avoid) continue;
-
-      // Check if too close to any avoid segment
-      for (const seg of avoidSegs) {
-        const dist = pointToSegDist(cx, cy, seg.start.x, seg.start.y, seg.end.x, seg.end.y);
-        if (dist < seg.width) {
-          avoid = true;
-          break;
-        }
-      }
-      if (avoid) continue;
-
-      // Keepout zones carve the pour (rect + polygon).
-      if (inKeepout(cx, cy)) continue;
-
-      // Cell is clear — fill it
-      filledCells.push({ col, row });
+  for (const via of vias) {
+    const vr = via.diameter / 2;
+    const bb = { x0: via.position.x - vr, y0: via.position.y - vr, x1: via.position.x + vr, y1: via.position.y + vr };
+    const d = (r: Rect) => pointRectDist(via.position, r) - vr;
+    if (via.net === net) mark(anchor, bb, 0, d, 1e-6);
+    else mark(foreign, bb, clearance, d, clearance);
+  }
+  for (const trace of traces) {
+    if (trace.layer !== layer) continue;
+    for (const seg of trace.segments) {
+      const bb = { x0: Math.min(seg.start.x, seg.end.x), y0: Math.min(seg.start.y, seg.end.y), x1: Math.max(seg.start.x, seg.end.x), y1: Math.max(seg.start.y, seg.end.y) };
+      const d = (r: Rect) => segRectDist(seg.start, seg.end, r) - seg.width / 2;
+      if (trace.net === net) mark(anchor, bb, seg.width / 2, d, 1e-6);
+      else mark(foreign, bb, clearance + seg.width / 2, d, clearance);
     }
   }
 
-  // ── Island removal ──────────────────────────────────────────────────────
-  // Keep only the copper that is actually connected to the pour net (via
-  // same-net pads or their thermal spokes). Isolated islands of fill are a
-  // manufacturing/reliability hazard and every real EDA tool removes them.
-  // If there are no same-net anchors on this layer there is nothing to
-  // measure connectivity against — keep the fill as before.
-  let keptCells = filledCells;
-  if (sameNetPads.length > 0) {
-    const filled = new Set<string>();
-    for (const c of filledCells) filled.add(`${c.col},${c.row}`);
-
-    // Seeds: spoke cells + every filled cell touching a same-net pad's
-    // thermal-relief neighbourhood (padRadius + spoke + one cell).
-    const seeds: string[] = [];
-    for (const key of spokeCells) {
-      if (filled.has(key)) seeds.push(key);
-    }
-    for (const sp of sameNetPads) {
-      const anchorR = sp.radius + 0.5 + cellSize; // gap + spoke + 1 cell
-      const c0 = Math.floor((sp.pos.x - anchorR) / cellSize);
-      const c1 = Math.ceil((sp.pos.x + anchorR) / cellSize);
-      const r0 = Math.floor((sp.pos.y - anchorR) / cellSize);
-      const r1 = Math.ceil((sp.pos.y + anchorR) / cellSize);
-      for (let r = r0; r <= r1; r++) {
-        for (let c = c0; c <= c1; c++) {
-          const key = `${c},${r}`;
-          if (!filled.has(key)) continue;
-          const cx = (c + 0.5) * cellSize;
-          const cy = (r + 0.5) * cellSize;
-          if (Math.hypot(cx - sp.pos.x, cy - sp.pos.y) <= anchorR) seeds.push(key);
+  // Keepouts (rect + polygon) on this layer carve the pour (full cell extent).
+  for (const k of options.keepouts ?? []) {
+    if (k.layers !== 'all' && !(k.layers as string[]).includes(layer)) continue;
+    if (k.polygon && k.polygon.length >= 3) {
+      const poly = k.polygon;
+      const xs = poly.map((p) => p.x), ys = poly.map((p) => p.y);
+      const bb = { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
+      const pip = (x: number, y: number) => {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+          if ((poly[i].y > y) !== (poly[j].y > y) && x < ((poly[j].x - poly[i].x) * (y - poly[i].y)) / (poly[j].y - poly[i].y) + poly[i].x) inside = !inside;
         }
-      }
+        return inside;
+      };
+      mark(foreign, bb, 0, (r) => {
+        if (pip((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2) || pip(r.x0, r.y0) || pip(r.x1, r.y0) || pip(r.x0, r.y1) || pip(r.x1, r.y1)) return -1;
+        for (let i = 0; i < poly.length; i++) if (segRectDist(poly[i], poly[(i + 1) % poly.length], r) === 0) return -1;
+        return 1;
+      }, 0);
+    } else {
+      const kr = { x0: k.rect.x, y0: k.rect.y, x1: k.rect.x + k.rect.width, y1: k.rect.y + k.rect.height };
+      mark(foreign, kr, 0, (r) => (rectRectDist(r, kr) === 0 ? -1 : 1), 0);
     }
-
-    // Flood fill (8-connected) from the seeds
-    const connected = new Set<string>();
-    const stack = [...seeds];
-    while (stack.length > 0) {
-      const key = stack.pop()!;
-      if (connected.has(key)) continue;
-      connected.add(key);
-      const [c, r] = key.split(',').map(Number);
-      for (let dr = -1; dr <= 1; dr++) {
-        for (let dc = -1; dc <= 1; dc++) {
-          if (dr === 0 && dc === 0) continue;
-          const nk = `${c + dc},${r + dr}`;
-          if (filled.has(nk) && !connected.has(nk)) stack.push(nk);
-        }
-      }
-    }
-
-    keptCells = filledCells.filter((c) => connected.has(`${c.col},${c.row}`));
   }
 
-  const cells = keptCells.map((c) => ({ x: (c.col + 0.5) * cellSize, y: (c.row + 0.5) * cellSize }));
+  // Thermal spokes: 4 cardinal rects starting INSIDE the pad copper and
+  // crossing the relief gap (+1 cell), so they touch both pad and pour.
+  const spokesPerPad: { dir: number; cells: number[] }[][] = [];
+  for (const pad of sameNetPads) {
+    const list: { dir: number; cells: number[] }[] = [];
+    if (thermalRelief) {
+      const hw = pad.size.width / 2, hh = pad.size.height / 2;
+      const rad = Math.max(hw, hh);
+      const dirs = [{ dx: 1, dy: 0, e: pad.shape === 'circle' ? rad : hw }, { dx: -1, dy: 0, e: pad.shape === 'circle' ? rad : hw },
+        { dx: 0, dy: 1, e: pad.shape === 'circle' ? rad : hh }, { dx: 0, dy: -1, e: pad.shape === 'circle' ? rad : hh }];
+      dirs.forEach((d, di) => {
+        const a = Math.max(0, d.e - 0.1), b = d.e + thermalGap + cellSize;
+        const p0 = { x: pad.position.x + d.dx * a, y: pad.position.y + d.dy * a };
+        const p1 = { x: pad.position.x + d.dx * b, y: pad.position.y + d.dy * b };
+        const sr: Rect = {
+          x0: Math.min(p0.x, p1.x) - (d.dy !== 0 ? spokeW / 2 : 0), x1: Math.max(p0.x, p1.x) + (d.dy !== 0 ? spokeW / 2 : 0),
+          y0: Math.min(p0.y, p1.y) - (d.dx !== 0 ? spokeW / 2 : 0), y1: Math.max(p0.y, p1.y) + (d.dx !== 0 ? spokeW / 2 : 0),
+        };
+        const cells: number[] = [];
+        const c0 = Math.max(0, Math.floor(sr.x0 / cellSize)), c1 = Math.min(cols - 1, Math.floor(sr.x1 / cellSize));
+        const r0 = Math.max(0, Math.floor(sr.y0 / cellSize)), r1 = Math.min(rows - 1, Math.floor(sr.y1 / cellSize));
+        for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+          if (rectRectDist(cellRect(c, r), sr) < eps) { cells.push(idx(c, r)); }
+        }
+        // a spoke is usable only if EVERY cell of it clears foreign copper
+        if (cells.length && cells.every((i) => !foreign[i])) {
+          for (const i of cells) { spoke[i] = 1; anchor[i] = 1; }
+          list.push({ dir: di, cells });
+        }
+      });
+    }
+    spokesPerPad.push(list);
+  }
+
+  const filled = new Uint8Array(N);
+  for (let i = 0; i < N; i++) if (!foreign[i] && (!gap[i] || spoke[i])) filled[i] = 1;
+
+  // Island removal: keep only 4-connected fill reachable from cells that
+  // actually overlap same-net copper (spokes / direct pad overlap / traces / vias).
+  const hasAnchors = sameNetPads.length > 0 || anchor.some((v) => v === 1);
+  let kept = filled;
+  if (hasAnchors && (options.removeIslands ?? true)) {
+    kept = new Uint8Array(N);
+    const stack: number[] = [];
+    for (let i = 0; i < N; i++) if (filled[i] && anchor[i]) { kept[i] = 1; stack.push(i); }
+    while (stack.length) {
+      const i = stack.pop()!;
+      const c = i % cols, r = (i - c) / cols;
+      const nb = [c > 0 ? i - 1 : -1, c < cols - 1 ? i + 1 : -1, r > 0 ? i - cols : -1, r < rows - 1 ? i + cols : -1];
+      for (const n of nb) if (n >= 0 && filled[n] && !kept[n]) { kept[n] = 1; stack.push(n); }
+    }
+  }
+
+  const cells: { x: number; y: number }[] = [];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    if (kept[idx(c, r)]) cells.push({ x: (c + 0.5) * cellSize, y: (r + 0.5) * cellSize });
+  }
+
+  const thermalPads: NonNullable<CopperPour['thermalPads']> = [];
+  if (thermalRelief) {
+    sameNetPads.forEach((pad, i) => {
+      thermalPads.push({
+        pos: pad.position, spokeWidth: spokeW, padRadius: Math.max(pad.size.width, pad.size.height) / 2,
+        spokes: spokesPerPad[i].filter((sp) => sp.cells.every((ci) => kept[ci])).length,
+      });
+    });
+  }
 
   return {
     layer, net, cells, cellSize, thermalPads,
     priority: options.priority ?? 0,
-    spokeWidth: 0.3,
+    spokeWidth: spokeW,
     clearance,
     removeIslands: true,
   };

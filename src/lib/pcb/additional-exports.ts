@@ -2,44 +2,42 @@
 
 import { fabY, fabRotation } from './gerber-export';
 import type { Footprint, Trace, Via, BoardOutline } from './types';
-import { partDatabase, type PartInfo } from './part-database';
+import type { CircuitComponent } from '../circuit/types';
+import { bomItemFor, groupBomItems } from './bom-core';
+import { isMechanicalType } from './footprints';
 
 // ===== BOM (CSV) =====
 // Joins the part database for MPN/manufacturer/distributor/price columns so
 // the BOM is order-ready (JLC/LCSC + DigiKey/Mouser), not just refdes+type.
-export function exportBOM(footprints: Footprint[]): string {
-  const groups = new Map<string, { refdes: string[]; type: string }>();
-  for (const fp of footprints) {
-    const key = fp.componentType;
-    if (!groups.has(key)) groups.set(key, { refdes: [], type: fp.componentType });
-    groups.get(key)!.refdes.push(fp.refdes ?? fp.id);
-  }
-  const lines = ['Designator,Quantity,Footprint,Description,MPN,Manufacturer,LCSC,DigiKey,Mouser,UnitPrice,ExtPrice,DNP'];
-  for (const [, g] of groups) {
-    const part = findPartForType(g.type);
-    const unit = part?.unitPrice ?? 0;
-    const ext = unit * g.refdes.length;
-    const refdes = `"${g.refdes.join(',')}"`;
+export function exportBOM(footprints: Footprint[], components?: CircuitComponent[]): string {
+  // Same row builder as the schematic BOM (bom-core.ts): value = the
+  // component's real value, Footprint = the package this board uses.
+  // Pass the schematic `components` for the value column; without them the
+  // value is derived only from what the placed footprint itself proves.
+  const byId = new Map((components ?? []).map((c) => [c.id, c]));
+  // mounting holes and other mechanical items are not parts to buy
+  const items = footprints.filter((fp) => !isMechanicalType(fp.componentType)).map((fp) => {
+    const comp = byId.get(fp.componentId);
+    if (comp) return bomItemFor(comp, fp.refdes ?? fp.id);
+    const isReal = fp.verified && fp.footprintName;
+    const part = isReal ? fp.footprintName!.split(' (')[0] : undefined;
+    return bomItemFor({
+      id: fp.componentId ?? fp.id, type: fp.componentType, position: { x: 0, y: 0 }, rotation: 0,
+      parameters: part ? { part } : {},
+    } as CircuitComponent, fp.refdes ?? fp.id);
+  });
+  const q = (v: string) => `"${v.replace(/"/g, '""')}"`;
+  const lines = ['Designator,Quantity,Footprint,Value,Description,MPN,Manufacturer,LCSC,DigiKey,Mouser,UnitPrice,ExtPrice,DNP'];
+  for (const g of groupBomItems(items)) {
+    const h = g.head;
+    const unit = h.unitPrice;
     lines.push([
-      refdes, g.refdes.length.toString(), g.type, `"${part?.description ?? g.type}"`,
-      part?.mpn ?? '', part?.manufacturer ?? '', part?.lcscPN ?? '',
-      part?.digikeyPN ?? '', part?.mouserPN ?? '',
-      unit.toFixed(2), ext.toFixed(2), '',
+      q(g.items.map((i) => i.refdes).join(',')), String(g.items.length), q(g.footprint), q(g.value), q(h.description),
+      h.mpn, q(h.manufacturer), h.lcsc, h.digikeyPN, h.mouserPN,
+      unit === null ? '' : unit.toFixed(2), unit === null ? '' : (unit * g.items.length).toFixed(2), '',
     ].join(','));
   }
   return lines.join('\n');
-}
-
-function findPartForType(type: string): PartInfo | undefined {
-  // part-database is leaf data (zero imports) — a static ESM import is safe.
-  // The previous lazy require() broke under ESM test runners (vitest:
-  // "require is not defined"), failing the whole BOM test group.
-  const lower = type.toLowerCase();
-  return partDatabase.find((p) =>
-    p.mpn.toLowerCase().includes(lower) ||
-    p.description.toLowerCase().includes(lower) ||
-    p.category === lower,
-  );
 }
 
 // ===== IPC-2581 (XML) — schema-valid structure: Content > StepRef +

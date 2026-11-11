@@ -11,7 +11,7 @@ import { Param, Stat } from './shared';
 //   - StimuliEditor: build PWL/SINE/PULSE/SFFM/EXP stimuli
 //   - ResultsViewer: display traces + measurements + statistics
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useEditor } from '@/lib/circuit/store';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -33,7 +33,9 @@ import {
 
 export function BatchSweepDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const components = useEditor((s) => s.components);
-  const runBatch = useEditor((s) => s.runBatch);
+  const runBatchAsync = useEditor((s) => s.runBatchAsync);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const [batchType, setBatchType] = useState<'step' | 'mc' | 'worst'>('step');
   const [param, setParam] = useState('resistance');
   const [componentId, setComponentId] = useState('');
@@ -64,15 +66,31 @@ export function BatchSweepDialog({ open, onClose }: { open: boolean; onClose: ()
     }
   }, [open, components, componentId]);
 
-  const run = () => {
-    const result = runBatch({
+  const cancel = () => abortRef.current?.abort();
+
+  const run = async () => {
+    if (abortRef.current) return; // already running
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setProgress({ done: 0, total: 1 });
+    let result;
+    try {
+      result = await runBatchAsync({
       type: batchType,
       param, componentId,
       start, stop, step,
       runs, tolerance,
       distribution: dist,
       inner: { type: 'ac', sweep: 'dec' as const, nPoints: 5, fStart: 10, fStop: 100000, sourceId: components.find(c => c.type === 'acVoltage')?.id ?? '', outputNode: 'p' },
-    });
+      }, { signal: ac.signal, onProgress: (done, total) => setProgress({ done, total }) });
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') toast.error(`Batch run failed: ${(err as Error).message}`);
+      else toast.info('Batch run cancelled');
+      return;
+    } finally {
+      abortRef.current = null;
+      setProgress(null);
+    }
     setResults(result);
     if (result.stats) {
       toast.success(`Monte Carlo: mean=${result.stats.mean.toFixed(4)} σ=${result.stats.std.toFixed(4)}`);
@@ -195,9 +213,21 @@ export function BatchSweepDialog({ open, onClose }: { open: boolean; onClose: ()
               <Param label="Tolerance (±)" value={tolerance} step={0.01} onChange={setTolerance} />
             </div>
           )}
-          <Button onClick={run} className="bg-cyan-500 text-slate-900">
-            <Waves size={14} className="mr-1" /> Run Batch
-          </Button>
+          {progress ? (
+            <div className="space-y-1">
+              <div className="h-2 rounded bg-slate-800 overflow-hidden" role="progressbar" aria-valuemin={0} aria-valuemax={progress.total} aria-valuenow={progress.done}>
+                <div className="h-full bg-cyan-500 transition-all" style={{ width: `${Math.min(100, (100 * progress.done) / Math.max(1, progress.total))}%` }} />
+              </div>
+              <div className="flex items-center justify-between text-xs text-slate-400">
+                <span>{progress.done} / {progress.total}</span>
+                <Button size="sm" variant="ghost" onClick={cancel}>Cancel</Button>
+              </div>
+            </div>
+          ) : (
+            <Button onClick={run} className="bg-cyan-500 text-slate-900">
+              <Waves size={14} className="mr-1" /> Run Batch
+            </Button>
+          )}
           {results && (
             <div className="bg-slate-950 p-3 rounded border border-slate-700 text-xs space-y-2">
               <div className="text-slate-300">Result: {results.traces.length} traces in {results.durationMs.toFixed(0)}ms</div>

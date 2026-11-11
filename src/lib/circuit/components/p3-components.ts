@@ -105,9 +105,10 @@ export const ne5532 = makeOpampMacromodel('ne5532', 'NE5532', {
 // Comparators — LM311 (with STROBE), LM393
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Open-collector comparators. The output transistor is ON (pulls OUT down to
-// `vlow` above the GND pin through `ron`) when (V+ − V−) exceeds the input
-// hysteresis — an inverting transfer (OUT low for V+ > V−). When the
+// Open-collector comparators. Per the LM393/LM311 datasheets the output
+// transistor is ON (pulls OUT down to `vlow` above the GND pin through `ron`)
+// when V(−) > V(+), and OFF (output floats) when V(+) > V(−) — i.e. the
+// output is "high" (via the external pull-up) for V+ > V−. When the
 // transistor is OFF the output floats (leakage only): the external pull-up
 // resistor sets the high level, exactly like the real open-collector part.
 // The LM311 adds an active-low STROBE pin: pulling it below ~0.8V forces the
@@ -126,8 +127,8 @@ function makeOpenCollectorComparator(type: string, name: string, opts: {
     // joins the Newton re-stamp loop (see opampRails note in extra.ts).
     nonLinear: true,
     description: hasStrobe
-      ? `${name} — open-collector comparator with active-low STROBE. Output transistor pulls LOW when V(+) > V(−); pull STROBE low to force the output off (high-Z).`
-      : `${name} — open-collector comparator. Output transistor pulls LOW when V(+) > V(−); output level when off is set by the external pull-up.`,
+      ? `${name} — open-collector comparator with active-low STROBE. Output pulls LOW when V(−) > V(+) and is released (pulled high externally) when V(+) > V(−); pull STROBE low to force the output off (high-Z).`
+      : `${name} — open-collector comparator. Output pulls LOW when V(−) > V(+); when V(+) > V(−) the output is released and its level is set by the external pull-up.`,
     symbol: type.slice(-3).toUpperCase(),
     boundingBox: { width: 6, height: 4 },
     terminals: [
@@ -189,8 +190,9 @@ function makeOpenCollectorComparator(type: string, name: string, opts: {
       // STROBE is active-low: below ~0.8V the output stage is disabled.
       let strobed = false;
       if (strobe !== undefined) strobed = (sim.nodeVoltage[strobe] ?? 0) < 0.8;
-      // Transistor ON only when the comparison is asserted AND not strobed off
-      const on = currentHigh && !strobed;
+      // Datasheet: OUT transistor ON (low) when V(−) > V(+); OFF when V(+) > V(−).
+      // (Strobed-off forces it OFF regardless.)
+      const on = !currentHigh && !strobed;
       if (out === 0) return; // unconnected output — nothing to pull
       const rOn = Math.max(0.001, params.ron as number);
       if (on) {

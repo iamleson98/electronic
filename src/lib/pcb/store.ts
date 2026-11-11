@@ -19,8 +19,7 @@ import type {
 import { DEFAULT_LAYER_STACK } from './types';
 import type { CircuitComponent, Wire } from '../circuit/types';
 import { useEditor } from '../circuit/store';
-import { getFootprintDef } from './footprints';
-import { createPCBFromSchematic, rotatePadSize } from './netlist-sync';
+import { createPCBFromSchematic } from './netlist-sync';
 import { runDRC as runDRCCheck, DEFAULT_DRC_CONFIG, drcErrorKey } from './drc';
 import type { DRCError, DRCWaiver, DRCConfig } from './drc';
 import { getManufacturerSpec } from './manufacturer-presets';
@@ -175,6 +174,43 @@ interface PCBState {
 }
 
 let idCounter = 0;
+/**
+ * The ONE pad-placement rule: def -> mirror-if-bottom -> rotate -> translate.
+ * Pads store absolute positions, so the current def-space offset is recovered
+ * by inverting the footprint's current transform (un-rotate, then un-mirror),
+ * then the target transform is applied. Flip, rotate and any order of the two
+ * therefore agree (flip used to mirror in board space, and rotate rebuilt pads
+ * from the unmirrored def, silently un-flipping bottom parts).
+ */
+export function placePads(
+  fp: { position: { x: number; y: number }; rotation: number; side: CopperLayer; pads: Pad[] },
+  newRot: number,
+  newSide: CopperLayer,
+): Pad[] {
+  const rnd = (v: number) => Math.round(v * 1e9) / 1e9;
+  const curRad = (fp.rotation * Math.PI) / 180;
+  const newRad = (newRot * Math.PI) / 180;
+  const cc = Math.cos(curRad), cs = Math.sin(curRad);
+  const nc = Math.cos(newRad), ns = Math.sin(newRad);
+  const swap = ((Math.round((newRot - fp.rotation) / 90) % 2) + 2) % 2 === 1;
+  return fp.pads.map((pad) => {
+    const ox = pad.position.x - fp.position.x;
+    const oy = pad.position.y - fp.position.y;
+    // un-rotate, un-mirror -> def space
+    let dx = ox * cc + oy * cs;
+    const dy = -ox * cs + oy * cc;
+    if (fp.side === 'bottom') dx = -dx;
+    // mirror, rotate -> board space
+    if (newSide === 'bottom') dx = -dx;
+    return {
+      ...pad,
+      position: { x: rnd(fp.position.x + dx * nc - dy * ns), y: rnd(fp.position.y + dx * ns + dy * nc) },
+      size: swap ? { width: pad.size.height, height: pad.size.width } : pad.size,
+      layer: newSide === fp.side ? pad.layer : newSide,
+    };
+  });
+}
+
 function dist2(a: { x: number; y: number }, b: { x: number; y: number }): number {
   const dx = a.x - b.x, dy = a.y - b.y;
   return dx * dx + dy * dy;
@@ -387,28 +423,15 @@ export const usePCB = create<PCBState>((set, get) => ({
     const s = get();
     const fp = s.footprints.find((f) => f.id === id);
     if (!fp) return;
-    const fpDef = getFootprintDefSafe(fp.componentType);
     const newRot = (fp.rotation + 90) % 360;
-    const rad = (newRot * Math.PI) / 180;
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
-    // Compute the new pads from the def (existing semantics) and record each
-    // pad's move so attached trace endpoints can follow the same delta.
-    const padMoves: { from: { x: number; y: number }; dx: number; dy: number; radius: number }[] = [];
-    const newPads = fp.pads.map((pad, i) => {
-      const padDef = fpDef.pads[i];
-      if (!padDef) return pad; // pad without a def-index match doesn't move
-      const px = padDef.position.x * cos - padDef.position.y * sin;
-      const py = padDef.position.x * sin + padDef.position.y * cos;
-      const newPos = { x: fp.position.x + px, y: fp.position.y + py };
-      padMoves.push({
-        from: { ...pad.position },
-        dx: newPos.x - pad.position.x,
-        dy: newPos.y - pad.position.y,
-        radius: Math.max(pad.size.width, pad.size.height) / 2,
-      });
-      return { ...pad, position: newPos, size: rotatePadSize(padDef.size, newRot) };
-    });
+    // Single placement helper: def -> mirror-if-bottom -> rotate -> translate.
+    const newPads = placePads(fp, newRot, fp.side);
+    const padMoves = fp.pads.map((pad, i) => ({
+      from: { ...pad.position },
+      dx: newPads[i].position.x - pad.position.x,
+      dy: newPads[i].position.y - pad.position.y,
+      radius: Math.max(pad.size.width, pad.size.height) / 2,
+    }));
     set({
       footprints: s.footprints.map((f) => f.id !== id ? f : {
         ...f,
@@ -817,7 +840,7 @@ export const usePCB = create<PCBState>((set, get) => ({
   addCopperPour: (layer, net, priority = 0) => {
     pushHistory('addPour');
     const s = get();
-    const pour = generateCopperPour(layer, net, s.footprints, s.traces, s.vias, s.board, 0.3, { priority, keepouts: s.keepouts });
+    const pour = generateCopperPour(layer, net, s.footprints, s.traces, s.vias, s.board, 0.3, { priority, keepouts: s.keepouts, edgeClearance: s.drcConfig.edgeClearance ?? 0.3 });
     // Zone priority: clip the new pour against higher-priority pours on the
     // same layer (higher wins overlapping cells — KiCad zone-priority parity).
     const higher = s.copperPours.filter((p) => p.layer === layer && (p.priority ?? 0) > (pour.priority ?? 0));
@@ -944,14 +967,7 @@ export const usePCB = create<PCBState>((set, get) => ({
         return {
           ...fp,
           side: newSide,
-          pads: fp.pads.map((p) => ({
-            ...p,
-            // Mirror around the FOOTPRINT'S position (pad positions are
-            // absolute board coordinates — mirroring x alone used to teleport
-            // every pad to negative x, off the board).
-            position: { x: 2 * fp.position.x - p.position.x, y: p.position.y },
-            layer: newSide,
-          })),
+          pads: placePads(fp, fp.rotation, newSide),
         };
       }),
     }));
@@ -1367,7 +1383,3 @@ function dragTraceEndpointsWithPads(
   });
 }
 
-// Helper: safe footprint def getter
-function getFootprintDefSafe(type: string) {
-  return getFootprintDef(type);
-}

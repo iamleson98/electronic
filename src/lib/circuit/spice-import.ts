@@ -29,6 +29,7 @@ import { getPlugin } from './registry';
 import './components'; // register all built-in plugins (idempotent)
 import { parseSpiceValue as canonicalParseSpiceValue } from './spice';
 import { fromSpiceExpr } from './spice-expr';
+import './spice-devices'; // registers the SPICE-faithful device plugins (spiceNpn, spiceDiode, spiceSwitch, spiceMutual*, spiceV/I)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Value parsing — handles SPICE engineering suffixes (case-insensitive)
@@ -102,7 +103,7 @@ function tokenizeLine(line: string): string[] {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class NetMap {
-  private nameToId = new Map<string, number>();
+  nameToId = new Map<string, number>();
   private nextId = 1;
   // Always reserve 0 for ground
   constructor() {
@@ -198,6 +199,14 @@ export interface SpiceImportResult {
   doc: CircuitDocument | null;
   errors: string[];
   warnings: string[];
+  /**
+   * SPICE net name (lower-case) → one component terminal sitting on that net
+   * (ground nets map to the ground component). Lets callers probe a node by
+   * its netlist name: `nodeMap.terminalNode.get(`${componentId}:${terminalId}`)`.
+   */
+  nets?: Map<string, { componentId: string; terminalId: string }>;
+  /** the .tran / .ac / .op cards of the deck, parsed (numbers in SI) */
+  analyses?: { tran?: { tstep: number; tstop: number }; ac?: { sweep: 'dec' | 'oct' | 'lin'; n: number; fstart: number; fstop: number }; op?: boolean };
 }
 
 export function importSpiceNetlist(netlist: string): SpiceImportResult {
@@ -246,7 +255,7 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
   for (const raw of lines) {
     const l = raw.trim();
     if (!l.startsWith('.')) continue;
-    const m = l.match(/^\.model\s+(\S+)\s+([A-Za-z]+)\s*\(([^)]*)\)/i);
+    const m = l.match(/^\.model\s+(\S+)\s+([A-Za-z]+)\s*\(?([^)]*)\)?/i);
     if (!m) continue;
     const params = new Map<string, number>();
     for (const tok of m[3].split(/[\s,]+/)) {
@@ -255,6 +264,27 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
     }
     modelDefs.set(m[1].toLowerCase(), { type: m[2].toUpperCase(), params });
   }
+
+  // .tran / .ac / .op cards (SI numbers) and K couplings / L cards, resolved after the element pass
+  const analyses: NonNullable<SpiceImportResult['analyses']> = {};
+  const kCards: { name: string; ls: string[]; k: number }[] = [];
+  const lInfo = new Map<string, { n1: string; n2: string; value: number }>();
+  for (const raw of lines) {
+    const t = tokenizeLine(raw.trim());
+    const f = (t[0] ?? '').toUpperCase();
+    if (f === '.TRAN' && t.length >= 3) analyses.tran = { tstep: parseSpiceValue(t[1]), tstop: parseSpiceValue(t[2]) };
+    else if (f === '.AC' && t.length >= 5) {
+      analyses.ac = { sweep: t[1].toLowerCase() as 'dec' | 'oct' | 'lin', n: parseSpiceValue(t[2]), fstart: parseSpiceValue(t[3]), fstop: parseSpiceValue(t[4]) };
+    } else if (f === '.OP') analyses.op = true;
+  }
+  const modelOf = (name: string | undefined, ...types: string[]) => {
+    const md = name ? modelDefs.get(name.toLowerCase()) : undefined;
+    return md && types.includes(md.type) ? md : undefined;
+  };
+  const mp = (md: { params: Map<string, number> }, ...keys: string[]): number | undefined => {
+    for (const k of keys) if (md.params.has(k)) return md.params.get(k);
+    return undefined;
+  };
 
   // Helper: ensure a ground component exists
   function ensureGround(): string {
@@ -419,78 +449,77 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
           });
           registerTerminal(tokens[1], id, 'a');
           registerTerminal(tokens[2], id, 'b');
+          lInfo.set(id.toLowerCase(), { n1: tokens[1], n2: tokens[2], value });
           break;
         }
-        case 'V': {  // Voltage source: V<name> n+ n- value [SINE(...)]
+        case 'V':    // Voltage source: V<name> n+ n- [DC] value [AC mag [phase]] [SIN|PULSE|PWL|EXP(...)]
+        case 'I': {  // Current source: I<name> n+ n- value (same syntax)
           if (tokens.length < 4) {
-            errors.push(`Line ${lineNum + 1}: V card needs n+ n- value: "${line}"`);
+            errors.push(`Line ${lineNum + 1}: ${cardType} card needs n+ n- value: "${line}"`);
             continue;
           }
+          const isV = cardType === 'V';
           const id = tokens[0];
-          // Look for SINE(...) or DC <value>. Arguments may carry SPICE
-          // engineering suffixes (SINE(0 1 1k) = 1 kHz) — parse each captured
-          // group through parseSpiceValue instead of bare parseFloat.
           const joined = tokens.slice(3).join(' ');
-          const sineArg = '([-+]?[\\d.]+(?:[eE][-+]?\\d+)?[a-zµ%]*)';
-          const sineMatch = joined.match(new RegExp(`SINE\\s*\\(\\s*${sineArg}\\s+${sineArg}\\s+${sineArg}`, 'i'));
-          if (sineMatch) {
-            const voff = parseSpiceValue(sineMatch[1]);
-            const vamp = parseSpiceValue(sineMatch[2]);
-            const freq = parseSpiceValue(sineMatch[3]);
+          const spec = parseSourceSpec(joined, analyses.tran);
+          // Library-part fast paths (kept for the simple cases the UI edits directly)
+          const simpleSine = /\bSINE\s*\(/i.test(joined) && !/\bAC\s/i.test(joined);
+          const sineMatch = joined.match(/SINE\s*\(\s*([^\s)]+)\s+([^\s)]+)\s+([^\s)]+)/i);
+          if (isV && simpleSine && sineMatch && !spec.hasAc && spec.waveArgs.length <= 3) {
             const plugin = getPlugin('acVoltage');
             const params: any = {};
             if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
-            params.offset = voff;
-            params.amplitude = vamp;
-            params.frequency = freq;
-            components.push({
-              id, type: 'acVoltage', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
-            });
-          } else if (/PULSE\s*\(/i.test(joined)) {
-            // PULSE(V1 V2 TD TR TF PW PER) — high time counts half of each edge
-            const args = (joined.match(/PULSE\s*\(([^)]*)\)/i)?.[1] ?? '').trim().split(/[\s,]+/).map(parseSpiceValue);
-            const [v1 = 0, v2 = 5, , tr = 0, tf = 0, pw = 0.5, per = 1] = args;
-            const plugin = getPlugin('pulseSource');
+            params.offset = parseSpiceValue(sineMatch[1]);
+            params.amplitude = parseSpiceValue(sineMatch[2]);
+            params.frequency = parseSpiceValue(sineMatch[3]);
+            components.push({ id, type: 'acVoltage', position: { x: 0, y: 0 }, rotation: 0, parameters: params });
+          } else if (spec.wave || spec.hasAc) {
+            const type = isV ? 'spiceV' : 'spiceI';
+            const plugin = getPlugin(type);
             const params: any = {};
             if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
-            params.low = v1;
-            params.high = v2;
-            params.frequency = per > 0 ? 1 / per : 1;
-            params.duty = per > 0 ? ((pw + (tr + tf) / 2) / per) * 100 : 50;
-            components.push({
-              id, type: 'pulseSource', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
-            });
+            params.dc = spec.dc; params.dcSet = spec.dcGiven;
+            params.acMag = spec.acMag; params.acPhase = spec.acPhase;
+            params.wave = spec.wave ?? '';
+            components.push({ id, type, position: { x: 0, y: 0 }, rotation: 0, parameters: params });
           } else {
-            // "V1 a b 5" and "V1 a b DC 5" are the same card
-            const value = parseSpiceValue(tokens[3].toUpperCase() === 'DC' ? (tokens[4] ?? '0') : tokens[3]);
-            const plugin = getPlugin('dcVoltage');
+            const type = isV ? 'dcVoltage' : 'currentSource';
+            const plugin = getPlugin(type);
             const params: any = {};
             if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
-            params.voltage = value;
-            components.push({
-              id, type: 'dcVoltage', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
-            });
+            params[isV ? 'voltage' : 'current'] = spec.dc;
+            components.push({ id, type, position: { x: 0, y: 0 }, rotation: 0, parameters: params });
           }
           registerTerminal(tokens[1], id, 'p');
           registerTerminal(tokens[2], id, 'n');
           break;
         }
-        case 'I': {  // Current source: I<name> n+ n- value
-          if (tokens.length < 4) {
-            errors.push(`Line ${lineNum + 1}: I card needs n+ n- value: "${line}"`);
+        case 'E':    // VCVS: E<name> n+ n- nc+ nc- gain
+        case 'G': {  // VCCS: G<name> n+ n- nc+ nc- gm
+          if (tokens.length < 6) {
+            errors.push(`Line ${lineNum + 1}: ${cardType} card needs n+ n- nc+ nc- value: "${line}"`);
             continue;
           }
           const id = tokens[0];
-          const value = parseSpiceValue(tokens[3].toUpperCase() === 'DC' ? (tokens[4] ?? '0') : tokens[3]);
-          const plugin = getPlugin('currentSource');
+          const type = cardType === 'E' ? 'vcvsUser' : 'vccsUser';
+          const plugin = getPlugin(type);
           const params: any = {};
           if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
-          params.current = value;
-          components.push({
-            id, type: 'currentSource', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
-          });
-          registerTerminal(tokens[1], id, 'p');
-          registerTerminal(tokens[2], id, 'n');
+          const valTok = tokens[5].toUpperCase() === 'VALUE' || tokens[5].includes('=') ? tokens[6] : tokens[5];
+          params[cardType === 'E' ? 'gain' : 'gm'] = parseSpiceValue(valTok ?? '0');
+          components.push({ id, type, position: { x: 0, y: 0 }, rotation: 0, parameters: params });
+          registerTerminal(tokens[1], id, 'op');
+          registerTerminal(tokens[2], id, 'on');
+          registerTerminal(tokens[3], id, 'ip');
+          registerTerminal(tokens[4], id, 'in');
+          break;
+        }
+        case 'K': {  // mutual inductance: K<name> L1 L2 [L3 …] k
+          if (tokens.length < 4) {
+            errors.push(`Line ${lineNum + 1}: K card needs L1 L2 k: "${line}"`);
+            continue;
+          }
+          kCards.push({ name: tokens[0], ls: tokens.slice(1, -1), k: parseSpiceValue(tokens[tokens.length - 1]) });
           break;
         }
         case 'B': {  // Behavioral source: B<name> n+ n- V=expr | I=expr
@@ -516,7 +545,7 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
           const plugin = getPlugin(type);
           const params: any = {};
           if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
-          params.expr = fromSpiceExpr(expr);
+          params.expr = fromSpiceExpr(plainNumbers(expr));
           components.push({
             id, type, position: { x: 0, y: 0 }, rotation: 0, parameters: params,
           });
@@ -530,12 +559,20 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
             continue;
           }
           const id = tokens[0];
-          const plugin = getPlugin('diode');
+          const dm = modelOf(tokens[3], 'D');
+          const plugin = getPlugin(dm ? 'spiceDiode' : 'diode');
           const params: any = {};
           if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
           params.modelName = tokens[3];
+          if (dm) {
+            const set = (k: string, ...names: string[]) => { const v = mp(dm, ...names); if (v !== undefined) params[k] = v; };
+            set('Is', 'is'); set('N', 'n'); set('Rs', 'rs'); set('Cjo', 'cjo', 'cj0', 'cj'); set('Vj', 'vj', 'pb'); set('M', 'm', 'mj');
+            set('Fc', 'fc'); set('Tt', 'tt'); set('Bv', 'bv');
+            const area = tokens[4] && /^[-+.\d]/.test(tokens[4]) ? parseSpiceValue(tokens[4]) : 1;
+            params.area = area;
+          }
           components.push({
-            id, type: 'diode', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
+            id, type: dm ? 'spiceDiode' : 'diode', position: { x: 0, y: 0 }, rotation: 0, parameters: params,
           });
           registerTerminal(tokens[1], id, 'a');
           registerTerminal(tokens[2], id, 'k');
@@ -550,12 +587,24 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
           // We can't easily know NPN vs PNP without parsing .MODEL — default to NPN
           // (the model name is preserved so a later pass could swap the type).
           const modelName = tokens[4] || '2N3904';
-          const isPnp = /pnp/i.test(modelName) || modelName.toUpperCase().startsWith('2N3906') || modelName.toUpperCase().startsWith('2N4403');
-          const type = isPnp ? 'pnp' : 'npn';
+          const qm = modelOf(modelName, 'NPN', 'PNP');
+          const isPnp = qm ? qm.type === 'PNP' : /pnp/i.test(modelName) || modelName.toUpperCase().startsWith('2N3906') || modelName.toUpperCase().startsWith('2N4403');
+          const type = qm ? (isPnp ? 'spicePnp' : 'spiceNpn') : isPnp ? 'pnp' : 'npn';
           const plugin = getPlugin(type);
           const params: any = {};
           if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
           params.modelName = modelName;
+          if (qm) {
+            const set = (k: string, ...names: string[]) => { const v = mp(qm, ...names); if (v !== undefined) params[k] = v; };
+            set('Is', 'is'); set('Nf', 'nf'); set('Nr', 'nr'); set('Bf', 'bf'); set('Br', 'br');
+            set('Ise', 'ise', 'c2'); set('Ne', 'ne'); set('Isc', 'isc', 'c4'); set('Nc', 'nc');
+            set('Vaf', 'vaf', 'va'); set('Var', 'var', 'vb'); set('Ikf', 'ikf', 'ik'); set('Ikr', 'ikr');
+            set('Rb', 'rb'); set('Rc', 'rc'); set('Re', 're');
+            set('Cje', 'cje'); set('Vje', 'vje', 'pe'); set('Mje', 'mje', 'me');
+            set('Cjc', 'cjc'); set('Vjc', 'vjc', 'pc'); set('Mjc', 'mjc', 'mc'); set('Fc', 'fc');
+            set('Tf', 'tf'); set('Tr', 'tr');
+            params.area = tokens[5] && /^[-+.\d]/.test(tokens[5]) ? parseSpiceValue(tokens[5]) : 1;
+          }
           components.push({
             id, type, position: { x: 0, y: 0 }, rotation: 0, parameters: params,
           });
@@ -605,6 +654,22 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
             continue;
           }
           const id = tokens[0];
+          const sm = modelOf(tokens[5], 'SW');
+          if (sm) {
+            // ngspice voltage-controlled switch: RON/ROFF/VT/VH with hysteresis
+            const plugin = getPlugin('spiceSwitch');
+            const params: any = {};
+            if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
+            params.vt = mp(sm, 'vt') ?? 0; params.vh = mp(sm, 'vh') ?? 0;
+            params.ron = mp(sm, 'ron') ?? 1; params.roff = mp(sm, 'roff') ?? 1e12;
+            params.initialOn = /^on$/i.test(tokens[6] || '');
+            components.push({ id, type: 'spiceSwitch', position: { x: 0, y: 0 }, rotation: 0, parameters: params });
+            registerTerminal(tokens[1], id, 'a');
+            registerTerminal(tokens[2], id, 'b');
+            registerTerminal(tokens[3], id, 'cp');
+            registerTerminal(tokens[4], id, 'cn');
+            break;
+          }
           const plugin = getPlugin('switch');
           const params: any = {};
           if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
@@ -724,6 +789,47 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
     return { doc: null, errors, warnings };
   }
 
+  // ── K couplings: fold the coupled L cards into one multi-winding component ──
+  if (kCards.length > 0) {
+    const parent = new Map<string, string>();
+    const find = (x: string): string => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x)!)!); x = parent.get(x)!; } return x; };
+    for (const kc of kCards) for (const l of kc.ls) if (!parent.has(l.toLowerCase())) parent.set(l.toLowerCase(), l.toLowerCase());
+    for (const kc of kCards) { const r0 = find(kc.ls[0].toLowerCase()); for (const l of kc.ls.slice(1)) parent.set(find(l.toLowerCase()), r0); }
+    const groups = new Map<string, string[]>();
+    for (const l of parent.keys()) { const r = find(l); (groups.get(r) ?? groups.set(r, []).get(r)!).push(l); }
+    let gi = 0;
+    for (const members of groups.values()) {
+      const infos = members.map((m) => ({ m, info: lInfo.get(m) }));
+      if (infos.some((x) => !x.info)) { warnings.push(`K card references unknown inductor(s) in group ${members.join(',')} — coupling ignored.`); continue; }
+      if (members.length > 3) { warnings.push(`K coupling group ${members.join(',')} has more than 3 windings — only the first 3 are coupled.`); members.length = 3; infos.length = 3; }
+      const n = members.length as 2 | 3;
+      const type = n === 2 ? 'spiceMutual2' : 'spiceMutual3';
+      const plugin = getPlugin(type);
+      const params: any = {};
+      if (plugin) for (const p of plugin.parameters) params[p.key] = p.default;
+      const ordered = infos.map((x, j) => ({ ...x, j }));
+      const origIds = ordered.map((x) => components.find((c) => c.id.toLowerCase() === x.m)!.id);
+      ordered.forEach((x, j) => { params[`L${j + 1}`] = x.info!.value; });
+      for (const key of Object.keys(params)) if (/^k\d\d$/.test(key)) params[key] = 0;
+      for (const kc of kCards) {
+        const idx = kc.ls.map((l) => members.indexOf(l.toLowerCase())).filter((i) => i >= 0);
+        for (let a = 0; a < idx.length; a++) for (let b = a + 1; b < idx.length; b++) {
+          const lo = Math.min(idx[a], idx[b]) + 1, hi = Math.max(idx[a], idx[b]) + 1;
+          params[`k${lo}${hi}`] = kc.k;
+        }
+      }
+      const id = `K_${origIds.join('_')}`.slice(0, 40) + (gi++ ? `_${gi}` : '');
+      // remove the plain inductors and their net registrations
+      for (const oid of origIds) {
+        const ci = components.findIndex((c) => c.id === oid);
+        if (ci >= 0) components.splice(ci, 1);
+        for (const arr of netMembers.values()) for (let q = arr.length - 1; q >= 0; q--) if (arr[q].componentId === oid) arr.splice(q, 1);
+      }
+      components.push({ id, type, position: { x: 0, y: 0 }, rotation: 0, parameters: params });
+      ordered.forEach((x, j) => { registerTerminal(x.info!.n1, id, `a${j + 1}`); registerTerminal(x.info!.n2, id, `b${j + 1}`); });
+    }
+  }
+
   // If any net references ground (0/gnd), ensure a ground component exists.
   if (netMap.has('0') || netMap.has('gnd') || netMap.has('ground')) {
     ensureGround();
@@ -789,5 +895,50 @@ export function importSpiceNetlist(netlist: string): SpiceImportResult {
     cards: directiveCards,
   };
 
-  return { doc, errors, warnings };
+  const nets = new Map<string, { componentId: string; terminalId: string }>();
+  for (const [name, id] of (netMap as unknown as { nameToId: Map<string, number> }).nameToId) {
+    const members = (netMembers.get(id) ?? []).filter((m) => m.componentId !== groundId);
+    if (id === 0 || name === '0' || name === 'gnd' || name === 'ground') { if (groundId) nets.set(name, { componentId: groundId, terminalId: 'g' }); }
+    else if (members.length > 0) nets.set(name, members[0]);
+  }
+  return { doc, errors, warnings, nets, analyses };
+}
+
+/** ngspice B-source expressions accept engineering suffixes (30m, 1k, 2.2u, 1meg); the app's evaluator wants plain numbers. */
+export function plainNumbers(expr: string): string {
+  return expr.replace(/(?<![\w.])(\d+\.?\d*(?:[eE][-+]?\d+)?|\.\d+(?:[eE][-+]?\d+)?)(meg|mil|[tgkmunpfTGKMUNPF])(?![\w(])/gi, (_m, n: string, suf: string) => String(parseSpiceValue(n + suf)));
+}
+
+/** Split "[DC] v [AC mag [phase]] [SIN|PULSE|PWL|EXP(...)]" into numeric fields; waveform args are SI numbers. */
+function parseSourceSpec(joined: string, tran?: { tstep: number; tstop: number }) {
+  let rest = joined;
+  let wave: string | undefined;
+  let waveKind: string | undefined;
+  let waveArgs: number[] = [];
+  const wm = rest.match(/\b(SINE?|PULSE|PWL|EXP)\s*\(([^)]*)\)/i);
+  if (wm) {
+    waveKind = wm[1].toLowerCase() === 'sine' ? 'sin' : wm[1].toLowerCase();
+    waveArgs = wm[2].trim().split(/[\s,]+/).filter(Boolean).map(parseSpiceValue);
+    if (waveKind === 'pulse' && tran) {
+      // SPICE defaults: TR = TF = TSTEP, PW = PER = TSTOP
+      while (waveArgs.length < 7) waveArgs.push(NaN);
+      if (!Number.isFinite(waveArgs[2])) waveArgs[2] = 0;
+      if (!Number.isFinite(waveArgs[3])) waveArgs[3] = tran.tstep;
+      if (!Number.isFinite(waveArgs[4])) waveArgs[4] = tran.tstep;
+      if (!Number.isFinite(waveArgs[5])) waveArgs[5] = tran.tstop;
+      if (!Number.isFinite(waveArgs[6])) waveArgs[6] = tran.tstop;
+    }
+    wave = `${waveKind.toUpperCase()}(${waveArgs.join(' ')})`;
+    rest = rest.replace(wm[0], ' ');
+  }
+  let acMag = 0, acPhase = 0, hasAc = false;
+  const am = rest.match(/\bAC\s+([^\s]+)(?:\s+([-+.\d][^\s]*))?/i);
+  if (am) {
+    hasAc = true; acMag = parseSpiceValue(am[1]); acPhase = am[2] ? parseSpiceValue(am[2]) : 0;
+    rest = rest.replace(am[0], ' ');
+  }
+  let dc = 0, dcGiven = false;
+  const dm = rest.match(/(?:\bDC\s+)?([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?[a-zA-Zµ]*)/i);
+  if (dm && !/^\s*$/.test(rest)) { dc = parseSpiceValue(dm[1]); dcGiven = true; }
+  return { dc, dcGiven, acMag, acPhase, hasAc, wave, waveKind, waveArgs };
 }

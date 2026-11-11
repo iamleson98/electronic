@@ -4,11 +4,13 @@
 import type { ComponentPlugin } from '../types';
 import { drawLabel } from './draw';
 import { registerPlugin } from '../registry';
-import { stampSimpleDiode, stepSimpleDiode, simpleDiodeCurrent } from './advanced-semi';
+import { termNode } from '../terminal-lookup';
+import { stampSimpleDiode, stepSimpleDiode, simpleDiodeCurrent, ledForwardV } from './advanced-semi';
 
 // ----- DC Voltage Source -----
 const dcVoltage: ComponentPlugin = {
   type: 'dcVoltage',
+  pureStamp: true,
   name: 'DC Voltage',
   category: 'source',
   description: 'Ideal DC voltage source. Maintains a fixed voltage between + and - terminals.',
@@ -130,6 +132,7 @@ const acVoltage: ComponentPlugin = {
 // ----- Pulse Source -----
 const pulseSource: ComponentPlugin = {
   type: 'pulseSource',
+  pureStamp: true,
   name: 'Pulse',
   category: 'source',
   description: 'Square wave generator with configurable period and duty cycle.',
@@ -339,6 +342,8 @@ const led: ComponentPlugin = {
   description: 'Light-emitting diode (Shockley junction): Forward Voltage is the drop at 20 mA, the datasheet test current; Series Resistance is the die/bond resistance (a few Ω — add your own current-limiting resistor, as on a real board). Glow ∝ forward current.',
   symbol: 'LED',
   nonLinear: true,
+  pureStamp: true, // stamp() only rewrites idempotent topology keys; Newton memory lives in sim.newtonMemory
+  pureStatePrefixes: ['dio_'],
   boundingBox: { width: 4, height: 2 },
   terminals: [
     { id: 'a', label: 'A', position: { x: 0, y: 1 } },
@@ -347,12 +352,16 @@ const led: ComponentPlugin = {
   parameters: [
     { key: 'color', label: 'Color', type: 'select', default: 'red', options: [
       { label: 'Red', value: 'red' },
+      { label: 'Orange', value: 'orange' },
+      { label: 'Yellow', value: 'yellow' },
       { label: 'Green', value: 'green' },
       { label: 'Blue', value: 'blue' },
-      { label: 'Yellow', value: 'yellow' },
       { label: 'White', value: 'white' },
+      { label: 'UV', value: 'uv' },
+      { label: 'Infrared', value: 'ir' },
     ] },
-    { key: 'forwardV', label: 'Forward Voltage (at 20 mA)', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 10, step: 0.1 },
+    // 0 = automatic: the typical Vf of the chosen colour (red 2.0, green 2.2, blue/white 3.2, IR 1.3 …)
+    { key: 'forwardV', label: 'Forward Voltage (at 20 mA, 0 = auto by colour)', type: 'number', default: 0, unit: 'V', min: 0, max: 10, step: 0.1, description: 'Datasheet Vf at 20 mA. 0 = automatic from the LED colour.' },
     // a real 5 mm LED's bulk resistance is a few ohms; the old 220 Ω default
     // hid a current-limiting resistor inside the part, so an LED + resistor
     // circuit drew about half the current the same parts draw on a bench
@@ -360,7 +369,7 @@ const led: ComponentPlugin = {
   ],
   render(ctx, params, cellSize, sim, instance) {
     const colorMap: Record<string, string> = {
-      red: '#ef4444', green: '#22c55e', blue: '#3b82f6', yellow: '#eab308', white: '#f8fafc',
+      red: '#ef4444', green: '#22c55e', blue: '#3b82f6', yellow: '#eab308', white: '#f8fafc', orange: '#f97316', uv: '#a855f7', ir: '#7f1d1d',
     };
     const color = colorMap[params.color as string] ?? '#ef4444';
     // Get the actual current through this LED from the instance's simState.
@@ -374,7 +383,7 @@ const led: ComponentPlugin = {
     const isSimRunning = sim != null && instance != null;
     // Only show glow if simulation is active AND current exceeds the LED's
     // threshold (forwardV / seriesR gives the minimum conduction current).
-    const vf = (params.forwardV as number) ?? 2.0;
+    const vf = ledForwardV(params);
     const seriesR = Math.max(0.01, (params.seriesR as number) ?? 220);
     const minConductionCurrent = 0.0001; // 0.1 mA minimum to visible glow
     const brightness = isSimRunning && absCurrent > minConductionCurrent
@@ -462,8 +471,8 @@ const led: ComponentPlugin = {
     ];
   },
   measure(_params, terminals, sim, comp) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const k = termNode(terminals, 'k', 1);
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
     const i = comp ? simpleDiodeCurrent(comp, sim, a, k) : 0;
     return [

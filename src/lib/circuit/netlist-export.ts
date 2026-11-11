@@ -8,7 +8,9 @@
 import type { CircuitComponent, CircuitDocument, Wire, ComponentPlugin } from './types';
 import { getPlugin } from './registry';
 import { buildNodeMap } from './engine';
-import { isSchematicOnlyType } from '../pcb/footprints';
+import { isSchematicOnlyType, isPhysicalType, powerInputFor, footprintPackage, getFootprintDef } from '../pcb/footprints';
+import { assignRefdes } from '../pcb/netlist-sync';
+import { bomItemFor, compareRefdes, isBomComponent } from '../pcb/bom-core';
 import type { OpampSpec } from './components/opamp-core';
 import { toSpiceExpr } from './spice-expr';
 import { simpleDiodeModel } from './components/advanced-semi';
@@ -24,7 +26,7 @@ interface Net {
   pins: { refdes: string; termId: string; pinNumber?: string }[];
 }
 
-function buildNets(doc: CircuitDocument): Net[] {
+function buildNets(doc: CircuitDocument, refdesOf?: Map<string, string>): Net[] {
   const plugins = new Map<string, ComponentPlugin>();
   for (const c of doc.components) {
     const p = getPlugin(c.type);
@@ -63,7 +65,7 @@ function buildNets(doc: CircuitDocument): Net[] {
       const key = `${comp.id}:${term.id}`;
       const node = nodeMap.terminalNode.get(key);
       if (node === undefined) continue;
-      const refdes = comp.refdes ?? comp.id;
+      const refdes = refdesOf?.get(comp.id) ?? comp.refdes ?? comp.id;
       const pinNumber = term.number;
       if (!netMap.has(node)) netMap.set(node, []);
       netMap.get(node)!.push({ refdes, termId: term.id, pinNumber });
@@ -357,78 +359,182 @@ function isDnp(comp: CircuitComponent): boolean {
   return comp.fields?.find((f) => f.key === 'DNP')?.value === 'true';
 }
 
+// ── KiCad netlist model ─────────────────────────────────────────────────────
+// Components carry a KiCad standard-library footprint id (or an empty one plus
+// an explanatory field when this tool has no verified real footprint), and each
+// net node uses the footprint PAD number — the datasheet pin number — resolved
+// by the same code the PCB editor uses (real-packages.ts, per discrete part).
+
+export interface KiCadComp {
+  ref: string;
+  value: string;
+  /** "Lib:Name" or '' */
+  footprint: string;
+  datasheet: string;
+  fields: { name: string; value: string }[];
+}
+export interface KiCadNet { code: number; name: string; nodes: { ref: string; pin: string }[] }
+export interface KiCadModel { comps: KiCadComp[]; nets: KiCadNet[] }
+
+/** Simulation-only parts (probes, schematic symbols, behavioural / dependent
+ *  sources, mounting holes) never reach the netlist. Supplies and signal
+ *  sources are NOT in this set: they are the board's input header (J#). */
+function isSimulationOnly(comp: CircuitComponent): boolean {
+  return !isBomComponent(comp);
+}
+
+export function buildKiCadModel(doc: CircuitDocument, opts?: { includeDnp?: boolean }): KiCadModel {
+  const physical = doc.components.filter((c) => !isSimulationOnly(c));
+  const refdesOf = assignRefdes(physical);
+  const fitted = physical.filter((c) => opts?.includeDnp || !isDnp(c));
+  const nets = buildNets(doc, refdesOf);
+  // A DC supply names its + net after the rail ('+9V'): the auto 'N0003'
+  // means nothing in Pcbnew. User labels (VCC, 5V…) and GND are kept.
+  const takenNames = new Set(nets.map((n) => n.name));
+  for (const comp of fitted) {
+    const rail = powerInputFor(comp.type, comp.parameters)?.netName;
+    if (!rail) continue;
+    const ref = refdesOf.get(comp.id)!;
+    const net = nets.find((n) => /^N\d{4}$/.test(n.name) && n.pins.some((p) => p.refdes === ref && p.termId === 'p'));
+    if (!net) continue;
+    let name = rail, k = 2;
+    while (takenNames.has(name)) name = `${rail}_${k++}`;
+    takenNames.add(name);
+    net.name = name;
+  }
+  // (comp id) by refdes, to look the pads of each node's component up
+  const compByRef = new Map(fitted.map((c) => [refdesOf.get(c.id)!, c]));
+
+  const comps: KiCadComp[] = fitted.map((comp) => {
+    const plugin = getPlugin(comp.type);
+    const pkg = footprintPackage(comp.type, comp.parameters);
+    const userFp = comp.fields?.find((f) => f.key === 'Footprint')?.value;
+    const footprint = userFp && userFp.includes(':') ? userFp : (pkg.kicad ?? '');
+    const fields: { name: string; value: string }[] = [];
+    if (!footprint) {
+      fields.push({ name: 'FootprintNote', value: pkg.note ?? 'no verified KiCad footprint for this part; assign one in Pcbnew' });
+    }
+    const item = bomItemFor(comp);
+    if (item.mpn) fields.push({ name: 'MPN', value: item.mpn });
+    for (const f of comp.fields ?? []) {
+      if (f.key !== 'Footprint' && f.key !== 'Datasheet' && f.key !== 'MPN') fields.push({ name: f.name, value: f.value });
+    }
+    return {
+      ref: refdesOf.get(comp.id)!,
+      value: item.value,
+      footprint,
+      datasheet: comp.fields?.find((f) => f.key === 'Datasheet')?.value ?? plugin?.datasheet ?? '',
+      fields,
+    };
+  });
+
+  // terminal → pad number, per component (terminals without a pad are dropped,
+  // e.g. the Level-1 MOSFET's bulk, which a real 3-pin part ties to source)
+  const padInfo = new Map<string, { byTerminal: Map<string, string>; ties: { pad: string; to: string }[] }>();
+  for (const comp of fitted) {
+    const plugin = getPlugin(comp.type);
+    const terminalIds = new Set((plugin?.terminals ?? []).map((t) => t.id));
+    const def = getFootprintDef(comp.type, comp.parameters);
+    const byTerminal = new Map<string, string>();
+    const ties: { pad: string; to: string }[] = [];
+    def.pads.forEach((pd, i) => {
+      const number = pd.number ?? String(i + 1);
+      if (terminalIds.has(pd.terminalId)) byTerminal.set(pd.terminalId, number);
+      if (pd.tie && pd.tieTo) ties.push({ pad: number, to: pd.tieTo });
+    });
+    padInfo.set(refdesOf.get(comp.id)!, { byTerminal, ties });
+  }
+
+  const byName = new Map<string, KiCadNet>();
+  const addNode = (net: KiCadNet, ref: string, pin: string) => {
+    if (!net.nodes.some((n) => n.ref === ref && n.pin === pin)) net.nodes.push({ ref, pin });
+  };
+  const getNet = (name: string): KiCadNet => {
+    let n = byName.get(name);
+    if (!n) { n = { code: byName.size + 1, name, nodes: [] }; byName.set(name, n); }
+    return n;
+  };
+  const fittedRefs = new Set(compByRef.keys());
+  // pad → net (per ref), to apply board-level ties to unused pins
+  const padNet = new Map<string, KiCadNet>();
+  for (const n of nets) {
+    const pins = n.pins.filter((p) => fittedRefs.has(p.refdes));
+    const mapped = pins.map((p) => ({ ref: p.refdes, pad: padInfo.get(p.refdes)?.byTerminal.get(p.termId) })).filter((p): p is { ref: string; pad: string } => p.pad !== undefined);
+    if (mapped.length === 0) continue;
+    const net = getNet(n.name);
+    for (const m of mapped) { addNode(net, m.ref, m.pad); padNet.set(`${m.ref}:${m.pad}`, net); }
+  }
+  // unused-pin ties (unused gate inputs → GND, parked op-amp → follower …):
+  // a floating CMOS input oscillates, so Pcbnew must see them wired
+  for (const [ref, info] of padInfo) {
+    const resolve = (to: string): string | undefined => /^pin\d+$/.test(to) ? to.slice(3) : info.byTerminal.get(to);
+    const parent = new Map<string, string>();
+    const find = (x: string): string => { while (parent.get(x) !== undefined && parent.get(x) !== x) x = parent.get(x)!; return x; };
+    for (const t of info.ties) {
+      const target = resolve(t.to);
+      if (target === undefined) continue;
+      parent.set(find(t.pad), find(target));
+      if (!parent.has(find(target))) parent.set(find(target), find(target));
+    }
+    const groups = new Map<string, Set<string>>();
+    for (const pad of parent.keys()) {
+      const root = find(pad);
+      if (!groups.has(root)) groups.set(root, new Set());
+      groups.get(root)!.add(pad); groups.get(root)!.add(root);
+    }
+    for (const pads of groups.values()) {
+      let net: KiCadNet | undefined;
+      for (const pad of pads) { const n = padNet.get(`${ref}:${pad}`); if (n) { net = n; break; } }
+      if (!net) {
+        const first = [...pads].sort((a, b) => Number(a) - Number(b))[0];
+        net = getNet(`Net-(${ref}-Pad${first})`);
+      }
+      for (const pad of pads) { addNode(net, ref, pad); padNet.set(`${ref}:${pad}`, net); }
+    }
+  }
+  const out = [...byName.values()].filter((n) => n.nodes.length > 0);
+  out.forEach((n, i) => { n.code = i + 1; });
+  return { comps, nets: out };
+}
+
 export function exportKiCadNetlist(
   doc: CircuitDocument,
   title: string = 'Circuit',
   opts?: { format?: 'sexpr' | 'xml'; includeDnp?: boolean },
 ): string {
-  if (opts?.format === 'xml') return exportKiCadNetlistXml(doc, title);
-  const nets = buildNets(doc);
-  const plugins = new Map<string, ComponentPlugin>();
-  for (const c of doc.components) {
-    const p = getPlugin(c.type);
-    if (p) plugins.set(c.type, p);
-  }
-  const fitted = doc.components.filter((c) => opts?.includeDnp || !isDnp(c));
+  if (opts?.format === 'xml') return exportKiCadNetlistXml(doc, title, opts);
+  const { comps, nets } = buildKiCadModel(doc, opts);
   const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const compNodes = fitted.map((comp) => {
-    const plugin = plugins.get(comp.type);
-    const refdes = comp.refdes ?? comp.id;
-    const footprint = comp.fields?.find((f) => f.key === 'Footprint')?.value ?? plugin?.defaultFootprint ?? '';
-    const value = comp.parameters.resistance ?? comp.parameters.voltage ?? comp.parameters.capacitance ?? comp.parameters.inductance ?? comp.type;
-    const datasheet = comp.fields?.find((f) => f.key === 'Datasheet')?.value ?? plugin?.datasheet ?? '';
-    const extraFields = (comp.fields ?? [])
-      .filter((f) => f.key !== 'Footprint' && f.key !== 'Datasheet')
-      .map((f) => `      (field (name "${esc(f.name)}") "${esc(f.value)}")`)
-      .join('\n');
-    return `  (comp (ref "${esc(refdes)}")\n    (value "${esc(String(value))}")\n    (footprint "${esc(footprint)}")\n    (datasheet "${esc(datasheet)}")${extraFields ? `\n${extraFields}` : ''})`;
+  const compNodes = comps.map((c) => {
+    const fields = [{ name: 'Footprint', value: c.footprint }, { name: 'Datasheet', value: c.datasheet }, ...c.fields]
+      .map((f) => `      (field (name "${esc(f.name)}") "${esc(f.value)}")`).join('\n');
+    return `    (comp (ref "${esc(c.ref)}")\n      (value "${esc(c.value)}")\n      (footprint "${esc(c.footprint)}")\n      (datasheet "${esc(c.datasheet)}")\n      (fields\n${fields}))`;
   }).join('\n');
-  const fittedRefs = new Set(fitted.map((c) => c.refdes ?? c.id));
-  const netNodes = nets.map((n, i) => {
-    const pinNodes = n.pins
-      .filter((p) => fittedRefs.has(p.refdes))
-      .map((p) => `      (node (ref "${esc(p.refdes)}") (pin "${esc(p.pinNumber ?? p.termId)}"))`)
-      .join('\n');
-    return `  (net (code "${i + 1}") (name "${esc(n.name)}")\n${pinNodes})`;
+  const netNodes = nets.map((n) => {
+    const nodes = n.nodes.map((p) => `      (node (ref "${esc(p.ref)}") (pin "${esc(p.pin)}"))`).join('\n');
+    return `    (net (code "${n.code}") (name "${esc(n.name)}")\n${nodes})`;
   }).join('\n');
-  return `(export (version "E")\n  (design (source "${esc(title)}") (date "${new Date().toISOString()}") (tool "CircuitLab Web EDA"))\n  (components\n${compNodes})\n  (nets\n${netNodes})\n)\n`;
+  return `(export (version "E")\n  (design (source "${esc(title)}") (date "${new Date().toISOString()}") (tool "CircuitLab Web EDA"))\n  (components\n${compNodes})\n  (nets\n${netNodes}))\n`;
 }
 
-export function exportKiCadNetlistXml(doc: CircuitDocument, title: string = 'Circuit'): string {
-  const nets = buildNets(doc);
-  const plugins = new Map<string, ComponentPlugin>();
-  for (const c of doc.components) {
-    const p = getPlugin(c.type);
-    if (p) plugins.set(c.type, p);
-  }
-
-  const compNodes = doc.components.map((comp) => {
-    const plugin = plugins.get(comp.type);
-    const refdes = comp.refdes ?? comp.id;
-    const footprint = comp.fields?.find((f) => f.key === 'Footprint')?.value ?? plugin?.defaultFootprint ?? 'Unknown';
-    const value = comp.parameters.resistance ?? comp.parameters.voltage ?? comp.parameters.capacitance ?? comp.type;
-    const datasheet = comp.fields?.find((f) => f.key === 'Datasheet')?.value ?? plugin?.datasheet ?? '';
-    return `    <comp ref="${escapeXML(refdes)}">
-      <value>${escapeXML(String(value))}</value>
-      <footprint>${escapeXML(footprint)}</footprint>
-      <datasheet>${escapeXML(datasheet)}</datasheet>
-${(comp.fields ?? []).filter((f) => f.key !== 'Footprint' && f.key !== 'Datasheet').map((f) => `      <field name="${escapeXML(f.name)}">${escapeXML(f.value)}</field>`).join('\n')}
-    </comp>`;
-  }).join('\n');
-
-  const netNodes = nets.map((n) => {
-    const pinNodes = n.pins.map((p) => `        <node ref="${escapeXML(p.refdes)}" pin="${escapeXML(p.pinNumber ?? p.termId)}"/>`).join('\n');
-    return `    <net code="${n.id}" name="${escapeXML(n.name)}">
-${pinNodes}
-    </net>`;
-  }).join('\n');
-
-  const date = new Date().toISOString();
+export function exportKiCadNetlistXml(doc: CircuitDocument, title: string = 'Circuit', opts?: { includeDnp?: boolean }): string {
+  const { comps, nets } = buildKiCadModel(doc, opts);
+  const compNodes = comps.map((c) => `    <comp ref="${escapeXML(c.ref)}">
+      <value>${escapeXML(c.value)}</value>
+      <footprint>${escapeXML(c.footprint)}</footprint>
+      <datasheet>${escapeXML(c.datasheet)}</datasheet>
+      <fields>
+${c.fields.map((f) => `        <field name="${escapeXML(f.name)}">${escapeXML(f.value)}</field>`).join('\n')}
+      </fields>
+    </comp>`).join('\n');
+  const netNodes = nets.map((n) => `    <net code="${n.code}" name="${escapeXML(n.name)}">
+${n.nodes.map((p) => `      <node ref="${escapeXML(p.ref)}" pin="${escapeXML(p.pin)}"/>`).join('\n')}
+    </net>`).join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
-<export version="E-DRAFT">
+<export version="E">
   <design>
     <source>${escapeXML(title)}</source>
-    <date>${date}</date>
+    <date>${new Date().toISOString()}</date>
     <tool>CircuitLab Web EDA</tool>
   </design>
   <components>
@@ -463,38 +569,32 @@ export interface BOMRow {
 }
 
 export function buildBOMRows(doc: CircuitDocument): BOMRow[] {
-  const plugins = new Map<string, ComponentPlugin>();
-  for (const c of doc.components) {
-    const p = getPlugin(c.type);
-    if (p) plugins.set(c.type, p);
-  }
+  // Same builder as the schematic JLC/PCBWay BOM and the PCB BOM (bom-core.ts):
+  // grouped by (value, footprint, mpn, dnp); value = real value, footprint =
+  // the package the PCB uses, MPN only on an exact match.
+  const physical = doc.components.filter((c) => isPhysicalType(c.type));
+  const refdesOf = assignRefdes(physical);
   const groups = new Map<string, BOMRow>();
-  for (const comp of doc.components) {
-    const plugin = plugins.get(comp.type);
-    if (!plugin) continue;
-    const refdes = comp.refdes ?? comp.id;
+  for (const comp of physical.filter(isBomComponent)) {
+    const item = bomItemFor(comp, refdesOf.get(comp.id));
     const dnp = isDnp(comp);
-    const footprint = comp.fields?.find((f) => f.key === 'Footprint')?.value ?? plugin.defaultFootprint ?? 'Unknown';
-    const mpn = comp.fields?.find((f) => f.key === 'MPN')?.value;
-    const manufacturer = comp.fields?.find((f) => f.key === 'Manufacturer')?.value;
-    const digikeyPN = comp.fields?.find((f) => f.key === 'DigiKeyPN')?.value;
-    const mouserPN = comp.fields?.find((f) => f.key === 'MouserPN')?.value;
-    const value = String(comp.parameters.resistance ?? comp.parameters.voltage ?? comp.parameters.capacitance ?? comp.parameters.inductance ?? comp.type);
-
-    // group by (footprint, value, mpn)
-    const key = `${footprint}|${value}|${mpn ?? ''}`;
-    if (!groups.has(key)) {
-      groups.set(key, {
-        designators: [], quantity: 0, value, footprint,
-        manufacturer, mpn, digikeyPN, mouserPN,
-        description: plugin.description, dnp,
-      });
+    const key = `${item.footprint}|${item.value}|${item.mpn}|${dnp}`;
+    let row = groups.get(key);
+    if (!row) {
+      row = {
+        designators: [], quantity: 0, value: item.value, footprint: item.footprint,
+        manufacturer: item.manufacturer || undefined, mpn: item.mpn || undefined,
+        digikeyPN: item.digikeyPN || undefined, mouserPN: item.mouserPN || undefined,
+        description: item.description, dnp,
+      };
+      groups.set(key, row);
     }
-    const row = groups.get(key)!;
-    row.designators.push(refdes);
+    row.designators.push(item.refdes);
     row.quantity++;
   }
-  return Array.from(groups.values()).sort((a, b) => a.footprint.localeCompare(b.footprint));
+  const rows = Array.from(groups.values());
+  for (const r of rows) r.designators.sort(compareRefdes);
+  return rows.sort((a, b) => compareRefdes(a.designators[0], b.designators[0]));
 }
 
 export function exportBOMCSV(doc: CircuitDocument): string {

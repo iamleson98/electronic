@@ -85,6 +85,12 @@ export interface Pad {
   polygon?: { x: number; y: number }[];
   /** Drill diameter in mm. > 0 means THT (plated through-hole). 0 = SMD. */
   drill?: number;
+  /** false = non-plated hole (mounting hole, NPTH): drilled into the NPTH
+   *  file, no annular ring is required. Default (absent) = plated. */
+  plated?: boolean;
+  /** Slotted (oval) hole: full hole extents in mm along board X / Y (already
+   *  rotated with the part). Absent = round hole of `drill` diameter. */
+  slot?: { width: number; height: number };
   /** datasheet pin number */
   number?: string;
   /** a real-part pin with no schematic terminal that must be wired (see note) */
@@ -279,6 +285,10 @@ export interface FootprintPadDef {
   layer?: CopperLayer;
   /** Drill diameter in mm. When > 0, the pad is a THT pad with a drill hole. */
   drill?: number;
+  /** false = non-plated (NPTH) hole; absent = plated */
+  plated?: boolean;
+  /** Slotted hole extents (mm, in footprint space); `drill` = the slot width */
+  slot?: { width: number; height: number };
   /** For polygon shapes: list of polygon vertices */
   polygon?: { x: number; y: number }[];
   /** datasheet pin number ("1", "14") */

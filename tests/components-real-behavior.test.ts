@@ -60,7 +60,8 @@ describe('unwired pins float instead of being grounded', () => {
       prev = { nodeVoltage: s.nodeVoltage, branchCurrent: s.branchCurrent, time: s.time, state: s.state };
     }
     // TRIG low → output HIGH (RST floats up through its internal pull-up)
-    expect(V(c, ws, s!, 'U1:out')).toBeGreaterThan(4.5);
+    // NE555 datasheet: VOH ≈ Vcc − 1.0 V (= 4 V on 5 V)
+    expect(V(c, ws, s!, 'U1:out')).toBeGreaterThan(3.8);
   });
 });
 

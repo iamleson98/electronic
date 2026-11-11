@@ -313,6 +313,8 @@ describe('review.derating rating provenance', () => {
       mk('resistor', 'r1', { resistance: 1000 }),
       mk('ground', 'gnd'),
     ] as CircuitComponent[];
+    // a legacy document: saved before resistors carried a powerRating parameter
+    delete (comps[1].parameters as Record<string, unknown>).powerRating;
     const wires = [
       { id: 'w1', from: { componentId: 'v1', terminalId: 'p' }, to: { componentId: 'r1', terminalId: 'a' } },
       { id: 'w2', from: { componentId: 'r1', terminalId: 'b' }, to: { componentId: 'gnd', terminalId: 'g' } },
@@ -535,7 +537,7 @@ describe('Gerber X2 layer numbers', () => {
     });
     const fns: Record<string, string> = {};
     for (const f of files) {
-      const m = f.content.match(/%TF\.FileFunction,Copper,(L\d+)\*%/);
+      const m = f.content.match(/%TF\.FileFunction,Copper,(L\d+),(?:Top|Inr|Bot)\*%/);
       if (m) fns[f.filename] = m[1];
     }
     expect(fns['top_copper.gbr']).toBe('L1');
@@ -549,7 +551,7 @@ describe('Gerber X2 layer numbers', () => {
 
   it('direct bottom export (no stack info) is collision-free L6, not L2', () => {
     const out = exportGerberX2Copper('bottom', [], [], [], { width: 40, height: 30 });
-    expect(out).toContain('%TF.FileFunction,Copper,L6*%');
+    expect(out).toContain('%TF.FileFunction,Copper,L6,Bot*%');
   });
 });
 

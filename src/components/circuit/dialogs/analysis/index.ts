@@ -4,3 +4,4 @@ export { OptionsDialog } from './OptionsDialog';
 export { MeasurementDialog } from './MeasurementDialog';
 export { BatchSweepDialog } from './BatchSweepDialog';
 export { StimuliEditorDialog } from './StimuliEditorDialog';
+export { StressCheckDialog } from './StressCheckDialog';

@@ -66,6 +66,46 @@ export function limitStep(vnew: number, vold: number, vscale: number, vcrit: num
 }
 
 /**
+ * SPICE3 / ngspice DEVpnjlim — P-N junction voltage limiting.
+ *
+ * Unlike limitStep (CircuitJS1 flavour) this also limits the DOWNWARD
+ * direction: a reverse-going iterate (vnew < 0) is clamped to at most one
+ * volt below the previous iterate (or 2·|vold|+1 when vold ≤ 0), so a single
+ * wild Newton step cannot throw an off junction to kilovolts and leave the
+ * following rounds to crawl back. Forward steps past vcrit are compressed
+ * logarithmically (vold + vt·(2 + ln(arg − 2))).
+ *
+ * The caller compares the result against vnew: any difference is SPICE's
+ * `icheck` — the device limited, so the iteration has not converged.
+ */
+const PNJLIM_RAW_MAX = 20;
+const PNJLIM_CEIL_VT = 10;
+export function pnjlim(vnew: number, vold: number, vt: number, vcrit: number): number {
+  if (vnew > vcrit && Math.abs(vnew - vold) > vt + vt) {
+    if (vold > 0) {
+      // `PNJLIM_RAW_MAX` bounds the raw Newton step the log compression sees: a
+      // linearisation that asks for 1e5…1e12 V is numerical garbage (ill-conditioned
+      // active-device cascades), and ln() of it would still kick the junction up by
+      // ≈ 0.8 V = e^32 in current. Anything beyond a real 20 V swing is treated as 20 V.
+      const arg = Math.max(-PNJLIM_RAW_MAX / vt, Math.min(PNJLIM_RAW_MAX / vt, (vnew - vold) / vt));
+      vnew = arg > 0 ? vold + vt * (2 + Math.log(arg - 2)) : vold - vt * (2 + Math.log(2 - arg));
+    } else {
+      vnew = vt * Math.log(vnew / vt);
+    }
+    // Evaluation ceiling (deviation from SPICE): repeated kicks from garbage
+    // rounds would otherwise stack the junction several volts up, where the
+    // tangent Newton step walks it back one Vt per round (130 rounds for 3.4 V).
+    // vcrit + PNJLIM_CEIL_VT·Vt is ~e^PNJLIM_CEIL_VT × 18 mA ≈ 400 A — never a real operating point.
+    const ceil = vcrit + PNJLIM_CEIL_VT * vt;
+    if (vnew > ceil) vnew = ceil;
+  } else if (vnew < 0) {
+    const arg = vold > 0 ? -vold - 1 : 2 * vold - 1;
+    if (vnew < arg) vnew = arg;
+  }
+  return vnew;
+}
+
+/**
  * Companion model of a Shockley junction at a given linearization point,
  * with gmin added (SPICE-style minimum conductance for matrix conditioning).
  *
@@ -97,6 +137,9 @@ export function shockleyCompanion(
   const iEq = i0 - g * v0;
   return { g, iEq, i0 };
 }
+
+/** Constant device gmin (SPICE GMIN). Not escalated per Newton round: the DC ladder owns gmin stepping. */
+export const DEVICE_GMIN = 1e-12;
 
 /**
  * SPICE-style escalating gmin for non-converging Newton loops.

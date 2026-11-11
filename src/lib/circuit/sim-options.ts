@@ -59,6 +59,13 @@ export interface SimOptions {
   saveNodes: string[];
   /** Print directives (.PRINT TRAN v(node)) — output to console/log during sim */
   printNodes: string[];
+  /**
+   * Stress-check derating factor (stress-check.ts): a part is flagged WARN once a
+   * stress exceeds `stressDerating` × its datasheet absolute maximum, FAIL above
+   * the absolute maximum itself. 1 (default) = absolute maxima only; 0.8 =
+   * the usual "professional" 20 % margin.
+   */
+  stressDerating?: number;
 }
 
 export const DEFAULT_OPTIONS: SimOptions = {
@@ -91,6 +98,7 @@ export const DEFAULT_OPTIONS: SimOptions = {
   nodeSets: {},
   saveNodes: [],
   printNodes: [],
+  stressDerating: 1,
 };
 
 export function mergeOptions(opts?: Partial<SimOptions>): SimOptions {

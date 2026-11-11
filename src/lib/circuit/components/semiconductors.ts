@@ -1,10 +1,12 @@
 // Semiconductors & ICs: diode, NPN/PNP BJT, NMOS/PMOS MOSFET, ideal op-amp, 555 timer,
 // logic gates, voltmeter, ammeter, oscilloscope.
 
-import type { ComponentPlugin, CircuitComponent } from '../types';
+import type { ComponentPlugin, CircuitComponent, SimContext } from '../types';
 import { drawLabel } from './draw';
+import { partOptions, defaultPart } from '../discrete-presets';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
+import { termNode } from '../terminal-lookup';
 import { thermalVoltage } from '../sim-options';
 import { stampBJT, stepBJT, measureBJT, stampSimpleDiode, stepSimpleDiode, simpleDiodeCurrent } from './advanced-semi';
 import { stampOpamp, stepOpamp, specFromParams, type OpampPins } from './opamp-core';
@@ -33,6 +35,8 @@ const diode: ComponentPlugin = {
   description: 'Silicon diode with the Shockley (exponential) I-V curve: Forward Voltage is the drop at 1 mA (1N4148 ≈ 0.7 V), On Resistance the bulk series resistance, Off Resistance a parallel leakage.',
   symbol: '▷',
   nonLinear: true,
+  pureStamp: true, // stamp() only rewrites idempotent topology keys; Newton memory lives in sim.newtonMemory
+  pureStatePrefixes: ['dio_'],
   boundingBox: { width: 4, height: 2 },
   terminals: [
     { id: 'a', label: 'A', position: { x: 0, y: 1 } },
@@ -42,6 +46,8 @@ const diode: ComponentPlugin = {
     { key: 'forwardV', label: 'Forward Voltage (at 1 mA)', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.05 },
     { key: 'onR', label: 'Series Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
     { key: 'offR', label: 'Leakage Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
+    { key: 'ratedCurrent', label: 'Max Forward Current', type: 'number', default: 0.3, unit: 'A', min: 0.001, max: 1000, step: 0.1, description: 'Absolute-maximum continuous If for the stress check. Defaults are a 1N4148 (300 mA / 100 V); 1N4007 = 1 A / 1000 V, 1N5819 = 1 A / 40 V.' },
+    { key: 'ratedReverseV', label: 'Max Reverse Voltage', type: 'number', default: 100, unit: 'V', min: 1, max: 10000, step: 1 },
   ],
   render(ctx, params, cellSize) {
     ctx.beginPath();
@@ -78,8 +84,8 @@ const diode: ComponentPlugin = {
     return [{ x: 0, y: 1 }, { x: 4, y: 1 }];
   },
   measure(_params, terminals, sim, comp) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const k = termNode(terminals, 'k', 1);
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
     const i = comp ? simpleDiodeCurrent(comp, sim, a, k) : 0;
     return [{ label: 'V', value: v.toFixed(3), unit: 'V' }, { label: 'I', value: (i * 1000).toFixed(3), unit: 'mA' }];
@@ -87,11 +93,25 @@ const diode: ComponentPlugin = {
 };
 
 // ----- NPN BJT -----
+/** Vendor SPICE capacitance / transit-time data of the preset parts (DC model is the hFE / VBE fit). */
+const BJT_DYNAMICS: Record<string, Record<string, number>> = {
+  '2N3904': { Cje: 4.493e-12, Mje: 0.2593, Vje: 0.75, Cjc: 3.638e-12, Mjc: 0.3085, Vjc: 0.75, Tf: 301.2e-12, Tr: 239.5e-9 },
+  '2N2222A': { Cje: 22.01e-12, Mje: 0.377, Vje: 0.75, Cjc: 7.306e-12, Mjc: 0.3416, Vjc: 0.75, Tf: 411.1e-12, Tr: 46.91e-9 },
+  'BC547B': { Cje: 13.58e-12, Mje: 0.3279, Vje: 0.65, Cjc: 3.728e-12, Mjc: 0.2955, Vjc: 0.3997, Tf: 439.1e-12, Tr: 1e-9 },
+};
+BJT_DYNAMICS['MMBT3904'] = BJT_DYNAMICS['2N3904'];
+BJT_DYNAMICS['PN2222A'] = BJT_DYNAMICS['2N2222A'];
+BJT_DYNAMICS['P2N2222A'] = BJT_DYNAMICS['2N2222A'];
+
 /** Gummel-Poon parameters for the basic BJT parts: β = hFE, and Is set so
  *  that Vbe = "VBE (on)" at Ic = 1 mA. No Early effect / knee (the simple
- *  part has no parameters for them). */
-export function simpleBjtModel(hfe: number, vOn: number): Record<string, number> {
-  return { Is: 1e-3 / Math.exp(vOn / thermalVoltage(27)), Bf: Math.max(1, hfe), Br: 1, Vaf: 1e6, Var: 1e6, Ikf: 1e6 };
+ *  part has no parameters for them). For parts with known vendor models the
+ *  junction capacitances and transit times (CJE/CJC/VJE/VJC/MJE/MJC/TF/TR)
+ *  are added so switching speed and RF behaviour are realistic; they carry no
+ *  DC current, so DC results are unchanged. */
+export function simpleBjtModel(hfe: number, vOn: number, part?: unknown): Record<string, number> {
+  const dyn = BJT_DYNAMICS[String(part ?? '')];
+  return { Is: 1e-3 / Math.exp(vOn / thermalVoltage(27)), Bf: Math.max(1, hfe), Br: 1, Vaf: 1e6, Var: 1e6, Ikf: 1e6, ...dyn };
 }
 
 const npn: ComponentPlugin = {
@@ -101,6 +121,8 @@ const npn: ComponentPlugin = {
   description: 'NPN BJT — exponential (Ebers–Moll) junctions: β = hFE, Vbe = VBE(on) at 1 mA, real gm = Ic/Vt and natural saturation. Works as a switch and in linear amplifiers.',
   symbol: 'NPN',
   nonLinear: true,
+  pureStamp: true, // stamp() only rewrites idempotent topology keys; Newton memory lives in sim.newtonMemory
+  pureStatePrefixes: ['spq_'],
   boundingBox: { width: 3, height: 4 },
   terminals: [
     { id: 'c', label: 'C', position: { x: 3, y: 0 } },
@@ -108,6 +130,7 @@ const npn: ComponentPlugin = {
     { id: 'e', label: 'E', position: { x: 3, y: 4 } },
   ],
   parameters: [
+    { key: 'part', label: 'Part (loads datasheet values)', type: 'select', default: defaultPart('npn'), options: partOptions('npn') },
     { key: 'hfe', label: 'DC Gain (hFE)', type: 'number', default: 100, unit: '', min: 1, max: 1000, step: 1 },
     { key: 'vbe', label: 'VBE at 1 mA', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 1.5, step: 0.05 },
   ],
@@ -182,13 +205,13 @@ const npn: ComponentPlugin = {
   // 1 mA, so every un-degenerated stage — a bypassed common-emitter amp — had
   // absurd gain and clipped.
   stamp(params, terminals, sys, sim, comp) {
-    stampBJT(simpleBjtModel(params.hfe as number, params.vbe as number), terminals, sys, sim, comp, true);
+    stampBJT(simpleBjtModel(params.hfe as number, params.vbe as number, params.part), terminals, sys, sim, comp, true);
   },
-  step(_params, terminals, sim, instance) {
-    stepBJT(terminals, sim, instance);
+  step(params, terminals, sim, instance) {
+    stepBJT(simpleBjtModel(params.hfe as number, params.vbe as number, params.part), terminals, sim, instance, true);
   },
   measure(params, terminals, sim, comp) {
-    return measureBJT(simpleBjtModel(params.hfe as number, params.vbe as number), terminals, sim, comp, true);
+    return measureBJT(simpleBjtModel(params.hfe as number, params.vbe as number, params.part), terminals, sim, comp, true);
   },
 };
 
@@ -283,8 +306,21 @@ const opamp: ComponentPlugin = {
 };
 
 // ----- 555 Timer -----
+/** Supply across the VCC/GND pins; falls back to the legacy `vcc` param only when VCC is unwired (maps to ground). */
+function supply555(
+  params: Record<string, any>,
+  terminals: { terminalId: string; nodeId: number }[],
+  sim: SimContext,
+): number {
+  const vccNode = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
+  const gndNode = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
+  if (vccNode === gndNode) return typeof params.vcc === 'number' ? params.vcc : 5;
+  return (sim.nodeVoltage[vccNode] ?? 0) - (sim.nodeVoltage[gndNode] ?? 0);
+}
+
 const timer555: ComponentPlugin = {
   type: 'timer555',
+  nonLinear: true, // output stage / thresholds follow node voltages
   name: '555 Timer',
   category: 'ic',
   description: 'NE555 timer IC. Supports astable and monostable modes. Connect THR+TRIG together and DIS to a RC network for astable.',
@@ -301,7 +337,7 @@ const timer555: ComponentPlugin = {
     { id: 'vcc', label: 'VCC', position: { x: 6, y: 2 } },
   ],
   parameters: [
-    { key: 'vcc', label: 'VCC', type: 'number', default: 5, unit: 'V', min: 1, max: 18, step: 0.1 },
+    { key: 'vcc', label: 'VCC (only if VCC pin unwired)', type: 'number', default: 5, unit: 'V', min: 1, max: 18, step: 0.1 },
     { key: 'astable', label: 'Astable Mode', type: 'boolean', default: false },
     { key: 'r1', label: 'R1 (Ω)', type: 'number', default: 47000, unit: 'Ω', min: 1, max: 1e9, step: 1000 },
     { key: 'r2', label: 'R2 (Ω)', type: 'number', default: 47000, unit: 'Ω', min: 1, max: 1e9, step: 1000 },
@@ -363,17 +399,22 @@ const timer555: ComponentPlugin = {
   //      advances the clock). The external RC components are still wired
   //      (for visual authenticity) but the 555 uses its internal timing model.
   stamp(params, terminals, sys, sim, comp) {
-    const vcc = params.vcc as number;
     const vccNode = terminals.find((t) => t.terminalId === 'vcc')!.nodeId;
     const gndNode = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
-    if (vccNode !== gndNode) sys.stampConductance(vccNode, gndNode, 1e-13);
+    // Supply is what is WIRED between the VCC and GND pins (param is only the
+    // fallback for an unwired VCC pin, which maps to ground).
+    const vs = supply555(params, terminals, sim);
+    const vg = sim.nodeVoltage[gndNode] ?? 0;
+    // Quiescent supply current ≈ Vcc/1.5 kΩ (TI NE555: 3 mA @ 5 V, 10 mA @ 15 V)
+    if (vccNode !== gndNode) sys.stampConductance(vccNode, gndNode, 1 / 1500);
 
-    // CTRL pin: if left unconnected, add weak pull to 2/3 VCC
+    // CTRL pin: the internal 3×5 kΩ divider holds it at 2/3 Vcc (Thevenin
+    // 3.33 kΩ); an external source/divider overrides it.
     const ctrlNode = terminals.find((t) => t.terminalId === 'ctrl')!.nodeId;
     if (ctrlNode !== gndNode && ctrlNode !== vccNode) {
-      const ctrlG = 1 / 5e6;
+      const ctrlG = 1 / 3333;
       sys.stampConductance(ctrlNode, gndNode, ctrlG);
-      sys.stampCurrentSource(gndNode, ctrlNode, (2 / 3) * vcc * ctrlG);
+      sys.stampCurrentSource(gndNode, ctrlNode, (vg + (2 / 3) * vs) * ctrlG);
     }
 
     // Add weak pull-down on THR, TRIG input pins (1 MΩ to GND).
@@ -412,22 +453,33 @@ const timer555: ComponentPlugin = {
       const phase = (sim.time % period);
       st.outHigh = phase < tHigh;
       st.ff = st.outHigh;
-
-      if (out !== gndNode) sys.stampVoltageSource(out, gndNode, st.outHigh ? vcc : 0);
-      // DIS pin: conducts to GND when output is LOW (ff=false)
-      if (!st.ff) {
-        if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1 / 50);
-      } else {
-        if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1e-13);
-      }
-      return;
     }
 
-    // ── Normal mode: real external RC physics ────────────────────────
-    // (The flip-flop state st.ff / st.outHigh is updated in step() from the
-    //  actual THR/TRIG node voltages; this stamp only reflects the state.)
-
-    if (out !== gndNode) sys.stampVoltageSource(out, gndNode, st.outHigh ? vcc : 0);
+    // ── Totem-pole output stage (TI NE555 datasheet) ───────────────────
+    //   HIGH: Voh = Vcc − 1.0 V at light load, ≈ 7 Ω slope
+    //         (13.3 V @ 100 mA and 12.5 V @ 200 mA on Vcc = 15 V)
+    //   LOW : Vol = 0.02 V + 8 Ω·Isink  (0.1 V @ 10 mA)
+    //   both limited to ≈ 200 mA. A supply below ~1 V is a dead chip.
+    // Norton companion, linearised against the previous Newton iterate.
+    if (out !== gndNode) {
+      const alive = vs > 1.0;
+      const high = st.outHigh && alive;
+      const rBase = high ? 7 : 8;
+      const vTh = high ? Math.max(0, vs - 1.0) : 0.02;
+      const vOutPrev = (sim.nodeVoltage[out] ?? 0) - vg;
+      // Current limit ≈ 200 mA: stretch the Thevenin resistance so the
+      // previous iterate's current never exceeds iMax (always a valid
+      // finite-conductance stamp, so an unloaded output still converges).
+      const iMax = 0.2;
+      const rOut = alive ? Math.max(rBase, Math.abs(vTh - vOutPrev) / iMax) : rBase;
+      if (!alive) {
+        sys.stampConductance(out, gndNode, 1 / 1e5);
+      } else {
+        sys.stampConductance(out, gndNode, 1 / rOut);
+        sys.stampCurrentSource(gndNode, out, vTh / rOut);
+      }
+    }
+    // DIS pin: open-collector transistor conducts to GND when the output is LOW
     if (!st.ff) {
       if (dis !== gndNode) sys.stampConductance(dis, gndNode, 1 / 50);
     } else {
@@ -435,19 +487,22 @@ const timer555: ComponentPlugin = {
     }
   },
   step(params, terminals, sim, instance) {
-    const vcc = params.vcc as number;
+    const gnd = terminals.find((t) => t.terminalId === 'gnd')!.nodeId;
     const thr = terminals.find((t) => t.terminalId === 'thr')!.nodeId;
     const trig = terminals.find((t) => t.terminalId === 'trig')!.nodeId;
     const rst = terminals.find((t) => t.terminalId === 'rst')!.nodeId;
     const ctrl = terminals.find((t) => t.terminalId === 'ctrl')!.nodeId;
     const key = stateKey555(terminals, instance);
     const st = sim.state[key] ?? (sim.state[key] = { ff: false, outHigh: false });
-    const vThr = sim.nodeVoltage[thr];
-    const vTrig = sim.nodeVoltage[trig];
-    const vRst = sim.nodeVoltage[rst];
-    const vCtrl = sim.nodeVoltage[ctrl];
-    const vThresh = vCtrl > 0.1 ? vCtrl : (2 / 3) * vcc;
-    const vTrigThresh = vCtrl > 0.1 ? vCtrl / 2 : (1 / 3) * vcc;
+    const vs = supply555(params, terminals, sim);
+    const vg = sim.nodeVoltage[gnd] ?? 0;
+    const vThr = (sim.nodeVoltage[thr] ?? 0) - vg;
+    const vTrig = (sim.nodeVoltage[trig] ?? 0) - vg;
+    const vRst = (sim.nodeVoltage[rst] ?? 0) - vg;
+    const vCtrl = (sim.nodeVoltage[ctrl] ?? 0) - vg;
+    // thresholds are 2/3 and 1/3 of the WIRED supply; a driven CTRL overrides
+    const vThresh = vCtrl > 0.1 ? vCtrl : (2 / 3) * vs;
+    const vTrigThresh = vCtrl > 0.1 ? vCtrl / 2 : (1 / 3) * vs;
     if (vRst < 0.4) {
       st.ff = false;
     } else {
@@ -614,6 +669,8 @@ const zener: ComponentPlugin = {
   description: 'Zener diode (Shockley junction with SPICE-style breakdown): Zener Voltage is the reverse drop at Izt = 5 mA, Forward Voltage the forward drop at 1 mA.',
   symbol: 'Z',
   nonLinear: true,
+  pureStamp: true, // stamp() only rewrites idempotent topology keys; Newton memory lives in sim.newtonMemory
+  pureStatePrefixes: ['dio_'],
   boundingBox: { width: 4, height: 2 },
   terminals: [
     { id: 'a', label: 'A', position: { x: 0, y: 1 } },
@@ -624,6 +681,7 @@ const zener: ComponentPlugin = {
     { key: 'forwardV', label: 'Forward Voltage (at 1 mA)', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 5, step: 0.05 },
     { key: 'onR', label: 'Series Resistance', type: 'number', default: 1, unit: 'Ω', min: 0.001, max: 1e6, step: 0.1 },
     { key: 'offR', label: 'Leakage Resistance', type: 'number', default: 1e7, unit: 'Ω', min: 1e3, max: 1e12, step: 1e5 },
+    { key: 'ratedPower', label: 'Power Rating', type: 'number', default: 0.5, unit: 'W', min: 0.01, max: 100, step: 0.1, description: 'Absolute-maximum dissipation for the stress check (BZX55 / 1N52xx = 0.5 W, 1N47xx = 1 W).' },
   ],
   render(ctx, params, cellSize) {
     ctx.beginPath();
@@ -667,8 +725,8 @@ const zener: ComponentPlugin = {
     return [{ x: 0, y: 1 }, { x: 4, y: 1 }];
   },
   measure(_params, terminals, sim, comp) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const k = termNode(terminals, 'k', 1);
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
     const i = comp ? simpleDiodeCurrent(comp, sim, a, k) : 0;
     return [{ label: 'V', value: v.toFixed(3), unit: 'V' }, { label: 'I', value: (i * 1000).toFixed(3), unit: 'mA' }];

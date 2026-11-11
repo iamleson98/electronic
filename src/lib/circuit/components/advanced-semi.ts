@@ -16,14 +16,18 @@ import { registerPlugin } from '../registry';
 import { drawLabel } from './draw';
 import { thermalVoltage, tempScaleIs } from '../sim-options';
 import { stateKey } from '../state-keys';
+import { termNode } from '../terminal-lookup';
 import {
-  limitStep,
+  pnjlim,
+  DEVICE_GMIN,
   junctionVCrit,
   shockleyCompanion,
-  escalateGmin,
-  junctionCapacitance,
 } from '../nonlinear';
 import type { SimContext, CircuitComponent } from '../types';
+import {
+  nodeV as spiceNodeV, chargeCompanion, commitCharge, depletion,
+  bjtModel, bjtStampCore, bjtStepCore, bjtMeasureCore, bjtExtraCount,
+} from '../spice-devices';
 
 /**
  * Effective device temperature in °C: per-component `temp` override wins,
@@ -74,6 +78,9 @@ export const diodeShockley: ComponentPlugin = {
   defaultFootprint: 'D0805',
   datasheet: 'https://en.wikipedia.org/wiki/Diode_modelling',
   nonLinear: true,
+  pureStamp: true, // stamp() only rewrites idempotent topology keys; Newton memory lives in sim.newtonMemory
+  pureStatePrefixes: ['dio_'],
+  extraVars: (p) => ((p.Rs as number) > 0 ? 1 : 0),
   render(ctx, params, cellSize) {
     ctx.beginPath();
     ctx.moveTo(0, cellSize); ctx.lineTo(2 * cellSize - 3, cellSize);
@@ -92,8 +99,8 @@ export const diodeShockley: ComponentPlugin = {
     drawLabel(ctx, `Is=${(params.Is as number).toExponential(1)}`, 0, -16);
   },
   stamp(params, terminals, sys, sim, comp) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const k = termNode(terminals, 'k', 1);
     const Is = params.Is as number;
     const N = params.N as number;
     const Rs = params.Rs as number;
@@ -125,28 +132,37 @@ export const diodeShockley: ComponentPlugin = {
     // previous ROUND (sim.newtonMemory — plugin state is rolled back every
     // round) so the linearized current changes by at most ~e per round.
     const mem = sim.newtonMemory;
-    const vRaw = nodeV(sim, an) - nodeV(sim, k);
     const vPrev = mem?.[key + '_vl'] ?? (st[key] as number | undefined) ?? 0.7;
+    // spiceNodeV returns NaN for an internal pseudo-node that is not part of
+    // this solve (the AC small-signal recorder replays stamp() against the DC
+    // operating point, where the Rs node has no entry): fall back to the
+    // committed junction voltage so the AC linearization sits at the real bias
+    // instead of reading 0 V.
+    let vRaw = spiceNodeV(sim, an) - spiceNodeV(sim, k);
+    if (!Number.isFinite(vRaw)) vRaw = (st[key] as number | undefined) ?? vPrev;
     const vcrit = junctionVCrit(vscale, IsT);
-    let v = limitStep(vRaw, vPrev, vscale, vcrit);
     // Reverse breakdown (SPICE BV/IBV): I_bv = −IBV·e^(−(v+Bv)/(N·Vt)),
-    // limited in the mirrored variable w = −v − Bv.
+    // limited in the mirrored variable w = −v − Bv (DIOload's second pnjlim).
     const Bv = params.Bv as number;
     const IBV = 1e-3;
     const hasBv = typeof Bv === 'number' && Number.isFinite(Bv) && Bv > 0;
-    if (hasBv && v < -Bv + 20 * vscale) {
-      const w = limitStep(-v - Bv, -vPrev - Bv, vscale, junctionVCrit(vscale, IBV));
+    let v: number;
+    if (hasBv && vRaw < Math.min(0, -Bv + 10 * vscale)) {
+      const w = pnjlim(-vRaw - Bv, -vPrev - Bv, vscale, junctionVCrit(vscale, IBV));
       v = -w - Bv;
+    } else {
+      v = pnjlim(vRaw, vPrev, vscale, vcrit);
     }
     if (mem) {
       mem[key + '_vl'] = v;
-      if (Math.abs(v - vRaw) > 1e-9) mem.__limited = (mem.__limited ?? 0) + 1;
+      if (v !== vRaw) mem.__limited = (mem.__limited ?? 0) + 1;
     }
     // SPICE-style escalating gmin: keeps the matrix non-singular and tames
     // stubborn convergence after many Newton rounds (CircuitJS1 Diode.java).
-    const gmin = escalateGmin(sim.newtonIter ?? 0);
+    const gmin = DEVICE_GMIN;
     // Shockley companion at the (limited) operating point v.
-    let { g, iEq } = shockleyCompanion(v, IsT, vscale, gmin);
+    let { g, iEq, i0 } = shockleyCompanion(v, IsT, vscale, gmin);
+    const gJunction = g - gmin;
     if (hasBv) {
       const e = Math.exp(Math.min(80, -(v + Bv) / vscale));
       const iB = -IBV * e;
@@ -156,35 +172,52 @@ export const diodeShockley: ComponentPlugin = {
     }
     sys.stampConductance(an, k, g);
     sys.stampCurrentSource(an, k, iEq);
-    // ── Charge storage: Cj(v) + diffusion capacitance ────────────────────
-    // Cj = Cjo/(1−v/Vj)^M (depletion), Cd = Tt·g (diffusion, transit-time).
-    // Linearized at v with the backward-Euler capacitor companion on the
-    // internal junction (the series Rs is outside the charge path). The
-    // history voltage is the previous step's COMMITTED junction voltage,
-    // written by step().
-    const Ceq = junctionCapacitance(v, Cjo, Vj, M) + Tt * g;
-    if (Ceq > 0) {
-      const dt = Math.max(sim.dt, 1e-12);
-      const vCjPrev = (st[key + '_cj'] as number | undefined) ?? v;
-      const gc = Ceq / dt;
-      sys.stampConductance(an, k, gc);
-      sys.stampCurrentSource(an, k, -gc * vCjPrev);
+    // ── Charge storage: q = ∫Cj dv (depletion) + Tt·i (diffusion) ─────────
+    // Companion on the internal junction (series Rs is outside the charge
+    // path) following the selected integration method (Euler / trapezoidal /
+    // Gear-BDF2) through the shared charge-history helpers, same as
+    // capacitors. The history is the last COMMITTED charge written by step();
+    // before any step exists the branch is quasi-static at the current point.
+    if (Cjo > 0 || Tt > 0) {
+      const [qd, cd] = depletion(v, Cjo, Vj, M, 0.5);
+      const q0 = qd + Tt * i0;
+      let hist = st[key + '_q'];
+      if (!hist) {
+        // no committed charge yet: take it at the committed junction voltage
+        // when one exists (DC-start transient), else quasi-static at v
+        const vC = st[key] as number | undefined;
+        const q1 = vC === undefined ? q0
+          : depletion(vC, Cjo, Vj, M, 0.5)[0] + Tt * IsT * (Math.exp(Math.min(vC / vscale, 200)) - 1);
+        hist = { q1, i1: 0, n: 0 };
+      }
+      const cc = chargeCompanion(sim, hist, v, q0, cd + Tt * gJunction);
+      if (cc && (cc.g !== 0 || cc.iEq !== 0)) {
+        sys.stampConductance(an, k, cc.g);
+        sys.stampCurrentSource(an, k, cc.iEq);
+      }
     }
   },
   step(params, terminals, sim, instance) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const k = termNode(terminals, 'k', 1);
     const st = sim.state.__global ?? (sim.state.__global = {});
     const key = stateKey('dio', instance, a, k);
     const an = (st[key + '_an'] as number | undefined) ?? a;
-    const vj = nodeV(sim, an) - nodeV(sim, k);
+    const vj = spiceNodeV(sim, an) - spiceNodeV(sim, k);
     st[key] = vj;          // committed junction voltage (limiting reference)
-    st[key + '_cj'] = vj;  // charge-storage history
+    // committed junction charge (charge-storage history for Euler/trap/Gear)
+    const N = params.N as number;
+    const T = deviceTemp(sim, instance);
+    const vscale = N * thermalVoltage(T);
+    const IsT = tempScaleIs(params.Is as number, T, 27, N);
+    const i0 = IsT * (Math.exp(Math.min(vj / vscale, 200)) - 1);
+    const [qd] = depletion(vj, params.Cjo as number, params.Vj as number, params.M as number, 0.5);
+    commitCharge(sim, st, key + '_q', qd + (params.Tt as number) * i0);
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 4, y: 1 }]; },
   measure(params, terminals, sim, comp) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const k = termNode(terminals, 'k', 1);
     const v = sim.nodeVoltage[a] - sim.nodeVoltage[k];
     const N = params.N as number;
     const T = deviceTemp(sim, comp);
@@ -221,14 +254,41 @@ export function simpleDiodeIref(type: string): number {
   return type === 'led' ? 20e-3 : 1e-3;
 }
 
+/** Typical LED forward voltage at 20 mA by colour (datasheet typ., 5 mm LEDs). */
+export const LED_VF_BY_COLOR: Record<string, number> = {
+  red: 2.0, orange: 2.05, yellow: 2.1, green: 2.2, blue: 3.2, white: 3.2, uv: 3.4, ir: 1.3,
+};
+const LED_HEX_COLOR: Record<string, string> = {
+  '#ef4444': 'red', '#f97316': 'orange', '#eab308': 'yellow', '#22c55e': 'green', '#3b82f6': 'blue', '#f8fafc': 'white',
+};
+/** Pre-colour-table default of `forwardV`; saved circuits that never touched the field store exactly this. */
+export const LED_LEGACY_DEFAULT_VF = 2.0;
+
+/**
+ * Effective LED Vf at 20 mA. `forwardV` is "auto" (follow `color`) when absent,
+ * ≤ 0, or exactly the legacy default 2.0 — saved circuits written before the
+ * colour table stored 2.0 for every LED (so a blue LED saved with 2.0 gets its
+ * real 3.2 V instead of conducting like a red one). Any other value is a
+ * deliberate user choice and wins.
+ */
+export function ledForwardV(p: Record<string, unknown>): number {
+  const raw = p.forwardV;
+  const col = String(p.color ?? 'red').toLowerCase();
+  const table = LED_VF_BY_COLOR[col] ?? LED_VF_BY_COLOR[LED_HEX_COLOR[col] ?? ''] ?? 2.0;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0 || raw === LED_LEGACY_DEFAULT_VF) return table;
+  return raw;
+}
+
 /** diodeShockley parameters for a basic diode-family part. */
 export function simpleDiodeModel(type: string, p: Record<string, unknown>): Record<string, number> {
   const num = (k: string, d: number) => (typeof p[k] === 'number' && Number.isFinite(p[k]) ? p[k] as number : d);
-  const N = SIMPLE_DIODE_N;
   const vt = thermalVoltage(27);
-  const vf = num('forwardV', type === 'led' ? 2.0 : 0.7);
-  const Is = simpleDiodeIref(type) / Math.expm1(Math.max(0.05, vf) / (N * vt));
   const Rs = type === 'led' ? Math.max(0.01, num('seriesR', 5)) : Math.max(0.001, num('onR', 1));
+  const vf = type === 'led' ? ledForwardV(p) : num('forwardV', 0.7);
+  // Wide-gap LEDs (blue/white/UV, Vf > 2.4 V) have a higher ideality factor
+  // (≈ 2–3); N = 1.8 would need Is < 1e-28 A, below what SPICE engines keep.
+  const N = type === 'led' && vf > 2.4 ? 2.5 : SIMPLE_DIODE_N;
+  const Is = simpleDiodeIref(type) / Math.expm1(Math.max(0.05, vf) / (N * vt));
   const Bv = type === 'zener' ? Math.max(0.1, num('zenerV', 3.3) - N * vt * Math.log(ZENER_IZT / SHOCKLEY_IBV)) : 0;
   return { Is, N, Rs, Cjo: 0, M: 0.333, Vj: 0.7, Tt: 0, Bv };
 }
@@ -240,8 +300,8 @@ export function stampSimpleDiode(type: string, params: Record<string, unknown>, 
   diodeShockley.stamp!(simpleDiodeModel(type, params), terminals, sys, sim, comp);
   const g = leakG(type, params);
   if (g > 0) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const k = terminals.find((t) => t.terminalId === 'k')!.nodeId;
+    const a = termNode(terminals, 'a', 0);
+    const k = termNode(terminals, 'k', 1);
     sys.stampConductance(a, k, g);
   }
 }
@@ -296,7 +356,7 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
     type: isNpn ? 'bjtGPNpn' : 'bjtGPPnp',
     name: `${isNpn ? 'NPN' : 'PNP'} BJT (Gummel-Poon)`,
     category: 'semiconductor',
-    description: `Gummel-Poon ${isNpn ? 'NPN' : 'PNP'} BJT with Is/Bf/Br/Vaf/Var/Early effect.`,
+    description: `Full SPICE Gummel-Poon ${isNpn ? 'NPN' : 'PNP'} BJT: Is/Nf/Nr/Bf/Br, leakage Ise/Isc, Early Vaf/Var, knees Ikf/Ikr, Rb/Rc/Re, junction + transit-time charge (Cje Cjc Tf Tr).`,
     symbol: isNpn ? 'Qn' : 'Qp',
     boundingBox: { width: 4, height: 4 },
     terminals: [
@@ -311,9 +371,32 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       { key: 'Vaf', label: 'Forward Early V', type: 'number', default: 100, unit: 'V', min: 1, max: 10000, step: 1 },
       { key: 'Var', label: 'Reverse Early V', type: 'number', default: 50, unit: 'V', min: 1, max: 10000, step: 1 },
       { key: 'Ikf', label: 'Forward Knee I', type: 'number', default: 1, unit: 'A', min: 1e-6, max: 100, step: 0.1 },
+      // Full SPICE Gummel-Poon extras (SPICE defaults: 0 = feature off)
+      { key: 'Nf', label: 'Forward Emission N (NF)', type: 'number', default: 1, min: 0.5, max: 3, step: 0.01 },
+      { key: 'Nr', label: 'Reverse Emission N (NR)', type: 'number', default: 1, min: 0.5, max: 3, step: 0.01 },
+      { key: 'Ise', label: 'B-E Leakage Is (ISE)', type: 'number', default: 0, unit: 'A', min: 0, max: 1e-3, step: 1e-15 },
+      { key: 'Ne', label: 'B-E Leakage N (NE)', type: 'number', default: 1.5, min: 1, max: 5, step: 0.1 },
+      { key: 'Isc', label: 'B-C Leakage Is (ISC)', type: 'number', default: 0, unit: 'A', min: 0, max: 1e-3, step: 1e-15 },
+      { key: 'Nc', label: 'B-C Leakage N (NC)', type: 'number', default: 2, min: 1, max: 5, step: 0.1 },
+      { key: 'Ikr', label: 'Reverse Knee I (IKR, 0 = none)', type: 'number', default: 0, unit: 'A', min: 0, max: 100, step: 0.1 },
+      { key: 'Rb', label: 'Base Resistance (RB)', type: 'number', default: 0, unit: 'Ω', min: 0, max: 1e4, step: 0.1 },
+      { key: 'Rc', label: 'Collector Resistance (RC)', type: 'number', default: 0, unit: 'Ω', min: 0, max: 1e4, step: 0.1 },
+      { key: 'Re', label: 'Emitter Resistance (RE)', type: 'number', default: 0, unit: 'Ω', min: 0, max: 1e4, step: 0.1 },
+      { key: 'Cje', label: 'B-E Zero-bias Cap (CJE)', type: 'number', default: 0, unit: 'F', min: 0, max: 1e-6, step: 1e-13 },
+      { key: 'Vje', label: 'B-E Potential (VJE)', type: 'number', default: 0.75, unit: 'V', min: 0.1, max: 5, step: 0.01 },
+      { key: 'Mje', label: 'B-E Grading (MJE)', type: 'number', default: 0.33, min: 0, max: 1, step: 0.01 },
+      { key: 'Cjc', label: 'B-C Zero-bias Cap (CJC)', type: 'number', default: 0, unit: 'F', min: 0, max: 1e-6, step: 1e-13 },
+      { key: 'Vjc', label: 'B-C Potential (VJC)', type: 'number', default: 0.75, unit: 'V', min: 0.1, max: 5, step: 0.01 },
+      { key: 'Mjc', label: 'B-C Grading (MJC)', type: 'number', default: 0.33, min: 0, max: 1, step: 0.01 },
+      { key: 'Fc', label: 'Depletion Cap Coeff (FC)', type: 'number', default: 0.5, min: 0, max: 0.95, step: 0.05 },
+      { key: 'Tf', label: 'Forward Transit Time (TF)', type: 'number', default: 0, unit: 's', min: 0, max: 1e-3, step: 1e-12 },
+      { key: 'Tr', label: 'Reverse Transit Time (TR)', type: 'number', default: 0, unit: 's', min: 0, max: 1e-3, step: 1e-12 },
     ],
+    extraVars: (p) => bjtExtraCount(bjtModel(p)),
     keywords: ['bjt', 'transistor', isNpn ? 'npn' : 'pnp', 'gummel-poon'],
     nonLinear: true,
+    pureStamp: true, // stamp() only rewrites idempotent topology keys; Newton memory lives in sim.newtonMemory
+    pureStatePrefixes: ['spq_'],
     defaultFootprint: 'TO-92',
     render(ctx, params, cellSize) {
       ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
@@ -358,7 +441,7 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
       stampBJT(params, terminals, sys, sim, comp, isNpn);
     },
     step(params, terminals, sim, instance) {
-      stepBJT(terminals, sim, instance);
+      stepBJT(params, terminals, sim, instance, isNpn);
     },
     getFlowPath() { return [{ x: 4, y: 1 }, { x: 2, y: 3 }, { x: 4, y: 3 }]; },
     measure(params, terminals, sim, comp) {
@@ -369,43 +452,41 @@ function makeGummelPoonBJT(type: 'npn' | 'pnp'): ComponentPlugin {
 
 type Terminals = { terminalId: string; nodeId: number }[];
 const pins3 = (terminals: Terminals) => ({
-  c: terminals.find((t) => t.terminalId === 'c')!.nodeId,
-  b: terminals.find((t) => t.terminalId === 'b')!.nodeId,
-  e: terminals.find((t) => t.terminalId === 'e')!.nodeId,
+  c: termNode(terminals, 'c', 0),
+  b: termNode(terminals, 'b', 1),
+  e: termNode(terminals, 'e', 2),
 });
+
+/**
+ * Full SPICE Gummel-Poon model for a parameter record (the GP parts' own keys,
+ * or simpleBjtModel()'s output for the basic parts). Delegates to the shared
+ * core in spice-devices.ts — NF/NR, ISE/NE, ISC/NC, VAF/VAR, IKF/IKR, RB/RC/RE
+ * (internal nodes), CJE/VJE/MJE, CJC/VJC/MJC/FC and TF/TR charge storage with
+ * the selected integration method. Missing keys take SPICE defaults, which
+ * reduce to the previous Ebers-Moll + Early + IKF model.
+ */
+function gpCore(params: Record<string, unknown>, sim: SimContext, comp: CircuitComponent | undefined) {
+  const T = deviceTemp(sim, comp);
+  const m = bjtModel(params as Record<string, any>);
+  m.IS = tempScaleIs(m.IS, T, 27);
+  return { m, vt: thermalVoltage(T) };
+}
 
 /** Newton-linearized Gummel-Poon stamp (shared by the basic NPN/PNP). */
 export function stampBJT(
   params: Record<string, unknown>, terminals: Terminals, sys: Parameters<NonNullable<ComponentPlugin['stamp']>>[2],
   sim: SimContext, comp: CircuitComponent | undefined, isNpn: boolean,
 ): void {
-  const { c, b, e } = pins3(terminals);
-  const op = gummelPoonOp(params, sim, comp, c, b, e, isNpn, true);
-  const { gcbe, gcbc, gbbe, gbbc, ic, ib, vbe, vbc } = op;
-  const gmin = escalateGmin(sim.newtonIter ?? 0);
-  // Collector current c→e: ic + gcbe·Δvbe + gcbc·Δvbc. The Jacobian is
-  // polarity-symmetric (the PNP's flipped currents and voltages cancel);
-  // only the constant terms carry the polarity sign.
-  sys.stampVCCS(c, e, b, e, gcbe);
-  sys.stampVCCS(c, e, b, c, gcbc);
-  // Base current b→e: ib + gbbe·Δvbe + gbbc·Δvbc
-  sys.stampVCCS(b, e, b, e, gbbe);
-  sys.stampVCCS(b, e, b, c, gbbc);
-  // junction gmin keeps the matrix regular with both junctions off
-  sys.stampConductance(b, e, gmin);
-  sys.stampConductance(b, c, gmin);
-  const sign = isNpn ? 1 : -1;
-  sys.stampCurrentSource(c, e, sign * (ic - gcbe * vbe - gcbc * vbc));
-  sys.stampCurrentSource(b, e, sign * (ib - gbbe * vbe - gbbc * vbc));
+  const { m, vt } = gpCore(params, sim, comp);
+  bjtStampCore(m, vt, isNpn ? 1 : -1, terminals, sys, sim, comp);
 }
 
-/** Record the committed junction voltages (seed for the next step's Newton). */
-export function stepBJT(terminals: Terminals, sim: SimContext, instance: CircuitComponent | undefined): void {
-  const { c, b, e } = pins3(terminals);
-  const st = sim.state.__global ?? (sim.state.__global = {});
-  const key = stateKey('bjt', instance, c, b, e);
-  st[key + '_vbe'] = sim.nodeVoltage[b] - sim.nodeVoltage[e];
-  st[key + '_vce'] = sim.nodeVoltage[c] - sim.nodeVoltage[e];
+/** Commit junction voltages + charge history at an accepted timestep. */
+export function stepBJT(
+  params: Record<string, unknown>, terminals: Terminals, sim: SimContext, instance: CircuitComponent | undefined, isNpn: boolean,
+): void {
+  const { m, vt } = gpCore(params, sim, instance);
+  bjtStepCore(m, vt, isNpn ? 1 : -1, terminals, sim, instance);
 }
 
 export function measureBJT(
@@ -414,96 +495,15 @@ export function measureBJT(
   const { c, b, e } = pins3(terminals);
   const vBE = sim.nodeVoltage[b] - sim.nodeVoltage[e];
   const vCE = sim.nodeVoltage[c] - sim.nodeVoltage[e];
-  // Same model as the stamp, evaluated (unlimited) at the solution;
-  // magnitudes so PNP currents read positive.
-  const op = gummelPoonOp(params, sim, comp, c, b, e, isNpn, false);
+  // Same model as the stamp, evaluated at the solution; magnitudes so PNP currents read positive.
+  const { m, vt } = gpCore(params, sim, comp);
+  const r = bjtMeasureCore(m, vt, isNpn ? 1 : -1, terminals, sim, comp);
   return [
     { label: 'Vbe', value: vBE.toFixed(4), unit: 'V' },
     { label: 'Vce', value: vCE.toFixed(4), unit: 'V' },
-    { label: 'Ic', value: (Math.abs(op.ic) * 1000).toFixed(4), unit: 'mA' },
-    { label: 'Ib', value: (Math.abs(op.ib) * 1000).toFixed(4), unit: 'mA' },
+    { label: 'Ic', value: (Math.abs(r.ic) * 1000).toFixed(4), unit: 'mA' },
+    { label: 'Ib', value: (Math.abs(r.ib) * 1000).toFixed(4), unit: 'mA' },
   ];
-}
-
-/**
- * Gummel-Poon (Ebers–Moll transport) operating point in the device's
- * "flipped world" (PNP voltages negated so both polarities share one model).
- * With `limit`, the junction voltages are Newton-limited against the
- * previous round's linearization (sim.newtonMemory) and recorded for the
- * next round.
- */
-function gummelPoonOp(
-  params: Record<string, unknown>, sim: SimContext, comp: CircuitComponent | undefined,
-  c: number, b: number, e: number, isNpn: boolean, limit: boolean,
-) {
-  const Is = params.Is as number;
-  const Bf = Math.max(1e-3, params.Bf as number);
-  const Br = Math.max(1e-3, params.Br as number);
-  const Vaf = Math.max(1e-3, params.Vaf as number);
-  const Var = Math.max(1e-3, (params.Var as number) ?? Infinity);
-  const Ikf = Math.max(1e-12, (params.Ikf as number) ?? Infinity);
-  const T = deviceTemp(sim, comp);
-  const Vt = thermalVoltage(T);
-  const IsT = tempScaleIs(Is, T, 27);
-  const pol = isNpn ? 1 : -1;
-  let vbe = pol * (sim.nodeVoltage[b] - sim.nodeVoltage[e]);
-  let vbc = pol * (sim.nodeVoltage[b] - sim.nodeVoltage[c]);
-  if (limit) {
-    const mem = sim.newtonMemory;
-    const key = stateKey('bjt', comp, c, b, e);
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const vcrit = junctionVCrit(Vt, IsT);
-    const cold = mem?.[key + '_lbe'] === undefined && st[key + '_vbe'] === undefined;
-    if (cold) {
-      // SPICE MODEINITJCT: first-ever linearization at Vbe = Vcrit, Vbc = 0
-      // (from all-zero node voltages Newton would start at an off junction
-      // and need many limited rounds to reach conduction).
-      vbe = vcrit;
-      vbc = 0;
-    } else {
-      // previous linearization: this step's last round, else the last
-      // committed step
-      const prevVbe = mem?.[key + '_lbe'] ?? pol * st[key + '_vbe'];
-      const prevVbc = mem?.[key + '_lbc'] ?? (st[key + '_vce'] !== undefined
-        ? pol * (st[key + '_vbe'] - st[key + '_vce']) : vbc);
-      const rawBe = vbe;
-      const rawBc = vbc;
-      vbe = limitStep(vbe, prevVbe, Vt, vcrit);
-      vbc = limitStep(vbc, prevVbc, Vt, vcrit);
-      if (mem && (Math.abs(vbe - rawBe) > 1e-9 || Math.abs(vbc - rawBc) > 1e-9)) {
-        mem.__limited = (mem.__limited ?? 0) + 1;
-      }
-    }
-    if (mem) { mem[key + '_lbe'] = vbe; mem[key + '_lbc'] = vbc; }
-  }
-  const ebe = Math.exp(Math.min(vbe / Vt, 80));
-  const ebc = Math.exp(Math.min(vbc / Vt, 80));
-  const If = IsT * (ebe - 1);
-  const Ir = IsT * (ebc - 1);
-  const gif = IsT * ebe / Vt;
-  const gir = IsT * ebc / Vt;
-  // Gummel-Poon base charge: qb = q1·(1 + √(1 + 4·q2))/2 with
-  //   q1 = 1/(1 − Vbc/Vaf − Vbe/Var)  (forward + reverse Early effect)
-  //   q2 = If/Ikf                       (high-level injection knee)
-  const den = 1 - vbc / Vaf - vbe / Var;
-  const clamped = den < 0.05;
-  const q1 = 1 / (clamped ? 0.05 : den);
-  const dq1be = clamped ? 0 : (q1 * q1) / Var;
-  const dq1bc = clamped ? 0 : (q1 * q1) / Vaf;
-  const q2 = Math.max(0, If) / Ikf;
-  const dq2be = If > 0 ? gif / Ikf : 0;
-  const sq = Math.sqrt(1 + 4 * q2);
-  const qb = (q1 * (1 + sq)) / 2;
-  const dqbbe = (dq1be * (1 + sq)) / 2 + (q1 * dq2be) / sq;
-  const dqbbc = (dq1bc * (1 + sq)) / 2;
-  const icc = (If - Ir) / qb;
-  const ic = icc - Ir / Br;
-  const ib = If / Bf + Ir / Br;
-  const gcbe = gif / qb - ((If - Ir) * dqbbe) / (qb * qb);
-  const gcbc = -gir / qb - ((If - Ir) * dqbbc) / (qb * qb) - gir / Br;
-  const gbbe = gif / Bf;
-  const gbbc = gir / Br;
-  return { vbe, vbc, ic, ib, gcbe, gcbc, gbbe, gbbc };
 }
 
 export const bjtGPNpn = makeGummelPoonBJT('npn');
@@ -545,6 +545,8 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
     ],
     keywords: ['mosfet', isNmos ? 'nmos' : 'pmos', 'level1', 'schichman-hodges'],
     nonLinear: true,
+    pureStamp: true, // stamp() only rewrites idempotent topology keys; Newton memory lives in sim.newtonMemory
+    pureStatePrefixes: ['mos_'],
     defaultFootprint: 'SOT-23',
     render(ctx, _params, cellSize) {
       ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 1.5;
@@ -571,10 +573,10 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
       drawLabel(ctx, isNmos ? 'NMOS' : 'PMOS', 2 * cellSize, 0);
     },
     stamp(params, terminals, sys, sim, comp) {
-      const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
-      const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
-      const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
-      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+      const d = termNode(terminals, 'd', 0);
+      const g = termNode(terminals, 'g', 1);
+      const s = termNode(terminals, 's', 2);
+      const b = termNode(terminals, 'b', 3);
       const Rd = params.Rd as number;
       const Rs = params.Rs as number;
       // Effective channel terminals. When Rd/Rs > 0 the channel connects to
@@ -633,10 +635,10 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
       sys.stampCurrentSource(D, S, sign * (op.id - op.gm * op.vgs - op.gds * op.vds - op.gmbs * op.vbs));
     },
     step(params, terminals, sim, instance) {
-      const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
-      const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
-      const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
-      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+      const d = termNode(terminals, 'd', 0);
+      const g = termNode(terminals, 'g', 1);
+      const s = termNode(terminals, 's', 2);
+      const b = termNode(terminals, 'b', 3);
       const st = sim.state.__global ?? (sim.state.__global = {});
       const key = stateKey('mos', instance, d, g, s, b);
       st[key + '_vgs'] = sim.nodeVoltage[g] - sim.nodeVoltage[s];
@@ -645,12 +647,12 @@ function makeLevel1MOS(type: 'nmos' | 'pmos'): ComponentPlugin {
     },
     getFlowPath() { return [{ x: 4, y: 1 }, { x: 2, y: 2 }, { x: 4, y: 3 }]; },
     measure(params, terminals, sim, comp) {
-      const d = terminals.find((t) => t.terminalId === 'd')!.nodeId;
-      const g = terminals.find((t) => t.terminalId === 'g')!.nodeId;
-      const s = terminals.find((t) => t.terminalId === 's')!.nodeId;
+      const d = termNode(terminals, 'd', 0);
+      const g = termNode(terminals, 'g', 1);
+      const s = termNode(terminals, 's', 2);
       const vGS = sim.nodeVoltage[g] - sim.nodeVoltage[s];
       const vDS = sim.nodeVoltage[d] - sim.nodeVoltage[s];
-      const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
+      const b = termNode(terminals, 'b', 3);
       const op = level1Op(params, sim, comp, sim.nodeVoltage[d], sim.nodeVoltage[g], sim.nodeVoltage[s], sim.nodeVoltage[b], isNmos);
       return [
         { label: 'Vgs', value: vGS.toFixed(4), unit: 'V' },

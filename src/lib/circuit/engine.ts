@@ -12,7 +12,12 @@ import type {
   Wire,
 } from './types';
 import { createMnaSystem, solveMna } from './solver';
-import { createSparseMnaSystem, solveSparse, shouldUseSparseSolver, asMnaSystem } from './sparse-klu';
+import { createSparseMnaSystem, solveSparse, solveSparseLenient, shouldUseSparseSolver, asMnaSystem, type SparseScratchPool } from './sparse-klu';
+
+// Shared triplet/RHS scratch for sparse builds; a re-entrant call (a plugin
+// whose stamp runs a nested simulateStep) gets its own private pool.
+const sharedSparsePool: SparseScratchPool = {};
+let sharedSparsePoolBusy = false;
 import { stateKey } from './state-keys';
 import { getRegistryVersion } from './registry';
 import { simpleDiodeCurrent } from './components/advanced-semi';
@@ -30,6 +35,8 @@ export interface NodeMap {
    * regular — the pin then reads whatever the device's own stamp implies.
    */
   floating?: ReadonlySet<number>;
+  /** lazily cached: does any terminal map to ground? */
+  hasGroundRef?: boolean;
 }
 
 /** Leak conductance on unwired (floating) pins — SPICE's gmin, 1 TΩ. */
@@ -272,15 +279,32 @@ function buildNodeMapUncached(components: CircuitComponent[], wires: Wire[], plu
   return { terminalNode, numNodes: nextId, netNames, floating };
 }
 
+/**
+ * Per-topology cache of resolved terminal arrays. Keyed on the NodeMap object
+ * (itself memoized on component/wire array identity, so it is rebuilt on any
+ * wire/component edit) and then on the component object. The returned array
+ * is shared and must be treated as read-only; callers get stable identity and
+ * zero per-call allocation.
+ */
+const terminalCache = new WeakMap<NodeMap, WeakMap<CircuitComponent, { plugin: ComponentPlugin; id: string; ids: string[]; terms: { terminalId: string; nodeId: number }[] }>>();
+
 export function getTerminalsForComponent(
   comp: CircuitComponent,
   plugin: ComponentPlugin,
   nodeMap: NodeMap,
 ): { terminalId: string; nodeId: number }[] {
-  return plugin.terminals.map((t) => ({
+  let perMap = terminalCache.get(nodeMap);
+  if (!perMap) { perMap = new WeakMap(); terminalCache.set(nodeMap, perMap); }
+  const hit = perMap.get(comp);
+  if (hit && hit.plugin === plugin && hit.id === comp.id && hit.ids.length === plugin.terminals.length) {
+    return hit.terms;
+  }
+  const terms = plugin.terminals.map((t) => ({
     terminalId: t.id,
     nodeId: nodeMap.terminalNode.get(`${comp.id}:${t.id}`) ?? 0,
   }));
+  perMap.set(comp, { plugin, id: comp.id, ids: terms.map((t) => t.terminalId), terms });
+  return terms;
 }
 
 /**
@@ -1416,6 +1440,20 @@ export interface StepResult {
   sim: SimContext;
   branchCurrentSize: number;
   nodeMap: NodeMap;
+  /**
+   * False when the step carries nonlinear devices and the Newton loop ran out
+   * of rounds (or lost its solve) before meeting the SPICE tolerances — the
+   * returned voltages are then the last iterate, not a solution.
+   */
+  converged?: boolean;
+  /** Newton rounds used by this step (1 = the first stamp/solve only). */
+  newtonRounds?: number;
+  /**
+   * True when a device was still limiting its junction step (SPICE `noncon`)
+   * in the last round — the iteration is stuck in the exponential, as opposed
+   * to a discontinuous model (region switch, comparator) chattering.
+   */
+  limited?: boolean;
 }
 
 export interface PrevState {
@@ -1433,18 +1471,188 @@ export interface PrevState {
  * `live[compId]` — keep their identity while their contents travel back in
  * time. Used to roll back plugin state before a gmin retry-stamp.
  */
-function restoreStateInPlace(live: Record<string, any>, snapshot: Record<string, any>): void {
-  for (const k of Object.keys(live)) {
-    if (!(k in snapshot)) delete live[k];
+/**
+ * Fast deep clone for plugin state (plain objects / arrays / typed arrays /
+ * primitives — what plugins actually keep). ~10x cheaper than
+ * structuredClone for the small flat objects that dominate. Anything exotic
+ * (Map, Set, Date, class instances) and deep/cyclic structures fall back to
+ * structuredClone; functions throw like structuredClone does, so a state
+ * holding one yields "no snapshot" exactly as before.
+ */
+function cloneStateValue(v: any, depth = 0): any {
+  if (v === null || typeof v !== 'object') {
+    if (typeof v === 'function' || typeof v === 'symbol') throw new Error('uncloneable state value');
+    return v;
   }
-  for (const [k, v] of Object.entries(snapshot)) {
+  if (depth > 24) return (globalThis as any).structuredClone(v);
+  if (Array.isArray(v)) {
+    const n = v.length;
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const e = v[i];
+      out[i] = e === null || typeof e !== 'object' ? (typeof e === 'function' || typeof e === 'symbol' ? cloneStateValue(e) : e) : cloneStateValue(e, depth + 1);
+    }
+    return out;
+  }
+  if (ArrayBuffer.isView(v)) return (v as any).slice();
+  const proto = Object.getPrototypeOf(v);
+  if (proto !== Object.prototype && proto !== null) return (globalThis as any).structuredClone(v);
+  const out: Record<string, any> = {};
+  for (const k in v) {
+    const e = v[k];
+    out[k] = e === null || typeof e !== 'object' ? (typeof e === 'function' || typeof e === 'symbol' ? cloneStateValue(e) : e) : cloneStateValue(e, depth + 1);
+  }
+  return out;
+}
+
+/**
+ * Which parts of the persistent state a rollback must cover. Components whose
+ * stamp() is pure (ComponentPlugin.pureStamp) rewrite identical state on every
+ * re-stamp, so their per-component state object and their declared
+ * `__global` key prefixes are excluded — the rollback then only touches
+ * devices that genuinely carry stamp-time state (diodes, BJTs, latches, …).
+ */
+interface RollbackScope {
+  /** top-level stateMap keys (component ids) left out of the snapshot */
+  skipTop: Set<string>;
+  /** `__global` keys with these prefixes are left out */
+  skipGlobalPrefixes: string[];
+}
+
+function skippedGlobalKey(k: string, prefixes: string[]): boolean {
+  for (let i = 0; i < prefixes.length; i++) if (k.startsWith(prefixes[i])) return true;
+  return false;
+}
+
+/** Snapshot of the persistent plugin state map, or null when uncloneable. */
+function snapshotState(stateMap: Record<string, any>, scope?: RollbackScope): Record<string, any> | null {
+  try {
+    if (!scope) return cloneStateValue(stateMap);
+    const out: Record<string, any> = {};
+    for (const k in stateMap) {
+      if (scope.skipTop.has(k)) continue;
+      const v = stateMap[k];
+      if (k === '__global' && scope.skipGlobalPrefixes.length > 0 && v !== null && typeof v === 'object') {
+        const g: Record<string, any> = {};
+        for (const gk in v) {
+          if (!skippedGlobalKey(gk, scope.skipGlobalPrefixes)) g[gk] = cloneStateValue(v[gk]);
+        }
+        out[k] = g;
+      } else {
+        out[k] = cloneStateValue(v);
+      }
+    }
+    return out;
+  } catch { return null; }
+}
+
+/** Rollback restore honouring the snapshot's scope (see RollbackScope). */
+function restoreScoped(live: Record<string, any>, snapshot: Record<string, any>, scope?: RollbackScope): void {
+  if (!scope) { restoreStateInPlace(live, snapshot); return; }
+  for (const k in live) {
+    if (!(k in snapshot) && !scope.skipTop.has(k)) delete live[k];
+  }
+  for (const k in snapshot) {
+    const v = snapshot[k];
     const cur = live[k];
-    if (v !== null && typeof v === 'object' && cur !== null && typeof cur === 'object' && !Array.isArray(v) && !Array.isArray(cur)) {
+    if (k === '__global' && scope.skipGlobalPrefixes.length > 0 && cur !== null && typeof cur === 'object' && v !== null && typeof v === 'object') {
+      const prefixes = scope.skipGlobalPrefixes;
+      for (const gk in cur) {
+        if (!(gk in v) && !skippedGlobalKey(gk, prefixes)) delete cur[gk];
+      }
+      // restore snapshot keys through the generic routine on a flat view
+      restoreStateInPlace(cur, v, true);
+    } else if (v !== null && typeof v === 'object' && cur !== null && typeof cur === 'object'
+        && !Array.isArray(v) && !Array.isArray(cur) && Object.getPrototypeOf(v) === Object.prototype) {
       restoreStateInPlace(cur, v);
-    } else {
-      live[k] = v;
+    } else if (cur !== v) {
+      live[k] = v !== null && typeof v === 'object' ? cloneStateValue(v) : v;
     }
   }
+}
+
+function restoreStateInPlace(live: Record<string, any>, snapshot: Record<string, any>, noDelete = false): void {
+  if (!noDelete) {
+    for (const k in live) {
+      if (!(k in snapshot)) delete live[k];
+    }
+  }
+  for (const k in snapshot) {
+    const v = snapshot[k];
+    if (v === null || typeof v !== 'object') {
+      if (live[k] !== v) live[k] = v;
+      continue;
+    }
+    const cur = live[k];
+    if (cur === null || typeof cur !== 'object') {
+      live[k] = cloneStateValue(v);
+    } else if (Array.isArray(v)) {
+      if (Array.isArray(cur) && cur.length === v.length) {
+        // same shape: copy back in place (keeps the live array's identity)
+        for (let i = 0; i < v.length; i++) {
+          const e = v[i];
+          if (e === null || typeof e !== 'object') { if (cur[i] !== e) cur[i] = e; }
+          else cur[i] = cloneStateValue(e);
+        }
+      } else {
+        live[k] = cloneStateValue(v);
+      }
+    } else if (!Array.isArray(cur) && !ArrayBuffer.isView(v) && Object.getPrototypeOf(v) === Object.prototype) {
+      restoreStateInPlace(cur, v);
+    } else {
+      // clone so later in-place mutation of live state can't corrupt the snapshot
+      live[k] = cloneStateValue(v);
+    }
+  }
+}
+
+/**
+ * Per-topology facts reused by every step: plugin + resolved terminals per
+ * component and the circuit-level flags the step loop needs. Cached on the
+ * NodeMap (rebuilt whenever the topology arrays change) and validated against
+ * the component array / plugin map identity.
+ */
+interface StepFacts {
+  components: CircuitComponent[];
+  plugins: Map<string, ComponentPlugin>;
+  plugArr: (ComponentPlugin | undefined)[];
+  termArr: { terminalId: string; nodeId: number }[][];
+  extraIdx: number[];
+  stepIdx: number[];
+  hasFeedback: boolean;
+  hasNonLinear: boolean;
+  needSnapshot: boolean;
+  scope: RollbackScope;
+}
+const stepFactsCache = new WeakMap<NodeMap, StepFacts>();
+function getStepFacts(components: CircuitComponent[], plugins: Map<string, ComponentPlugin>, nodeMap: NodeMap): StepFacts {
+  const hit = stepFactsCache.get(nodeMap);
+  if (hit && hit.components === components && hit.plugins === plugins && hit.plugArr.length === components.length) return hit;
+  const n = components.length;
+  const plugArr: (ComponentPlugin | undefined)[] = new Array(n);
+  const termArr: { terminalId: string; nodeId: number }[][] = new Array(n);
+  const extraIdx: number[] = [];
+  const stepIdx: number[] = [];
+  let hasFeedback = false, hasNonLinear = false, needSnapshot = false;
+  const scope: RollbackScope = { skipTop: new Set(), skipGlobalPrefixes: [] };
+  for (let i = 0; i < n; i++) {
+    const pl = plugins.get(components[i].type);
+    plugArr[i] = pl;
+    if (!pl) continue;
+    if (!(pl.stamp && !pl.pureStamp)) scope.skipTop.add(components[i].id);
+    if (pl.pureStamp && pl.pureStatePrefixes) {
+      for (const pf of pl.pureStatePrefixes) if (!scope.skipGlobalPrefixes.includes(pf)) scope.skipGlobalPrefixes.push(pf);
+    }
+    termArr[i] = getTerminalsForComponent(components[i], pl, nodeMap);
+    if (pl.extraVars) extraIdx.push(i);
+    if (pl.step) stepIdx.push(i);
+    if (pl.feedback === true) hasFeedback = true;
+    if (pl.nonLinear === true) hasNonLinear = true;
+    if (pl.stamp && !pl.pureStamp) needSnapshot = true;
+  }
+  const f: StepFacts = { components, plugins, plugArr, termArr, extraIdx, stepIdx, hasFeedback, hasNonLinear, needSnapshot, scope };
+  stepFactsCache.set(nodeMap, f);
+  return f;
 }
 
 export function simulateStep(
@@ -1471,6 +1679,21 @@ export function simulateStep(
      * current readouts and wire-dot animation satisfy KCL exactly.
      */
     recordTerminalCurrents?: boolean;
+    /**
+     * Extra shunt conductance (S) from every non-ground node to ground — the
+     * gmin-stepping homotopy parameter. 0/undefined = none.
+     */
+    gminShunt?: number;
+    /** Newton round budget for this step (default 100 nonlinear / 20 feedback-only). */
+    maxNewton?: number;
+    /**
+     * Pseudo-transient continuation level: a fictitious capacitance of
+     * `pseudoCap` S (C/dt) from every node to ground, anchored to the
+     * previous pseudo-time solution (the warm start). The converged solve is
+     * one backward-Euler pseudo-time step; shrinking the level to 0 recovers
+     * the exact operating point along the physical settling path.
+     */
+    pseudoCap?: number;
   },
 ): StepResult | null {
   // Trapezoidal cold start. Trap needs each reactive element's previous
@@ -1500,9 +1723,9 @@ export function simulateStep(
   // Per-component extra-variable demand (e.g. a discretized transmission
   // line with N internal junction nodes) — plugins declare it via extraVars().
   let declaredExtras = 0;
-  for (const comp of components) {
-    const plugin = plugins.get(comp.type);
-    if (plugin?.extraVars) declaredExtras += plugin.extraVars(comp.parameters);
+  const facts = getStepFacts(components, plugins, nodeMap);
+  for (const ci of facts.extraIdx) {
+    declaredExtras += facts.plugArr[ci]!.extraVars!(components[ci].parameters);
   }
   const maxExtras = components.length * 4 + 8 + declaredExtras;
 
@@ -1601,13 +1824,10 @@ export function simulateStep(
   };
 
   // First pass: let plugins initialize their simState (e.g., capacitor voltage)
-  for (const comp of components) {
-    const plugin = plugins.get(comp.type);
-    if (!plugin) continue;
+  for (const ci of facts.stepIdx) {
+    const comp = components[ci];
     if (!comp.simState) comp.simState = {};
-    if (plugin.step && !comp.simState.__inited) {
-      comp.simState.__inited = true;
-    }
+    if (!comp.simState.__inited) comp.simState.__inited = true;
   }
 
   // Stamp + solve, with an optional gmin retry. A singular matrix can occur
@@ -1619,31 +1839,71 @@ export function simulateStep(
   // like SPICE's "no DC path to ground"), and plugin state mutated during
   // the first stamp (edge counters, region latches) is rolled back first
   // so the re-stamp applies every transition exactly once.
-  let hasGroundRef = false;
-  for (const n of nodeMap.terminalNode.values()) {
-    if (n === 0) { hasGroundRef = true; break; }
+  let hasGroundRef = nodeMap.hasGroundRef;
+  if (hasGroundRef === undefined) {
+    hasGroundRef = false;
+    for (const n of nodeMap.terminalNode.values()) {
+      if (n === 0) { hasGroundRef = true; break; }
+    }
+    nodeMap.hasGroundRef = hasGroundRef;
   }
   let stateSnapshot: Record<string, any> | null = null;
-  if (hasGroundRef && typeof (globalThis as any).structuredClone === 'function') {
-    try { stateSnapshot = (globalThis as any).structuredClone(stateMap); } catch { stateSnapshot = null; }
-  }
+  // Pure-stamp circuits (see ComponentPlugin.pureStamp) need no rollback
+  // snapshot: re-stamping rewrites identical state.
+  const needSnapshot = facts.needSnapshot;
+  if (hasGroundRef && needSnapshot) stateSnapshot = snapshotState(stateMap, facts.scope);
+  const canRollback = hasGroundRef && (stateSnapshot !== null || !needSnapshot);
 
-  const buildAndSolve = (withGmin: boolean): { x: Float64Array | null; sys: any; sparseSys: any } => {
-    const sparse = useSparse ? createSparseMnaSystem(numNodes - 1, maxExtras) : null;
+  // Resolved once per step (and cached per topology): plugin + terminal array
+  // for every component, so the Newton rounds do no map lookups or allocation.
+  const nComps = components.length;
+  const plugArr = facts.plugArr;
+  const termArr = facts.termArr;
+
+  const gminShunt = simOptions?.gminShunt ?? 0;
+  const pseudoCap = simOptions?.pseudoCap ?? 0;
+  const anchor = Float64Array.from(nodeVoltage);
+  const buildAndSolve = (withGmin: boolean, reg = 0, lenient = false): { x: Float64Array | null; sys: any; sparseSys: any } => {
+    const ownsPool = !sharedSparsePoolBusy;
+    const pool: SparseScratchPool = ownsPool ? sharedSparsePool : {};
+    if (ownsPool) sharedSparsePoolBusy = true;
+    try {
+    const sparse = useSparse ? createSparseMnaSystem(numNodes - 1, maxExtras, pool) : null;
     const s = useSparse ? asMnaSystem(sparse!) : createMnaSystem(numNodes - 1, maxExtras);
     s.nextExtra = numNodes - 1;
     stampFloatingGmin(s, nodeMap);
     if (withGmin) {
       for (let n = 1; n < numNodes; n++) s.stampConductance(n, 0, 1e-12);
     }
-    for (const comp of components) {
-      const plugin = plugins.get(comp.type);
+    if (gminShunt > 0) {
+      for (let n = 1; n < numNodes; n++) s.stampConductance(n, 0, gminShunt);
+    }
+    if (reg > 0) {
+      // Levenberg–Marquardt regularisation toward the iterate the stamps
+      // linearised around: (A + reg·I)·x = z + reg·v_prev. A converged
+      // iterate is a fixed point of it (x = v_prev), so it only ever damps.
+      for (let n = 1; n < numNodes; n++) {
+        s.stampConductance(n, 0, reg);
+        s.stampCurrentSource(0, n, reg * sim.nodeVoltage[n]);
+      }
+    }
+    for (let ci = 0; ci < nComps; ci++) {
+      const comp = components[ci];
+      const plugin = plugArr[ci];
       if (!plugin || !plugin.stamp) continue;
-      const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
+      const terminals = termArr[ci];
       try {
         (plugin.stamp as any)(comp.parameters, terminals, s, sim, comp);
       } catch (e) {
         console.error(`stamp error in ${comp.type} (${comp.id}):`, e);
+      }
+    }
+    if (pseudoCap > 0) {
+      // Pseudo-transient anchor: a fictitious capacitance C/dt = pseudoCap on
+      // every node, tying it to the previous pseudo-time solution.
+      for (let n = 1; n < numNodes; n++) {
+        s.stampConductance(n, 0, pseudoCap);
+        s.stampCurrentSource(0, n, pseudoCap * anchor[n]);
       }
     }
     // resize system: we may have allocated more extra vars than used.
@@ -1672,19 +1932,50 @@ export function simulateStep(
         s.numExtra = actualSize - (numNodes - 1);
       }
     }
-    const sol = useSparse && sparse ? solveSparse(sparse) : solveMna(s);
+    const sol = useSparse && sparse ? (lenient ? solveSparseLenient(sparse) : solveSparse(sparse)) : solveMna(s);
     return { x: sol, sys: s, sparseSys: sparse };
+    } finally {
+      if (ownsPool) sharedSparsePoolBusy = false;
+    }
   };
 
-  let attempt = buildAndSolve(false);
+  // One Newton round's stamp + solve with the retry ladder. A failed (null)
+  // solve — exactly singular, or so ill-conditioned the residual check
+  // rejects it (a chain of active transistors multiplies its gains) — must
+  // not leave the plugin state or the junction limiters advanced. Retry
+  // order: gmin (1e-12 S to ground); then, for nonlinear circuits, damped
+  // Newton (LM regularisation toward the current iterate) of growing
+  // strength, so a hopeless linearisation yields a bounded step instead of
+  // ending the whole solve.
+  const REG_LADDER = [1e-9, 1e-6, 1e-4];
+  const solveRound = (): { x: Float64Array | null; sys: any; sparseSys: any } => {
+    const memSnap = sim.newtonMemory ? { ...sim.newtonMemory } : null;
+    const rollback = () => {
+      if (stateSnapshot) restoreScoped(stateMap, stateSnapshot, facts.scope);
+      if (memSnap && sim.newtonMemory) {
+        for (const key of Object.keys(sim.newtonMemory)) delete sim.newtonMemory[key];
+        Object.assign(sim.newtonMemory, memSnap);
+        sim.newtonMemory.__limited = 0;
+      }
+    };
+    let r = buildAndSolve(false);
+    if (r.x || !canRollback) return r;
+    rollback();
+    r = buildAndSolve(true);
+    if (r.x || !facts.hasNonLinear) return r;
+    rollback();
+    r = buildAndSolve(true, 0, true);
+    if (r.x) return r;
+    for (const reg of REG_LADDER) {
+      rollback();
+      r = buildAndSolve(true, reg);
+      if (r.x) return r;
+    }
+    return r;
+  };
+
+  let attempt = solveRound();
   let x = attempt.x;
-  if (!x && stateSnapshot) {
-    // roll the plugin state back to the pre-stamp snapshot (in place, so
-    // comp.simState references keep their identity), then retry with gmin
-    restoreStateInPlace(stateMap, stateSnapshot);
-    attempt = buildAndSolve(true);
-    x = attempt.x;
-  }
 
   // A plugin that allocates more branch-current unknowns than the budget
   // (the solver now grows its matrix accordingly) also needs a bigger
@@ -1716,15 +2007,18 @@ export function simulateStep(
   // Both flags share this loop: the same stamp→solve→measure residual
   // machinery converges both. Circuits with neither flag skip this
   // entirely — zero overhead for linear circuits.
-  const hasFeedback = components.some((c) => plugins.get(c.type)?.feedback === true);
-  const hasNonLinear = components.some((c) => plugins.get(c.type)?.nonLinear === true);
-  if (x && stateSnapshot && (hasFeedback || hasNonLinear)) {
+  const hasFeedback = facts.hasFeedback;
+  const hasNonLinear = facts.hasNonLinear;
+  let newtonConverged = true;
+  let newtonRounds = 1;
+  let newtonLimited = false;
+  if (x && canRollback && (hasFeedback || hasNonLinear)) {
     // SPICE-style convergence tolerances for the Newton loop (ngspice
     // defaults: reltol=1e-3, vntol=1e-6 V, aitol=1e-12 A).
     const RELTOL = 1e-3;
     const VNTOL = 1e-6;
     const AITOL = 1e-12;
-    const MAX_ITER = hasNonLinear ? 100 : 20;
+    const MAX_ITER = simOptions?.maxNewton ?? (hasNonLinear ? 100 : 20);
     // Convergence test (SPICE `convTest`): |ΔV| ≤ RELTOL·|V| + VNTOL on every
     // node and |ΔI| ≤ RELTOL·|I| + AITOL on every extra unknown. The extras
     // were held to AITOL alone — but they include pseudo-nodes (a diode's Rs
@@ -1774,8 +2068,14 @@ export function simulateStep(
       sim.nodeVoltage, newV0, sim.branchCurrent, newI0, attempt.sys.numExtra,
     );
     if (!round0Converged && (deltaV0 >= 1e-9 || deltaI0 >= 1e-12)) {
+      newtonConverged = !hasNonLinear;
       let prevDeltaV = Infinity;
       let nonDecreasing = 0;
+      // Previous round's Newton update vector (solve − what the stamps saw):
+      // lets the stall detector tell a ±-oscillating fixed point (needs
+      // damping) from a monotone walk (an exponential junction coming back
+      // down one Vt per round) whose residual is merely equal round to round.
+      let prevStep: Float64Array | null = null;
       let dampAlpha = 0.5;   // blend factor once damping engages
       let dampEngaged = false;
       let lastGood: { x: Float64Array; sys: any } | null = { x, sys: attempt.sys };
@@ -1792,23 +2092,27 @@ export function simulateStep(
         for (let i = 1; i < numNodes; i++) prevVArr[i] = sim.nodeVoltage[i];
         const prevIArr = Float64Array.from(sim.branchCurrent);
         sim.newtonIter = k;
+        newtonRounds = k + 1;
         // Undo state mutated by the previous round's stamp (edge counters,
         // region latches) so every re-stamp applies transitions exactly once.
-        restoreStateInPlace(stateMap, stateSnapshot);
+        if (stateSnapshot) restoreScoped(stateMap, stateSnapshot, facts.scope);
         if (sim.newtonMemory) sim.newtonMemory.__limited = 0;
-        let round = buildAndSolve(false);
-        if (!round.x) {
-          restoreStateInPlace(stateMap, stateSnapshot);
-          round = buildAndSolve(true);
-        }
-        if (!round.x) break; // keep the last consistent round
+        const round = solveRound();
+        if (!round.x) { newtonLimited = true; break; } // keep the last consistent round
         lastGood = { x: round.x, sys: round.sys };
         // Residual: how far the solve moved from what this round's stamps saw.
         let deltaV = 0;
+        const stepVec = new Float64Array(numNodes);
+        let stepDot = 0;
         for (let i = 1; i < numNodes; i++) {
-          const d = Math.abs(round.x[i - 1] - sim.nodeVoltage[i]);
+          const dv = round.x[i - 1] - sim.nodeVoltage[i];
+          stepVec[i] = dv;
+          if (prevStep) stepDot += dv * prevStep[i];
+          const d = Math.abs(dv);
           if (d > deltaV) deltaV = d;
         }
+        const reversing = prevStep !== null && stepDot < 0;
+        prevStep = stepVec;
         // I(source) references read sim.branchCurrent — include those in
         // the residual too (a BI mirror can move currents while voltages
         // look settled) and feed the solved currents back for the next round.
@@ -1820,7 +2124,8 @@ export function simulateStep(
           sim.branchCurrent[i] = iNew;
         }
         const limited = deviceLimited();
-        if (!limited && deltaV < 1e-9 && deltaI < 1e-12) break; // self-consistent (absolute test)
+        newtonLimited = limited;
+        if (!limited && deltaV < 1e-9 && deltaI < 1e-12) { newtonConverged = true; break; } // self-consistent (absolute test)
         // SPICE tolerance test — the Newton loop's official exit: the solve
         // moved less than reltol·|V| + vntol from what this round's stamps
         // linearized around. Strictly stronger than the absolute test for
@@ -1831,6 +2136,7 @@ export function simulateStep(
           const newI = new Float64Array(round.sys.numExtra);
           for (let i = 0; i < round.sys.numExtra; i++) newI[i] = round.x[numNodes - 1 + i];
           if (convergedNewton(prevVArr, newV, prevIArr, newI, round.sys.numExtra)) {
+            newtonConverged = true;
             break; // SPICE-tolerance converged — this solve is self-consistent
           }
         }
@@ -1849,7 +2155,7 @@ export function simulateStep(
         if (limited) {
           nonDecreasing = 0;
         } else if (!dampEngaged) {
-          nonDecreasing = deltaV >= prevDeltaV ? nonDecreasing + 1 : 0;
+          nonDecreasing = (deltaV > prevDeltaV || (reversing && deltaV >= 0.99 * prevDeltaV)) ? nonDecreasing + 1 : 0;
           dampEngaged = nonDecreasing >= 2;
         } else if (deltaV > prevDeltaV) {
           dampAlpha = Math.max(0.05, dampAlpha * 0.5);
@@ -1891,22 +2197,23 @@ export function simulateStep(
   if (simOptions?.recordTerminalCurrents) {
     let post: Record<string, any> | null = null;
     if (stateSnapshot) {
-      try { post = (globalThis as any).structuredClone(stateMap); } catch { post = null; }
-      if (post) restoreStateInPlace(stateMap, stateSnapshot);
+      post = snapshotState(stateMap, facts.scope);
+      if (post) restoreScoped(stateMap, stateSnapshot, facts.scope);
     }
     try {
       sim.terminalCurrents = recordTerminalCurrents(components, plugins, nodeMap, sim, x);
     } catch {
       sim.terminalCurrents = undefined;
     }
-    if (post) restoreStateInPlace(stateMap, post);
+    if (post) restoreScoped(stateMap, post, facts.scope);
   }
 
   // call step() for stateful components
-  for (const comp of components) {
-    const plugin = plugins.get(comp.type);
+  for (let ci = 0; ci < nComps; ci++) {
+    const comp = components[ci];
+    const plugin = plugArr[ci];
     if (!plugin || !plugin.step) continue;
-    const terminals = getTerminalsForComponent(comp, plugin, nodeMap);
+    const terminals = termArr[ci];
     try {
       plugin.step(comp.parameters, terminals, sim, comp);
     } catch (e) {
@@ -1914,7 +2221,7 @@ export function simulateStep(
     }
   }
 
-  return { sim, branchCurrentSize: sys.numExtra, nodeMap };
+  return { sim, branchCurrentSize: sys.numExtra, nodeMap, converged: newtonConverged, newtonRounds, limited: newtonLimited };
 }
 
 /**
@@ -1932,11 +2239,23 @@ export function solveDC(
   wires: Wire[],
   plugins: Map<string, ComponentPlugin>,
   maxIter: number = 50,
-  opts?: { robust?: boolean; simOptions?: { initialConditions?: Record<string, number>; nodeSets?: Record<string, number>; method?: 'euler' | 'trap' | 'gear'; temp?: number } },
+  opts?: { robust?: boolean; dcDt?: number; noInductorShorts?: boolean; warmStart?: PrevState; simOptions?: { initialConditions?: Record<string, number>; nodeSets?: Record<string, number>; method?: 'euler' | 'trap' | 'gear'; temp?: number; gminShunt?: number; maxNewton?: number; pseudoCap?: number } },
 ): SimContext | null {
   // initialize simState
   for (const comp of components) {
     if (!comp.simState) comp.simState = {};
+  }
+
+  // Exact DC treatment of inductors (SPICE: an inductor is a 0 V branch at DC).
+  // The companion G = dt/L at dt = 1e6 s is 1e10–1e16 S for µH–nH inductors; next to
+  // the 1e-7 S of a 10 MΩ bias resistor that is 17+ orders of magnitude of dynamic
+  // range, so LU returns garbage voltages (or a singular pivot) on any node that is
+  // only weakly tied down. Solve with each inductor replaced by a 0 V source instead
+  // and seed the inductor state with the branch current. Falls back to the companion
+  // path when the topology forbids it (inductor loops / across a source).
+  if (!opts?.noInductorShorts && components.some((c) => SHORT_AT_DC[c.type])) {
+    const exact = solveDCWithInductorShorts(components, wires, plugins, maxIter, opts);
+    if (exact) return exact;
   }
 
   // For DC operating point: capacitors should be OPEN and inductors SHORT.
@@ -1945,11 +2264,19 @@ export function solveDC(
   //   Inductor:   G = dt/L  (large dt → large G → short circuit)
   // Using dt = 1e6 seconds makes both companion models converge to their
   // DC steady-state behavior. This is the standard SPICE approach (.OP).
-  const DC_DT = 1e6;
+  const DC_DT = opts?.dcDt ?? 1e6;
 
-  let prev: PrevState | undefined;
+  let prev: PrevState | undefined = opts?.warmStart;
   let result: SimContext | null = null;
   let failed = false;
+  let nonConverged = 0;
+  // With the homotopy ladder behind it (robust), the direct attempt is a
+  // quick try: SPICE's ITL1 spirit, but fail fast — a start that has not
+  // settled in DIRECT_NEWTON_CAP rounds is diverging, not slowly converging.
+  const capped = opts?.simOptions?.maxNewton !== undefined || opts?.robust === true;
+  const stepOpts = opts?.robust && opts.simOptions?.maxNewton === undefined
+    ? { ...opts.simOptions, maxNewton: DIRECT_NEWTON_CAP }
+    : opts?.simOptions;
   for (let iter = 0; iter < maxIter; iter++) {
     // fixedTime: hold every time-dependent source at its t=0 value for the
     // whole solve (ngspice .OP semantics). Previously sim.time advanced by
@@ -1957,9 +2284,18 @@ export function solveDC(
     // random phase per round: the convergence test could never settle (always
     // 50 iterations), and the returned operating point — which runTran uses
     // to seed the transient — carried an arbitrary source phase.
-    const r = simulateStep(components, wires, plugins, prev, DC_DT, { fixedTime: 0, recordTerminalCurrents: true, ...opts?.simOptions, method: 'euler' }); // DC: caps open, no integration history
+    const r = simulateStep(components, wires, plugins, prev, DC_DT, { fixedTime: 0, recordTerminalCurrents: true, ...stepOpts, method: 'euler' }); // DC: caps open, no integration history
     if (!r) { failed = true; break; }
     result = r.sim;
+    // A nonlinear step whose Newton loop ran out of rounds is not an
+    // operating point (SPICE: "singular matrix / iteration limit" → run the
+    // gmin / source stepping ladder). Two in a row ends the direct attempt
+    // instead of burning maxIter × 100 builds on a hopeless start.
+    if (r.converged === false && r.limited) {
+      if (++nonConverged >= (capped ? 1 : 2)) { failed = true; break; }
+    } else {
+      nonConverged = 0;
+    }
     // check convergence
     if (prev) {
       let maxDelta = 0;
@@ -1984,6 +2320,24 @@ export function solveDC(
     }
   }
   if (!failed) return result;
+  // Tiny inductances (nH-class ESL / lead inductors) make the dt = 1e6 s short-circuit
+  // companion G = dt/L ≈ 1e15 S, which wrecks LU conditioning (the cancellation
+  // error exceeds every other entry and the pivot collapses). Retry with a dt that
+  // keeps the inductor "short" (G ≈ 1e10 S, still ≫ any series R) but the matrix
+  // solvable; capacitors stay effectively open (G = C/dt).
+  if (opts?.dcDt === undefined) {
+    let lMin = Infinity;
+    for (const c of components) for (const [k, v] of Object.entries(c.parameters)) {
+      if (typeof v === 'number' && v > 0 && /^(inductance|L[123]?)$/.test(k)) lMin = Math.min(lMin, v);
+    }
+    if (Number.isFinite(lMin)) {
+      const dt = Math.min(1e6, Math.max(1e-3, lMin * 1e10));
+      if (dt < DC_DT) {
+        const retry = solveDC(components, wires, plugins, maxIter, { ...opts, dcDt: dt });
+        if (retry) return retry;
+      }
+    }
+  }
   // Plain Newton failed — escalate to inline robust aids (gmin stepping →
   // source stepping) when requested. Implemented HERE (not via require() of
   // ./convergence, which is dead code in browser ESM bundles AND a circular
@@ -1994,94 +2348,265 @@ export function solveDC(
   return null;
 }
 
+/** Newton round budget of a direct DC attempt that has the gmin/source ladder behind it. */
+const DIRECT_NEWTON_CAP = 100;
+/** Round budget per homotopy step (a step needing more is shrunk instead). */
+const HOMOTOPY_NEWTON_CAP = 100;
+
+type DcSimOptions = NonNullable<NonNullable<Parameters<typeof solveDC>[4]>['simOptions']>;
+
 /**
- * Inline robust fallbacks for solveDC: gmin stepping (shunt every node to
- * ground, decaying 1e-2 → gmin target) then source stepping (scale all
- * independent sources 0 → 100%). Returns the first converged operating
- * point, or null. No imports — safe from engine↔convergence cycles.
+ * gmin shunts and pseudo-capacitances tie nodes to ground, so they must not
+ * conjure a reference for a circuit that has none (SPICE: "no DC path to
+ * ground") — that stays a failure.
+ */
+function circuitHasGround(components: CircuitComponent[], wires: Wire[], plugins: Map<string, ComponentPlugin>): boolean {
+  for (const n of buildNodeMap(components, wires, plugins).terminalNode.values()) if (n === 0) return true;
+  return false;
+}
+
+/** Warm-start state from a solved operating point (state deep-cloned: failed attempts mutate it in place). */
+export function warmFrom(sim: SimContext): PrevState {
+  let state: Record<string, any> = sim.state;
+  try { state = cloneStateValue(sim.state); } catch { /* share */ }
+  return { nodeVoltage: sim.nodeVoltage, branchCurrent: sim.branchCurrent, time: sim.time, state };
+}
+
+/**
+ * SPICE dynamic gmin stepping: shunt every node to ground with `gShunt`,
+ * solve, and reduce the shunt toward zero — each solve warm-started from the
+ * previous one (the whole point of a homotopy; a cold start at every level
+ * re-solves the original hard problem). The step factor adapts: it widens
+ * while solves converge and shrinks (sqrt) when one fails.
+ */
+export function dcGminStepping(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  maxIter: number,
+  simOptions?: DcSimOptions,
+  gminTarget = 1e-12,
+): SimContext | null {
+  if (!circuitHasGround(components, wires, plugins)) return null;
+  const at = (g: number, warm?: PrevState) =>
+    solveDC(components, wires, plugins, maxIter, { warmStart: warm, simOptions: { ...simOptions, gminShunt: g, maxNewton: HOMOTOPY_NEWTON_CAP } });
+  let g = 1e-2;
+  let cur = at(g);
+  if (!cur) { g = 1; cur = at(g); }
+  if (!cur) { g = 1e2; cur = at(g); }
+  if (!cur) return null;
+  let factor = 10;
+  let guard = 0;
+  while (g > gminTarget * 1.001 && guard++ < 80) {
+    const next = Math.max(g / factor, gminTarget);
+    const r = at(next, warmFrom(cur));
+    if (r) {
+      g = next; cur = r;
+      factor = Math.min(factor * 2, 1e4);
+    } else {
+      factor = Math.sqrt(factor);
+      if (factor < 1.1) return null;
+    }
+  }
+  // Final clean solve (no shunt), seeded from the gmin-target solution.
+  const clean = solveDC(components, wires, plugins, maxIter, { warmStart: warmFrom(cur), simOptions: { ...simOptions, gminShunt: 0, maxNewton: HOMOTOPY_NEWTON_CAP } });
+  return clean ?? (g <= gminTarget * 1.001 ? cur : null);
+}
+
+export function scaleSources(components: CircuitComponent[], a: number): CircuitComponent[] {
+  return components.map((c) => {
+    const keys = c.type === 'dcVoltage' ? ['voltage']
+      : c.type === 'acVoltage' ? ['amplitude', 'offset']
+      : c.type === 'pulseSource' ? ['high', 'low']
+      : c.type === 'currentSource' ? ['current']
+      : null;
+    if (!keys) return c;
+    const parameters = { ...c.parameters };
+    for (const k of keys) if (typeof parameters[k] === 'number') parameters[k] = (parameters[k] as number) * a;
+    return { ...c, parameters };
+  });
+}
+
+/**
+ * Source stepping: ramp every independent source 0 → 100 % with adaptive step
+ * (halved on failure), each solve warm-started from the previous one.
+ */
+export function dcSourceStepping(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  maxIter: number,
+  simOptions?: DcSimOptions,
+): SimContext | null {
+  const at = (a: number, warm?: PrevState) =>
+    solveDC(scaleSources(components, a), wires, plugins, maxIter, { warmStart: warm, simOptions: { ...simOptions, maxNewton: HOMOTOPY_NEWTON_CAP } });
+  let cur = at(0);
+  if (!cur) return null;
+  let a = 0;
+  let da = 0.1;
+  let guard = 0;
+  while (a < 1 && guard++ < 200) {
+    const next = Math.min(1, a + da);
+    const r = at(next, warmFrom(cur));
+    if (r) {
+      a = next; cur = r;
+      da = Math.min(da * 1.5, 0.25);
+    } else {
+      da /= 2;
+      if (da < 1e-4) return null;
+    }
+  }
+  return a >= 1 ? cur : null;
+}
+
+/**
+ * Pseudo-transient continuation (ngspice "transient op"): march a fictitious
+ * node capacitance C/dt = `cap` S from a stiff value (state frozen near the
+ * cold start, devices off, every solve trivially convergent) down to zero,
+ * each backward-Euler pseudo-time step a converged Newton solve warm-started
+ * from the last. Unlike gmin or source stepping it follows the physical
+ * settling path, so it passes the solution-branch folds of high-gain
+ * cascades (a DC-coupled chain of active transistors settles stage by stage).
+ */
+export function dcPseudoTransient(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  maxIter: number,
+  simOptions?: DcSimOptions,
+): SimContext | null {
+  if (!circuitHasGround(components, wires, plugins)) return null;
+  const at = (cap: number, warm?: PrevState) =>
+    solveDC(components, wires, plugins, 1, { warmStart: warm, simOptions: { ...simOptions, pseudoCap: cap, maxNewton: HOMOTOPY_NEWTON_CAP } });
+  // Adaptive pseudo-time step L = 1/cap (like a transient's dt control): grow
+  // on success, cut on failure — failure means a stage is switching faster
+  // than L, so L must SHRINK below the failed attempt, not merely grow slower.
+  let L = 10;
+  let cur: SimContext | null = null;
+  let guard = 0;
+  while (L < 1e12 && guard++ < 600) {
+    const r = at(1 / L, cur ? warmFrom(cur) : undefined);
+    if (r) { cur = r; L *= 2; }
+    else {
+      if (!cur) return null;
+      L /= 4;
+      if (L < 1e-3) return null;
+    }
+  }
+  if (!cur) return null;
+  return solveDC(components, wires, plugins, maxIter, { warmStart: warmFrom(cur), simOptions: { ...simOptions, pseudoCap: 0, maxNewton: HOMOTOPY_NEWTON_CAP } });
+}
+
+/**
+ * Inline robust fallbacks for solveDC, in SPICE order: gmin stepping, then
+ * source stepping (both warm-started homotopies). Returns the first converged
+ * operating point, or null. Implemented here (not in ./convergence, which
+ * imports this file) to avoid an import cycle.
  */
 function solveDCWithFallbacks(
   components: CircuitComponent[],
   wires: Wire[],
   plugins: Map<string, ComponentPlugin>,
   maxIter: number,
-  opts?: { simOptions?: { initialConditions?: Record<string, number>; nodeSets?: Record<string, number>; method?: 'euler' | 'trap' | 'gear'; temp?: number } },
+  opts?: { simOptions?: DcSimOptions },
 ): SimContext | null {
-  // 1. Gmin stepping: shunt every non-ground node to ground, decay the shunt.
   try {
-    const nodeMap = buildNodeMap(components, wires, plugins);
-    const nodeTerminal = new Map<number, { componentId: string; terminalId: string }>();
-    for (const [key, nodeId] of nodeMap.terminalNode) {
-      if (nodeId > 0 && !nodeTerminal.has(nodeId)) {
-        const [componentId, terminalId] = key.split(':');
-        nodeTerminal.set(nodeId, { componentId, terminalId });
-      }
-    }
-    const ground = components.find((c) => c.type === 'ground' || c.type === 'powerGND');
-    if (ground) {
-      let lastGood: SimContext | null = null;
-      for (let gmin = 1e-2; gmin >= 1e-12 * 0.999; gmin *= 0.1) {
-        const shunts: CircuitComponent[] = [];
-        const shuntWires: Wire[] = [];
-        let idx = 0;
-        for (const [nodeId, term] of nodeTerminal) {
-          const shuntId = `__gmin_shunt_${nodeId}__`;
-          shunts.push({
-            id: shuntId, type: 'resistor', position: { x: 0, y: 0 }, rotation: 0,
-            parameters: { resistance: 1 / gmin },
-          });
-          shuntWires.push(
-            { id: `__gmin_wa_${idx}__`, from: { componentId: shuntId, terminalId: 'a' }, to: { componentId: term.componentId, terminalId: term.terminalId } },
-            { id: `__gmin_wb_${idx}__`, from: { componentId: shuntId, terminalId: 'b' }, to: { componentId: ground.id, terminalId: 'g' } },
-          );
-          idx++;
-        }
-        const r = solveDC(
-          [...components, ...shunts], [...wires, ...shuntWires], plugins, maxIter,
-          { simOptions: opts?.simOptions },
-        );
-        if (r) lastGood = r;
-      }
-      // Final clean solve at full source values.
-      const clean = solveDC(components, wires, plugins, maxIter, { simOptions: opts?.simOptions });
-      if (clean) return clean;
-      if (lastGood) return lastGood;
-    }
-  } catch {
-    // fall through to source stepping
-  }
-  // 2. Source stepping: ramp independent sources 0% → 100% in 5 steps,
-  // seeding each step from the previous solution via nodeSets.
+    const g = dcGminStepping(components, wires, plugins, maxIter, opts?.simOptions);
+    if (g) return g;
+  } catch { /* fall through to source stepping */ }
   try {
-    const sources = components.filter((c) =>
-      c.type === 'dcVoltage' || c.type === 'acVoltage' || c.type === 'currentSource' || c.type === 'pulseSource');
-    if (sources.length === 0) return null;
-    let seed: Record<string, number> | undefined;
-    for (const frac of [0.1, 0.3, 0.6, 1.0]) {
-      const scaled = components.map((c) => {
-        if (c.type === 'dcVoltage' || c.type === 'acVoltage' || c.type === 'pulseSource') {
-          const v = c.parameters.voltage;
-          if (typeof v === 'number') return { ...c, parameters: { ...c.parameters, voltage: v * frac } };
-        }
-        if (c.type === 'currentSource') {
-          const i = c.parameters.current;
-          if (typeof i === 'number') return { ...c, parameters: { ...c.parameters, current: i * frac } };
-        }
-        return c;
+    const sres = dcSourceStepping(components, wires, plugins, maxIter, opts?.simOptions);
+    if (sres) return sres;
+  } catch { /* fall through */ }
+  try {
+    const p = dcPseudoTransient(components, wires, plugins, maxIter, opts?.simOptions);
+    if (p) return p;
+  } catch { /* fall through */ }
+  // Last resort: the full Newton budget (a slowly-but-surely converging
+  // circuit the capped attempts gave up on).
+  return solveDC(components, wires, plugins, maxIter, { simOptions: { ...opts?.simOptions, maxNewton: 100 } });
+}
+
+
+// ── exact inductor DC (see solveDC) ─────────────────────────────────────────
+/** component types whose windings are shorts at DC: type → [[a, b] terminal pairs] */
+const SHORT_AT_DC: Record<string, [string, string][]> = {
+  inductor: [['a', 'b']],
+  spiceMutual2: [['a1', 'b1'], ['a2', 'b2']],
+  spiceMutual3: [['a1', 'b1'], ['a2', 'b2'], ['a3', 'b3']],
+};
+
+function solveDCWithInductorShorts(
+  components: CircuitComponent[],
+  wires: Wire[],
+  plugins: Map<string, ComponentPlugin>,
+  maxIter: number,
+  opts: Parameters<typeof solveDC>[4],
+): SimContext | null {
+  try {
+    // winding id → original (component, terminal a, terminal b)
+    const windings: { id: string; compId: string; ta: string; tb: string; type: string; k: number }[] = [];
+    const sub: CircuitComponent[] = [];
+    for (const c of components) {
+      const pairs = SHORT_AT_DC[c.type];
+      if (!pairs) { sub.push(c); continue; }
+      pairs.forEach(([ta, tb], k) => {
+        const id = pairs.length === 1 ? c.id : `${c.id}__w${k + 1}`;
+        windings.push({ id, compId: c.id, ta, tb, type: c.type, k });
+        sub.push({ ...c, id, type: 'dcVoltage', parameters: { voltage: 0 }, simState: {} });
       });
-      const r = solveDC(scaled, wires, plugins, maxIter, {
-        simOptions: { ...opts?.simOptions, ...(seed ? { nodeSets: seed } : {}) },
-      });
-      if (!r) return null;
-      seed = {};
-      const nm = buildNodeMap(scaled, wires, plugins);
-      for (const [key, nodeId] of nm.terminalNode) {
-        if (nodeId > 0) seed[key] = r.nodeVoltage[nodeId] ?? 0;
-      }
-      if (frac === 1.0) return r;
     }
+    const remap = new Map<string, string>(); // `${compId}:${terminal}` → `${subId}:p|n`
+    for (const w of windings) {
+      remap.set(`${w.compId}:${w.ta}`, `${w.id}:p`);
+      remap.set(`${w.compId}:${w.tb}`, `${w.id}:n`);
+    }
+    const mapEnd = (e: { componentId: string; terminalId: string }) => {
+      const m = remap.get(`${e.componentId}:${e.terminalId}`);
+      if (!m) return e;
+      const [componentId, terminalId] = m.split(':');
+      return { componentId, terminalId };
+    };
+    const subWires = wires.map((w) => ({ ...w, from: mapEnd(w.from), to: mapEnd(w.to) }));
+    const r = solveDC(sub, subWires, plugins, maxIter, { ...opts, noInductorShorts: true });
+    if (!r) return null;
+    // node numbering must be identical to the original circuit's (the transient reuses it)
+    const nmOrig = buildNodeMap(components, wires, plugins);
+    const nmSub = buildNodeMap(sub, subWires, plugins);
+    for (const [key, id] of remap) {
+      const [compId, term] = key.split(':');
+      const [subId, subTerm] = id.split(':');
+      if ((nmOrig.terminalNode.get(`${compId}:${term}`) ?? -1) !== (nmSub.terminalNode.get(`${subId}:${subTerm}`) ?? -2)) return null;
+    }
+    if (nmOrig.numNodes !== nmSub.numNodes) return null;
+    // seed the reactive state with the DC branch currents
+    const st = (r.state.__global ?? (r.state.__global = {})) as Record<string, any>;
+    const idx = (r.state.__branchIndices ?? {}) as Record<string, number>;
+    const base = r.nodeVoltage.length - 1;
+    const iOf = (id: string) => r.branchCurrent[(idx[id] ?? NaN) - base] ?? 0;
+    const byComp = new Map<string, number[]>();
+    for (const w of windings) (byComp.get(w.compId) ?? byComp.set(w.compId, []).get(w.compId)!)[w.k] = iOf(w.id);
+    for (const [compId, cur] of byComp) {
+      const comp = components.find((c) => c.id === compId)!;
+      if (comp.type === 'inductor') {
+        st[`ind_${compId}`] = cur[0];
+        st[`ind_${compId}_i`] = cur[0];
+      } else {
+        const vv = cur.map(() => 0);
+        st[`spk_${compId}`] = { i: cur, v1: vv, hp: 1e6, n: 1 };
+      }
+    }
+    // terminal currents: re-key the substituted windings under the original terminals
+    if (r.terminalCurrents) {
+      for (const w of windings) {
+        const ip = r.terminalCurrents.get(`${w.id}:p`), inn = r.terminalCurrents.get(`${w.id}:n`);
+        if (ip !== undefined) r.terminalCurrents.set(`${w.compId}:${w.ta}`, ip);
+        if (inn !== undefined) r.terminalCurrents.set(`${w.compId}:${w.tb}`, inn);
+      }
+    }
+    delete r.state.__branchIndices;
+    return r;
   } catch {
     return null;
   }
-  return null;
 }

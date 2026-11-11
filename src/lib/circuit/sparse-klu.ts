@@ -119,15 +119,38 @@ export interface SparseMnaSystem {
 // so numerics are interchangeable with the dense path.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function createSparseMnaSystem(numNodes: number, numExtra: number): SparseMnaSystem {
+/**
+ * Optional scratch pool so the engine can rebuild the system every Newton
+ * round without reallocating the triplet buffer / RHS (capacity is kept,
+ * only the count is reset). Only ONE live system per pool may be stamped or
+ * solved at a time — the engine's rounds are strictly sequential.
+ */
+export interface SparseScratchPool {
+  triplets?: TripletBuffer;
+  z?: Float64Array;
+}
+
+export function createSparseMnaSystem(numNodes: number, numExtra: number, pool?: SparseScratchPool): SparseMnaSystem {
   const size = numNodes + numExtra;
-  const triplets = new TripletBuffer(Math.max(64, size * 4));
+  let triplets: TripletBuffer;
+  let zBuf: Float64Array;
+  if (pool && pool.triplets && pool.z && pool.z.length === size) {
+    triplets = pool.triplets;
+    triplets.clear();
+    zBuf = pool.z;
+    zBuf.fill(0);
+  } else {
+    triplets = pool?.triplets ?? new TripletBuffer(Math.max(64, size * 4));
+    triplets.clear();
+    zBuf = new Float64Array(size);
+    if (pool) { pool.triplets = triplets; pool.z = zBuf; }
+  }
   const sys: SparseMnaSystem = {
     numNodes,
     numExtra,
     size,
     triplets,
-    z: new Float64Array(size),
+    z: zBuf,
     nextExtra: numNodes,
     clearStamps: () => {
       triplets.clear();
@@ -147,7 +170,7 @@ export function createSparseMnaSystem(numNodes: number, numExtra: number): Spars
         }
       }
       t.count = w;
-      sys.z = sys.z.slice(0, newSize);
+      sys.z = sys.z.subarray(0, newSize);
       sys.size = newSize;
     },
     addExtra: () => {
@@ -306,6 +329,7 @@ const factorizationCache: FactorizationCache = {
 
 /** Test/benchmark hook: reset the reuse cache + counters. */
 export function resetSparseFactorizationCache(): void {
+  patternCache = null;
   factorizationCache.size = -1;
   factorizationCache.rowPtr = null;
   factorizationCache.cols = null;
@@ -330,7 +354,7 @@ function structuresEqual(
   return true;
 }
 
-export function solveSparse(sys: SparseMnaSystem): Float64Array | null {
+function solveSparseSlow(sys: SparseMnaSystem): Float64Array | null {
   const n = sys.size;
   if (n === 0) return new Float64Array(0);
   const t = sys.triplets;
@@ -377,6 +401,325 @@ export function solveSparse(sys: SparseMnaSystem): Float64Array | null {
     factorizationCache.colPerm = r.colPerm;
   }
   return r ? r.x : null;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Persistent pattern + numeric-only refactorization (fast path)
+//
+// Once a full factorization has produced a pivot order for a given triplet
+// structure, every later solve with the SAME (row, col) triplet sequence and
+// the same nonzero mask only needs numeric work:
+//   * triplet → merged-entry slot map (no sort, no merge, no row lists),
+//   * a symbolic LU pattern for the fixed pivot order (computed once),
+//   * left-looking (IKJ) numeric LU in typed arrays.
+// The arithmetic performed per entry is identical to the Markowitz-path
+// replay (same pivot order, same elimination order, U rows stored in original
+// column order so back-substitution sums in the same sequence), so results
+// are bit-for-bit the same as the replay path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface PatternCache {
+  valid: boolean;
+  n: number;
+  count: number;
+  tRow: Int32Array;
+  tCol: Int32Array;
+  /** triplet index → merged (row,col) group */
+  group: Int32Array;
+  /** per group: was its merged value nonzero (structure mask) */
+  nz: Uint8Array;
+  /** per group: index into compact CSR arrays, or -1 */
+  cidx: Int32Array;
+  gsum: Float64Array;
+  rowPtr: Int32Array;
+  cols: Int32Array;
+  vals: Float64Array;
+  rowPerm: Int32Array;
+  colPerm: Int32Array;
+  posOfCol: Int32Array;
+  // symbolic LU (permuted coordinates)
+  lPtr: Int32Array;
+  lIdx: Int32Array;
+  lVal: Float64Array;
+  uPtr: Int32Array;
+  uIdx: Int32Array;
+  uVal: Float64Array;
+  udiag: Float64Array;
+  colMax: Float64Array;
+  w: Float64Array;
+  bp: Float64Array;
+  x2: Float64Array;
+}
+
+let patternCache: PatternCache | null = null;
+const patternStats = { fast: 0, rebuild: 0 };
+
+/** Test/benchmark hook. */
+export function sparsePatternStats(): { fast: number; rebuild: number } {
+  return { ...patternStats };
+}
+
+function buildPatternCache(
+  n: number, t: TripletBuffer, rowPerm: Int32Array, colPerm: Int32Array,
+): PatternCache | null {
+  const count = t.count;
+  const tRow = t.row.slice(0, count);
+  const tCol = t.col.slice(0, count);
+  const idx = new Int32Array(count);
+  for (let i = 0; i < count; i++) idx[i] = i;
+  idx.sort((a, b) => tRow[a] - tRow[b] || tCol[a] - tCol[b]);
+  const group = new Int32Array(count);
+  // pass 1: group ids + sums (same accumulation order as mergeTriplets)
+  let ng = 0;
+  const groupRow: number[] = [];
+  const groupCol: number[] = [];
+  const sums: number[] = [];
+  let i = 0;
+  while (i < count) {
+    const r = tRow[idx[i]];
+    const c = tCol[idx[i]];
+    let v = 0;
+    let j = i;
+    while (j < count && tRow[idx[j]] === r && tCol[idx[j]] === c) {
+      group[idx[j]] = ng;
+      v += t.val[idx[j]];
+      j++;
+    }
+    groupRow.push(r); groupCol.push(c); sums.push(v);
+    ng++;
+    i = j;
+  }
+  const nz = new Uint8Array(ng);
+  const cidx = new Int32Array(ng).fill(-1);
+  const rowPtr = new Int32Array(n + 1);
+  let nnz = 0;
+  for (let g = 0; g < ng; g++) {
+    if (sums[g] !== 0) { nz[g] = 1; cidx[g] = nnz++; rowPtr[groupRow[g] + 1]++; }
+  }
+  for (let r = 0; r < n; r++) rowPtr[r + 1] += rowPtr[r];
+  const cols = new Int32Array(nnz);
+  const vals = new Float64Array(nnz);
+  for (let g = 0; g < ng; g++) {
+    if (nz[g]) { cols[cidx[g]] = groupCol[g]; vals[cidx[g]] = sums[g]; }
+  }
+  // groups are sorted by (row, col) so compact order is already CSR order.
+
+  const posOfCol = new Int32Array(n);
+  for (let k = 0; k < n; k++) posOfCol[colPerm[k]] = k;
+
+  // ── symbolic factorization along the fixed pivot order ──
+  const marker = new Int32Array(n).fill(-1);
+  const heap = new Int32Array(n + 1);
+  let heapN = 0;
+  const hpush = (v: number) => {
+    let c = heapN++;
+    while (c > 0) {
+      const p = (c - 1) >> 1;
+      if (heap[p] <= v) break;
+      heap[c] = heap[p];
+      c = p;
+    }
+    heap[c] = v;
+  };
+  const hpop = (): number => {
+    const top = heap[0];
+    const last = heap[--heapN];
+    let c = 0;
+    for (;;) {
+      let ch = 2 * c + 1;
+      if (ch >= heapN) break;
+      if (ch + 1 < heapN && heap[ch + 1] < heap[ch]) ch++;
+      if (heap[ch] >= last) break;
+      heap[c] = heap[ch];
+      c = ch;
+    }
+    heap[c] = last;
+    return top;
+  };
+  const lPtrA: number[] = [0];
+  const lIdxA: number[] = [];
+  const uPtrA: number[] = [0];
+  const uIdxA: number[] = [];
+  for (let k = 0; k < n; k++) {
+    const r = rowPerm[k];
+    const strict: number[] = []; // j > k (permuted coords)
+    let hasDiag = false;
+    heapN = 0;
+    for (let e = rowPtr[r]; e < rowPtr[r + 1]; e++) {
+      const j = posOfCol[cols[e]];
+      marker[j] = k;
+      if (j < k) hpush(j);
+      else if (j === k) hasDiag = true;
+      else strict.push(j);
+    }
+    while (heapN > 0) {
+      const kk = hpop();
+      lIdxA.push(kk);
+      for (let e = uPtrA[kk]; e < uPtrA[kk + 1]; e++) {
+        const j = uIdxA[e];
+        if (marker[j] === k) continue;
+        marker[j] = k;
+        if (j < k) hpush(j);
+        else if (j === k) hasDiag = true;
+        else strict.push(j);
+      }
+    }
+    if (!hasDiag) return null; // pivot absent from structure — cannot reuse
+    lPtrA.push(lIdxA.length);
+    // U row stored in ORIGINAL column order (matches the replay path's
+    // back-substitution summation order).
+    strict.sort((a, b) => colPerm[a] - colPerm[b]);
+    for (const j of strict) uIdxA.push(j);
+    uPtrA.push(uIdxA.length);
+  }
+  return {
+    valid: true, n, count, tRow, tCol, group, nz, cidx,
+    gsum: new Float64Array(ng), rowPtr, cols, vals,
+    rowPerm: Int32Array.from(rowPerm), colPerm: Int32Array.from(colPerm), posOfCol,
+    lPtr: Int32Array.from(lPtrA), lIdx: Int32Array.from(lIdxA), lVal: new Float64Array(lIdxA.length),
+    uPtr: Int32Array.from(uPtrA), uIdx: Int32Array.from(uIdxA), uVal: new Float64Array(uIdxA.length),
+    udiag: new Float64Array(n), colMax: new Float64Array(n),
+    w: new Float64Array(n), bp: new Float64Array(n), x2: new Float64Array(n),
+  };
+}
+
+/** Numeric-only refactor + solve on a valid pattern cache. null → fall back. */
+function fastSolve(pc: PatternCache, sys: SparseMnaSystem): Float64Array | null {
+  const n = pc.n;
+  const t = sys.triplets;
+  const count = t.count;
+  // structure check: identical triplet (row, col) sequence
+  if (pc.count !== count || n !== sys.size) return null;
+  const tr = t.row, tc = t.col, pr = pc.tRow, pcl = pc.tCol;
+  for (let i = 0; i < count; i++) {
+    if (tr[i] !== pr[i] || tc[i] !== pcl[i]) return null;
+  }
+  // accumulate + nonzero-mask check
+  const gsum = pc.gsum, group = pc.group, tv = t.val;
+  gsum.fill(0);
+  for (let i = 0; i < count; i++) gsum[group[i]] += tv[i];
+  const nz = pc.nz, cidx = pc.cidx, vals = pc.vals;
+  for (let g = 0; g < gsum.length; g++) {
+    const v = gsum[g];
+    if ((v !== 0) !== (nz[g] === 1)) return null;
+    if (nz[g]) vals[cidx[g]] = v;
+  }
+
+  const { rowPtr, cols, rowPerm, colPerm, posOfCol, lPtr, lIdx, lVal, uPtr, uIdx, uVal, udiag, colMax, w, bp, x2 } = pc;
+  colMax.fill(0);
+  for (let i = 0; i < n; i++) {
+    const r = rowPerm[i];
+    for (let e = rowPtr[r], eEnd = rowPtr[r + 1]; e < eEnd; e++) w[posOfCol[cols[e]]] = vals[e];
+    for (let e = lPtr[i], eEnd = lPtr[i + 1]; e < eEnd; e++) {
+      const k = lIdx[e];
+      const wk = w[k];
+      w[k] = 0;
+      const a = wk < 0 ? -wk : wk;
+      if (a > colMax[k]) colMax[k] = a;
+      const f = wk / udiag[k];
+      if (!isFinite(f)) { clearW(pc, i); return null; }
+      lVal[e] = f;
+      if (f !== 0) {
+        for (let e2 = uPtr[k], e2End = uPtr[k + 1]; e2 < e2End; e2++) w[uIdx[e2]] -= f * uVal[e2];
+      }
+    }
+    const pv = w[i];
+    w[i] = 0;
+    if (!isFinite(pv) || Math.abs(pv) < PIVOT_ABS_FLOOR) { clearW(pc, i); return null; }
+    udiag[i] = pv;
+    const apv = Math.abs(pv);
+    if (apv > colMax[i]) colMax[i] = apv;
+    for (let e = uPtr[i], eEnd = uPtr[i + 1]; e < eEnd; e++) {
+      const j = uIdx[e];
+      uVal[e] = w[j];
+      w[j] = 0;
+    }
+  }
+  // pivot stability guard (same criterion as the replay path)
+  for (let k = 0; k < n; k++) {
+    if (Math.abs(udiag[k]) < REUSE_TAU * colMax[k]) return null;
+  }
+
+  const z = sys.z;
+  // forward substitution (row-oriented; same subtraction order per entry)
+  for (let i = 0; i < n; i++) {
+    let s = z[rowPerm[i]];
+    for (let e = lPtr[i], eEnd = lPtr[i + 1]; e < eEnd; e++) {
+      const yk = bp[lIdx[e]];
+      if (yk !== 0) s -= lVal[e] * yk;
+    }
+    bp[i] = s;
+  }
+  // back substitution
+  for (let k = n - 1; k >= 0; k--) {
+    let sum = bp[k];
+    for (let e = uPtr[k], eEnd = uPtr[k + 1]; e < eEnd; e++) sum -= uVal[e] * x2[uIdx[e]];
+    const diag = udiag[k];
+    if (diag === 0 || !isFinite(diag)) return null;
+    const xv = sum / diag;
+    if (!isFinite(xv)) return null;
+    x2[k] = xv;
+  }
+  const x = new Float64Array(n);
+  for (let k = 0; k < n; k++) x[colPerm[k]] = x2[k];
+
+  // residual sanity check (identical to luSolveCore's)
+  let maxRes = 0, maxAx = 0, maxB = 0;
+  for (let i = 0; i < n; i++) {
+    const bAbs = Math.abs(z[i]);
+    if (bAbs > maxB) maxB = bAbs;
+  }
+  for (let r = 0; r < n; r++) {
+    let sacc = 0;
+    for (let e = rowPtr[r]; e < rowPtr[r + 1]; e++) sacc += vals[e] * x[cols[e]];
+    const axAbs = Math.abs(sacc);
+    if (axAbs > maxAx) maxAx = axAbs;
+    const res = Math.abs(sacc - z[r]);
+    if (!isFinite(res)) return null;
+    if (res > maxRes) maxRes = res;
+  }
+  if (maxRes > RESIDUAL_TOL * Math.max(1, maxB, maxAx) && !lenientResidual) return null;
+  return x;
+}
+
+/** After an aborted row, wipe the dense work vector. */
+function clearW(pc: PatternCache, _i: number): void {
+  pc.w.fill(0);
+}
+
+/**
+ * Lenient solve for Newton rounds that already failed the strict residual
+ * check: returns the (finite) factorisation result even when its relative
+ * residual is poor. A linearisation at a bad iterate — a chain of active
+ * transistors whose small-signal gains multiply to 1e30 — is legitimately
+ * ill-conditioned. SPICE factors it anyway and lets junction limiting tame
+ * the resulting step; rejecting it ends a run that would have recovered.
+ * Never used for a solution that is reported as converged without the
+ * Newton loop's own self-consistency test.
+ */
+let lenientResidual = false;
+export function solveSparseLenient(sys: SparseMnaSystem): Float64Array | null {
+  lenientResidual = true;
+  try { return solveSparse(sys); } finally { lenientResidual = false; }
+}
+
+export function solveSparse(sys: SparseMnaSystem): Float64Array | null {
+  const n = sys.size;
+  if (n === 0) return new Float64Array(0);
+  const pc = patternCache;
+  if (pc && pc.valid) {
+    const x = fastSolve(pc, sys);
+    if (x) { patternStats.fast++; factorizationCache.reuseHits++; return x; }
+  }
+  const x = solveSparseSlow(sys);
+  if (x && factorizationCache.rowPerm && factorizationCache.colPerm && factorizationCache.size === n) {
+    patternStats.rebuild++;
+    patternCache = buildPatternCache(n, sys.triplets, factorizationCache.rowPerm, factorizationCache.colPerm);
+  } else {
+    patternCache = null;
+  }
+  return x;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -933,7 +1276,7 @@ function luSolveCore(
     if (res > maxRes) maxRes = res;
   }
   const scale = Math.max(1, maxB, maxAx);
-  if (maxRes > RESIDUAL_TOL * scale) return null;
+  if (maxRes > RESIDUAL_TOL * scale && !lenientResidual) return null;
 
   return { x, rowPerm, colPerm };
 }

@@ -14,8 +14,8 @@
 //   - Computes yield (% of runs passing the spec)
 //   - Builds a histogram with `nBins` bins
 //
-// Uses a simple LCG (Linear Congruential Generator) for reproducibility —
-// pass `config.seed` for deterministic results.
+// Each trial uses its own LCG seeded from (config.seed, trial index), so any
+// subset of trials can run on any thread with identical results.
 
 import { solveDC, buildNodeMap, computeComponentCurrents } from './engine';
 import type { CircuitComponent, Wire, ComponentPlugin, CircuitDocument } from './types';
@@ -117,19 +117,18 @@ class LCG {
 // Main entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function runMonteCarlo(
-  doc: CircuitDocument,
-  config: MonteCarloConfig,
-  plugins: Map<string, ComponentPlugin>,
-  _spec?: any,
-): MonteCarloResult {
-  const nRuns = Math.max(1, config.runs ?? 100);
-  const seed = config.seed ?? 1;
-  const nBins = Math.max(1, config.nBins ?? 20);
-  const rng = new LCG(seed);
+/** Mix (seed, trial index) into an independent, well-spread LCG seed. */
+export function trialSeed(seed: number, run: number): number {
+  let x = (seed | 0) ^ Math.imul(run + 1, 0x9e3779b1);
+  x ^= x >>> 16; x = Math.imul(x, 0x85ebca6b);
+  x ^= x >>> 13; x = Math.imul(x, 0xc2b2ae35);
+  x ^= x >>> 16;
+  return x | 0 || 1;
+}
 
-  // Tolerance source: explicit config list, else per-part `tolerance` fields
-  // (with type defaults: R/C/L 5%, semiconductors 10%), else defaultTolerance.
+/** Tolerance source: explicit config list, else per-part `tolerance` fields
+ *  (with type defaults: R/C/L 5%, semiconductors 10%), else defaultTolerance. */
+export function resolveTolerances(doc: CircuitDocument, config: MonteCarloConfig): MonteCarloTolerance[] {
   const DEFAULT_TOL: Record<string, number> = {
     resistor: 0.05, capacitor: 0.05, inductor: 0.05, potentiometer: 0.1,
     led: 0.1, diode: 0.1, zener: 0.05,
@@ -144,7 +143,7 @@ export function runMonteCarlo(
     resistor: 'resistance', capacitor: 'capacitance', inductor: 'inductance',
     potentiometer: 'resistance', led: 'seriesR', diode: 'onR', zener: 'zenerV',
   };
-  const tolerances: MonteCarloTolerance[] = (config.tolerances && config.tolerances.length > 0)
+  return (config.tolerances && config.tolerances.length > 0)
     ? config.tolerances
     : doc.components.flatMap((c) => {
         const param = PARAM_BY_TYPE[c.type];
@@ -152,69 +151,97 @@ export function runMonteCarlo(
         const tol = c.tolerance ?? DEFAULT_TOL[c.type] ?? config.defaultTolerance ?? 0.05;
         return [{ componentId: c.id, param, tolerance: tol, distribution: c.toleranceDist ?? 'gauss' as const }];
       });
+}
 
-  const runs: MonteCarloRun[] = [];
-  const values: number[] = [];
-
-  for (let run = 0; run < nRuns; run++) {
-    // Clone the circuit and apply perturbations
-    const clonedComponents: CircuitComponent[] = JSON.parse(JSON.stringify(doc.components));
-    const perturbations: MonteCarloRun['perturbations'] = [];
-    for (const tol of tolerances) {
-      const comp = clonedComponents.find(c => c.id === tol.componentId);
-      if (!comp) continue;
-      const orig = Number(comp.parameters[tol.param]);
-      if (!isFinite(orig)) continue;
-      // Per-part distribution wins over the config default (a 1% C0G on
-      // 'uniform' must not inherit a global 'gauss').
-      const srcComp = doc.components.find((c) => c.id === tol.componentId);
-      const dist = tol.distribution ?? srcComp?.toleranceDist ?? 'gauss';
-      let factor: number;
-      if (dist === 'uniform') {
-        // Uniform in [-tol, +tol]
-        factor = 1 + (rng.next() * 2 - 1) * tol.tolerance;
-      } else {
-        // Gaussian with stddev = tol/3 (so 99.7% within ±tol)
-        factor = 1 + rng.nextGauss() * (tol.tolerance / 3);
-      }
-      const perturbed = orig * factor;
-      comp.parameters[tol.param] = perturbed;
-      perturbations.push({ componentId: tol.componentId, param: tol.param, original: orig, perturbed });
+/**
+ * ONE Monte Carlo trial. Pure function of (doc, tolerances, config, run):
+ * the RNG is seeded per trial from (config.seed, run), so trials are order-
+ * independent and can run on any thread with identical results.
+ */
+export function runMonteCarloTrial(
+  doc: CircuitDocument,
+  tolerances: MonteCarloTolerance[],
+  config: MonteCarloConfig,
+  plugins: Map<string, ComponentPlugin>,
+  run: number,
+): MonteCarloRun {
+  const rng = new LCG(trialSeed(config.seed ?? 1, run));
+  // Clone the circuit and apply perturbations
+  const clonedComponents: CircuitComponent[] = JSON.parse(JSON.stringify(doc.components));
+  const perturbations: MonteCarloRun['perturbations'] = [];
+  for (const tol of tolerances) {
+    const comp = clonedComponents.find(c => c.id === tol.componentId);
+    if (!comp) continue;
+    const orig = Number(comp.parameters[tol.param]);
+    if (!isFinite(orig)) continue;
+    // Per-part distribution wins over the config default (a 1% C0G on
+    // 'uniform' must not inherit a global 'gauss').
+    const srcComp = doc.components.find((c) => c.id === tol.componentId);
+    const dist = tol.distribution ?? srcComp?.toleranceDist ?? 'gauss';
+    let factor: number;
+    if (dist === 'uniform') {
+      // Uniform in [-tol, +tol]
+      factor = 1 + (rng.next() * 2 - 1) * tol.tolerance;
+    } else {
+      // Gaussian with stddev = tol/3 (so 99.7% within ±tol)
+      factor = 1 + rng.nextGauss() * (tol.tolerance / 3);
     }
-
-    // Run the measurement
-    const value = measure({ components: clonedComponents, wires: doc.wires }, plugins, config.measurement);
-    if (!isFinite(value)) {
-      // Record the failed run (with its perturbations) but exclude it from
-      // the statistics — previously failed runs vanished entirely, so yield
-      // was computed only over survivors (a circuit failing 90% of the time
-      // could report 100% yield).
-      runs.push({ index: run, value: NaN, passed: false, perturbations });
-      continue;
-    }
-
-    // Check spec
-    let passed = true;
-    if (config.spec) {
-      if (config.spec.min !== undefined && value < config.spec.min) passed = false;
-      if (config.spec.max !== undefined && value > config.spec.max) passed = false;
-    }
-
-    runs.push({ index: run, value, passed, perturbations });
-    values.push(value);
+    const perturbed = orig * factor;
+    comp.parameters[tol.param] = perturbed;
+    perturbations.push({ componentId: tol.componentId, param: tol.param, original: orig, perturbed });
   }
 
-  // Compute statistics
+  // Run the measurement
+  const value = measure({ components: clonedComponents, wires: doc.wires }, plugins, config.measurement);
+  if (!isFinite(value)) {
+    // Record the failed run (with its perturbations) but exclude it from
+    // the statistics — previously failed runs vanished entirely, so yield
+    // was computed only over survivors (a circuit failing 90% of the time
+    // could report 100% yield).
+    return { index: run, value: NaN, passed: false, perturbations };
+  }
+  let passed = true;
+  if (config.spec) {
+    if (config.spec.min !== undefined && value < config.spec.min) passed = false;
+    if (config.spec.max !== undefined && value > config.spec.max) passed = false;
+  }
+  return { index: run, value, passed, perturbations };
+}
+
+/** Aggregate per-trial records (in index order) into stats / yield / histogram. */
+export function finalizeMonteCarlo(runs: MonteCarloRun[], config: MonteCarloConfig): MonteCarloResult {
+  const nBins = Math.max(1, config.nBins ?? 20);
+  const values = runs.filter((r) => isFinite(r.value)).map((r) => r.value);
   const stats = computeStats(values);
-
-  // Build histogram
   const { histogram, histogramEdges } = buildHistogram(values, nBins);
-
-  // Compute yield
   const yieldCount = runs.filter(r => r.passed).length;
   const yieldPct = runs.length > 0 ? yieldCount / runs.length : 0;
-
   return { runs, stats, yield: yieldPct, histogram, histogramEdges };
+}
+
+export interface MonteCarloRunOptions {
+  /** called after each trial with (done, total) */
+  onProgress?: (done: number, total: number) => void;
+  /** return true to stop early; the partial result is returned */
+  shouldCancel?: () => boolean;
+}
+
+export function runMonteCarlo(
+  doc: CircuitDocument,
+  config: MonteCarloConfig,
+  plugins: Map<string, ComponentPlugin>,
+  _spec?: any,
+  runOpts?: MonteCarloRunOptions,
+): MonteCarloResult {
+  const nRuns = Math.max(1, config.runs ?? 100);
+  const tolerances = resolveTolerances(doc, config);
+  const runs: MonteCarloRun[] = [];
+  for (let run = 0; run < nRuns; run++) {
+    if (runOpts?.shouldCancel?.()) break;
+    runs.push(runMonteCarloTrial(doc, tolerances, config, plugins, run));
+    runOpts?.onProgress?.(run + 1, nRuns);
+  }
+  return finalizeMonteCarlo(runs, config);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

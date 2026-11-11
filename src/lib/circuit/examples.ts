@@ -80,8 +80,8 @@ const rawExample555: CircuitDocument = {
     comp('resistor', 'ra', [10, 4], 0, { resistance: 10000 }),
     comp('resistor', 'rb', [22, 4], 0, { resistance: 47000 }),
     comp('capacitor', 'c1', [22, 14], 0, { capacitance: 1e-6, initialV: 0 }),
-    // OUT → 220 Ω → LED: the resistor sets ≈ 14 mA, as on a real board
-    comp('resistor', 'rled', [24, 8], 0, { resistance: 220 }),
+    // OUT → 120 Ω → LED: NE555 VOH ≈ Vcc − 1 V = 4 V, so (4 − 2.2)/125 ≈ 13 mA
+    comp('resistor', 'rled', [24, 8], 0, { resistance: 120 }),
     comp('led', 'led1', [30, 8], 0, { color: 'green', forwardV: 2.0, seriesR: 5 }),
   ],
   wires: [
@@ -223,8 +223,8 @@ const rawExampleArduino: CircuitDocument = {
   version: 1,
   components: [
     comp('arduino', 'ard1', [6, 6], 0, { sketch: 'blink', vcc: 5 }),
-    comp('resistor', 'r1', [18, 6], 0, { resistance: 330 }),
-    comp('led', 'led1', [24, 6], 0, { color: 'blue', forwardV: 2.5, seriesR: 1 }),
+    comp('resistor', 'r1', [18, 6], 0, { resistance: 150 }),
+    comp('led', 'led1', [24, 6], 0, { color: 'blue', seriesR: 1 }), // Vf = 3.2 V from the colour table: (5−3.2)/150 ≈ 12 mA
     comp('ground', 'gnd1', [7, 14], 0, {}),
   ],
   wires: [
@@ -1147,10 +1147,10 @@ const rawExamplePnpSwitch: CircuitDocument = {
   components: [
     comp('dcVoltage', 'v1', [4, 4], 0, { voltage: 5 }),
     comp('pushButton', 'btn1', [4, 16], 0, { pressed: true }),
-    comp('resistor', 'rb', [10, 16], 0, { resistance: 10000 }),
-    comp('resistor', 'rc', [22, 8], 0, { resistance: 1000 }),
+    comp('resistor', 'rb', [10, 16], 0, { resistance: 4700 }),
+    comp('resistor', 'rc', [22, 8], 0, { resistance: 220 }),
     comp('pnp', 'q1', [16, 8], 0, { hfe: 100, veb: 0.7, satV: 0.2 }),
-    comp('led', 'led1', [28, 8], 0, { color: 'blue', forwardV: 2.0, seriesR: 1 }),
+    comp('led', 'led1', [28, 8], 0, { color: 'blue', seriesR: 1 }), // Vf = 3.2 V: (5−0.2−3.2)/220 ≈ 7 mA
     comp('ground', 'gnd1', [5, 22], 0, {}),
   ],
   wires: [

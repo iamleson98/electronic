@@ -466,7 +466,7 @@ export function PropertyPanel() {
             <p className="py-4 text-center text-xs text-slate-500">No editable parameters.</p>
           ) : (
             <div className="space-y-2.5">
-              {plugin.parameters.map((p) => (
+              {plugin.parameters.filter((p) => !p.deprecated).map((p) => (
                 <ParameterEditor
                   key={p.key}
                   def={p}

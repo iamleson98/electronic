@@ -35,7 +35,7 @@ import type { CircuitComponent, Wire, Vec2 } from '../circuit/types';
 import { getPlugin } from '../circuit/registry';
 import { buildNodeMap } from '../circuit/engine';
 import type { Footprint, Pad, Ratsnest, BoardOutline } from './types';
-import { getFootprintDef, isSchematicOnlyType } from './footprints';
+import { getFootprintDef, isPhysicalType, powerInputFor } from './footprints';
 import { DEFAULT_DRC_CONFIG } from './drc';
 import { DEFAULT_AUTOROUTE_OPTIONS } from './auto-router';
 
@@ -136,8 +136,8 @@ interface PlacementComp {
 }
 
 /** Effective half-extents of a component's footprint (body + pad reach). */
-function footprintHalfExtents(type: string): { hw: number; hh: number; padCount: number } {
-  const def = getFootprintDef(type);
+function footprintHalfExtents(type: string, parameters?: Record<string, unknown>): { hw: number; hh: number; padCount: number } {
+  const def = getFootprintDef(type, parameters);
   let maxX = def.bodySize.width / 2, maxY = def.bodySize.height / 2;
   for (const pad of def.pads) {
     maxX = Math.max(maxX, Math.abs(pad.position.x) + pad.size.width / 2);
@@ -158,6 +158,9 @@ export function assignRefdes(components: CircuitComponent[]): Map<string, string
   const out = new Map<string, string>();
   const used = new Set<string>();
   for (const c of components) {
+    // a supply / signal source is the board's input header: it is a J#, never
+    // the schematic's BT1 / V1 (see powerInputFor)
+    if (powerInputFor(c.type) && !(c.refdes && /^J\d+$/.test(c.refdes))) continue;
     if (c.refdes && !used.has(c.refdes)) { out.set(c.id, c.refdes); used.add(c.refdes); }
   }
   // ids ending in a number (r1, q2) keep that number…
@@ -190,7 +193,8 @@ function generateRefdes(type: string, id: string): string {
     resistor: 'R', capacitor: 'C', inductor: 'L', potentiometer: 'RV',
     led: 'LED', diode: 'D', switch: 'SW', pushButton: 'SW',
     npn: 'Q', pnp: 'Q', nmos: 'Q', pmos: 'Q',
-    dcVoltage: 'BT', acVoltage: 'BT', pulseSource: 'BT', currentSource: 'I',
+    // supplies / signal sources are the board's input header (powerInputFor)
+    dcVoltage: 'J', acVoltage: 'J', pulseSource: 'J', currentSource: 'J', battery: 'J', solarCell: 'J',
     ground: 'GND', opamp: 'U', timer555: 'U',
     ammeter: 'J', // current-measurement jumper header (scope / voltmeter probes are schematic-only)
     arduino: 'U', arduinoReal: 'U', raspberryPi: 'U',
@@ -245,7 +249,7 @@ export function computeSmartPlacement(
   // nets are built from EVERY symbol (grounds and labels join nets), but
   // only physical parts are placed
   const allComponents = components;
-  components = components.filter((c) => !isSchematicOnlyType(c.type));
+  components = components.filter((c) => isPhysicalType(c.type));
   if (components.length === 0) return { positions, rotations, stats };
   const physicalIds = new Set(components.map((c) => c.id));
 
@@ -302,7 +306,7 @@ export function computeSmartPlacement(
   const scale = Math.min(innerW / schW, innerH / schH);
 
   const comps: PlacementComp[] = components.map((comp) => {
-    const ext = footprintHalfExtents(comp.type);
+    const ext = footprintHalfExtents(comp.type, comp.parameters);
     return {
       comp,
       x: margin + (comp.position.x - minX) * scale + (innerW - schW * scale) / 2,
@@ -546,24 +550,28 @@ export function computeSmartPlacement(
   // ── RUDY-lite congestion feedback (after relaxation) ──────
   // Pad offset caches for the congestion estimate (per call, so mutated
   // footprint registries can never go stale between calls).
+  // (keyed by type + chosen part: a transistor's package depends on its part)
+  const defKey = (comp: CircuitComponent) => `${comp.type}|${String(comp.parameters?.part ?? '')}`;
   const typePadOffsets = new Map<string, { x: number; y: number }[]>();
   const typeTerminalOffsets = new Map<string, Map<string, { x: number; y: number }>>();
-  const padOffsetsFor = (type: string): { x: number; y: number }[] => {
-    let offs = typePadOffsets.get(type);
+  const padOffsetsFor = (comp: CircuitComponent): { x: number; y: number }[] => {
+    const key = defKey(comp);
+    let offs = typePadOffsets.get(key);
     if (!offs) {
-      offs = getFootprintDef(type).pads.map((p) => ({ x: p.position.x, y: p.position.y }));
-      typePadOffsets.set(type, offs);
+      offs = getFootprintDef(comp.type, comp.parameters).pads.map((p) => ({ x: p.position.x, y: p.position.y }));
+      typePadOffsets.set(key, offs);
     }
     return offs;
   };
-  const terminalOffset = (type: string, terminalId: string): { x: number; y: number } | undefined => {
-    let m = typeTerminalOffsets.get(type);
+  const terminalOffset = (comp: CircuitComponent, terminalId: string): { x: number; y: number } | undefined => {
+    const key = defKey(comp);
+    let m = typeTerminalOffsets.get(key);
     if (!m) {
       m = new Map<string, { x: number; y: number }>();
-      for (const p of getFootprintDef(type).pads) {
+      for (const p of getFootprintDef(comp.type, comp.parameters).pads) {
         m.set(p.terminalId, { x: p.position.x, y: p.position.y });
       }
-      typeTerminalOffsets.set(type, m);
+      typeTerminalOffsets.set(key, m);
     }
     return m.get(terminalId);
   };
@@ -590,7 +598,7 @@ export function computeSmartPlacement(
       let nMinX = Infinity, nMaxX = -Infinity, nMinY = Infinity, nMaxY = -Infinity, padCount = 0;
       for (const t of terms) {
         const c = byId.get(t.compId);
-        const off = c ? terminalOffset(c.comp.type, t.terminalId) : undefined;
+        const off = c ? terminalOffset(c.comp, t.terminalId) : undefined;
         if (!c || !off) continue;
         const px = c.x + off.x, py = c.y + off.y;
         padCount++;
@@ -620,7 +628,7 @@ export function computeSmartPlacement(
     }
     // pad escape demand — every pad needs a local track slot
     for (const c of comps) {
-      for (const off of padOffsetsFor(c.comp.type)) {
+      for (const off of padOffsetsFor(c.comp)) {
         const px = c.x + off.x, py = c.y + off.y;
         if (px < 0 || py < 0 || px >= boardW || py >= boardH) continue;
         const i = Math.min(cols - 1, Math.floor(px / RUDY_CELL_SIZE));
@@ -682,7 +690,7 @@ export function computeSmartPlacement(
       // bigger effective pairGap / repulsion strength
       for (const c of comps) {
         let worst = 0;
-        for (const off of padOffsetsFor(c.comp.type)) {
+        for (const off of padOffsetsFor(c.comp)) {
           const px = c.x + off.x, py = c.y + off.y;
           if (px < 0 || py < 0 || px >= boardW || py >= boardH) continue;
           const i = Math.min(grid.cols - 1, Math.floor(px / RUDY_CELL_SIZE));
@@ -711,7 +719,7 @@ export function computeSmartPlacement(
     // rotation FIRST — a rotated 2-pad part swaps its extents, which the
     // overlap resolution below must account for
     for (const c of comps) {
-      const def = getFootprintDef(c.comp.type);
+      const def = getFootprintDef(c.comp.type, c.comp.parameters);
       if (def.pads.length !== 2) { rotations.set(c.comp.id, 0); continue; }
       // centroid of connected neighbors (weighted)
       let cx = 0, cy = 0, wsum = 0;
@@ -741,7 +749,7 @@ export function computeSmartPlacement(
     const eff = new Map<string, { hw: number; hh: number }>();
     for (const c of comps) {
       const rot = rotations.get(c.comp.id) ?? 0;
-      const def = getFootprintDef(c.comp.type);
+      const def = getFootprintDef(c.comp.type, c.comp.parameters);
       let maxX = def.bodySize.width / 2, maxY = def.bodySize.height / 2;
       for (const pad of def.pads) {
         const off = rotatePadOffset(pad.position.x, pad.position.y, rot);
@@ -823,12 +831,12 @@ export function generateFootprints(
 ): Footprint[] {
   const { positions, rotations } = computeSmartPlacement(components, wires, boardWidth, boardHeight);
 
-  const physical = components.filter((comp) => !isSchematicOnlyType(comp.type));
+  const physical = components.filter((comp) => isPhysicalType(comp.type));
   const refdesOf = assignRefdes(physical);
   return physical.map((comp) => {
     const pos = positions.get(comp.id) ?? { x: boardWidth / 2, y: boardHeight / 2 };
     const rot = rotations.get(comp.id) ?? 0;
-    const fpDef = getFootprintDef(comp.type);
+    const fpDef = getFootprintDef(comp.type, comp.parameters);
     const refdes = refdesOf.get(comp.id)!;
 
     const pads: Pad[] = fpDef.pads.map((padDef) => {
@@ -846,6 +854,8 @@ export function generateFootprints(
         // 0.8mm drills) keep their through-hole nature on the PCB — the DRC,
         // Gerber/Excellon export and copper pour all read Pad.drill.
         ...(padDef.drill != null ? { drill: padDef.drill } : {}),
+        ...(padDef.plated === false ? { plated: false } : {}),
+        ...(padDef.slot ? { slot: rotatePadSize(padDef.slot, rot) } : {}),
         ...(padDef.number != null ? { number: padDef.number } : {}),
         ...(padDef.tie ? { tie: true } : {}),
         ...(padDef.tieTo ? { tieTo: padDef.tieTo } : {}),
@@ -988,11 +998,11 @@ export function applyPinTies(footprints: Footprint[], padNets: Map<string, strin
 
 /** Estimate a sensible board size for the given components. */
 export function estimateBoardSize(components: CircuitComponent[]): BoardOutline {
-  const physical = components.filter((c) => !isSchematicOnlyType(c.type));
+  const physical = components.filter((c) => isPhysicalType(c.type));
   if (physical.length === 0) return { width: 80, height: 60 };
   let totalArea = 0;
   for (const comp of physical) {
-    const ext = footprintHalfExtents(comp.type);
+    const ext = footprintHalfExtents(comp.type, comp.parameters);
     totalArea += (2 * ext.hw + PLACE_GAP) * (2 * ext.hh + PLACE_GAP);
   }
   // routing space multiplier: components occupy ~30% of the board
@@ -1096,5 +1106,9 @@ function computePadNets(
       padNets.set(termKey, nodeToNetName.get(nodeId)!);
     }
   }
+  // NOTE: the KiCad netlist (buildKiCadModel) renames the + net of a DC supply
+  // to its rail ('+9V'). The PCB editor keeps the auto names (N1…): the
+  // autorouter orders nets by NAME (power-class regex), so renaming here
+  // changes the routing order of every example board.
   return { padNets };
 }

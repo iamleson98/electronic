@@ -18,6 +18,7 @@
 // The AI composes COMPLEX circuits by chaining patterns (e.g. a bench supply =
 // power-supply pattern; a signal chain = rc-lowpass + opamp-inverting).
 
+import { LED_VF_BY_COLOR } from '@/lib/circuit/components/advanced-semi';
 import type { Tool } from './types';
 import type { ToolContext } from './types';
 import type { CircuitComponent } from '@/lib/circuit/types';
@@ -101,9 +102,9 @@ function manifest(
 
 function buildLedDriver(ctx: ToolContext, args: any): PatternResult {
   const supplyV = args.supplyV ?? 5;
-  const vf = args.vf ?? 2.0;
-  const targetI = args.targetI ?? 0.015;
   const color = args.color ?? 'red';
+  const vf = args.vf ?? LED_VF_BY_COLOR[String(color).toLowerCase()] ?? 2.0;
+  const targetI = args.targetI ?? 0.015;
   const calc = calcLedResistor(supplyV, vf, targetI);
   const r = calc.outputs.rStandard as number;
 

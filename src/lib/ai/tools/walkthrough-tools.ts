@@ -19,6 +19,7 @@
 // netlist — the AI cannot hallucinate values it did not compute.
 
 import { getPlugin } from '@/lib/circuit/registry';
+import { ledForwardV } from '@/lib/circuit/components/advanced-semi';
 import type { CircuitComponent, Wire } from '@/lib/circuit/types';
 import {
   calcOhmsLaw,
@@ -525,7 +526,7 @@ export function analyzeCircuitWalkthrough(
         const vinGuess = estimateDriveVoltage(c, seriesR, nl, components);
         // The LED model carries a forward voltage (at 20 mA) AND its bulk
         // series resistance (params forwardV / seriesR) — both in the loop.
-        const vf = paramByPattern(c, /^forwardv/i, 2.0);
+        const vf = ledForwardV(c.parameters ?? {});
         const ledRs = paramByPattern(c, /^seriesr$/i, 5);
         const rTotal = paramOf(seriesR, 'resistance', 330) + ledRs;
         const driveV = Math.max(0.1, vinGuess - vf);

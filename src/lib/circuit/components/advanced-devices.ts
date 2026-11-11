@@ -13,6 +13,7 @@ import type { ComponentPlugin, SimContext } from '../types';
 import { registerPlugin } from '../registry';
 import { drawLabel } from './draw';
 import { stateKey } from '../state-keys';
+import { spiceSwitch, spiceMutual2 } from '../spice-devices';
 import { stampOpamp, stepOpamp, measureOpamp, acStampOpamp, specFromParams, opampParamDefs, type OpampPins } from './opamp-core';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,7 +22,28 @@ import { stampOpamp, stepOpamp, measureOpamp, acStampOpamp, specFromParams, opam
 //   abs, sqrt, min, max, table, limit, if, time (variable)
 // ─────────────────────────────────────────────────────────────────────────────
 
-type Token = { type: 'num' | 'op' | 'func' | 'paren' | 'var'; value: string };
+type Token =
+  | { type: 'num'; value: string; num: number }
+  | { type: 'op' | 'func' | 'paren' | 'var'; value: string }
+  | { type: 'vi'; value: string; args: string[] };
+
+/** SPICE magnitude suffix → multiplier (case-insensitive; trailing unit letters ignored). */
+function spiceSuffix(sfx: string): number {
+  const s = sfx.toLowerCase();
+  if (s.startsWith('meg')) return 1e6;
+  if (s.startsWith('mil')) return 25.4e-6;
+  switch (s[0]) {
+    case 'f': return 1e-15;
+    case 'p': return 1e-12;
+    case 'n': return 1e-9;
+    case 'u': return 1e-6;
+    case 'm': return 1e-3;
+    case 'k': return 1e3;
+    case 'g': return 1e9;
+    case 't': return 1e12;
+    default: return 1;
+  }
+}
 
 function tokenize(expr: string): Token[] {
   const tokens: Token[] = [];
@@ -29,50 +51,61 @@ function tokenize(expr: string): Token[] {
   while (i < expr.length) {
     const c = expr[i];
     if (/\s/.test(c)) { i++; continue; }
-    if (/[0-9.]/.test(c)) {
-      let num = '';
-      while (i < expr.length && /[0-9.eE+-]/.test(expr[i])) {
-        if ((expr[i] === '+' || expr[i] === '-') && !/[eE]/.test(expr[i - 1] ?? '')) break;
-        num += expr[i++];
+    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(expr[i + 1] ?? ''))) {
+      const m = /^(\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/.exec(expr.slice(i))!;
+      i += m[0].length;
+      let mult = 1;
+      const sm = /^(?:µ|[a-zA-Z]+)/.exec(expr.slice(i));
+      if (sm) {
+        mult = sm[0][0] === 'µ' ? 1e-6 : spiceSuffix(sm[0]);
+        i += sm[0].length;
       }
-      tokens.push({ type: 'num', value: num });
+      tokens.push({ type: 'num', value: m[0], num: parseFloat(m[0]) * mult });
       continue;
     }
     if (/[a-zA-Z_]/.test(c)) {
       let id = '';
-      while (i < expr.length && /[a-zA-Z0-9_]/.test(expr[i])) id += expr[i++];
-      tokens.push(/(exp|log|ln|log10|sin|cos|tan|abs|sqrt|min|max|table|limit|if|V|I|time|pi)/.test(id)
-        ? { type: 'func', value: id } : { type: 'var', value: id });
+      while (i < expr.length && /[a-zA-Z0-9_.$#]/.test(expr[i])) id += expr[i++];
+      let j = i;
+      while (j < expr.length && /\s/.test(expr[j])) j++;
+      const isCall = expr[j] === '(';
+      if (isCall && (id === 'V' || id === 'v' || id === 'I' || id === 'i')) {
+        // capture the raw argument text up to the matching paren so node
+        // names such as "R1:a" survive intact
+        let depth = 0; let k = j; let raw = '';
+        for (; k < expr.length; k++) {
+          if (expr[k] === '(') { depth++; if (depth === 1) continue; }
+          else if (expr[k] === ')') { depth--; if (depth === 0) break; }
+          raw += expr[k];
+        }
+        i = k + 1;
+        tokens.push({ type: 'vi', value: id.toUpperCase(), args: raw.split(',').map((x) => x.trim()) });
+        continue;
+      }
+      tokens.push(isCall ? { type: 'func', value: id.toLowerCase() } : { type: 'var', value: id.toLowerCase() });
       continue;
     }
-    if ('+-*/^()'.includes(c)) {
-      tokens.push({ type: c === '(' || c === ')' ? 'paren' : 'op', value: c });
-      i++; continue;
-    }
-    if (c === ',') {
-      // Commas are real tokens: the V(n1,n2)/I(src) raw-argument collector
-      // splits on them, and the math-function arg loop consumes them.
-      // (The old tokenizer silently dropped commas, which glued V(a,b)'s
-      // arguments together into a single bogus node name "ab".)
-      tokens.push({ type: 'op', value: ',' });
-      i++; continue;
-    }
-    // comparison operators (two-char first)
     const two = expr.slice(i, i + 2);
-    if (two === '>=' || two === '<=' || two === '==' || two === '!=' || two === '<>') {
-      tokens.push({ type: 'op', value: two === '<>' ? '!=' : two });
-      i += 2; continue;
+    if (two === '**') { tokens.push({ type: 'op', value: '^' }); i += 2; continue; }
+    if (two === '&&' || two === '||' || two === '>=' || two === '<=' || two === '==' || two === '!=') {
+      tokens.push({ type: 'op', value: two }); i += 2; continue;
     }
-    if (c === '>' || c === '<') {
-      tokens.push({ type: 'op', value: c });
-      i++; continue;
+    if (two === '<>') { tokens.push({ type: 'op', value: '!=' }); i += 2; continue; }
+    if ('+-*/^%'.includes(c) || c === '>' || c === '<' || c === '!' || c === '?' || c === ':' || c === ',') {
+      tokens.push({ type: 'op', value: c }); i++; continue;
     }
-    if (c === ';' || c === '!') { i++; continue; }
-    i++;
+    if (c === '(' || c === ')') { tokens.push({ type: 'paren', value: c }); i++; continue; }
+    i++; // ignore anything else (';', stray characters)
   }
   return tokens;
 }
 
+/**
+ * Recursive-descent evaluator with C/ngspice precedence (low → high):
+ *   ?:  <  ||  <  &&  <  == !=  <  < > <= >=  <  + -  <  * / %  <  unary - + !  <  ^ **
+ * `^` is left-associative as in ngspice (2^3^2 = 64); unary minus binds looser
+ * than `^` (-2^2 = -4, as ngspice), and a signed exponent (`2^-1`) works.
+ */
 class ExprEvaluator {
   private tokens: Token[];
   private pos = 0;
@@ -88,32 +121,67 @@ class ExprEvaluator {
 
   peek(): Token | null { return this.tokens[this.pos] ?? null; }
   consume(): Token { return this.tokens[this.pos++]; }
-
-  parse(): number {
-    return this.parseComparison();
+  private isOp(...ops: string[]): boolean {
+    const t = this.peek();
+    return !!t && t.type === 'op' && ops.includes(t.value);
   }
 
-  /** Lowest precedence: comparisons → 1/0 (ngspice parity for if()/soft clamps) */
-  private parseComparison(): number {
-    let left = this.parseExpr();
-    while (this.peek()?.type === 'op' && ['>', '<', '>=', '<=', '==', '!='].includes(this.peek()!.value)) {
+  parse(): number {
+    return this.parseTernary();
+  }
+
+  private parseTernary(): number {
+    const c = this.parseOr();
+    if (this.isOp('?')) {
+      this.consume();
+      const a = this.parseTernary();
+      if (this.isOp(':')) this.consume();
+      const b = this.parseTernary();
+      return c !== 0 ? a : b;
+    }
+    return c;
+  }
+
+  private parseOr(): number {
+    let l = this.parseAnd();
+    while (this.isOp('||')) { this.consume(); const r = this.parseAnd(); l = (l !== 0 || r !== 0) ? 1 : 0; }
+    return l;
+  }
+
+  private parseAnd(): number {
+    let l = this.parseEq();
+    while (this.isOp('&&')) { this.consume(); const r = this.parseEq(); l = (l !== 0 && r !== 0) ? 1 : 0; }
+    return l;
+  }
+
+  private parseEq(): number {
+    let l = this.parseRel();
+    while (this.isOp('==', '!=')) {
       const op = this.consume().value;
-      const right = this.parseExpr();
+      const r = this.parseRel();
+      l = (op === '==' ? l === r : l !== r) ? 1 : 0;
+    }
+    return l;
+  }
+
+  private parseRel(): number {
+    let l = this.parseExpr();
+    while (this.isOp('>', '<', '>=', '<=')) {
+      const op = this.consume().value;
+      const r = this.parseExpr();
       switch (op) {
-        case '>': left = left > right ? 1 : 0; break;
-        case '<': left = left < right ? 1 : 0; break;
-        case '>=': left = left >= right ? 1 : 0; break;
-        case '<=': left = left <= right ? 1 : 0; break;
-        case '==': left = left === right ? 1 : 0; break;
-        case '!=': left = left !== right ? 1 : 0; break;
+        case '>': l = l > r ? 1 : 0; break;
+        case '<': l = l < r ? 1 : 0; break;
+        case '>=': l = l >= r ? 1 : 0; break;
+        default: l = l <= r ? 1 : 0; break;
       }
     }
-    return left;
+    return l;
   }
 
   private parseExpr(): number {
     let left = this.parseTerm();
-    while (this.peek()?.type === 'op' && (this.peek()!.value === '+' || this.peek()!.value === '-')) {
+    while (this.isOp('+', '-')) {
       const op = this.consume().value;
       const right = this.parseTerm();
       left = op === '+' ? left + right : left - right;
@@ -122,101 +190,109 @@ class ExprEvaluator {
   }
 
   private parseTerm(): number {
-    let left = this.parseFactor();
-    while (this.peek()?.type === 'op' && (this.peek()!.value === '*' || this.peek()!.value === '/')) {
-      const op = this.consume().value;
-      const right = this.parseFactor();
-      left = op === '*' ? left * right : left / right;
-    }
-    return left;
-  }
-
-  private parseFactor(): number {
     let left = this.parseUnary();
-    if (this.peek()?.type === 'op' && this.peek()!.value === '^') {
-      this.consume();
-      const right = this.parseFactor();
-      left = Math.pow(left, right);
+    while (this.isOp('*', '/', '%')) {
+      const op = this.consume().value;
+      const right = this.parseUnary();
+      left = op === '*' ? left * right : op === '/' ? left / right : left % right;
     }
     return left;
   }
 
   private parseUnary(): number {
-    if (this.peek()?.type === 'op' && this.peek()!.value === '-') {
+    if (this.isOp('-')) { this.consume(); return -this.parseUnary(); }
+    if (this.isOp('+')) { this.consume(); return this.parseUnary(); }
+    if (this.isOp('!')) { this.consume(); return this.parseUnary() === 0 ? 1 : 0; }
+    return this.parsePower();
+  }
+
+  private parsePower(): number {
+    // Left-associative like ngspice (2^3^2 = 64); a signed exponent (2^-1) is allowed.
+    let base = this.parsePrimary();
+    while (this.isOp('^')) {
       this.consume();
-      return -this.parseUnary();
+      let sign = 1;
+      while (this.isOp('-', '+')) { if (this.consume().value === '-') sign = -sign; }
+      base = Math.pow(base, sign * this.parsePrimary());
     }
-    if (this.peek()?.type === 'op' && this.peek()!.value === '+') {
-      this.consume();
-      return this.parseUnary();
-    }
-    return this.parsePrimary();
+    return base;
   }
 
   private parsePrimary(): number {
     const tok = this.peek();
     if (!tok) return 0;
-    if (tok.type === 'num') { this.consume(); return parseFloat(tok.value); }
+    if (tok.type === 'num') { this.consume(); return tok.num; }
+    if (tok.type === 'vi') {
+      this.consume();
+      return this.resolver(tok.value as 'V' | 'I', tok.args);
+    }
     if (tok.type === 'paren' && tok.value === '(') {
       this.consume();
-      const v = this.parseComparison();
+      const v = this.parseTernary();
       if (this.peek()?.value === ')') this.consume();
       return v;
     }
     if (tok.type === 'func') {
       this.consume();
-      if (tok.value === 'time') return this.time;
-      if (tok.value === 'pi') return Math.PI;
-      // function call: expect (
-      if (this.peek()?.value === '(') {
-        this.consume();
-        const args: number[] = [];
-        const argStrs: string[] = [];
-        // for V/I, we need raw string args; for math functions, parse as expressions
-        if (tok.value === 'V' || tok.value === 'I') {
-          // collect raw tokens until matching )
-          let depth = 1;
-          let raw = '';
-          while (this.pos < this.tokens.length && depth > 0) {
-            const t = this.consume();
-            if (t.value === '(') depth++;
-            else if (t.value === ')') { depth--; if (depth === 0) break; }
-            raw += t.value;
-          }
-          // split on comma at top level
-          const parts = raw.split(',').map((s) => s.trim());
-          argStrs.push(...parts);
-          return this.resolver(tok.value as 'V' | 'I', argStrs);
-        }
-        // math functions — each argument may itself contain comparisons
-        // (e.g. if(V(a)>1, 5, -5)); parsing args with parseExpr would let the
-        // stray '>' be consumed as a junk primary and shift the arg list.
-        while (this.peek() && this.peek()!.value !== ')') {
-          args.push(this.parseComparison());
-          if (this.peek()?.value === ',') this.consume();
-        }
-        if (this.peek()?.value === ')') this.consume();
-        switch (tok.value) {
-          case 'exp': return Math.exp(args[0]);
-          case 'log': return Math.log(args[0]);
-          case 'ln': return Math.log(args[0]);
-          case 'log10': return Math.log10(args[0]);
-          case 'sin': return Math.sin(args[0]);
-          case 'cos': return Math.cos(args[0]);
-          case 'tan': return Math.tan(args[0]);
-          case 'abs': return Math.abs(args[0]);
-          case 'sqrt': return Math.sqrt(args[0]);
-          case 'min': return Math.min(args[0], args[1]);
-          case 'max': return Math.max(args[0], args[1]);
-          case 'limit': return Math.max(args[1], Math.min(args[0], args[2]));
-          case 'if': return args[0] !== 0 ? args[1] : args[2];
-          default: return 0;
-        }
+      if (this.peek()?.value === '(') this.consume();
+      const args: number[] = [];
+      while (this.peek() && this.peek()!.value !== ')') {
+        args.push(this.parseTernary());
+        if (this.peek()?.value === ',') this.consume();
+        else if (this.peek()?.value !== ')') break;
+      }
+      if (this.peek()?.value === ')') this.consume();
+      return applyFunc(tok.value, args);
+    }
+    if (tok.type === 'var') {
+      this.consume();
+      switch (tok.value) {
+        case 'time': return this.time;
+        case 'pi': return Math.PI;
+        case 'e': return Math.E;
+        default: return 0;  // unknown variable
       }
     }
-    if (tok.type === 'var') { this.consume(); return 0; }  // unknown variable
     this.consume();
     return 0;
+  }
+}
+
+function applyFunc(name: string, a: number[]): number {
+  const x = a[0] ?? 0;
+  switch (name) {
+    case 'exp': return Math.exp(x);
+    case 'ln': case 'log': return Math.log(x);
+    case 'log10': return Math.log10(x);
+    case 'sin': return Math.sin(x);
+    case 'cos': return Math.cos(x);
+    case 'tan': return Math.tan(x);
+    case 'asin': return Math.asin(x);
+    case 'acos': return Math.acos(x);
+    case 'atan': return Math.atan(x);
+    case 'atan2': return Math.atan2(x, a[1] ?? 0);
+    case 'sinh': return Math.sinh(x);
+    case 'cosh': return Math.cosh(x);
+    case 'tanh': return Math.tanh(x);
+    case 'asinh': return Math.asinh(x);
+    case 'acosh': return Math.acosh(x);
+    case 'atanh': return Math.atanh(x);
+    case 'abs': return Math.abs(x);
+    case 'sqrt': return Math.sqrt(x);
+    case 'pow': return Math.pow(x, a[1] ?? 0);
+    case 'pwr': return Math.sign(x) * Math.pow(Math.abs(x), a[1] ?? 0);
+    case 'min': return Math.min(x, a[1] ?? x);
+    case 'max': return Math.max(x, a[1] ?? x);
+    case 'limit': return Math.max(a[1] ?? x, Math.min(x, a[2] ?? x));
+    case 'u': return x > 0 ? 1 : 0;
+    case 'uramp': return x > 0 ? x : 0;
+    case 'sgn': case 'sign': return x > 0 ? 1 : x < 0 ? -1 : 0;
+    case 'floor': return Math.floor(x);
+    case 'ceil': return Math.ceil(x);
+    case 'int': return Math.trunc(x);
+    case 'nint': return Math.round(x);
+    case 'if': case 'ternary_fcn': return x !== 0 ? (a[1] ?? 0) : (a[2] ?? 0);
+    default: return 0;
   }
 }
 
@@ -414,9 +490,9 @@ export const biSource: ComponentPlugin = {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Voltage-controlled switch (S element)
-//   Conductance between terminals = Ron when V(ctrl+) - V(ctrl-) > Vt + Vh,
-//                                  Roff when V < Vt - Vh,
-//                                  interpolated in between.
+//   Conductance between terminals = 1/Ron when V(ctrl+) - V(ctrl-) > Vt + Vh,
+//                                   1/Roff when V < Vt - Vh,
+//                                   previous state in between (hysteresis).
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const vcSwitch: ComponentPlugin = {
@@ -452,22 +528,15 @@ export const vcSwitch: ComponentPlugin = {
     ctx.stroke();
     drawLabel(ctx, 'S', 3 * cellSize, cellSize * 0.5 - 12);
   },
-  stamp(params, terminals, sys, sim) {
-    const a = terminals.find((t) => t.terminalId === 'a')!.nodeId;
-    const b = terminals.find((t) => t.terminalId === 'b')!.nodeId;
-    const cp = terminals.find((t) => t.terminalId === 'cp')!.nodeId;
-    const cn = terminals.find((t) => t.terminalId === 'cn')!.nodeId;
-    const vt = params.vt as number;
-    const vh = params.vh as number;
-    const ron = Math.max(1e-9, params.ron as number);
-    const roff = Math.max(1, params.roff as number);
-    const vCtrl = sim.nodeVoltage[cp] - sim.nodeVoltage[cn];
-    // Smooth switch model: conductance interpolates between 1/ron and 1/roff
-    // based on sigmoid around vt with hysteresis vh.
-    const x = (vCtrl - vt) / (2 * vh + 1e-9);
-    const sigmoid = 1 / (1 + Math.exp(-x * 5));  // 0..1
-    const r = ron + (roff - ron) * (1 - sigmoid);
-    sys.stampConductance(a, b, 1 / r);
+  // SPICE S-element semantics (shared core with spiceSwitch): ON when the
+  // control voltage exceeds VT+VH, OFF below VT−VH, and the previous
+  // COMMITTED state (step(), once per accepted timestep) inside the band —
+  // real hysteresis, no sigmoid.
+  stamp(params, terminals, sys, sim, comp) {
+    spiceSwitch.stamp!(params, terminals, sys, sim, comp);
+  },
+  step(params, terminals, sim, comp) {
+    spiceSwitch.step!(params, terminals, sim, comp);
   },
   getFlowPath() { return [{ x: 0, y: 1 }, { x: 6, y: 1 }]; },
 };
@@ -496,6 +565,14 @@ function coupledL(params: Record<string, any>) {
   if (typeof ratio === 'number' && ratio > 0 && ratio !== 1 && params.L2 === params.L1) L2 = L1 / (ratio * ratio);
   const k = Math.max(0, Math.min(0.9999, (params.k as number) ?? 0.99));
   return { L1, L2, M: k * Math.sqrt(L1 * L2) };
+}
+
+const MUTUAL_PIN: Record<string, string> = { p1: 'a1', p2: 'b1', s1: 'a2', s2: 'b2' };
+const mutualTerminals = (terminals: { terminalId: string; nodeId: number }[]) =>
+  terminals.map((t) => ({ terminalId: MUTUAL_PIN[t.terminalId] ?? t.terminalId, nodeId: t.nodeId }));
+function mutualParams(params: Record<string, any>) {
+  const { L1, L2, M } = coupledL(params);
+  return { L1, L2, k12: M / Math.sqrt(L1 * L2) };
 }
 
 export const coupledInductor: ComponentPlugin = {
@@ -545,37 +622,23 @@ export const coupledInductor: ComponentPlugin = {
     ctx.moveTo(2 * cellSize + 4, cellSize); ctx.lineTo(2 * cellSize + 4, 3 * cellSize);
     ctx.stroke();
   },
-  // Backward-Euler companion of [v1; v2] = [L1 M; M L2]·d/dt[i1; i2]:
-  //   [i1; i2] = [i1; i2]_prev + dt·Γ·[v1; v2],  Γ = [L2 −M; −M L1]/(L1·L2 − M²)
-  // (the old stamp was an ideal `ratio` transformer plus primary inductance
-  // — L2 and k were read and discarded).
+  // Delegates to the SPICE K-element core (spiceMutual2): companion model on
+  // the winding currents using the selected integration method (Euler /
+  // trapezoidal / Gear-BDF2), exactly like capacitors and spiceMutual2.
   stamp(params, terminals, sys, sim, comp) {
-    const t = coupledTerms(terminals);
-    const { L1, L2, M } = coupledL(params);
-    const D = L1 * L2 - M * M;
-    const dt = Math.max(sim.dt, 1e-12);
-    const st = sim.state.__global ?? (sim.state.__global = {});
-    const key = stateKey('xfmr', comp, t.p1, t.p2, t.s1, t.s2);
-    const i1Prev = (st[key] as number | undefined) ?? 0;
-    const i2Prev = (st[key + '_i2'] as number | undefined) ?? 0;
-    sys.stampConductance(t.p1, t.p2, (dt * L2) / D);
-    sys.stampVCCS(t.p1, t.p2, t.s1, t.s2, (-dt * M) / D);
-    sys.stampCurrentSource(t.p1, t.p2, i1Prev);
-    sys.stampConductance(t.s1, t.s2, (dt * L1) / D);
-    sys.stampVCCS(t.s1, t.s2, t.p1, t.p2, (-dt * M) / D);
-    sys.stampCurrentSource(t.s1, t.s2, i2Prev);
+    spiceMutual2.stamp!(mutualParams(params), mutualTerminals(terminals), sys, sim, comp);
   },
   step(params, terminals, sim, instance) {
+    const mt = mutualTerminals(terminals);
+    spiceMutual2.step!(mutualParams(params), mt, sim, instance);
+    // Mirror the winding currents into the legacy xfmr keys that the engine's
+    // wire-current display and measure() read.
     const t = coupledTerms(terminals);
-    const { L1, L2, M } = coupledL(params);
-    const D = L1 * L2 - M * M;
-    const dt = Math.max(sim.dt, 1e-12);
     const st = sim.state.__global ?? (sim.state.__global = {});
+    const sk = `spk_${instance?.id ?? [t.p1, t.p2, t.s1, t.s2].join('_')}`;
+    const s = st[sk] as { i: number[] } | undefined;
     const key = stateKey('xfmr', instance, t.p1, t.p2, t.s1, t.s2);
-    const v1 = sim.nodeVoltage[t.p1] - sim.nodeVoltage[t.p2];
-    const v2 = sim.nodeVoltage[t.s1] - sim.nodeVoltage[t.s2];
-    st[key] = ((st[key] as number | undefined) ?? 0) + (dt / D) * (L2 * v1 - M * v2);
-    st[key + '_i2'] = ((st[key + '_i2'] as number | undefined) ?? 0) + (dt / D) * (-M * v1 + L1 * v2);
+    if (s) { st[key] = s.i[0]; st[key + '_i2'] = s.i[1]; }
   },
   measure(params, terminals, sim, comp) {
     const t = coupledTerms(terminals);

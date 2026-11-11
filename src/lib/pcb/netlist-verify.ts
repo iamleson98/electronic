@@ -6,7 +6,7 @@ import type { Footprint, Trace, Via, Pad, Ratsnest } from './types';
 import type { CircuitComponent, Wire, ComponentPlugin } from '../circuit/types';
 import { getPlugin } from '../circuit/registry';
 import { buildNodeMap } from '../circuit/engine';
-import { isSchematicOnlyType } from './footprints';
+import { isPhysicalType } from './footprints';
 
 /**
  * Annotation-only component types (net labels, power/ground symbols,
@@ -15,7 +15,7 @@ import { isSchematicOnlyType } from './footprints';
  * terminals are excluded from the schematic-side pad counts. One list,
  * shared with footprint generation (footprints.ts).
  */
-const LOGICAL_ONLY_TYPES = { has: isSchematicOnlyType };
+const LOGICAL_ONLY_TYPES = { has: (type: string) => !isPhysicalType(type) };
 
 export interface NetlistVerifyResult {
   ok: boolean;
@@ -127,7 +127,7 @@ export function verifyNetlist(
   }
 
   // 4. Check component count
-  const schematicComponentIds = new Set(schematicComponents.filter((c) => !isSchematicOnlyType(c.type)).map((c) => c.id));
+  const schematicComponentIds = new Set(schematicComponents.filter((c) => isPhysicalType(c.type)).map((c) => c.id));
   const pcbComponentIds = new Set(pcbFootprints.map((f) => f.componentId));
   for (const id of schematicComponentIds) {
     if (!pcbComponentIds.has(id)) {

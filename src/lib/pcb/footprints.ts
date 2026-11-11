@@ -4,7 +4,7 @@
 
 import type { FootprintDef, FootprintPadDef } from './types';
 import { getPlugin } from '../circuit/registry';
-import { realPackageDef, dipPos } from './real-packages';
+import { realPackageDef, realPackageInfo, dipPos } from './real-packages';
 
 // Standard pad sizes (mm).
 // NOTE: PAD_SMD/PAD_SMALL keep their historical 1.5x0.8 / 1.0x1.0 sizes:
@@ -46,6 +46,71 @@ const ANNOTATION_TYPES = new Set([
 /** Schematic-only symbol: shapes the netlist, never becomes a PCB part. */
 export function isSchematicOnlyType(type: string): boolean {
   return ANNOTATION_TYPES.has(type);
+}
+
+// ── Power / signal INPUT connectors ───────────────────────────────────────
+// A schematic supply (dcVoltage, battery, …) is not a part you can buy: on the
+// real board it is wherever the power comes IN. Every DC supply / battery is
+// therefore mapped to a physical 2-pin 2.54 mm input header (ref J#, value
+// "PWR 9V", pad 1 = +, pad 2 = −) and every signal / AC source to a 2-pin
+// "SIG IN" header. ONE mapping: the PCB footprint, BOM, CPL and KiCad netlist
+// all read it from here.
+
+/** supply-type → the parameter holding its voltage */
+const DC_SOURCE_VOLTAGE_PARAM: Record<string, string> = { dcVoltage: 'voltage', battery: 'voltage', solarCell: 'voc' };
+const SIGNAL_SOURCES = new Set(['acVoltage', 'pulseSource', 'currentSource']);
+
+/** KiCad footprint + BOM package of the input header. */
+export const POWER_HEADER_KICAD = 'Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical';
+export const POWER_HEADER_PKG = 'PinHeader-1x02 P2.54';
+
+export interface PowerInput {
+  kind: 'dc' | 'signal';
+  /** BOM / netlist value: 'PWR 9V' or 'SIG IN' */
+  value: string;
+  /** DC supplies: the rail voltage */
+  voltage?: number;
+  /** DC supplies: name of the + net ('+9V', '+3.3V', '-5V'); absent when 0 V */
+  netName?: string;
+}
+
+/** 9 → '+9V', 3.3 → '+3.3V', -5 → '-5V'; 0 → ''. */
+export function formatRailName(v: number): string {
+  if (!Number.isFinite(v) || v === 0) return '';
+  const n = parseFloat(Math.abs(v).toFixed(3));
+  return `${v < 0 ? '-' : '+'}${n}V`;
+}
+
+/** The input-connector role of a source component, or null for anything else. */
+export function powerInputFor(type: string, parameters?: Record<string, unknown>): PowerInput | null {
+  const key = DC_SOURCE_VOLTAGE_PARAM[type];
+  if (key) {
+    const raw = parameters?.[key];
+    const v = typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
+    const rail = v === undefined ? '' : formatRailName(v);
+    return { kind: 'dc', value: rail ? `PWR ${rail.replace(/^\+/, '')}` : 'PWR', ...(v !== undefined ? { voltage: v } : {}), ...(rail ? { netName: rail } : {}) };
+  }
+  if (SIGNAL_SOURCES.has(type)) return { kind: 'signal', value: 'SIG IN' };
+  return null;
+}
+
+/** Mechanical items (mounting holes): on the board, but not a BOM / CPL / netlist part. */
+export function isMechanicalType(type: string): boolean {
+  return type === 'mountingHole';
+}
+
+/**
+ * Does this component type become something physical on the board?
+ * Schematic symbols, probes and behavioural / dependent sources do not;
+ * supplies and signal sources become input headers (see above).
+ */
+export function isPhysicalType(type: string): boolean {
+  if (ANNOTATION_TYPES.has(type)) return false;
+  if (powerInputFor(type)) return true;
+  const cat = getPlugin(type)?.category;
+  if (cat === 'source') return false;
+  if (cat === 'meter' && type !== 'ammeter') return false;
+  return true;
 }
 
 /**
@@ -102,6 +167,20 @@ function parametricFootprintDef(type: string): FootprintDef | null {
     bodySize: { width: 6.35, height: (pins / 2) * 2.54 + 0.5 },
     pads,
     name: `${plugin.name} (generic DIP-${pins}, pinout not verified)`,
+  };
+}
+
+/** KiCad PinHeader_1x02_P2.54mm_Vertical, origin at the pad-pair centre:
+ *  pad 1 (square) = + / signal, pad 2 (round) = − / return. */
+function powerHeaderDef(): FootprintDef {
+  return {
+    bodySize: { width: 2.54, height: 5.08 },
+    pads: [
+      { terminalId: 'p', position: { x: 0, y: -1.27 }, shape: 'rect', size: { width: 1.7, height: 1.7 }, drill: 1.0, number: '1' },
+      { terminalId: 'n', position: { x: 0, y: 1.27 }, shape: 'circle', size: { width: 1.7, height: 1.7 }, drill: 1.0, number: '2' },
+    ],
+    name: 'PinHeader_1x02_P2.54mm (pad 1 = +, pad 2 = −)',
+    verified: true,
   };
 }
 
@@ -183,44 +262,27 @@ export const footprintDefs: Record<string, FootprintDef> = {
     ],
   },
 
-  // ----- Transistors (SOT-23 style) -----
-  pmos: {
-    bodySize: { width: 2.9, height: 2.8 },
-    pads: [
-      { terminalId: 's', position: { x: 1.0, y: -1.0 }, shape: 'rect', size: PAD_SMALL },
-      { terminalId: 'g', position: { x: -1.0, y: 0 }, shape: 'rect', size: PAD_SMALL },
-      { terminalId: 'd', position: { x: 1.0, y: 1.0 }, shape: 'rect', size: PAD_SMALL },
-    ],
-  },
+  // ----- Transistors (npn/pnp/nmos/pmos + Gummel-Poon / Level-1 variants):
+  // resolved PER PART in real-packages.ts (TO-92 / SOT-23 / TO-220 with the
+  // datasheet pad numbers of the chosen part). -----
 
-  // ----- Power sources (THT) -----
-  dcVoltage: {
-    bodySize: { width: 5.0, height: 10.0 },
+  // ----- Power / signal sources: a 2-pin input header (see powerInputFor) -----
+  dcVoltage: powerHeaderDef(),
+  battery: powerHeaderDef(),
+  solarCell: powerHeaderDef(),
+  acVoltage: powerHeaderDef(),
+  pulseSource: powerHeaderDef(),
+  currentSource: powerHeaderDef(),
+
+  // ----- Mechanical: M3 mounting hole, non-plated (NPTH) -----
+  // KiCad MountingHole_3.2mm_M3: Ø3.2 mm hole, no copper, no pin number.
+  mountingHole: {
+    bodySize: { width: 3.2, height: 3.2 },
     pads: [
-      { terminalId: 'p', position: { x: 0, y: -4.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'n', position: { x: 0, y: 4.0 }, shape: 'circle', size: PAD_THT },
+      { terminalId: 'mh', position: { x: 0, y: 0 }, shape: 'circle', size: { width: 3.2, height: 3.2 }, drill: 3.2, plated: false },
     ],
-  },
-  acVoltage: {
-    bodySize: { width: 5.0, height: 10.0 },
-    pads: [
-      { terminalId: 'p', position: { x: 0, y: -4.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'n', position: { x: 0, y: 4.0 }, shape: 'circle', size: PAD_THT },
-    ],
-  },
-  pulseSource: {
-    bodySize: { width: 5.0, height: 10.0 },
-    pads: [
-      { terminalId: 'p', position: { x: 0, y: -4.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'n', position: { x: 0, y: 4.0 }, shape: 'circle', size: PAD_THT },
-    ],
-  },
-  currentSource: {
-    bodySize: { width: 5.0, height: 10.0 },
-    pads: [
-      { terminalId: 'p', position: { x: 0, y: -4.0 }, shape: 'circle', size: PAD_THT },
-      { terminalId: 'n', position: { x: 0, y: 4.0 }, shape: 'circle', size: PAD_THT },
-    ],
+    name: 'MountingHole_3.2mm_M3 (NPTH)',
+    verified: true,
   },
 
   // ----- ICs, transistors, displays: real packages with datasheet pinouts
@@ -303,11 +365,12 @@ export const footprintDefs: Record<string, FootprintDef> = {
  * The parametric path guarantees every schematic pin gets a PCB pad with a
  * matching terminalId — the netlist stays consistent by construction.
  */
-export function getFootprintDef(type: string): FootprintDef {
+export function getFootprintDef(type: string, parameters?: Record<string, unknown>): FootprintDef {
   const explicit = footprintDefs[type];
   if (explicit) return explicit;
-  // real package + datasheet pinout (user-registered footprints above win)
-  const real = realPackageDef(type);
+  // real package + datasheet pinout (user-registered footprints above win).
+  // `parameters.part` picks the physical part of a transistor (BC547 ≠ 2N3904).
+  const real = realPackageDef(type, parameters?.part);
   if (real) return real;
   if (ANNOTATION_TYPES.has(type)) {
     return { bodySize: { width: 1.0, height: 1.0 }, pads: [], name: 'Annotation' };
@@ -336,4 +399,54 @@ for (const def of Object.values(footprintDefs)) {
       pad.drill = 1.0;
     }
   }
+}
+
+
+/** KiCad-library ids + BOM package names of the hand-drawn passive footprints. */
+const PASSIVE_PACKAGES: Record<string, { pkg: string; kicad: string }> = {
+  resistor: { pkg: '1206', kicad: 'Resistor_SMD:R_1206_3216Metric' },
+  capacitor: { pkg: '1206', kicad: 'Capacitor_SMD:C_1206_3216Metric' },
+  inductor: { pkg: '1210', kicad: 'Inductor_SMD:L_1210_3225Metric' },
+  led: { pkg: '1206', kicad: 'LED_SMD:LED_1206_3216Metric' },
+  diode: { pkg: '1206', kicad: 'Diode_SMD:D_1206_3216Metric' },
+  ammeter: { pkg: 'PinHeader-1x02 P2.54', kicad: 'Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical' },
+  // supplies / signal sources are the board's input header (powerInputFor)
+  dcVoltage: { pkg: POWER_HEADER_PKG, kicad: POWER_HEADER_KICAD },
+  battery: { pkg: POWER_HEADER_PKG, kicad: POWER_HEADER_KICAD },
+  solarCell: { pkg: POWER_HEADER_PKG, kicad: POWER_HEADER_KICAD },
+  acVoltage: { pkg: POWER_HEADER_PKG, kicad: POWER_HEADER_KICAD },
+  pulseSource: { pkg: POWER_HEADER_PKG, kicad: POWER_HEADER_KICAD },
+  currentSource: { pkg: POWER_HEADER_PKG, kicad: POWER_HEADER_KICAD },
+};
+
+export interface FootprintPackage {
+  /** package as placed on the PCB ('1206', 'DIP-8', 'TO-92', …) — never the component type */
+  pkg: string;
+  /** KiCad standard-library footprint id; null when this tool has no verified real footprint */
+  kicad: string | null;
+  /** why `kicad` is null */
+  note?: string;
+}
+
+/**
+ * The package the PCB actually uses for a component, plus its KiCad library
+ * footprint id. Single source of truth for the BOM and the KiCad netlist.
+ */
+export function footprintPackage(type: string, parameters?: Record<string, unknown>): FootprintPackage {
+  const passive = PASSIVE_PACKAGES[type];
+  if (passive) {
+    return { pkg: passive.pkg, kicad: passive.kicad };
+  }
+  const real = realPackageInfo(type, parameters?.part);
+  if (real) {
+    return real.kicad
+      ? { pkg: real.pkg, kicad: real.kicad }
+      : { pkg: real.pkg, kicad: null, note: `no KiCad library footprint verified for ${real.pkg}; assign one in Pcbnew` };
+  }
+  const def = getFootprintDef(type, parameters);
+  return {
+    pkg: def.name ?? `${type} (generic footprint)`,
+    kicad: null,
+    note: 'generic footprint, pinout not verified against a datasheet; assign the real footprint in Pcbnew',
+  };
 }

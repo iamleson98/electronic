@@ -120,12 +120,12 @@ describe('fab bundle + presets + waivers', () => {
     const errors = runDRC([], [], [], [], { width: 10, height: 10 }, DEFAULT_DRC_CONFIG, undefined, [{ key, note: 'reviewed', date: '2026-01-01' }]);
     expect(errors.find((e) => drcErrorKey(e) === key)).toBeUndefined();
   });
-  it('BOM has order columns, PnP has LCSC + corrections', () => {
+  it('BOM has order columns, generic PnP has LCSC and NO name-regex rotation hack', () => {
     const bom = exportBOM([{ refdes: 'R1', componentType: 'resistor', position: { x: 0, y: 0 }, rotation: 0, side: 'top', bodySize: { width: 1, height: 1 }, pads: [] } as never]);
     expect(bom.split('\n')[0]).toContain('LCSC');
     const pnp = exportPickAndPlace([{ refdes: 'D1', componentType: 'diode', footprintName: 'SOT-23', position: { x: 1, y: 2 }, rotation: 0, side: 'top' } as never]);
     expect(pnp.split('\n')[0]).toContain('LCSC');
-    expect(pnp.split('\n')[1].split(',')[4]).toBe('180');
+    expect(pnp.split('\n')[1].split(',')[4]).toBe('0'); // a SOT-23 diode at 0° is 0° — corrections live in an explicit table / cplRotationOffset
   });
 });
 

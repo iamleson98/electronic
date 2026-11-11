@@ -1,0 +1,155 @@
+{
+  "ngspice": "ngspice-47 (2026-11-11)",
+  "decks": {
+    "unode-32u4.indicators": {
+      "metrics": {
+        "v5": 4.97442119,
+        "i_led_power_mA": 2.95864484,
+        "i_led_d13_mA": 2.88804347,
+        "i_led_tx_mA": 2.8880434732,
+        "i_led_rx_mA": 2.8880434732
+      },
+      "dcOp": {
+        "v5": 4.97442119,
+        "d13": 4.9022201,
+        "n_r7_pin2": 0.0722010868,
+        "ss": 0.0722010868,
+        "n_led1_pin2": 2.95864484,
+        "n_led2_pin1": 2.01417663,
+        "n_led3_pin2": 2.96024456,
+        "n_led4_pin2": 2.96024456
+      }
+    },
+    "unode-32u4.usb-hotplug": {
+      "metrics": {
+        "inrush_peak_A": 5.72518338,
+        "v5_final": 4.90996277,
+        "tau_us": 5.03380932,
+        "v5_at_4us": 1.8805129417876298,
+        "avcc1_at_10us": 3.754814423471533
+      },
+      "dcOp": {
+        "v5": -2.76828417e-36,
+        "vbus_src": 0,
+        "n_f1_pin1": -1.73017761e-36,
+        "avcc1": -2.76823804e-36
+      }
+    },
+    "unode-32u4.avcc-isolation": {
+      "metrics": {
+        "avcc1_dB_500k": 27.037313224021965,
+        "avcc1_dB_1M": -9.428145990608567,
+        "avcc1_dB_2M": -23.496372143743812,
+        "avcc1_dB_10M": -54.22606412620744,
+        "avcc1_dB_100M": -55.53028629144174,
+        "avcc2_dB_10M": -54.22606412620744
+      },
+      "dcOp": {
+        "v5": 4.97902125,
+        "avcc1": 4.97893827,
+        "avcc2": 4.97893827
+      }
+    },
+    "unode-32u4.crystal-resonance": {
+      "metrics": {
+        "f_dip_MHz": 15.9986717,
+        "contrast": 5.9459101214392565,
+        "Q": 6447.95731904111,
+        "z_dip_mV": 0.15059867544604874
+      },
+      "dcOp": {
+        "xtal1": 2.4895106
+      }
+    },
+    "tricolor-lamp.pwm-channel": {
+      "metrics": {
+        "i_on_mean_mA": 15.865937557288971,
+        "i_avg_mA": 5.5620587064354625,
+        "i_off_max_uA": 0.011818181819026304,
+        "v12_min": 11.7230239,
+        "vcc_at_0": 4.69596593,
+        "gate_high_V": 4.68893215
+      },
+      "dcOp": {
+        "gate3": 0,
+        "v12": 11.814609,
+        "vcc": 4.69596593,
+        "p_n_d3a_pin1": 11.8146064
+      }
+    },
+    "radio-lab-tx.am-modulation": {
+      "metrics": {
+        "f_carrier_kHz": 753.0281886745745,
+        "am_depth_pct": 18.94371193436128,
+        "rf_amp_V": 4.5224681
+      },
+      "dcOp": {
+        "rf_out": 4.6846114
+      }
+    },
+    "radio-lab-rx.tank-alignment": {
+      "metrics": {
+        "f_peak_kHz": 818.9873419999999,
+        "tank_gain": 3.235207746614195
+      },
+      "dcOp": {
+        "tank": 0
+      }
+    },
+    "radio-lab-rx.receiving": {
+      "metrics": {
+        "tank_amp_mV": 97.10949504999999,
+        "det_amp_mV": 178.92647500000015,
+        "out_amp_mV": 1676.2255499999999
+      },
+      "dcOp": {
+        "tank": 0,
+        "det": 7.88663058e-8,
+        "n_c13_pin1": 4.5
+      }
+    },
+    "fm-radio-lab-tx.fm-deviation": {
+      "metrics": {
+        "f_carrier_MHz": 90.25825221000535,
+        "tank_amp_V": 0.582890205
+      },
+      "dcOp": {
+        "tank": 8.98762361
+      }
+    },
+    "unode-32u4.crystal-ring": {
+      "metrics": {
+        "f_ring_MHz": 16.00024420603618,
+        "ring_tau_us": 197.59229148111706
+      },
+      "dcOp": {
+        "xtal1": 2.4895106
+      }
+    },
+    "arc-lighter.firing": {
+      "metrics": {
+        "i_switch_peak_A": 3.037786474509804,
+        "v_collector_max_V": 39.3351873,
+        "i_battery_avg_A": 1.9467304025002476,
+        "v_drv_mean_V": 3.2524537839845467
+      },
+      "dcOp": {
+        "col": 0.0181702942,
+        "emit": 2.85104348e-13,
+        "vdrv": 0.0181697366,
+        "bat": 3.69985041
+      }
+    },
+    "fm-radio-lab-rx.super-regen": {
+      "metrics": {
+        "rf_peak_V": 0.8768383100000001,
+        "f_rf_MHz": 92.09133275205352,
+        "quench_period_us": 15.096900000000002
+      },
+      "dcOp": {
+        "tank": 8.97924277,
+        "q2c": 0.0219584705
+      }
+    }
+  }
+}

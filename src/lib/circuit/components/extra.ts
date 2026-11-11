@@ -3,6 +3,7 @@
 
 import type { ComponentPlugin, CircuitComponent } from '../types';
 import { drawLabel } from './draw';
+import { partOptions, defaultPart } from '../discrete-presets';
 import { registerPlugin } from '../registry';
 import { stateKey } from '../state-keys';
 import { simpleBjtModel } from './semiconductors';
@@ -17,6 +18,8 @@ const pnp: ComponentPlugin = {
   description: 'PNP BJT with simple piecewise-linear model. Use as a switch (high-side).',
   symbol: 'PNP',
   nonLinear: true,
+  pureStamp: true, // stamp() only rewrites idempotent topology keys; Newton memory lives in sim.newtonMemory
+  pureStatePrefixes: ['spq_'],
   boundingBox: { width: 3, height: 4 },
   terminals: [
     { id: 'e', label: 'E', position: { x: 3, y: 0 } },
@@ -24,6 +27,7 @@ const pnp: ComponentPlugin = {
     { id: 'c', label: 'C', position: { x: 3, y: 4 } },
   ],
   parameters: [
+    { key: 'part', label: 'Part (loads datasheet values)', type: 'select', default: defaultPart('pnp'), options: partOptions('pnp') },
     { key: 'hfe', label: 'DC Gain (hFE)', type: 'number', default: 100, unit: '', min: 1, max: 1000, step: 1 },
     { key: 'veb', label: 'VEB at 1 mA', type: 'number', default: 0.7, unit: 'V', min: 0.1, max: 1.5, step: 0.05 },
   ],
@@ -91,13 +95,13 @@ const pnp: ComponentPlugin = {
   },
   // exponential junctions — see the NPN (semiconductors.ts)
   stamp(params, terminals, sys, sim, comp) {
-    stampBJT(simpleBjtModel(params.hfe as number, params.veb as number), terminals, sys, sim, comp, false);
+    stampBJT(simpleBjtModel(params.hfe as number, params.veb as number, params.part), terminals, sys, sim, comp, false);
   },
-  step(_params, terminals, sim, instance) {
-    stepBJT(terminals, sim, instance);
+  step(params, terminals, sim, instance) {
+    stepBJT(simpleBjtModel(params.hfe as number, params.veb as number, params.part), terminals, sim, instance, false);
   },
   measure(params, terminals, sim, comp) {
-    return measureBJT(simpleBjtModel(params.hfe as number, params.veb as number), terminals, sim, comp, false);
+    return measureBJT(simpleBjtModel(params.hfe as number, params.veb as number, params.part), terminals, sim, comp, false);
   },
 };
 
@@ -118,6 +122,8 @@ const nmos: ComponentPlugin = {
   description: 'N-channel enhancement MOSFET (SPICE Level 1, bulk tied to source): Id = ½·Kp·(Vgs−Vth)²·(1+λ·Vds) in saturation, triode below; weak-inversion tail under threshold.',
   symbol: 'NMOS',
   nonLinear: true,
+  pureStamp: true, // stamp() only rewrites idempotent topology keys; Newton memory lives in sim.newtonMemory
+  pureStatePrefixes: ['mos_'],
   boundingBox: { width: 3, height: 4 },
   terminals: [
     { id: 'd', label: 'D', position: { x: 3, y: 0 } },
@@ -125,8 +131,9 @@ const nmos: ComponentPlugin = {
     { id: 's', label: 'S', position: { x: 3, y: 4 } },
   ],
   parameters: [
+    { key: 'part', label: 'Part (loads datasheet values)', type: 'select', default: defaultPart('nmos'), options: partOptions('nmos') },
     { key: 'vth', label: 'Threshold Vth', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 10, step: 0.1 },
-    { key: 'kp', label: 'Transconductance Kp', type: 'number', default: 0.1, unit: 'A/V²', min: 0.001, max: 10, step: 0.01 },
+    { key: 'kp', label: 'Transconductance Kp', type: 'number', default: 0.1, unit: 'A/V²', min: 0.001, max: 100, step: 0.01 },
     { key: 'lambda', label: 'Channel-Length Mod (λ)', type: 'number', default: 0.02, unit: 'V⁻¹', min: 0, max: 1, step: 0.005 },
     // drain series resistance (bond / package); the channel's own Rds(on) = 1/(Kp·Vov)
     { key: 'ron', label: 'Drain Series Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 1000, step: 0.1 },
@@ -202,6 +209,8 @@ const pmos: ComponentPlugin = {
   description: 'P-channel enhancement MOSFET (SPICE Level 1, bulk tied to source): on when Vsg > |Vth|, Id = ½·Kp·(Vsg−|Vth|)²·(1+λ·Vsd) in saturation.',
   symbol: 'PMOS',
   nonLinear: true,
+  pureStamp: true, // stamp() only rewrites idempotent topology keys; Newton memory lives in sim.newtonMemory
+  pureStatePrefixes: ['mos_'],
   boundingBox: { width: 3, height: 4 },
   terminals: [
     { id: 's', label: 'S', position: { x: 3, y: 0 } },
@@ -209,8 +218,9 @@ const pmos: ComponentPlugin = {
     { id: 'd', label: 'D', position: { x: 3, y: 4 } },
   ],
   parameters: [
+    { key: 'part', label: 'Part (loads datasheet values)', type: 'select', default: defaultPart('pmos'), options: partOptions('pmos') },
     { key: 'vth', label: 'Threshold |Vth|', type: 'number', default: 2.0, unit: 'V', min: 0.1, max: 10, step: 0.1 },
-    { key: 'kp', label: 'Transconductance Kp', type: 'number', default: 0.1, unit: 'A/V²', min: 0.001, max: 10, step: 0.01 },
+    { key: 'kp', label: 'Transconductance Kp', type: 'number', default: 0.1, unit: 'A/V²', min: 0.001, max: 100, step: 0.01 },
     { key: 'lambda', label: 'Channel-Length Mod (λ)', type: 'number', default: 0.02, unit: 'V⁻¹', min: 0, max: 1, step: 0.005 },
     // drain series resistance (bond / package); the channel's own Rds(on) = 1/(Kp·Vov)
     { key: 'ron', label: 'Drain Series Resistance', type: 'number', default: 0.1, unit: 'Ω', min: 0.001, max: 1000, step: 0.1 },

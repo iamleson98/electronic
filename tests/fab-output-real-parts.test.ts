@@ -14,7 +14,7 @@ import { createPCBFromSchematic, rotatePadSize } from '../src/lib/pcb/netlist-sy
 import { autoRoute } from '../src/lib/pcb/auto-router';
 import { runDRC } from '../src/lib/pcb/drc';
 import { getFootprintDef } from '../src/lib/pcb/footprints';
-import { exportGerberCopper, exportExcellonDrill, exportPickAndPlace, exportGerberSilkscreen, fabY, fabRotation } from '../src/lib/pcb/gerber-export';
+import { exportGerberCopper, exportExcellonDrill, exportPickAndPlace, exportGerberSilkscreen, needsPin1Marker, fabY, fabRotation } from '../src/lib/pcb/gerber-export';
 import { exampleCategories } from '../src/lib/circuit/examples';
 import { getPlugin } from '../src/lib/circuit/registry';
 import type { CircuitComponent, Wire } from '../src/lib/circuit/types';
@@ -137,7 +137,8 @@ describe('pads, land patterns, silkscreen', () => {
     const strokes = (silk.match(/D01\*/g) ?? []).length;
     expect(strokes).toBeGreaterThan(footprints.length * 4 + 20); // outlines alone are 4 per part
     const dots = silk.split('G54D11*')[1] ?? '';
-    expect((dots.match(/D03\*/g) ?? []).length).toBe(footprints.filter((f) => f.pads.some((p) => p.number === '1') && f.pads.length >= 2).length);
+    // pin-1 dots only on polarised / orientation-critical parts (ICs, transistors, diodes, LEDs, headers) — never on resistors / caps
+    expect((dots.match(/D03\*/g) ?? []).length).toBe(footprints.filter((f) => needsPin1Marker(f)).length);
   });
 });
 

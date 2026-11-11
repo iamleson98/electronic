@@ -16,6 +16,7 @@
 //   - diagnostic-tools.ts             (AI root-cause diagnosis)
 //   - kb-tools.ts                     (knowledge base lookup/search)
 //   - whatif-tools.ts                 (non-mutating what-if simulation)
+//   - stress-tools.ts                 (datasheet absolute-max stress check)
 
 import type { Tool, ToolContext } from './types';
 export type { Tool, ToolContext, ToolResult } from './types';
@@ -38,6 +39,7 @@ import { planTrackTool } from './plan-tools';
 import { transcriptExportTool } from './transcript-tools';
 import { simulateSweepTool } from './sweep-tools';
 import { yieldMonteCarloTool, yieldSensitivityTool } from './yield-tools';
+import { stressCheckTool } from './stress-tools';
 import { deratingCheckTool, designReviewTool, bringupChecklistTool } from './review-tools';
 import { acAnalysisTool, fourierTool } from './analysis-tools';
 import { designCalculateTool } from './design-calculators';
@@ -96,6 +98,7 @@ export const TOOLS: Tool[] = [
   yieldMonteCarloTool,
   yieldSensitivityTool,
   deratingCheckTool,
+  stressCheckTool,
   designReviewTool,
   bringupChecklistTool,
   designCalculateTool,

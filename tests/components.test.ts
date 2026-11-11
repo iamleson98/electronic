@@ -591,7 +591,8 @@ describe('555 Timer', () => {
     expect(sim).not.toBeNull();
     // Output should be either HIGH or LOW (oscillating)
     const vOut = nodeV(comps, wires, 't555', 'out', sim);
-    expect(vOut === 0 || vOut === 5 || (vOut > 4 || vOut < 1)).toBe(true);
+    // NE555 datasheet: VOH ≈ Vcc − 1 V (4 V on 5 V), VOL ≈ 0.02–0.1 V
+    expect(vOut > 3.5 || vOut < 1).toBe(true);
   });
 });
 
